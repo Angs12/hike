@@ -4,6 +4,7 @@ open Bap.Std
 open Bap_core_theory
 
 (** Register and convention facts. [Abi.sp] is the stack pointer. *)
+module Atomic = Hike_atomic
 module Abi = Hike_abi
 
 (** The production diagnostic channel: [hike: ...] lines on stderr. *)

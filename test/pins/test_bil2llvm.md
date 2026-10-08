@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-55`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-57`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -35,16 +35,15 @@ one failing fixture never hides the rest of the module.
 | EMIT-43 | `set_owner_initializer`'s `word64` consults the loader's RELATIVE facts first: a site the `spec_relative` table names renders the fact's runtime value remapped through the sections (the same `remap_native` map every pointer load takes), never the image's raw bits. | Empty the `relative` map in `bil2llvm_section.ml` (`let _relative = Core.Map.empty (module Core.Int64)`), leaving the match arm unreachable. | EMIT-43 FAILs: the slot carries `i64 66` (the raw bits) and no `ptrtoint (ptr getelementptr inbounds (i8, ptr @text, i64 4) to i64)` (measured). |
 | EMIT-44 | A word no relocation names keeps its raw bits even when they land inside a built section's span — the span never guesses an address (the class-(b) rule). | Route the unrelocated arm through `remapped_const ctx llvm_ctx llvm_module v word_ty` (the pre-rule span guess). | EMIT-44 FAILs: `i64 1288` is replaced by a remap of `@text` (measured). |
 | EMIT-45 | A printable-ASCII word keeps its raw bits too: no printable-string guard and no span guess stand in the substitution rule's place. | Same disable as EMIT-44 (the span guess remaps any in-span word, string-shaped or not). | EMIT-45 FAILs: `i64 2189640` (`"Hi!"` little-endian) is replaced by a remap of `@rodata` (measured). |
-| EMIT-47 | A decoded lock bracket emits one seq_cst RMW, consuming the markers and suppressing the plain store. | Return an empty bracket plan. | The five arithmetic/bitwise atomicrmw assertions fail. |
-| EMIT-48 | The fixed BAP xadd destination order gives the register the captured old cell and memory the sum. | Replace the register read with the new cell. | The old-value spill assertion fails. |
-| EMIT-49 | Memory xchg emits one atomic exchange at its first read and suppresses the plain store. | Return an empty bracket plan. | The atomic exchange and store-count assertions fail. |
+| EMIT-47 | Explicit operation tags emit one seq_cst atomicrmw for all six operations at all four widths, with no ordinary cell load/store. | Drop the atomic plan. | The operation, operand or no-plain-access assertions fail. |
+| EMIT-48 | Captured operands dominate emission and the returned old value feeds subsequent uses. | Lose input capture or bind old to new. | The addend-seven and old-value spill assertions fail. |
 | EMIT-50 | A register xchg carries no markers and renders as plain moves. | (Control: no mechanism to disable — it pins that the marker lane touches nothing unmarked.) | EMIT-50 FAILs if the unmarked lane ever renders atomic (0 atomicrmw asserted). |
 | EMIT-51 | The LLVM C API bridge emits mfence/lfence/sfence as seq_cst/acquire/release fences. | Drop the fence bridge call. | Each exact fence assertion fails. |
-| EMIT-52 | A marked guarded or ite compare/store emits one strong seq_cst cmpxchg. | Return an empty bracket plan. | The cmpxchg assertion fails and a plain store survives. |
-
-| EMIT-53 | All operand widths use the captured old/new cell for flags, without a racing reload. | Leave post-store loads unreplaced. | Ordinary loads survive and the no-load assertion fails. |
+| EMIT-52 | Explicit expected/desired captures emit one strong seq_cst cmpxchg. | Drop the compare-exchange plan. | The exact operand assertion fails or a plain store survives. |
 | EMIT-54 | TLS initializer relocation sites cover file bytes only; the zero tail stays zero even where ELF virtual addresses alias other sections. | Apply relocation rules to the zero tail. | The unrelated RELATIVE word replaces zero bytes. |
-| EMIT-55 | Every path in a lock bracket closes; cyclic, nested, overlapping or orphan markers refuse. | Accept a terminal path without unlock. | The partially closed bracket emits instead of refusing. |
+| EMIT-55 | Legacy lock/unlock markers require the paired producer and refuse. | Accept legacy markers. | The refusal assertion fails. |
+| EMIT-56 | NEG retries in a private helper, preserving the caller CFG at a phi join. | Inline the retry blocks into the caller. | The helper-call assertion fails. |
+| EMIT-57 | Unknown operation/width contracts refuse before analysis or emission. | Treat the name as an ordinary external call. | The refusal assertion fails. |
 
 **Fixture note (2026-09-29).** `emit_ir` now runs
 `Hike.Cfg_complete.materialize_fallthroughs` before the split, as the

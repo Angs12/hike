@@ -1,6 +1,7 @@
 open Bap.Std
 open Bap_main
 open Bap_core_theory
+module Atomic = Hike_atomic
 module Abi = Hike_abi
 
 (* Public re-exports; consumers use [Hike.Abi], etc. *)
@@ -653,6 +654,10 @@ let pass_convlir ~output proj = convert_binary output proj
 let pass_split_blocks proj =
   Project.map_program proj ~f:Hike_split_blocks.normalize
 
+let pass_atomic proj =
+  let addr_bits = Hike_abi.word_bits (Hike_abi.of_target (Project.target proj)) in
+  Project.map_program proj ~f:(Hike_atomic.normalize ~addr_bits)
+
 let pass_ssa proj =
   let target = Project.target proj in
   Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
@@ -664,7 +669,8 @@ let () =
          re-decode's own subs included — is what gets filtered, so the
          re-discovered stubs and externs drop by the same rules. *)
       let discover = chain ~name:"discover" ~deps:[] pass_discover in
-      let jump = chain ~name:"jump" ~deps:[ discover ] pass_jump in
+      let atomic = chain ~name:"atomic" ~deps:[ discover ] pass_atomic in
+      let jump = chain ~name:"jump" ~deps:[ atomic ] pass_jump in
       let split_mem = chain ~name:"split-mem" ~deps:[ jump ] pass_split_mem in
       let coerce = chain ~name:"coerce" ~deps:[ split_mem ] pass_coerce in
       let fp = chain ~name:"fp" ~deps:[ coerce ] pass_fp in

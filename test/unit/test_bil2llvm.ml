@@ -38,11 +38,8 @@ let count_two_incoming_phis (ir : string) : int =
       | [] -> false)
   |> List.length
 
-(* The atomic lane's shared fixture vocabulary: BAP's lock markers
-   around an RMW. *)
+(* Intrinsic calls share the producer's explicit capture/result lanes. *)
 let lock_tid = Tid.for_name "intrinsic:x86:lock"
-
-let unlock_tid = Tid.for_name "intrinsic:x86:unlock"
 
 let mk_marker target : tid -> jmp term = fun cont ->
   Jmp.create
@@ -651,118 +648,41 @@ let tests : unit Alcotest.test list =
           && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
           && count " = alloca i8, i64 " = 2));
 
-    (* The atomic lane: BAP's lock markers consumed.  A marker pair
-       brackets one locked RMW; the bracket is the atomicity fact and
-       the BIL inside names the op. *)
-    pin "EMIT-47"
-      "every plain locked RMW lowers to one seq_cst atomicrmw of its op"
+    pin "EMIT-47" "explicit atomic operations emit one effect at every width"
       (fun () ->
-        let m = memv "fam_m" in
-        let rmw op imm off =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Int (atomic_w off),
-                 Bil.BinOp
-                   (op, Bil.Load (Bil.Var m, Bil.Int (atomic_w off), LittleEndian, `r64),
-                    Bil.Int (atomic_w imm)),
-                 LittleEndian, `r64 ))
-        in
-        let ops =
-          [ (Bil.PLUS, 1, 0x2000); (Bil.MINUS, 2, 0x2008); (Bil.AND, 3, 0x2010);
-            (Bil.OR, 4, 0x2018); (Bil.XOR, 5, 0x2020) ]
-        in
-        (* lock -> store -> unlock, per family member. *)
-        let nodes =
-          Base.List.concat_mapi ops ~f:(fun i (op, imm, off) ->
-              [ ([], [ (2 * i + 1, mk_marker lock_tid) ]);
-                ([ rmw op imm off ], [ (2 * i + 2, mk_marker unlock_tid) ]) ])
-          @ [ ([], [ (0, mk_ret) ]) ]
-        in
-        let sub, _ = sub_of "fam_sub" nodes in
-        let ir = emit_ir [ sub ] in
-        let count sub_str =
-          String.split_on_char '\n' ir
-          |> List.filter (fun l -> contains_substring l sub_str)
-          |> List.length
-        in
-        check "EMIT-47"
-          (count "atomicrmw" = 5
-           && contains_substring ir "atomicrmw add"
-           && contains_substring ir "atomicrmw sub"
-           && contains_substring ir "atomicrmw and"
-           && contains_substring ir "atomicrmw or"
-           && contains_substring ir "atomicrmw xor"
-           && count "seq_cst" = 5
-           && not (contains_substring ir "intrinsic:x86")));
+        List.iter (fun bits ->
+          List.iter (fun op ->
+            let addr = Def.create (Hike.Atomic.lane "address" 64) (Bil.Int (atomic_w 0x2000)) in
+            let value = Def.create (Hike.Atomic.lane "input0" bits) (Bil.Int (Word.of_int ~width:bits 3)) in
+            let sub,_ = sub_of "atomic_family"
+                [ [addr;value], [(1,mk_marker (Tid.for_name
+                    (Printf.sprintf "intrinsic:x86:atomic_%s_%d" op bits)))];
+                  [], [(0,mk_ret)] ] in
+            let ir = emit_ir [sub] in
+            check (Printf.sprintf "EMIT-47.%s.%d" op bits)
+              (contains_substring ir ("atomicrmw " ^ op ^ " ptr")
+               && contains_substring ir (Printf.sprintf "i%d 3 seq_cst" bits)
+               && not (contains_substring ir " = load ")
+               && not (contains_substring ir " store i")
+               && not (contains_substring ir "intrinsic:x86:atomic")))
+            ["add";"sub";"and";"or";"xor";"xchg"])
+          [8;16;32;64]);
 
-    pin "EMIT-48"
-      "a marked xadd lowers to one atomicrmw add whose returned old value \
-       feeds the register def; the addend store leaves"
+    pin "EMIT-48" "the atomic old result feeds later register and flag uses"
       (fun () ->
-        let m = memv "xadd_m" in
-        let rax = v64 "RAX" in
-        let t = v64 "xadd_sum" in
-        let ld a = Bil.Load (Bil.Var m, Bil.Int (atomic_w a), LittleEndian, `r64) in
-        let st a d =
-          Def.create m
-            (Bil.Store (Bil.Var m, Bil.Int (atomic_w a), d, LittleEndian, `r64))
-        in
-        let sub, _ =
-          sub_of "xadd_sub"
-            [ ([ Def.create rax (Bil.Int (atomic_w 3)) ], [ (1, mk_marker lock_tid) ]);
-              ([ Def.create t (ld 0x2000);
-                 st 0x2000 (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Var rax));
-                 Def.create rax (Bil.Var t) ],
-               [ (2, mk_marker unlock_tid) ]);
-              ([ st 0x2010 (Bil.Var rax) ], [ (0, mk_ret) ]) ]
-        in
-        let ir = emit_ir [ sub ] in
-        let count sub_str =
-          String.split_on_char '\n' ir
-          |> List.filter (fun l -> contains_substring l sub_str)
-          |> List.length
-        in
+        let m = memv "atomic_result" in
+        let old = Hike.Atomic.lane "old" 64 in
+        let sub,_ = sub_of "atomic_result"
+            [ [Def.create (Hike.Atomic.lane "address" 64) (Bil.Int (atomic_w 0x2000));
+               Def.create (Hike.Atomic.lane "input0" 64) (Bil.Int (atomic_w 7))],
+              [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_add_64"))];
+              [Def.create m (Bil.Store (Bil.Var m,Bil.Int (atomic_w 0x2010),
+                  Bil.Var old,LittleEndian,`r64))], [(0,mk_ret)] ] in
+        let ir = emit_ir [sub] in
         check "EMIT-48"
-          (count "atomicrmw add" = 1
-           (* the register def carries the returned old value into the
-              spill; the addend store is gone (one store total) *)
+          (contains_substring ir "i64 7 seq_cst"
            && contains_substring ir "store i64 %xold"
-           && count " store i64" = 1
-           && not (contains_substring ir "intrinsic:x86")));
-
-    pin "EMIT-49"
-      "a marked memory xchg lowers to atomicrmw xchg; the register's load \
-       binds the returned old value"
-      (fun () ->
-        let m = memv "xchg_m" in
-        let rax = v64 "RAX" in
-        let t = v64 "xchg_t" in
-        let ld a = Bil.Load (Bil.Var m, Bil.Int (atomic_w a), LittleEndian, `r64) in
-        let st a d =
-          Def.create m
-            (Bil.Store (Bil.Var m, Bil.Int (atomic_w a), d, LittleEndian, `r64))
-        in
-        let sub, _ =
-          sub_of "xchg_sub"
-            [ ([ Def.create rax (Bil.Int (atomic_w 7)) ], [ (1, mk_marker lock_tid) ]);
-              ([ Def.create t (Bil.Var rax);
-                 Def.create rax (ld 0x2000);
-                 st 0x2000 (Bil.Var t) ],
-               [ (2, mk_marker unlock_tid) ]);
-              ([ st 0x2010 (Bil.Var rax) ], [ (0, mk_ret) ]) ]
-        in
-        let ir = emit_ir [ sub ] in
-        let count sub_str =
-          String.split_on_char '\n' ir
-          |> List.filter (fun l -> contains_substring l sub_str)
-          |> List.length
-        in
-        check "EMIT-49"
-          (count "atomicrmw xchg" = 1
-           && contains_substring ir "store i64 %xold"
-           && count " store i64" = 1
-           && not (contains_substring ir "intrinsic:x86")));
+           && not (contains_substring ir " = load ")));
 
     pin "EMIT-50" "a register xchg carries no markers and stays plain"
       (fun () ->
@@ -800,66 +720,19 @@ let tests : unit Alcotest.test list =
                && not (contains_substring ir ("call void @" ^ name))))
           [ "mfence", "seq_cst"; "lfence", "acquire"; "sfence", "release" ]);
 
-    pin "EMIT-52"
-      "a marked compare-exchange emits one seq_cst cmpxchg"
+    pin "EMIT-52" "explicit compare-exchange emits one conditional atomic effect"
       (fun () ->
-        let m = memv "cas_m" in
-        let rax = v64 "RAX" in
-        let rbx = v64 "RBX" in
-        let t = v64 "cas_old" in
-        let ld a = Bil.Load (Bil.Var m, Bil.Int (atomic_w a), LittleEndian, `r64) in
-        let st a d =
-          Def.create m
-            (Bil.Store (Bil.Var m, Bil.Int (atomic_w a), d, LittleEndian, `r64))
-        in
-        let eq = Bil.BinOp (Bil.EQ, Bil.Var rax, Bil.Var t) in
-        let sub, _ =
-          sub_of "cas_sub"
-            [ ([ Def.create rax (Bil.Int (atomic_w 5));
-                 Def.create rbx (Bil.Int (atomic_w 9)) ],
-               [ (1, mk_marker lock_tid) ]);
-              ([ Def.create t (ld 0x2000) ],
-               [ (2, fun tgt -> mk_jmp_to tgt eq); (3, mk_goto) ]);
-              ([ st 0x2000 (Bil.Var rbx) ], [ (4, mk_goto) ]);
-              ([ Def.create rax (Bil.Var t) ], [ (4, mk_goto) ]);
-              ([], [ (5, mk_marker unlock_tid) ]);
-              ([], [ (0, mk_ret) ]) ]
-        in
-        let ir = emit_ir [ sub ] in
+        let sub,_ = sub_of "atomic_cas"
+            [ [Def.create (Hike.Atomic.lane "address" 64) (Bil.Int (atomic_w 0x2000));
+               Def.create (Hike.Atomic.lane "input0" 64) (Bil.Int (atomic_w 5));
+               Def.create (Hike.Atomic.lane "input1" 64) (Bil.Int (atomic_w 9))],
+              [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_cmpxchg_64"))];
+              [], [(0,mk_ret)] ] in
+        let ir = emit_ir [sub] in
         check "EMIT-52"
           (contains_substring ir "cmpxchg ptr"
-           && contains_substring ir "seq_cst seq_cst"
-           && not (contains_substring ir "intrinsic:x86")));
-
-
-    pin "EMIT-53"
-      "atomic flags use the captured cell result at every operand width"
-      (fun () ->
-        List.iter (fun size ->
-            let bits = Size.in_bits size in
-            let m = memv "flags_before" and after = memv "flags_after" in
-            let old = Var.create "flags_old" (Type.Imm bits) in
-            let flag = Var.create "flags_zero" (Type.Imm 1) in
-            let addr = Bil.Int (atomic_w 0x2000) in
-            let sub, _ = sub_of "flags_sub"
-                [ [], [ (1, mk_marker lock_tid) ];
-                  [ Def.create old (Bil.Load (Bil.Var m, addr, LittleEndian, size));
-                    Def.create after (Bil.Store (Bil.Var m, addr,
-                        Bil.BinOp (Bil.PLUS, Bil.Var old, Bil.Int (Word.one bits)),
-                        LittleEndian, size));
-                    Def.create flag (Bil.BinOp (Bil.EQ,
-                        Bil.Load (Bil.Var after, addr, LittleEndian, size),
-                        Bil.Int (Word.zero bits))) ],
-                  [ (2, mk_marker unlock_tid) ];
-                  [ Def.create m (Bil.Store (Bil.Var after,
-                        Bil.Int (atomic_w 0x2010), Bil.Cast (Bil.UNSIGNED, 64, Bil.Var flag),
-                        LittleEndian, `r64)) ], [ (0, mk_ret) ] ] in
-            let ir = emit_ir [ sub ] in
-            check ("EMIT-53." ^ string_of_int bits)
-              (contains_substring ir ("atomicrmw add ptr")
-               && contains_substring ir ("icmp eq i" ^ string_of_int bits)
-               && not (contains_substring ir " = load ")))
-          [ `r8; `r16; `r32; `r64 ]);
+           && contains_substring ir "i64 5, i64 9 seq_cst seq_cst"
+           && not (contains_substring ir " store i")));
 
     pin "EMIT-54"
       "TLS relocations affect initialized bytes and never the zero tail"
@@ -877,17 +750,41 @@ let tests : unit Alcotest.test list =
            && contains_substring ir "[8 x i8] zeroinitializer"
            && not (contains_substring ir "i64 57005")));
 
-    pin "EMIT-55" "every lock-bracket path must reach its unlock"
+    pin "EMIT-55" "legacy lock markers are refused rather than emitted as plain accesses"
       (fun () ->
-        let flag = Var.create "open_bracket_flag" (Type.Imm 1) in
-        let sub, _ = sub_of "open_bracket"
-            [ [], [ (1, mk_marker lock_tid) ];
-              [], [ (2, fun t -> mk_jmp_to t (Bil.Var flag)); (3, mk_goto) ];
-              [], [ (3, mk_marker unlock_tid) ];
-              [], [ (0, mk_ret) ] ] in
+        let sub,_ = sub_of "legacy_atomic"
+            [ [], [(1,mk_marker lock_tid)]; [], [(0,mk_ret)] ] in
         let refused = try ignore (emit_ir [sub]); false with
-          | Failure message -> contains_substring message "no unlock" in
+          | Failure message -> contains_substring message "legacy atomic markers" in
         check "EMIT-55" refused);
+
+    pin "EMIT-56" "atomic negation preserves the caller CFG at a phi join"
+      (fun () ->
+        let guard = Bil.Var (v1 "neg_guard") in
+        let old = Hike.Atomic.lane "old" 64 in
+        let sub,_ = sub_of "atomic_neg_join"
+            [ [], [(1,fun t -> mk_jmp_to t guard);
+                   (2,fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT,guard)))];
+              [Def.create (Hike.Atomic.lane "address" 64) (Bil.Int (atomic_w 0x2000))],
+              [(3,mk_marker (Tid.for_name "intrinsic:x86:atomic_neg_64"))];
+              [Def.create old (Bil.Int (atomic_w 9))], [(3,mk_goto)];
+              [Def.create (v64 "RAX") (Bil.Var old)], [(0,mk_ret)] ] in
+        let ir = emit_ir [sub] in
+        check "EMIT-56"
+          (contains_substring ir "call i64 @hike.atomic.neg.64"
+           && contains_substring ir "define internal i64 @hike.atomic.neg.64"
+           && contains_substring ir "load atomic i64"
+           && contains_substring ir "cmpxchg ptr"
+           && count_two_incoming_phis ir >= 2));
+
+    pin "EMIT-57" "unknown atomic contracts refuse instead of becoming external calls"
+      (fun () ->
+        let sub,_ = sub_of "unknown_atomic"
+            [ [], [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_add_128"))];
+              [], [(0,mk_ret)] ] in
+        let refused = try ignore (emit_ir [sub]); false with
+          | Failure message -> contains_substring message "unsupported atomic intrinsic" in
+        check "EMIT-57" refused);
 
     (* ENTRY-NAME: the entry sub is analysed, never defined, and its
        declaration carries the ABI's process-entry symbol — a stripped

@@ -713,7 +713,8 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
 (* Marker calls retain only their continuation; fences emit their exact ordering. *)
 let create_atomic_intrinsic_call ctx scope llvm_builder ~sub_tid name call =
   (match Abi.strip_at name with
-   | "intrinsic:x86:lock" | "intrinsic:x86:unlock" -> ()
+   | "intrinsic:x86:lock" | "intrinsic:x86:unlock" ->
+     failwith "hike-emit: legacy atomic markers: install the paired BAP producer"
    | "intrinsic:mfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.SequentiallyConsistent llvm_builder
    | "intrinsic:lfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.Acquire llvm_builder
    | "intrinsic:sfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.Release llvm_builder

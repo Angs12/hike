@@ -1032,6 +1032,7 @@ let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   (* The FP pass qualifies the temp widths, as the pipeline does; the
      types pass writes each sub's signature onto its [arg] terms; the
      SSA pass materializes the phis the emitter renders. *)
+  let prog = Hike.Atomic.normalize ~addr_bits:64 prog in
   let prog = Hike.Fp.run_program prog in
   let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
   let prog = Hike.Split_blocks.normalize prog in

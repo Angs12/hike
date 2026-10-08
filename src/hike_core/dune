@@ -3,6 +3,7 @@
  (public_name hike.hike_core)
  (wrapped false)
  (modules
+  hike_atomic
   hike_diag
   hike_native_fp
   hike_return

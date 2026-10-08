@@ -182,6 +182,7 @@ type emit_ctx = {
 type atomic_kind =
   | Rmw of Llvm.AtomicRMWBinOp.t * exp
   | Compare_exchange of exp * exp
+  | Negate
 
 type atomic_action =
   | Atomic_begin of {
@@ -189,9 +190,6 @@ type atomic_action =
       mem : exp;
       addr : exp;
       size : Size.t;
-      old_var : var;
-      new_var : var;
-      rhs : exp;
     }
   | Atomic_value of exp
 

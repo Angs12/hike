@@ -20,3 +20,8 @@ CAMLprim value hike_build_cmpxchg(value ptr, value expected, value desired,
       LLVMAtomicOrderingSequentiallyConsistent, 0);
   return to_val(result);
 }
+
+CAMLprim value hike_atomic_load_seq_cst(value instruction) {
+  LLVMSetOrdering(from_val(instruction), LLVMAtomicOrderingSequentiallyConsistent);
+  return Val_unit;
+}

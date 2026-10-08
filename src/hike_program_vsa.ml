@@ -91,6 +91,8 @@ let prepare proj =
   { target; images; linker_slots; reserved_slots; text_range; data_spans }
 
 let normalize context program =
+  let addr_bits = Hike_abi.word_bits (Hike_abi.of_target context.target) in
+  let program = Hike_atomic.normalize ~addr_bits program in
   Term.map sub_t program ~f:(Hike_jump.compile_sub context.target)
   |> Hike_split_mem.normalize |> Hike_coerce.coerce_program
   |> Hike_fp.run_program

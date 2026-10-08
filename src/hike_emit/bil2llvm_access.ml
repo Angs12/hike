@@ -142,215 +142,39 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
       | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp)
   | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp
 
-(* ---- The atomic lane: BAP's lock markers consumed. ----
-   The x86 backend brackets every locked memory RMW with
-   [intrinsic:x86:lock]/[x86:unlock] calls and marks the implicit case
-   (a memory xchg); the fence instructions ride their own intrinsics.
-   The bracket is the atomicity fact; the BIL inside names the op. *)
-
-(* A bracket is one decoded instruction and therefore one memory cell.
-   Capture its old/new values once, including the BIL flag calculations. *)
-let plan_bracket (blocks : blk term list) : (Tid.t * atomic_action) list =
-  let defs = Base.List.concat_map blocks ~f:(fun b ->
-      Term.enum def_t b |> Seq.to_list) in
-  let malformed shape =
-    failwith ("hike-emit: atomic: unsupported lock bracket: " ^ shape) in
-  let stores = Base.List.filter_map defs ~f:(fun d ->
-      match Def.rhs d with
-      | Bil.Store (mem, addr, data, _, size) -> Some (d, mem, addr, data, size)
-      | _ -> None) in
-  match stores with
-  | [ (store, mem, addr, data, size) ] ->
-    let indexed = Base.List.mapi defs ~f:(fun i d -> (i, d)) in
-    let store_index = Base.List.find_map_exn indexed ~f:(fun (i, d) ->
-        if Tid.equal (Term.tid d) (Term.tid store) then Some i else None) in
-    let rec root_at limit = function
-      | Bil.Var v as e -> (
-        let definition = Base.List.filter indexed ~f:(fun (i, d) ->
-            i < limit && Var.equal (Def.lhs d) v) |> Base.List.last in
-        match definition with
-        | Some (i, d) -> root_at i (Def.rhs d)
-        | None -> e)
-      | e -> e in
-    let root = root_at store_index in
-    let load_at limit e = match root_at limit e with Bil.Load _ -> true | _ -> false in
-    let load = load_at store_index in
-    let compare limit e =
-      let difference e = match root_at limit e with
-        | Bil.BinOp (Bil.MINUS, expected, old) when load_at limit old -> Some expected
-        | _ -> None in
-      match root_at limit e with
-      | Bil.BinOp (Bil.EQ, a, b) when load_at limit a -> Some b
-      | Bil.BinOp (Bil.EQ, a, b) when load_at limit b -> Some a
-      | Bil.BinOp (Bil.EQ, Bil.Int zero, e) when Word.is_zero zero -> difference e
-      | Bil.BinOp (Bil.EQ, e, Bil.Int zero) when Word.is_zero zero -> difference e
-      | _ -> None in
-    let prefixes = snd (Base.List.fold blocks ~init:(0, []) ~f:(fun (n, acc) b ->
-        let n = n + Term.length def_t b in
-        n, (Term.tid b, n) :: acc)) in
-    let cas = match root data with
-      | Bil.Ite (condition, desired, old) when load old ->
-        Base.Option.map (compare store_index condition) ~f:(fun expected ->
-            Compare_exchange (expected, desired))
-      | _ ->
-        Base.List.find_map blocks ~f:(fun b ->
-            let limit = Base.List.Assoc.find_exn prefixes ~equal:Tid.equal (Term.tid b) in
-            Term.enum jmp_t b |> Seq.find_map ~f:(fun j ->
-                Base.Option.map (compare limit (Jmp.cond j)) ~f:(fun expected ->
-                    Compare_exchange (expected, data)))) in
-    let kind = match cas with
-      | Some kind -> kind
-      | None -> (
-        let op = function
-          | Bil.PLUS -> Some Llvm.AtomicRMWBinOp.Add
-          | Bil.MINUS -> Some Llvm.AtomicRMWBinOp.Sub
-          | Bil.AND -> Some Llvm.AtomicRMWBinOp.And
-          | Bil.OR -> Some Llvm.AtomicRMWBinOp.Or
-          | Bil.XOR -> Some Llvm.AtomicRMWBinOp.Xor
-          | _ -> None in
-        match root data with
-        | Bil.BinOp (o, a, b) when load a -> (
-          match op o with Some o -> Rmw (o, b) | None -> malformed "RMW operator")
-        | Bil.BinOp ((Bil.PLUS | Bil.AND | Bil.OR | Bil.XOR as o), a, b)
-          when load b ->
-          Rmw (Base.Option.value_exn (op o), a)
-        | Bil.UnOp (Bil.NOT, a) when load a ->
-          Rmw (Llvm.AtomicRMWBinOp.Xor,
-               Bil.Int (Word.ones (Size.in_bits size)))
-        | Bil.Load _ ->
-          Rmw (Llvm.AtomicRMWBinOp.Or, Bil.Int (Word.zero (Size.in_bits size)))
-        | Bil.Var _ | Bil.Cast _ | Bil.Int _ ->
-          Rmw (Llvm.AtomicRMWBinOp.Xchg, data)
-        | _ -> malformed "store value") in
-    let old_var = Var.create "atomic_old" (Type.Imm (Size.in_bits size)) in
-    let new_var = Var.create "atomic_new" (Type.Imm (Size.in_bits size)) in
-    let has_load e =
-      (object inherit [bool] Exp.visitor
-         method! enter_load ~mem:_ ~addr:_ _ _ _ = true
-       end)#visit_exp e false in
-    let rewrite ~after e =
-      (object inherit Exp.mapper
-         method! map_load ~mem:_ ~addr:_ _ _ =
-           Bil.Var (if after then new_var else old_var)
-       end)#map_exp e in
-    let any_read = Base.List.exists defs ~f:(fun d -> has_load (Def.rhs d)) in
-    let started = ref false in
-    let plan = Base.List.filter_mapi defs ~f:(fun i d ->
-        let rhs = if Tid.equal (Term.tid d) (Term.tid store) then data else Def.rhs d in
-        let reads = has_load rhs in
-        if (reads || (not any_read && Tid.equal (Term.tid d) (Term.tid store)))
-           && not !started then begin
-          started := true;
-          Some (Term.tid d, Atomic_begin {
-              kind; mem; addr; size; old_var; new_var; rhs = rewrite ~after:false rhs })
-        end else if reads || Tid.equal (Term.tid d) (Term.tid store) then
-          Some (Term.tid d, Atomic_value (rewrite ~after:(i > store_index) rhs))
-        else None) in
-    if not !started then malformed "no old-cell read";
-    plan
-  | [] -> malformed "no memory store"
-  | _ -> malformed "multiple memory stores"
-
-(* Every lock-marker bracket of the sub, as one per-def plan. *)
+(* The analytical accesses are generated by [Hike_atomic], with all inputs
+   captured before the tagged load. Operation identity comes from BAP. *)
 let plan_atomics (sub : sub term) : atomic_action Tid.Map.t =
-  let blocks = Term.enum blk_t sub |> Seq.to_list in
-  let call_target_name j =
-    match Jmp.kind j with
-    | Call c -> (
-      match Call.target c with
-      | Direct t -> Some (Tid.name t)
-      | Indirect _ -> None)
-    | _ -> None
-  in
-  let succ_tids blk =
-    Term.enum jmp_t blk
-    |> Seq.concat_map ~f:(fun j ->
-           match Jmp.kind j with
-           | Goto (Direct t) -> Seq.return t
-           | Call c -> (
-             match Call.return c with
-             | Some l -> Seq.return (label_tid l)
-             | None -> Seq.empty)
-           | _ -> Seq.empty)
-    |> Seq.to_list
-  in
-  let is_marker name kind =
-    Base.Option.exists name ~f:(fun n ->
-        Abi.is_lock_marker n && Base.String.is_suffix n ~suffix:kind)
-  in
-  let brackets =
-    Base.List.filter_map blocks ~f:(fun blk ->
-        let lock =
-          Term.enum jmp_t blk
-          |> Seq.find ~f:(fun j ->
-                 is_marker (call_target_name j) ":lock")
-        in
-        Base.Option.map lock ~f:(fun j ->
-            match Jmp.kind j with
-            | Call c -> (
-              match Call.return c with
-              | Some l -> (blk, label_tid l)
-              | None ->
-                failwith
-                  "hike-emit: atomic: a lock-marker call has no continuation")
-            | _ -> assert false))
-  in
-  let block_of tid = Base.List.find blocks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
-  let covered = ref Tid.Set.empty in
-  let plan =
-    Base.List.concat_map brackets ~f:(fun (_lk, cont) ->
-        let visited = ref Tid.Set.empty in
-        let rec walk active tid acc =
-          if Core.Set.mem active tid then
-            failwith "hike-emit: atomic: cyclic lock-marker bracket"
-          else if Core.Set.mem !visited tid then acc
-          else (
-            if Core.Set.mem !covered tid then
-              failwith "hike-emit: atomic: overlapping lock-marker brackets";
-            visited := Core.Set.add !visited tid;
-            let active = Core.Set.add active tid in
-            match block_of tid with
-            | None ->
-              failwith
-                "hike-emit: atomic: a lock-marker bracket names no block"
-            | Some blk ->
-              if Term.enum jmp_t blk |> Seq.exists ~f:(fun j ->
-                  is_marker (call_target_name j) ":lock") then
-                failwith "hike-emit: atomic: nested lock-marker bracket";
-              let ends =
-                Term.enum jmp_t blk
-                |> Seq.exists ~f:(fun j ->
-                       is_marker (call_target_name j) ":unlock")
-              in
-              let acc = blk :: acc in
-              if ends then acc
-              else match succ_tids blk with
-                | [] -> failwith "hike-emit: atomic: lock-marker path has no unlock"
-                | successors ->
-                  Base.List.fold successors ~init:acc
-                    ~f:(fun acc t -> walk active t acc))
-        in
-        let bracket = List.rev (walk Tid.Set.empty cont []) in
-        covered := Core.Set.union !covered !visited;
-        if
-          Base.List.exists bracket ~f:(fun blk ->
-              Term.enum jmp_t blk
-              |> Seq.exists ~f:(fun j ->
-                     is_marker (call_target_name j) ":unlock"))
-        then plan_bracket bracket
-        else
-          failwith
-            "hike-emit: atomic: a lock-marker bracket closes with no unlock \
-             call")
-  in
-  Base.List.iter blocks ~f:(fun blk ->
-      if Term.enum jmp_t blk |> Seq.exists ~f:(fun j ->
-          is_marker (call_target_name j) ":unlock")
-         && not (Core.Set.mem !covered (Term.tid blk)) then
-        failwith "hike-emit: atomic: unlock-marker has no lock bracket");
-  plan
-  |> Base.List.fold ~init:Tid.Map.empty ~f:(fun m (tid, a) ->
-         Core.Map.set m ~key:tid ~data:a)
+  Term.enum blk_t sub |> Seq.fold ~init:Tid.Map.empty ~f:(fun plan blk ->
+      let inputs = ref Core.Int.Map.empty in
+      Term.enum def_t blk |> Seq.fold ~init:plan ~f:(fun plan d ->
+          Base.Option.iter (Term.get_attr d Hike_atomic.input) ~f:(fun i ->
+              inputs := Core.Map.set !inputs ~key:i ~data:(Bil.Var (Def.lhs d)));
+          match Term.get_attr d Hike_atomic.operation with
+          | Some op ->
+            let operand i = match Core.Map.find !inputs i with
+              | Some e -> e | None -> failwith "hike-emit: atomic input is missing" in
+            let kind = match op with
+              | "add" -> Rmw (Llvm.AtomicRMWBinOp.Add,operand 0)
+              | "sub" -> Rmw (Llvm.AtomicRMWBinOp.Sub,operand 0)
+              | "and" -> Rmw (Llvm.AtomicRMWBinOp.And,operand 0)
+              | "or" -> Rmw (Llvm.AtomicRMWBinOp.Or,operand 0)
+              | "xor" -> Rmw (Llvm.AtomicRMWBinOp.Xor,operand 0)
+              | "xchg" -> Rmw (Llvm.AtomicRMWBinOp.Xchg,operand 0)
+              | "cmpxchg" -> Compare_exchange (operand 0,operand 1)
+              | "neg" -> Negate
+              | _ -> failwith "hike-emit: unknown atomic operation" in
+            (match Def.rhs d with
+             | Bil.Load (mem,addr,_,size) ->
+               Core.Map.set plan ~key:(Term.tid d)
+                 ~data:(Atomic_begin {kind;mem;addr;size})
+             | _ -> failwith "hike-emit: atomic load was lost")
+          | None when Term.has_attr d Hike_atomic.write ->
+            (match Def.rhs d with
+             | Bil.Store (_,_,data,_,_) ->
+               Core.Map.set plan ~key:(Term.tid d) ~data:(Atomic_value data)
+             | _ -> failwith "hike-emit: atomic store was lost")
+          | None -> plan))
 
 (* The atomic op's target pointer: the same resolution lanes an
    ordinary access takes. *)
@@ -404,35 +228,23 @@ let atomic_width ctx llvm_builder v bits =
 let create_atomic ctx scope llvm_builder blk_tid action : Llvm.llvalue =
   match action with
   | Atomic_value rhs -> create_exp ctx scope llvm_builder blk_tid rhs
-  | Atomic_begin { kind; mem; addr; size; old_var; new_var; rhs } ->
+  | Atomic_begin { kind; mem; addr; size } ->
     let bits = Size.in_bits size in
     let value exp = atomic_width ctx llvm_builder
-        (create_exp ctx scope llvm_builder blk_tid exp) bits in
+        (as_integer ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)) bits in
     let ptr = atomic_ptr ctx scope llvm_builder blk_tid mem addr in
-    let old, fresh = match kind with
-      | Rmw (op, operand) ->
-        let v = value operand in
-        let old = Llvm.build_atomicrmw op ptr v
-            Llvm.AtomicOrdering.SequentiallyConsistent false "xold" llvm_builder in
-        let fresh = match op with
-          | Llvm.AtomicRMWBinOp.Xchg -> v
-          | Add -> Llvm.build_add old v "" llvm_builder
-          | Sub -> Llvm.build_sub old v "" llvm_builder
-          | And -> Llvm.build_and old v "" llvm_builder
-          | Or -> Llvm.build_or old v "" llvm_builder
-          | Xor -> Llvm.build_xor old v "" llvm_builder
-          | _ -> assert false in
-        old, fresh
-      | Compare_exchange (expected, desired) ->
-        let expected = value expected and desired = value desired in
-        let result = Bil2llvm_atomic.cmpxchg ptr expected desired llvm_builder in
-        let old = Llvm.build_extractvalue result 0 "xold" llvm_builder in
-        let success = Llvm.build_extractvalue result 1 "xsuccess" llvm_builder in
-        old, Llvm.build_select success desired old "" llvm_builder in
-    Base.List.iter [ old_var, old; new_var, fresh ] ~f:(fun (var, v) ->
-        insert_local scope blk_tid var v;
-        bind_ssaval scope var v);
-    create_exp ctx scope llvm_builder blk_tid rhs
+    match kind with
+    | Rmw (op, operand) ->
+      let old = Llvm.build_atomicrmw op ptr (value operand)
+          Llvm.AtomicOrdering.SequentiallyConsistent false "xold" llvm_builder in
+      Llvm.set_alignment 1 old;
+      old
+    | Compare_exchange (expected, desired) ->
+      let expected = value expected and desired = value desired in
+      let result = Bil2llvm_atomic.cmpxchg ptr expected desired llvm_builder in
+      Llvm.set_alignment 1 result;
+      Llvm.build_extractvalue result 0 "xold" llvm_builder
+    | Negate -> Bil2llvm_atomic.negate ctx.llvm_module ptr bits llvm_builder
 
 let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
@@ -441,7 +253,9 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let want = if is_ptr_var var then Some ctx.ptr_ty else None in
   let res =
     match Core.Map.find !(scope.atomic_plan) (Term.tid def) with
-    | Some action -> create_atomic ctx scope llvm_builder blk_tid action
+    | Some action ->
+      let value = create_atomic ctx scope llvm_builder blk_tid action in
+      if Option.is_some want then as_pointer ctx llvm_builder value else value
     | None ->
         if Hike_def_slots.def_is_dyn_alloc def then
           create_dynamic_alloc ctx scope llvm_builder blk_tid def exp

@@ -90,7 +90,21 @@ let tests = [
             (Term.enum sub_t program |> Seq.exists ~f:(fun sub ->
                  match Term.get_attr sub address with
                  | Some a -> Word.to_int64_exn a = 0x400082L
-                 | None -> false))))
+                 | None -> false))));
+  pin "DRIVE-05" "BAP carries the decoded atomic operation and captures inputs before it"
+    (fun () ->
+      with_binary "\xf0\x48\x01\x37\xc3" (fun project ->
+          let program = Hike.Drive.run project in
+          let targets = Term.enum sub_t program
+            |> Seq.concat_map ~f:(Term.enum blk_t)
+            |> Seq.concat_map ~f:(Term.enum jmp_t)
+            |> Seq.filter_map ~f:(fun j -> match Jmp.kind j with
+                 | Call c -> (match Call.target c with Direct t -> Some (Tid.name t) | _ -> None)
+                 | _ -> None) |> Seq.to_list in
+          check "explicit atomic add reaches BIR"
+            (Base.List.exists targets ~f:(fun n -> String.equal (Hike.Abi.strip_at n) "intrinsic:x86:atomic_add_64"));
+          check "generic lock markers are absent"
+            (not (Base.List.exists targets ~f:Hike.Abi.is_lock_marker))))
 ]
 
 let () = run "drive" tests

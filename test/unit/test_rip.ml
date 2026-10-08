@@ -208,25 +208,16 @@ let tests = [
                     sm_image = Some (Bytes.make 24 '\000'); sm_copy_relocs = [] } in
        let spec = { empty_spec with spec_sections = [Some meta];
                                    spec_whole = [(7, 0x4008L, 0x401fL)] } in
-       (* The marked bracket: BAP's lock markers around the RMW. *)
-       let lock = Tid.for_name "intrinsic:x86:lock" in
-       let unlock = Tid.for_name "intrinsic:x86:unlock" in
-       let mk_marker target : tid -> jmp term = fun cont ->
-         Jmp.create (Call (Call.create ~return:(Direct cont)
-                             ~target:(Direct target) ())) in
        let resolve subs =
-         let prog = resolve (Program.create ~subs:subs ()) in
-         Term.enum sub_t prog |> Seq.to_list
-       in
+         let prog = Program.create ~subs:subs ()
+             |> Hike.Atomic.normalize ~addr_bits:64 |> resolve in
+         Term.enum sub_t prog |> Seq.to_list in
        let marked, _ = sub_of "rip_atomic"
-           [ [Def.create loaded (Bil.Int (Cbat_word.to_word (w64 5)))],
-             [(1, mk_marker lock)];
-             [Def.create mem (Bil.Store (Bil.Var mem, int 8L,
-                 Bil.BinOp (Bil.PLUS,
-                     Bil.Load (Bil.Var mem, int 8L, LittleEndian, `r64),
-                     Bil.Var loaded), LittleEndian, `r64))],
-             [(2, mk_marker unlock)];
-             [], [(0, mk_ret)] ] in
+           [ [Def.create (Hike.Atomic.lane "address" 64) (int 0x4010L);
+              Def.create (Hike.Atomic.lane "input0" 64) (int 5L)],
+             [(1,fun cont -> Jmp.create (Call (Call.create ~return:(Direct cont)
+                 ~target:(Direct (Tid.for_name "intrinsic:x86:atomic_add_64")) ())))];
+             [], [(0,mk_ret)] ] in
        (* The unmarked twin: the same load/store pair, no markers. *)
        let unmarked, _ = sub_of "rip_plain"
            [ [Def.create loaded (Bil.Int (Cbat_word.to_word (w64 5)));
@@ -237,11 +228,11 @@ let tests = [
              [(0, mk_ret)] ] in
        let ir_marked = emit_ir_spec spec (resolve [marked]) in
        let ir_plain = emit_ir_spec spec (resolve [unmarked]) in
-       check "a marked RMW addresses the owning global at its byte index"
-         (contains_substring ir_marked
-            "atomicrmw add ptr getelementptr (i8, ptr @data, i64 8)"
+       check "an explicit atomic addresses the owning global at its byte index"
+         (contains_substring ir_marked "atomicrmw add ptr"
+          && contains_substring ir_marked "ptr @data, i64 8)"
          && contains_substring ir_marked "seq_cst");
-       check "the markers render no external call"
+       check "the intrinsic renders no external call"
          (not (contains_substring ir_marked "intrinsic:x86"));
        check "an unmarked RMW stays plain"
          (not (contains_substring ir_plain "atomicrmw")));
