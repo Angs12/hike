@@ -1,8 +1,8 @@
 # Pins — test_hike_fp
 
 Module: `test/unit/test_hike_fp.ml` (group `hike_fp`, ids `HFP-01`…).
-Production mechanism: `src/hike_fp.ml` (the `hike-fp` pass, chained after
-`hike-coerce`, before `hike-vsa`).  The x86 lifter uses one intrinsic
+Production mechanism: `src/hike_fp.ml`, called by
+`Hike_program_vsa.normalize` after width coercion and before each VSA solve. The x86 lifter uses one intrinsic
 temp name (`intrinsic:x0`) at several widths — single- and
 double-precision share the unsized `_binary` intrinsic spelling — and
 BAP's var identity is `(name, version)`, type-blind, so a

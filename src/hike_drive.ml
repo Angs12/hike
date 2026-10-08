@@ -246,10 +246,8 @@ let run proj =
                       && Core.Map.equal Core.Set.equal p.compiled !destinations ->
           { p with decoded = out }
         | _ ->
-        (* The lifted program is BAP's raw BIR: the normalizer chain runs
-           over it once per round — one memory node per def, width-honest
-           binops, the FP temp widths — so every later reader takes the
-           terms as the passes left them. *)
+        (* The lifted program is BAP's raw BIR. The VSA solve normalizes
+           each round's copy before analysis; this raw form is returned. *)
         let lifted =
           match prev with
           | None -> Project.program proj
@@ -286,7 +284,6 @@ let run proj =
           in
           Term.map sub_t raw ~f:(Hike_cfg_complete.arm_dispatches ~dests)
         in
-        let program = Hike_program_vsa.normalize context raw in
         let used_noreturn = !noreturn in
         (* The site → terminator-instruction map, off this round's
            decode: the solver's jmp rewrites drop the jmp's own
@@ -301,7 +298,7 @@ let run proj =
           in
           fun a -> Base.Option.value (Core.Map.find m a) ~default:a
         in
-        let solution = Hike_program_vsa.solve context proj ~noreturn:!noreturn program in
+        let solution = Hike_program_vsa.solve context proj ~noreturn:!noreturn raw in
         let subs_acc = solution.subs in
         (* The noreturn fact on the solved program (denotations and the
            canonical returns are final): the set feeds the NEXT round's
@@ -318,7 +315,7 @@ let run proj =
            routes it as a root for the next scan. *)
         let main_addr =
           match
-            Term.enum sub_t program
+            Term.enum sub_t raw
             |> Seq.find ~f:(fun s -> Term.has_attr s Sub.entry_point)
           with
           | None -> None

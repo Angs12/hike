@@ -98,6 +98,7 @@ let normalize context program =
   |> Hike_fp.run_program
 
 let solve context proj ~noreturn program =
+  let program = normalize context program in
   let { target; images; linker_slots; data_spans; _ } = context in
   let block_addrs =
     Term.enum sub_t program

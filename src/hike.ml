@@ -84,22 +84,7 @@ let chain' ~name ~deps run =
   Project.register_pass' ~name ~deps ~runonce:true run;
   last_pass ()
 
-let map_subs f proj =
-  Project.map_program proj ~f:(fun prog -> Term.map sub_t prog ~f)
-
 let pass_filter proj = Hike_filter.filter_subs proj
-
-let pass_jump proj = map_subs (Hike_jump.compile_sub (Project.target proj)) proj
-
-let pass_split_mem proj = Project.map_program proj ~f:Hike_split_mem.normalize
-
-(* The one width-coercion point: every later consumer reads uniform widths. *)
-let pass_coerce proj = Project.map_program proj ~f:Hike_coerce.coerce_program
-
-(* The FP temp identity carries its width; after the coercion point the
-   lifter's widths are honest, so every later pass reads the qualified
-   names. *)
-let pass_fp proj = Project.map_program proj ~f:Hike_fp.run_program
 
 (* The prune's closure debug; thunk-guarded like the completion's
    trace, so production never formats it. *)
@@ -654,10 +639,6 @@ let pass_convlir ~output proj = convert_binary output proj
 let pass_split_blocks proj =
   Project.map_program proj ~f:Hike_split_blocks.normalize
 
-let pass_atomic proj =
-  let addr_bits = Hike_abi.word_bits (Hike_abi.of_target (Project.target proj)) in
-  Project.map_program proj ~f:(Hike_atomic.normalize ~addr_bits)
-
 let pass_ssa proj =
   let target = Project.target proj in
   Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
@@ -669,12 +650,7 @@ let () =
          re-decode's own subs included — is what gets filtered, so the
          re-discovered stubs and externs drop by the same rules. *)
       let discover = chain ~name:"discover" ~deps:[] pass_discover in
-      let atomic = chain ~name:"atomic" ~deps:[ discover ] pass_atomic in
-      let jump = chain ~name:"jump" ~deps:[ atomic ] pass_jump in
-      let split_mem = chain ~name:"split-mem" ~deps:[ jump ] pass_split_mem in
-      let coerce = chain ~name:"coerce" ~deps:[ split_mem ] pass_coerce in
-      let fp = chain ~name:"fp" ~deps:[ coerce ] pass_fp in
-      let vsa = chain ~name:"vsa" ~deps:[ fp ] pass_vsa in
+      let vsa = chain ~name:"vsa" ~deps:[ discover ] pass_vsa in
       let filter = chain ~name:"filter" ~deps:[ vsa ] pass_filter in
       let sections = chain ~name:"sections" ~deps:[ filter ] pass_attrib in
       let split_blocks =
