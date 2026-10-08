@@ -816,7 +816,7 @@ let tests : unit Alcotest.test list =
            cells its addresses can read, so the constraint contains every
            contributing cell). *)
         let hull_case ~(store_off : int) :
-            AI.t * var * var * var * exp * exp =
+            AI.t * AI.t * var * var * var * exp * exp =
           let hmem = memv "t5r_hm" in
           let ha = Var.create ~is_virtual:true ~fresh:false "t5r_ha" (Type.Imm 32) in
           let hb = Var.create ~is_virtual:true ~fresh:false "t5r_hb" (Type.Imm 32) in
@@ -864,16 +864,17 @@ let tests : unit Alcotest.test list =
           in
           let rctx_h = mk_rctx ~abi:Hike_abi.x86_64_sysv sub_h in
           let blk_h = List.nth (Term.enum blk_t sub_h |> Seq.to_list) 0 in
+          let forward = Vsa.Test_seam.denote_defs blk_h entry_h in
           let entry_h = AI.add_word entry_h ~key:ht ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol:sol_h ~rctx:rctx_h
               ~seeds:(Var.Set.singleton ht)
               entry_h blk_h
           in
-          (refined, ha, hb, hmem, hka, hkb)
+          (refined, forward, ha, hb, hmem, hka, hkb)
         in
         (* Positive: the store at rbp-8 sits inside the hull [rbp-8, rbp]. *)
-        let refined_p, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
+        let refined_p, _, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
         let cell_p addr =
           Result.fold
             (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_p, addr, LittleEndian, `r32)) refined_p)
@@ -893,7 +894,8 @@ let tests : unit Alcotest.test list =
           (Ws.equal (AI.find_word 32 refined_p hb_p) (Ws.singleton (w32 6))
           && Ws.equal (AI.find_word 32 refined_p ha_p) (Ws.singleton (w32 6)));
         (* Negative: the store at rbp-16 is outside the hull [rbp-8, rbp]. *)
-        let refined_n, ha_n, hb_n, hmem_n, _hka_n, hkb_n = hull_case ~store_off:16 in
+        let refined_n, forward_n, ha_n, hb_n, hmem_n, _hka_n, hkb_n =
+          hull_case ~store_off:16 in
         let cell_n addr =
           Result.fold
             (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_n, addr, LittleEndian, `r32)) refined_n)
@@ -905,9 +907,9 @@ let tests : unit Alcotest.test list =
           (Ws.equal (cell_n hkb_n) (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))));
         check
           "T5-2 (Store row, hull negative): a store outside the hull leaves the data \
-           producers unconstrained"
-          (Ws.is_top (AI.find_word 32 refined_n hb_n)
-          && Ws.is_top (AI.find_word 32 refined_n ha_n)));
+           producers at their forward values"
+          (Ws.equal (AI.find_word 32 refined_n hb_n) (AI.find_word 32 forward_n hb_n)
+          && Ws.equal (AI.find_word 32 refined_n ha_n) (AI.find_word 32 forward_n ha_n)));
 
     (* The cross-block cell carry: the store that wrote the cell is in
        ANOTHER block; the guard block's walk still delivers the load's
@@ -996,7 +998,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let mk ~(store_endian : endian) ~(store_sz : Size.t) ~(load_addr : exp)
             ~(load_endian : endian) ~(seed_wide : Mem.Key.t list)
-            ~(seed_data : Ws.t) : AI.t * var * var * var =
+            ~(seed_data : Ws.t) : AI.t * var * var * AI.t =
           let mem = memv "pf_m" in
           let rbp = v64 "RBP" in
           (* The producing chain runs at the store's own width. *)
@@ -1033,13 +1035,14 @@ let tests : unit Alcotest.test list =
           in
           let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
           let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
+          let forward = Vsa.Test_seam.denote_defs blk entry in
           let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol ~rctx
               ~seeds:(Var.Set.singleton t2)
               entry blk
           in
-          (refined, ta, tb, mem)
+          (refined, ta, tb, forward)
         in
         let rbp = v64 "RBP" in
         let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -1049,36 +1052,32 @@ let tests : unit Alcotest.test list =
           | [ k ] -> k
           | _ -> failwith "key"
         in
-        let unconstrained refined ta tb =
-          let oc = Stdlib.open_out_gen [ Stdlib.Open_creat; Stdlib.Open_append ] 0o666 "/tmp/pf.txt" in
-          Stdlib.Printf.fprintf oc "ta=%s tb=%s\n"
-            (Format.asprintf "%a" Ws.pp (AI.find_word 32 refined ta))
-            (Format.asprintf "%a" Ws.pp (AI.find_word 32 refined tb));
-          Stdlib.close_out oc;
-          Ws.is_top (AI.find_word (Var.typ ta |> (function Type.Imm w -> w | _ -> 64)) refined ta)
-          && Ws.is_top (AI.find_word (Var.typ tb |> (function Type.Imm w -> w | _ -> 64)) refined tb)
+        (* No delivery: each producer keeps its forward value at the edge. *)
+        let unconstrained refined forward ta tb =
+          let at v st = AI.find_word (match Var.typ v with Type.Imm w -> w | _ -> 64) st v in
+          Ws.equal (at ta refined) (at ta forward) && Ws.equal (at tb refined) (at tb forward)
         in
         (* Endian: the store writes LittleEndian, the read is BigEndian. *)
-        let r_e, ta_e, tb_e, _ =
+        let r_e, ta_e, tb_e, f_e =
           mk ~store_endian:LittleEndian ~store_sz:`r32 ~load_addr:kb
             ~load_endian:BigEndian ~seed_wide:[ key_ofw (-16); key_ofw (-8) ]
             ~seed_data:(Ws.top 32) in
         check "F (endian): a foreign-endian store's data producers stay unconstrained"
-          (unconstrained r_e ta_e tb_e);
+          (unconstrained r_e f_e ta_e tb_e);
         (* Width: the store writes 8 bytes, the read takes 4. *)
-        let r_w, ta_w, tb_w, _ =
+        let r_w, ta_w, tb_w, f_w =
           mk ~store_endian:LittleEndian ~store_sz:`r64 ~load_addr:kb
             ~load_endian:LittleEndian ~seed_wide:[ key_ofw (-16); key_ofw (-8) ]
             ~seed_data:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))) in
         check "F (width): a wider store's data producers stay unconstrained"
-          (unconstrained r_w ta_w tb_w);
+          (unconstrained r_w f_w ta_w tb_w);
         (* Disjoint key: the read's cell is elsewhere. *)
-        let r_d, ta_d, tb_d, _ =
+        let r_d, ta_d, tb_d, f_d =
           mk ~store_endian:LittleEndian ~store_sz:`r32 ~load_addr:k24
             ~load_endian:LittleEndian ~seed_wide:[ key_ofw (-16); key_ofw (-24) ]
             ~seed_data:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))) in
         check "F (disjoint): a store outside the read's range leaves the producers unconstrained"
-          (unconstrained r_d ta_d tb_d));
+          (unconstrained r_d f_d ta_d tb_d));
 
     (* Pin A: the empty cell meet is the identity — the cell keeps its
        stored value; the dead-path bottom is never written. *)

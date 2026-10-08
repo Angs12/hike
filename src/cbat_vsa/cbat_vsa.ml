@@ -672,19 +672,19 @@ let refine_edge ~sol ~rctx ~seeds env blk =
    ACTUAL env writes — a delivery equal to the state's value writes
    nothing, so it never counts. *)
 let refine_edge_count_writes ~sol ~rctx ~seeds env blk =
-  let confine_writes = ref 0 in
-  let carry_writes = ref 0 in
+  let output_writes = ref 0 in
+  let input_writes = ref 0 in
   let out =
     Cbat_backward.refine_edge
       ~entry:(Solution.get sol (Term.tid blk))
       ~rctx ~seeds
       ~on_write:(fun site ->
           match site with
-          | Cbat_backward.Confine_write -> incr confine_writes
-          | Cbat_backward.Carry_write -> incr carry_writes)
+          | Cbat_backward.Output_write -> incr output_writes
+          | Cbat_backward.Input_write -> incr input_writes)
       env blk
   in
-  (out, !confine_writes, !carry_writes)
+  (out, !output_writes, !input_writes)
 
 (* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
 module Test_seam = struct
@@ -709,5 +709,5 @@ module Test_seam = struct
   let refine_edge_count_writes = refine_edge_count_writes
 
   (* The walk's env-write sites, named for the counting refine. *)
-  type write_site = Cbat_backward.write_site = Confine_write | Carry_write
+  type write_site = Cbat_backward.write_site = Output_write | Input_write
 end

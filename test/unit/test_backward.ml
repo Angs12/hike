@@ -96,6 +96,45 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
     Ws.elem exit (cell head_in),
     not (Ws.elem exit (cell (Graphlib.Std.Solution.get sol body_tid))) )
 
+(* The guard-edge walk on one block after an [RBP := RSP] entry: [defs]
+   end in [zf]'s guard, the edge takes zf = {1}, and the refined edge
+   state is returned.  [m] is the block's memory, top at entry. *)
+let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t =
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let sub, tids =
+    sub_of name
+      [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+        defs, [ (2, mk_goto) ];
+        [], [] ]
+  in
+  let entry =
+    AI.add_memory (anchored_entry ()) ~key:m
+      ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+  in
+  let sol =
+    static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+      (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
+  in
+  let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+  let blk =
+    Term.enum blk_t sub |> Seq.to_list
+    |> List.find (fun b -> Tid.equal (Term.tid b) tids.(1))
+  in
+  let post = Vsa.Test_seam.denote_defs blk (Graphlib.Std.Solution.get sol tids.(1)) in
+  let edge = AI.add_word post ~key:zf ~data:(Ws.singleton Cbat_word.b1) in
+  let out, _, _ =
+    Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
+      ~seeds:(Var.Set.singleton zf) edge blk
+  in
+  out
+
+(* The [RBP - 8] cell address the write-site pins store and load. *)
+let wr_addr =
+  Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"), Bil.Int (Cbat_word.to_word (w64 8)))
+
+let wr_v32 (n : string) = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 32)
+
 let tests : unit Alcotest.test list =
   [
     (* L3a: backward guard refinement through the producer rows. *)
@@ -1523,10 +1562,11 @@ let tests : unit Alcotest.test list =
        is observable as a missing count, never as the returned env. *)
 
     pin "BK-95"
-      "the write sites skip a delivery that changes nothing — confine \
-       counts the load def's strict delivery, never the guard def's equal \
-       one ({1} met into {1}); carry counts the strict leftover, never \
-       the unconsumed seed's equal one"
+      "the replay's write sites skip a fact that changes nothing — the \
+       load's read fact already narrows x, so x's output fact and the \
+       guard def's {1} write nothing; the block's input facts (x's \
+       leftover and the unconsumed seed u's [2,5]) each narrow the entry \
+       once"
       (fun () ->
         let m = memv "w5_m" in
         let rsp = v64 "RSP" in
@@ -1570,20 +1610,19 @@ let tests : unit Alcotest.test list =
           AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
             ~data:(Ws.singleton Cbat_word.b1)
         in
-        (* The load def's confine strictly precedes (one write); the guard
-           def's delivery is the state's own {1} (no write). *)
-        let out, confine_writes, carry_writes =
+        (* The read fact narrows x before its def; the output facts are
+           then the replayed values (no write). *)
+        let out, output_writes, input_writes =
           Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
             ~seeds:(Var.Set.singleton zf) edge_env guard_blk
         in
-        check "BK-95.confine" (confine_writes = 1);
-        check "BK-95.carry-none" (carry_writes = 0);
+        check "BK-95.output-equal" (output_writes = 0);
+        check "BK-95.input-none" (input_writes = 0);
         check "BK-95.row"
           (Ws.precedes (AI.find_word 32 out (Var.base x))
              (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 4))));
-        (* The carry site: the guard block defines x nowhere, so x's
-           leftover strictly precedes (one write) and the unconsumed seed
-           u's delivery equals the state's own [2,5] (no write). *)
+        (* The input site: the guard block defines x and u nowhere, so
+           both facts hold at the entry, where each strictly narrows. *)
         let x2 = Var.create ~is_virtual:false ~fresh:false "w5_gx" (Type.Imm 32) in
         let zf2 = v1 "w5_gzf" in
         let u = Var.create ~is_virtual:false ~fresh:false "w5_u" (Type.Imm 32) in
@@ -1606,7 +1645,7 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub2 |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard2)
         in
-        let out2, confine2, carry2 =
+        let out2, output2, input2 =
           Vsa.Test_seam.refine_edge_count_writes ~sol:sol2 ~rctx:rctx2
             ~seeds:(Core.Set.union (Var.Set.singleton zf2) (Var.Set.singleton u))
             (AI.add_word
@@ -1615,9 +1654,9 @@ let tests : unit Alcotest.test list =
                ~key:u ~data:(bk_iv32 ~lo:2 ~hi:5))
             guard2_blk
         in
-        check "BK-95.confine-equal" (confine2 = 0);
-        check "BK-95.carry" (carry2 = 1);
-        check "BK-95.carry-equal-kept"
+        check "BK-95.output-equal2" (output2 = 0);
+        check "BK-95.input" (input2 = 2);
+        check "BK-95.seed-kept"
           (Ws.equal (AI.find_word 32 out2 (Var.base u)) (bk_iv32 ~lo:2 ~hi:5)));
 
     pin "BK-96"
@@ -1661,6 +1700,82 @@ let tests : unit Alcotest.test list =
           (not (Ws.is_top (AI.find_word 32 out (Var.base x2))));
         check "BK-96.env-value"
           (Ws.equal (AI.find_word 32 out (Var.base u)) (bk_iv32 ~lo:2 ~hi:5)));
+
+    pin "BK-100"
+      "a var rewritten after the def that receives its constraint keeps its \
+       edge value: the guard bounds z = y's first value, while the edge y is \
+       the later y := u"
+      (fun () ->
+        let x = wr_v32 "w100_x" and y = wr_v32 "w100_y" and z = wr_v32 "w100_z" in
+        let u = wr_v32 "w100_u" and zf = v1 "w100_zf" in
+        let out =
+          wr_refine "w100" (memv "w100_m") zf
+            [ Def.create y (Bil.Var x);
+              Def.create z (Bil.Var y);
+              Def.create y (Bil.Var u);
+              Def.create zf
+                (Bil.BinOp (Bil.SLT, Bil.Var z, Bil.Int (Cbat_word.to_word (w32 5)))) ]
+        in
+        check "BK-100.guarded"
+          (not (Ws.elem (w32 50) (AI.find_word 32 out (Var.base z))));
+        check "BK-100.rewritten-kept"
+          (Ws.elem (w32 50) (AI.find_word 32 out (Var.base y))));
+
+    pin "BK-101"
+      "a cell stored after the load the guard reads keeps its edge value: \
+       the guard bounds x = the loaded value, while the edge cell holds the \
+       later store's u"
+      (fun () ->
+        let m = memv "w101_m" in
+        let x = wr_v32 "w101_x" and u = wr_v32 "w101_u" and zf = v1 "w101_zf" in
+        let out =
+          wr_refine "w101" m zf
+            [ Def.create x (Bil.Load (Bil.Var m, wr_addr, LittleEndian, `r32));
+              Def.create m
+                (Bil.Store (Bil.Var m, wr_addr, Bil.Var u, LittleEndian, `r32));
+              Def.create zf
+                (Bil.BinOp (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) ]
+        in
+        check "BK-101.guarded"
+          (not (Ws.elem (w32 50) (AI.find_word 32 out (Var.base x))));
+        check "BK-101.rewritten-kept"
+          (Ws.elem (w32 50) (cell_at m (v64 "RBP") out)));
+
+    pin "BK-102"
+      "a store's cell takes its data's constraint: x is stored, the guard \
+       bounds x below 7 (unsigned), and the edge cell is bounded by 6 — \
+       clang -O0's spilled switch index"
+      (fun () ->
+        let m = memv "w102_m" in
+        let x = wr_v32 "w102_x" and t = wr_v32 "w102_t" and zf = v1 "w102_zf" in
+        let out =
+          wr_refine "w102" m zf
+            [ Def.create m
+                (Bil.Store (Bil.Var m, wr_addr, Bil.Var x, LittleEndian, `r32));
+              Def.create t (Bil.Var x);
+              Def.create zf
+                (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
+        in
+        check "BK-102" (bounded_above (cell_at m (v64 "RBP") out) (w32 6)));
+
+    pin "BK-103"
+      "a store's cell overwritten later takes nothing from the first \
+       store's data: the edge cell holds the later u"
+      (fun () ->
+        let m = memv "w103_m" in
+        let x = wr_v32 "w103_x" and u = wr_v32 "w103_u" in
+        let t = wr_v32 "w103_t" and zf = v1 "w103_zf" in
+        let out =
+          wr_refine "w103" m zf
+            [ Def.create m
+                (Bil.Store (Bil.Var m, wr_addr, Bil.Var x, LittleEndian, `r32));
+              Def.create m
+                (Bil.Store (Bil.Var m, wr_addr, Bil.Var u, LittleEndian, `r32));
+              Def.create t (Bil.Var x);
+              Def.create zf
+                (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
+        in
+        check "BK-103" (Ws.elem (w32 50) (cell_at m (v64 "RBP") out)));
   ]
 
 let () = run "backward" tests

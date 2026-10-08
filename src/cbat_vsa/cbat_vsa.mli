@@ -220,7 +220,7 @@ module Test_seam : sig
     AI.t -> blk term -> AI.t
 
   (* The walk's env-write sites, named for the counting refine. *)
-  type write_site = Cbat_backward.write_site = Confine_write | Carry_write
+  type write_site = Cbat_backward.write_site = Output_write | Input_write
 
   (* The walked env with the per-site count of ACTUAL env writes — a
      delivery equal to the state's value writes nothing, so it never
