@@ -1,204 +1,80 @@
-(* The jump compiler: rewrites jcc flag idioms into the simplest equivalent
-   value comparisons.  Identity on the residual — a cond with no single
-   reaching flag def, an unknown shape, or an inconsistent fact set keeps
-   the current path unchanged. *)
+(* The jump compiler: each jump's cond becomes the simplest equivalent
+   expression over values.  A backward pass substitutes the defs it
+   passes into the cond — a def replaces its var, so every var left
+   reads the value at the walked position — and simplifies after each
+   step; the walk continues into a unique goto predecessor.  The
+   smallest flag-free form wins: inlined at the jump when its vars still
+   hold those values there, else bound to a fresh comparison def at its
+   own position.  No flag-free form keeps the cond. *)
 
 open Bap.Std
 open Bap_core_theory
 open Core
 
-(* The flag defs as the lifter emits them, and the facts they yield:
-   ZF := 0 = d               ZF ⇔ d = 0      (also ZF := 1 / := 0)
-   CF := a < b               CF ⇔ a <u b     (sub/cmp borrow)
-   SF := high:1[e]           SF ⇔ sign bit of e
-   OF := high:1[(x^y)&(x^d)] OF ⇔ signed overflow of x−y, d = x−y
-   OF := 0                   the test/and group: OF ≡ 0, so the
-                             signed families run on SF alone
-   Anything else (add/imul/shift carries, PF/AF forms) is NOT consumed. *)
-
-(* BIR conds are pure AND/OR/NOT over 1-bit vars. *)
-type bexp = V of var | N of bexp | A of bexp * bexp | O of bexp * bexp
-
-(* Flags identified by the target's register roles, never a name. *)
-type flag = ZF | CF | SF | OF
-
-type flag_vars = {
-  zf : var option;
-  cf : var option;
-  sf : var option;
-  of_ : var option;
-}
-
-let flag_vars (target : Theory.Target.t) : flag_vars =
+(* The status flags, identified by the target's register roles. *)
+let flag_vars (target : Theory.Target.t) : var list =
   let role r = Option.map ~f:Var.reify (Theory.Target.reg target r) in
   let open Theory.Role.Register in
-  {
-    zf = role zero_flag;
-    cf = role carry_flag;
-    sf = role sign_flag;
-    of_ = role overflow_flag;
-  }
+  List.filter_opt
+    [ role zero_flag; role carry_flag; role sign_flag; role overflow_flag;
+      role parity_flag ]
 
-let is_flag (fv : flag_vars) (f : flag) (v : var) : bool =
-  let same = Option.exists ~f:(Var.same v) in
-  match f with
-  | ZF -> same fv.zf
-  | CF -> same fv.cf
-  | SF -> same fv.sf
-  | OF -> same fv.of_
+let is_flag (flags : var list) (v : var) : bool = List.exists flags ~f:(Var.same v)
 
-let parse_bexp (e : exp) : bexp option =
-  let pair c x y =
-    Option.bind x ~f:(fun x -> Option.map y ~f:(c x))
-  in
-  Hike_exp_fold.fold
-    (fun e child ->
-      match e with
-      | Bil.Var v -> (match Var.typ v with Type.Imm 1 -> Some (V v) | _ -> None)
-      | Bil.UnOp (Bil.NOT, a) -> Option.map ~f:(fun b -> N b) (child a)
-      | Bil.BinOp (Bil.AND, a, b) -> pair (fun x y -> A (x, y)) (child a) (child b)
-      | Bil.BinOp (Bil.OR, a, b) -> pair (fun x y -> O (x, y)) (child a) (child b)
-      | _ -> None)
-    e
-
-(* The signed xor core: (SF|OF) & ~(SF&OF) — OF xor SF. *)
-let is_xor_core (fv : flag_vars) (b : bexp) : bool =
-  match b with
-  | A (O (V sf1, V of1), N (A (V sf2, V of2))) ->
-      is_flag fv SF sf1 && is_flag fv OF of1
-      && is_flag fv SF sf2 && is_flag fv OF of2
-  | _ -> false
-
-type zf_fact = Zero of exp | Zconst of bool
-
-type cf_fact = Ult of exp * exp | Cconst of bool
-
-(* The OF fact: the canonical (op1^op2)&(op1^diff) triple, or the
-   folded x&(x^d) form (BAP folds x^0 to x; the diff is a temp). *)
-type ovf_fact =
-  | Ovf_core of exp * exp * exp
-  | Ovf_folded of exp * exp
-
-type facts = {
-  zf : zf_fact option; (* ZF ⇔ (d = 0) / constant *)
-  cf : cf_fact option; (* CF ⇔ (a <u b) / constant *)
-  sf : exp option; (* SF ⇔ sign bit of e *)
-  ovf : ovf_fact option; (* OF ⇔ signed overflow of x−y, d = x−y *)
-  and_form : bool; (* OF := 0 — the test/and group (OF identically 0) *)
-}
-
-let empty_facts = { zf = None; cf = None; sf = None; ovf = None; and_form = false }
-
-(* Width of an exp: the width of its free vars (BIR is width-uniform); a
-   bare immediate is its own width. *)
-let width_of_exp (e : exp) : int option =
+let rec size (e : exp) : int =
   match e with
-  | Bil.Int w -> Some (Word.bitwidth w)
-  | _ -> (
-      let vs = Exp.free_vars e in
-      if Core.Set.is_empty vs then None
-      else
-        let v = Option.value_exn (Core.Set.min_elt vs) in
-        match Var.typ v with Type.Imm n -> Some n | _ -> None)
+  | Bil.Var _ | Bil.Int _ | Bil.Unknown _ -> 1
+  | Bil.Load (m, a, _, _) -> 1 + size m + size a
+  | Bil.Store (m, a, v, _, _) -> 1 + size m + size a + size v
+  | Bil.BinOp (_, a, b) | Bil.Concat (a, b) | Bil.Let (_, a, b) -> 1 + size a + size b
+  | Bil.UnOp (_, a) | Bil.Cast (_, _, a) | Bil.Extract (_, _, a) -> 1 + size a
+  | Bil.Ite (c, a, b) -> 1 + size c + size a + size b
 
-let zero_exp (e : exp) : exp option =
+let rec has_unknown (e : exp) : bool =
+  match e with
+  | Bil.Unknown _ -> true
+  | Bil.Var _ | Bil.Int _ -> false
+  | Bil.Load (m, a, _, _) -> has_unknown m || has_unknown a
+  | Bil.Store (m, a, v, _, _) -> has_unknown m || has_unknown a || has_unknown v
+  | Bil.BinOp (_, a, b) | Bil.Concat (a, b) | Bil.Let (_, a, b) ->
+    has_unknown a || has_unknown b
+  | Bil.UnOp (_, a) | Bil.Cast (_, _, a) | Bil.Extract (_, _, a) -> has_unknown a
+  | Bil.Ite (c, a, b) -> has_unknown c || has_unknown a || has_unknown b
+
+(* [e] with [v] read as [r]; a Let binding [v] shadows it in its body. *)
+let rec subst (v : var) (r : exp) (e : exp) : exp =
+  let s = subst v r in
+  match e with
+  | Bil.Var x when Var.same x v -> r
+  | Bil.Var _ | Bil.Int _ | Bil.Unknown _ -> e
+  | Bil.Load (m, a, en, sz) -> Bil.Load (s m, s a, en, sz)
+  | Bil.Store (m, a, x, en, sz) -> Bil.Store (s m, s a, s x, en, sz)
+  | Bil.BinOp (op, a, b) -> Bil.BinOp (op, s a, s b)
+  | Bil.UnOp (op, a) -> Bil.UnOp (op, s a)
+  | Bil.Cast (c, n, a) -> Bil.Cast (c, n, s a)
+  | Bil.Extract (hi, lo, a) -> Bil.Extract (hi, lo, s a)
+  | Bil.Concat (a, b) -> Bil.Concat (s a, s b)
+  | Bil.Ite (c, a, b) -> Bil.Ite (s c, s a, s b)
+  | Bil.Let (x, a, b) -> Bil.Let (x, s a, if Var.same x v then b else s b)
+
+(* The width of an immediate exp, by BAP's type inference. *)
+let width_of_exp (e : exp) : int option =
+  match Type.infer e with Ok (Type.Imm n) -> Some n | _ -> None
+
+let zero_of (e : exp) : exp option =
   Option.map ~f:(fun n -> Bil.Int (Word.zero n)) (width_of_exp e)
 
-let is_zero_int = function Bil.Int w -> Word.is_zero w | _ -> false
+let is_zero = function Bil.Int w -> Word.is_zero w | _ -> false
 
-let is_one_int = function Bil.Int w -> Word.is_one w | _ -> false
-
-(* A XOR of one value with itself is identically zero; the OF formula's
-   factors can fold to this (cmp x, 0 leaves x & (x ^ x)). *)
-let is_self_cancelling_xor = function
-  | Bil.BinOp (Bil.XOR, a, b) -> Exp.equal a b
+let is_ones = function
+  | Bil.Int w -> Word.equal w (Word.ones (Word.bitwidth w))
   | _ -> false
 
-(* Fact extraction from one flag def rhs (the table above); [None] when the
-   shape is unknown. *)
-let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
-  match (fl, rhs) with
-  | ZF, Bil.BinOp (Bil.EQ, a, b) when is_zero_int a -> (
-      match f.zf with None -> Some { f with zf = Some (Zero b) } | _ -> None)
-  | ZF, Bil.BinOp (Bil.EQ, a, b) when is_zero_int b -> (
-      match f.zf with None -> Some { f with zf = Some (Zero a) } | _ -> None)
-  | ZF, e when is_one_int e -> (
-      match f.zf with None -> Some { f with zf = Some (Zconst true) } | _ -> None)
-  | ZF, e when is_zero_int e -> (
-      match f.zf with None -> Some { f with zf = Some (Zconst false) } | _ -> None)
-  | CF, Bil.BinOp (Bil.LT, a, b) -> (
-      match f.cf with None -> Some { f with cf = Some (Ult (a, b)) } | _ -> None)
-  | CF, e when is_one_int e -> (
-      match f.cf with None -> Some { f with cf = Some (Cconst true) } | _ -> None)
-  | CF, e when is_zero_int e -> (
-      match f.cf with None -> Some { f with cf = Some (Cconst false) } | _ -> None)
-  | SF, Bil.Cast (Bil.HIGH, 1, e) -> (
-      match f.sf with None -> Some { f with sf = Some e } | _ -> None)
-  (* The OF formula's factors can self-cancel — cmp x, 0 folds x - 0 to
-     x and leaves x & (x ^ x); either factor being a self-cancelling xor
-     makes the whole expression zero, so OF ≡ 0 and the signed family
-     runs on SF alone. *)
-  | OF, Bil.Cast (Bil.HIGH, 1, Bil.BinOp (Bil.AND, a, b))
-    when is_self_cancelling_xor a || is_self_cancelling_xor b ->
-    if f.and_form then None else Some { f with and_form = true }
-  | ( OF
-    , Bil.Cast
-        ( Bil.HIGH
-        , 1
-        , Bil.BinOp (Bil.AND, Bil.BinOp (Bil.XOR, x, y), Bil.BinOp (Bil.XOR, x2, d)) ) )
-    when Exp.equal x x2 -> (
-      match f.ovf with
-      | None -> Some { f with ovf = Some (Ovf_core (x, y, d)) }
-      | _ -> None)
-  (* The x^0 fold: BAP leaves x & (x ^ d) where d is the diff temp
-     (cmp x, 0 folds x - 0 to x).  The ctx resolves d against x. *)
-  | ( OF
-    , Bil.Cast
-        ( Bil.HIGH
-        , 1
-        , Bil.BinOp (Bil.AND, a, Bil.BinOp (Bil.XOR, b, d)) ) )
-    when Exp.equal a b -> (
-      match f.ovf with
-      | None -> Some { f with ovf = Some (Ovf_folded (a, d)) }
-      | _ -> None)
-  (* test/and: OF is identically 0 — the group's signed identity is SF alone. *)
-  | OF, e when is_zero_int e ->
-    if f.and_form then None else Some { f with and_form = true }
-  | _ -> None
+let bool_exp (b : bool) : exp = Bil.Int (if b then Word.b1 else Word.b0)
 
-(* Block context: single-def value rhs, for CONSISTENCY CHECKS only — the
-   emitted comparison reuses the var, never re-substitutes. *)
-
-type ctx = { rhs : exp Var.Map.t; xrhs : exp Var.Map.t }
-
-(* [rhs] keys the block's own single defs; [xrhs] keys (by base var) the
-   unique reaching defs from predecessor blocks. *)
-let resolve_exp (c : ctx) (e : exp) : exp =
-  match e with
-  | Bil.Var v -> (
-      match Core.Map.find c.rhs v with
-      | Some r -> r
-      | None -> Option.value (Core.Map.find c.xrhs (Var.base v)) ~default:e)
-  | _ -> e
-
-let same_exp (c : ctx) (a : exp) (b : exp) : bool =
-  Exp.equal (resolve_exp c a) (resolve_exp c b)
-
-(* The overflow pattern is only the sub-overflow predicate when its diff exp
-   IS (x − y), resolved. *)
-let is_minus_xy (c : ctx) (e : exp) (x : exp) (y : exp) : bool =
-  match resolve_exp c e with
-  | Bil.BinOp (Bil.MINUS, a, b) -> Exp.equal a x && Exp.equal b y
-  | _ -> false
-
-let const_cond (b : bool) : exp = Bil.Int (if b then Word.one 1 else Word.zero 1)
-
-(* The cond algebra: each parsed leaf becomes an atom over the flag facts,
-   NOT is the complement, and AND/OR combine two relations when both range
-   over the same two values. *)
-
-(* The relation lattice: a relation admits a subset of the orderings over its
-   operand pair; the complement and the connectives are componentwise. *)
+(* The relation lattice: a relation admits a subset of the orderings over
+   its operand pair; the complement and the connectives are
+   componentwise. *)
 type rel = LT | LE | EQ | NEQ | GT | GE
 
 let rel_bits = function
@@ -209,478 +85,328 @@ let rel_bits = function
 let rel_complement = function
   | LT -> GE | GE -> LT | LE -> GT | GT -> LE | EQ -> NEQ | NEQ -> EQ
 
-let rel_of_bits = function
-  | true, false, false -> Some LT | true, true, false -> Some LE
-  | false, true, false -> Some EQ | true, false, true -> Some NEQ
-  | false, false, true -> Some GT | false, true, true -> Some GE
-  | true, true, true | false, false, false -> None
+let rel_flip = function
+  | LT -> GT | GT -> LT | LE -> GE | GE -> LE | EQ -> EQ | NEQ -> NEQ
 
-(* An atom: a constant truth, or one relation over two values (the bool picks
-   signed vs unsigned).  The pair is the two values the relation ranges over —
-   the connectives' agreement key; an emitted equality's pair looks through
-   the resolved subtraction (d = x − y makes the pair (x, y)). *)
-type atom = Const of bool | Rel of rel * bool * exp * exp
+(* A relation over (a, b); [signed] is [None] for the equalities. *)
+type atom = { r : rel; signed : bool option; a : exp; b : exp }
 
-type item = { atom : atom; pair : (exp * exp) option; flags : flag list }
-
-let complement_item (i : item) : item =
-  { i with
-    atom =
-      (match i.atom with
-       | Const b -> Const (not b)
-       | Rel (r, s, a, b) -> Rel (rel_complement r, s, a, b)) }
-
-(* GT/GE render operand-swapped (never a NOT); signedness picks the
-   operator. *)
-let render_atom = function
-  | Const b -> const_cond b
-  | Rel (r, s, a, b) ->
-      let op =
-        match r with
-        | LT | GT -> if s then Bil.SLT else Bil.LT
-        | LE | GE -> if s then Bil.SLE else Bil.LE
-        | EQ -> Bil.EQ
-        | NEQ -> Bil.NEQ in
-      let x, y = match r with GT | GE -> (b, a) | _ -> (a, b) in
-      Bil.BinOp (op, x, y)
-
-(* The atoms over the facts: a ZF subtraction compares its operands (d is
-   reused, never re-substituted), any other d is compared to zero at d's own
-   width; SF under OF ≡ 0 is the sign alone, e <s 0. *)
-let zf_item (c : ctx) (d : exp) : item option =
-  let pair =
-    match resolve_exp c d with
-    | Bil.BinOp (Bil.MINUS, u, v) -> Some (u, v)
-    | _ -> Option.map ~f:(fun z -> (d, z)) (zero_exp d) in
-  let atom =
-    match d with
-    | Bil.BinOp (Bil.MINUS, x, y) ->
-        if Exp.equal x y then Some (Const true)
-        else if is_zero_int x then Some (Rel (EQ, false, y, x))
-        else Some (Rel (EQ, false, x, y))
-    | _ -> Option.map ~f:(fun z -> Rel (EQ, false, d, z)) (zero_exp d) in
-  Option.bind atom ~f:(fun atom ->
-      Option.map pair ~f:(fun pair -> { atom; pair = Some pair; flags = [ ZF ] }))
-
-let sign_item (e : exp) (flags : flag list) : item option =
-  Option.map (zero_exp e) ~f:(fun z ->
-      { atom = Rel (LT, true, e, z); pair = Some (e, z); flags })
-
-let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option =
-  if is_flag fv ZF v then
-    match facts.zf with
-    | Some (Zero d) -> zf_item c d
-    | Some (Zconst b) -> Some { atom = Const b; pair = None; flags = [ ZF ] }
-    | None -> None
-  else if is_flag fv CF v then
-    match facts.cf with
-    | Some (Ult (a, b)) ->
-        Some { atom = Rel (LT, false, a, b); pair = Some (a, b); flags = [ CF ] }
-    | Some (Cconst b) -> Some { atom = Const b; pair = None; flags = [ CF ] }
-    | None -> None
-  else if is_flag fv SF v && facts.and_form then
-    Option.bind facts.sf ~f:(fun e -> sign_item e [ SF ])
-  else None
-
-(* The xor-core atom: x <s y when the overflow's diff resolves to (x − y) and
-   the sign exp to the same diff; with OF ≡ 0 the core is the sign alone. *)
-let signed_item (c : ctx) (facts : facts) : item option =
-  match (facts.sf, facts.ovf) with
-  | Some e, Some (Ovf_core (x, y, d))
-    when is_minus_xy c d x y && same_exp c e d ->
-      Some { atom = Rel (LT, true, x, y); pair = Some (x, y); flags = [ SF; OF ] }
-  | Some e, Some (Ovf_core (x, _, d)) when same_exp c x d ->
-      (* op1 = diff: the x^d factor is zero, so OF ≡ 0. *)
-      sign_item e [ SF; OF ]
-  | Some e, Some (Ovf_core (x, y, _)) when same_exp c x y ->
-      (* op1 = op2: the x^y factor is zero, so OF ≡ 0. *)
-      sign_item e [ SF; OF ]
-  | Some e, Some (Ovf_folded (x, d)) when same_exp c x d ->
-      (* cmp x, 0: the diff folded to x, leaving x & (x ^ x). *)
-      sign_item e [ SF; OF ]
-  | Some e, None when facts.and_form -> sign_item e [ SF; OF ]
+let atom_of (e : exp) : atom option =
+  match e with
+  | Bil.BinOp (Bil.LT, a, b) -> Some { r = LT; signed = Some false; a; b }
+  | Bil.BinOp (Bil.LE, a, b) -> Some { r = LE; signed = Some false; a; b }
+  | Bil.BinOp (Bil.SLT, a, b) -> Some { r = LT; signed = Some true; a; b }
+  | Bil.BinOp (Bil.SLE, a, b) -> Some { r = LE; signed = Some true; a; b }
+  | Bil.BinOp (Bil.EQ, a, b) -> Some { r = EQ; signed = None; a; b }
+  | Bil.BinOp (Bil.NEQ, a, b) -> Some { r = NEQ; signed = None; a; b }
   | _ -> None
 
-(* AND/OR over two compiled atoms: constants fold; relations combine on the
-   lattice iff both range over the same two values; an equality side carries
-   no signed flavor — the ordering side's operands and signedness emit. *)
-let combine (c : ctx) ~or_ (u : item) (v : item) : item option =
-  let flags = List.append u.flags v.flags in
-  let eq r = match r with EQ | NEQ -> true | _ -> false in
-  let joined =
-    match (u.atom, v.atom) with
-    | Const p, Const q -> Some (Const (if or_ then p || q else p && q), None)
-    | Const p, r | r, Const p ->
-        if Bool.equal p or_ then Some (Const or_, None)
-        else (
-          let side = match u.atom with Const _ -> v | _ -> u in
-          Some (r, side.pair))
-    | Rel (r1, s1, x1, y1), Rel (r2, s2, x2, y2)
-      when Bool.equal s1 s2 || eq r1 || eq r2 -> (
-        match (u.pair, v.pair) with
-        | Some (p1, q1), Some (p2, q2)
-          when same_exp c p1 p2 && same_exp c q1 q2 -> (
-            let f = if or_ then ( || ) else ( && ) in
-            let (b1, e1, g1) = rel_bits r1 in
-            let (b2, e2, g2) = rel_bits r2 in
-            match rel_of_bits (f b1 b2, f e1 e2, f g1 g2) with
-            | Some r ->
-                let s, x, y, pair =
-                  if eq r1 && not (eq r2) then (s2, x2, y2, v.pair)
-                  else (s1, x1, y1, u.pair) in
-                Some (Rel (r, s, x, y), pair)
-            | None -> None)
-        | _ -> None)
-    | _ -> None in
-  Option.map ~f:(fun (atom, pair) -> { atom; pair; flags }) joined
+(* GT/GE render operand-swapped; signedness picks the operator. *)
+let render (t : atom) : exp =
+  let s = Option.value t.signed ~default:false in
+  let op =
+    match t.r with
+    | LT | GT -> if s then Bil.SLT else Bil.LT
+    | LE | GE -> if s then Bil.SLE else Bil.LE
+    | EQ -> Bil.EQ
+    | NEQ -> Bil.NEQ in
+  let x, y = match t.r with GT | GE -> (t.b, t.a) | _ -> (t.a, t.b) in
+  Bil.BinOp (op, x, y)
 
-let rec eval_bexp (fv : flag_vars) (c : ctx) (facts : facts) (b : bexp) :
-    item option =
-  match b with
-  | b when is_xor_core fv b -> signed_item c facts
-  | V v -> flag_item fv c facts v
-  | N x -> Option.map ~f:complement_item (eval_bexp fv c facts x)
-  | A (x, y) -> join fv c facts ~or_:false x y
-  | O (x, y) -> join fv c facts ~or_:true x y
+(* Two relations over one operand pair (either orientation, compatible
+   signedness) meet or join componentwise. *)
+let combine ~(or_ : bool) (u : atom) (v : atom) : exp option =
+  let signed =
+    match u.signed, v.signed with
+    | Some x, Some y -> if Bool.equal x y then Some (Some x) else None
+    | Some x, None | None, Some x -> Some (Some x)
+    | None, None -> Some None in
+  let v =
+    if Exp.equal u.a v.a && Exp.equal u.b v.b then Some v
+    else if Exp.equal u.a v.b && Exp.equal u.b v.a then
+      Some { v with r = rel_flip v.r; a = v.b; b = v.a }
+    else None in
+  match signed, v with
+  | Some signed, Some v ->
+    let f = if or_ then ( || ) else ( && ) in
+    let (b1, e1, g1) = rel_bits u.r and (b2, e2, g2) = rel_bits v.r in
+    (match f b1 b2, f e1 e2, f g1 g2 with
+     | true, true, true -> Some (bool_exp true)
+     | false, false, false -> Some (bool_exp false)
+     | true, false, false -> Some (render { u with r = LT; signed })
+     | true, true, false -> Some (render { u with r = LE; signed })
+     | false, true, false -> Some (render { u with r = EQ; signed })
+     | true, false, true -> Some (render { u with r = NEQ; signed })
+     | false, false, true -> Some (render { u with r = GT; signed })
+     | false, true, true -> Some (render { u with r = GE; signed }))
+  | _ -> None
 
-and join (fv : flag_vars) (c : ctx) (facts : facts) ~or_ (x : bexp) (y : bexp) :
-    item option =
-  Option.bind (eval_bexp fv c facts x) ~f:(fun x' ->
-      Option.bind (eval_bexp fv c facts y) ~f:(combine c ~or_ x'))
+let fold_binop op a b =
+  match op, b with
+  | (Bil.DIVIDE | Bil.SDIVIDE | Bil.MOD | Bil.SMOD), b when Word.is_zero b -> None
+  | _ -> Option.try_with (fun () -> Bil.Apply.binop op a b)
 
-type binfo = {
-  idefs : (int * def term) list; (* defs in block order *)
-  last_pos : int Var.Map.t; (* last def position per var *)
-  defined : Var.Set.t; (* vars with a def or phi site here (entry kills) *)
+(* The connective chain of one operator, flattened. *)
+let rec chain (op : binop) (e : exp) : exp list =
+  match e with
+  | Bil.BinOp (op', a, b) when Poly.equal op op' -> chain op a @ chain op b
+  | e -> [ e ]
+
+(* [s] the sign of a - b and [o] its overflow, (a ^ b) & (a ^ (a - b)),
+   each as the signed test against zero: their xor is a <s b. *)
+let signed_borrow (s : exp) (o : exp) : exp option =
+  match s, o with
+  | Bil.BinOp (Bil.SLT, (Bil.BinOp (Bil.MINUS, a, b) as d), z1),
+    Bil.BinOp
+      ( Bil.SLT
+      , Bil.BinOp (Bil.AND, Bil.BinOp (Bil.XOR, a1, b1), Bil.BinOp (Bil.XOR, a2, d'))
+      , z2 )
+    when is_zero z1 && is_zero z2 && Exp.equal a a1 && Exp.equal b b1
+         && Exp.equal a a2 && Exp.equal d d' ->
+    Some (Bil.BinOp (Bil.SLT, a, b))
+  | _ -> None
+
+(* One rewrite at the node; [None] when no rule applies.  Every rule is an
+   exact equivalence. *)
+let rewrite (e : exp) : exp option =
+  match e with
+  (* constants *)
+  | Bil.BinOp (op, Bil.Int a, Bil.Int b) ->
+    Option.map (fold_binop op a b) ~f:(fun w -> Bil.Int w)
+  | Bil.UnOp (op, Bil.Int a) -> Some (Bil.Int (Bil.Apply.unop op a))
+  | Bil.Cast (c, n, Bil.Int a) -> Some (Bil.Int (Bil.Apply.cast c n a))
+  | Bil.Extract (hi, lo, Bil.Int a) -> Some (Bil.Int (Word.extract_exn ~hi ~lo a))
+  | Bil.Concat (Bil.Int a, Bil.Int b) -> Some (Bil.Int (Word.concat a b))
+  | Bil.Ite (Bil.Int c, a, b) -> Some (if Word.is_one c then a else b)
+  (* the sign bit is the signed test against zero *)
+  | Bil.Cast (Bil.HIGH, 1, a) when Option.exists (width_of_exp a) ~f:(fun n -> n > 1) ->
+    Option.map (zero_of a) ~f:(fun z -> Bil.BinOp (Bil.SLT, a, z))
+  (* integer identities *)
+  | Bil.BinOp ((Bil.XOR | Bil.MINUS), a, b) when Exp.equal a b -> zero_of a
+  | Bil.BinOp (Bil.AND, a, b) when is_zero a -> Some a
+  | Bil.BinOp (Bil.AND, a, b) when is_zero b -> Some b
+  | Bil.BinOp (Bil.AND, a, b) when is_ones a -> Some b
+  | Bil.BinOp (Bil.AND, a, b) when is_ones b -> Some a
+  | Bil.BinOp (Bil.OR, a, b) when is_ones a -> Some a
+  | Bil.BinOp (Bil.OR, a, b) when is_ones b -> Some b
+  | Bil.BinOp ((Bil.OR | Bil.XOR | Bil.PLUS), a, b) when is_zero a -> Some b
+  | Bil.BinOp ((Bil.OR | Bil.XOR | Bil.PLUS | Bil.MINUS), a, b) when is_zero b -> Some a
+  | Bil.BinOp ((Bil.AND | Bil.OR), a, b) when Exp.equal a b -> Some a
+  | Bil.UnOp (Bil.NOT, Bil.UnOp (Bil.NOT, a)) -> Some a
+  (* relations *)
+  | Bil.BinOp ((Bil.EQ | Bil.LE | Bil.SLE), a, b) when Exp.equal a b -> Some (bool_exp true)
+  | Bil.BinOp ((Bil.NEQ | Bil.LT | Bil.SLT), a, b) when Exp.equal a b -> Some (bool_exp false)
+  | Bil.BinOp (((Bil.EQ | Bil.NEQ) as op), (Bil.Int _ as k), a) when
+      (match a with Bil.Int _ -> false | _ -> true) ->
+    Some (Bil.BinOp (op, a, k))
+  | Bil.BinOp (((Bil.EQ | Bil.NEQ) as op), a, (Bil.Int k as z))
+    when Word.is_zero k
+         && not (Option.equal Int.equal (width_of_exp a) (Some (Word.bitwidth k))) ->
+    Option.bind (zero_of a) ~f:(fun z' ->
+        if Exp.equal z z' then None else Some (Bil.BinOp (op, a, z')))
+  | Bil.BinOp (((Bil.EQ | Bil.NEQ) as op), Bil.BinOp (Bil.MINUS, a, b), z) when is_zero z ->
+    Some (Bil.BinOp (op, a, b))
+  | Bil.UnOp (Bil.NOT, r) ->
+    Option.map (atom_of r) ~f:(fun t -> render { t with r = rel_complement t.r })
+  (* the xor core: (p | q) & ~(p & q) *)
+  | Bil.BinOp
+      (Bil.AND, Bil.BinOp (Bil.OR, p, q), Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.AND, p', q')))
+    when (Exp.equal p p' && Exp.equal q q') || (Exp.equal p q' && Exp.equal q p') ->
+    Some (Bil.BinOp (Bil.XOR, p, q))
+  (* the signed borrow: sign(a - b) xor overflow(a - b) is a <s b *)
+  | Bil.BinOp (Bil.XOR, p, q) when Option.is_some (signed_borrow p q) ->
+    signed_borrow p q
+  | Bil.BinOp (Bil.XOR, p, q) when Option.is_some (signed_borrow q p) ->
+    signed_borrow q p
+  (* connectives over relations *)
+  | Bil.BinOp (((Bil.OR | Bil.AND) as op), _, _) ->
+    let or_ = Poly.equal op Bil.OR in
+    let terms = chain op e in
+    let rec pair acc = function
+      | [] -> None
+      | x :: rest ->
+        let hit =
+          List.find_mapi rest ~f:(fun i y ->
+              match atom_of x, atom_of y with
+              | Some u, Some v ->
+                Option.map (combine ~or_ u v) ~f:(fun c -> (i, c))
+              | _ -> None) in
+        (match hit with
+         | Some (i, c) ->
+           let rest = List.filteri rest ~f:(fun k _ -> k <> i) in
+           Some (List.rev_append acc (c :: rest))
+         | None -> pair (x :: acc) rest) in
+    Option.map (pair [] terms) ~f:(fun ts ->
+        List.reduce_exn ts ~f:(fun a b -> Bil.BinOp (op, a, b)))
+  | _ -> None
+
+let rec simplify (e : exp) : exp =
+  let s = simplify in
+  let e =
+    match e with
+    | Bil.Var _ | Bil.Int _ | Bil.Unknown _ -> e
+    | Bil.Load (m, a, en, sz) -> Bil.Load (s m, s a, en, sz)
+    | Bil.Store (m, a, x, en, sz) -> Bil.Store (s m, s a, s x, en, sz)
+    | Bil.BinOp (op, a, b) -> Bil.BinOp (op, s a, s b)
+    | Bil.UnOp (op, a) -> Bil.UnOp (op, s a)
+    | Bil.Cast (c, n, a) -> Bil.Cast (c, n, s a)
+    | Bil.Extract (hi, lo, a) -> Bil.Extract (hi, lo, s a)
+    | Bil.Concat (a, b) -> Bil.Concat (s a, s b)
+    | Bil.Ite (c, a, b) -> Bil.Ite (s c, s a, s b)
+    | Bil.Let (x, a, b) -> Bil.Let (x, s a, s b) in
+  match rewrite e with Some e' -> simplify e' | None -> e
+
+(* A substituted cond past this size ends the walk. *)
+let size_cap = 128
+
+type edge = Goto_edge | Other_edge
+
+(* Every block's incoming edges, by source block. *)
+let preds_of (sub : sub term) : (tid * edge) list Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+      Term.enum jmp_t b
+      |> Seq.fold ~init:m ~f:(fun m j ->
+          let add t k = Core.Map.add_multi m ~key:t ~data:(Term.tid b, k) in
+          match Jmp.kind j with
+          | Goto (Direct t) -> add t Goto_edge
+          | Call c ->
+            (match Call.return c with Some (Direct t) -> add t Other_edge | _ -> m)
+          | Ret (Direct t) | Int (_, t) -> add t Other_edge
+          | Goto (Indirect _) | Ret (Indirect _) -> m))
+
+(* A cond's form at one position: insert before [at] in [blk] (or inline
+   at the jump); [hops] counts the blocks back from the jump. *)
+type candidate = {
+  cond : exp;
+  blk : tid;
+  at : tid option;
+  hops : int;
+  pos : int;
+  inline : bool;
+  consumed : Var.Set.t;
 }
 
-(* Reaching state: the unique def site per BASE var, plus the vars whose
-   entry value has no unique site (several reaching defs, or a phi).  A var
-   absent from both is a live-in parameter, whose value is stable. *)
-type rstate = { unique_site : def term Var.Map.t; multi_site : Var.Set.t }
+let order (c : candidate) = (size c.cond, (if c.inline then 0 else 1), c.hops, - c.pos)
 
-let rstate_equal (a : rstate) (b : rstate) : bool =
-  Var.Map.equal (fun d d' -> Tid.equal (Term.tid d) (Term.tid d')) a.unique_site b.unique_site
-  && Var.Set.equal a.multi_site b.multi_site
+let acceptable (flags : var list) (e : exp) : bool =
+  (not (has_unknown e))
+  && not (Core.Set.exists (Exp.free_vars e) ~f:(is_flag flags))
 
-let rjoin (a : rstate) (b : rstate) : rstate =
-  let key_set =
-    Core.Map.merge a.unique_site b.unique_site
-      ~f:(fun ~key:v -> function
-        | `Both _ | `Left _ | `Right _ -> Some v)
-    |> Core.Map.keys
-    |> Core.Set.of_list (module Var)
-  in
-  let keys = Core.Set.union key_set (Core.Set.union a.multi_site b.multi_site) in
-  Core.Set.fold keys ~init:{ unique_site = Var.Map.empty; multi_site = Var.Set.empty }
-    ~f:(fun st v ->
-        if Core.Set.mem a.multi_site v || Core.Set.mem b.multi_site v then
-          { st with multi_site = Core.Set.add st.multi_site v }
-        else
-          match (Core.Map.find a.unique_site v, Core.Map.find b.unique_site v) with
-          | Some d, Some d' ->
-              if Tid.equal (Term.tid d) (Term.tid d') then
-                { st with unique_site = Core.Map.set st.unique_site ~key:v ~data:d }
-              else { st with multi_site = Core.Set.add st.multi_site v }
-          | Some d, None | None, Some d ->
-              { st with unique_site = Core.Map.set st.unique_site ~key:v ~data:d }
-          | None, None -> st)
-
-type xenv = {
-  in_state : rstate Tid.Map.t; (* reaching defs at each block entry *)
-  bins : binfo Tid.Map.t;
-  site : (Tid.t * int) Tid.Map.t; (* def tid -> (block tid, position) *)
-}
-
-(* The reaching-defs fixpoint: the unique site per var when every path
-   agrees, ambiguity otherwise. *)
-let reaching_defs (sub : sub term) : xenv =
-  let blocks = Term.enum blk_t sub |> Seq.to_list in
-  let all_tids = Core.Set.of_list (module Tid) (List.map blocks ~f:(fun b -> Term.tid b)) in
-  let bins =
-    List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
-        let idefs =
-          Term.enum def_t b |> Seq.to_list
-          |> List.mapi ~f:(fun i d -> (i, d)) in
-        let last_pos =
-          List.fold_left idefs ~init:Var.Map.empty
-            ~f:(fun acc (i, d) -> Core.Map.set acc ~key:(Def.lhs d) ~data:i) in
-        let phis =
-          Term.enum phi_t b
-          |> Seq.fold ~init:Var.Set.empty ~f:(fun acc p ->
-                 Core.Set.add acc (Var.base (Phi.lhs p))) in
-        let defined =
-          Core.Set.union
-            (List.fold_left idefs ~init:Var.Set.empty
-               ~f:(fun acc (_, d) -> Core.Set.add acc (Var.base (Def.lhs d))))
-            phis in
-        Core.Map.set m ~key:(Term.tid b) ~data:{ idefs; last_pos; defined }) in
-  let empty = { unique_site = Var.Map.empty; multi_site = Var.Set.empty } in
-  let graph =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:(Sub.to_graph sub) ~f:(fun graph blk ->
-           Term.enum jmp_t blk
-           |> Seq.fold ~init:graph ~f:(fun graph j ->
-                  match Jmp.kind j with
-                  | Ret (Direct dst) when Core.Set.mem all_tids dst ->
-                      Graphs.Tid.Edge.insert
-                        (Graphs.Tid.Edge.create (Term.tid blk) dst
-                           (Term.tid j))
-                        graph
-                  | _ -> graph))
-  in
-  let def state d =
-    let var = Var.base (Def.lhs d) in
-    { unique_site = Core.Map.set state.unique_site ~key:var ~data:d;
-      multi_site = Core.Set.remove state.multi_site var }
-  in
-  let phi state p =
-    let var = Var.base (Phi.lhs p) in
-    { unique_site = Core.Map.remove state.unique_site var;
-      multi_site = Core.Set.add state.multi_site var }
-  in
-  let jmp state _ = state in
-  let flow =
-    Hike_bir_flow.run ~graph ~sub ~rev:false
-      ~initial:(Tid.Map.singleton Graphs.Tid.start empty) ~default:empty
-      ~equal:rstate_equal ~merge:rjoin ~def ~phi ~jmp
-  in
-  let site =
-    List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
-        match Core.Map.find bins (Term.tid b) with
-        | None -> m
-        | Some bi ->
-            List.fold_left bi.idefs ~init:m ~f:(fun m (i, d) ->
-                Core.Map.set m ~key:(Term.tid d) ~data:(Term.tid b, i))) in
-  { in_state = flow.before;
-    bins;
-    site }
-
-(* The def of [v] the flag producer at [pos] in block [p] read: the last def
-   of [v] in [p] before [pos], else [v]'s unique reaching def at [p]'s
-   entry. *)
-let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
-  Option.bind (Core.Map.find xenv.bins p) ~f:(fun bi ->
-      let vb = Var.base v in
-      let within =
-        List.fold_left bi.idefs ~init:None ~f:(fun acc (i, d) ->
-            if i < pos && Var.equal (Var.base (Def.lhs d)) vb then Some d else acc)
-      in
-      match within with
-      | Some d -> Some d
-      | None ->
-          Option.bind (Core.Map.find xenv.in_state p) ~f:(fun st ->
-              Core.Map.find st.unique_site vb))
-
-(* The inline guard: every var the emitted comparison reads must hold, at the
-   jump, the value its flag producer read — a var defined in the branching
-   block only when every producer is local, a cross-block var only through
-   one unique reaching def. *)
-let cross_guard (xenv : xenv) (b : blk term) (bi : binfo) (in_st : rstate)
-    (producers : (Tid.t * int) list) (e : exp) : bool =
-  let b_tid = Term.tid b in
-  let has_there =
-    List.exists producers ~f:(fun (p, _) -> not (Tid.equal p b_tid)) in
-  let produced_at =
-    List.fold_left producers ~init:Int.max_value
-      ~f:(fun acc (_, p) -> Int.min acc p) in
-  Core.Set.for_all (Exp.free_vars e) ~f:(fun v ->
-      let vb = Var.base v in
-      if Core.Set.mem bi.defined vb then
-        (not has_there)
-        && (match Core.Map.find bi.last_pos v with
-            | None -> true
-            | Some p -> p <= produced_at)
-      else if not has_there then true
+(* The backward walk over [j]'s block and its unique goto predecessors;
+   the best candidate, if any improves on the cond. *)
+let compile_jmp ~(flags : var list) ~(blocks : blk term Tid.Map.t)
+    ~(preds : (tid * edge) list Tid.Map.t) ~(entry : tid option)
+    (b0 : blk term) (j : jmp term) : candidate option =
+  let orig = Jmp.cond j in
+  if Core.Set.is_empty (Exp.free_vars orig) then None
+  else
+    let start =
+      if acceptable flags orig then
+        [ { cond = orig; blk = Term.tid b0; at = None; hops = 0; pos = Int.max_value;
+            inline = true; consumed = Var.Set.empty } ]
+      else [] in
+    let unique_goto_pred (b : tid) : tid option =
+      if Option.exists entry ~f:(Tid.equal b) then None
       else
-        match Core.Map.find in_st.unique_site vb with
-        | Some d ->
-            let dk = Term.tid d in
-            List.for_all producers ~f:(fun (p, pos) ->
-                Tid.equal p b_tid
-                ||
-                match read_def xenv p pos v with
-                | Some d' -> Tid.equal (Term.tid d') dk
-                | None -> false)
-        | None -> not (Core.Set.mem in_st.multi_site vb))
-
-let all_flags = [ ZF; CF; SF; OF ]
-
-let reads_mem (e : exp) : bool = Hike_stack_model.reads_mem e
-
-type block_plan = {
-  changed : bool;
-  (* consumed flag vars (their facts served the rewritten cond). *)
-  consumed_vars : Var.Set.t;
-}
-
-(* One block: each flag resolves to its single reaching def — the block's
-   last def or the unique reaching def at the block entry; an ambiguous
-   candidate has no fact.  Unchanged jmps keep the current path. *)
-let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
-    block_plan * (jmp term * exp option * item option) list =
-  let bt = Term.tid blk in
-  let bi =
-    Option.value (Core.Map.find xenv.bins bt)
-      ~default:{ idefs = []; last_pos = Var.Map.empty; defined = Var.Set.empty } in
-  let in_st =
-    Option.value (Core.Map.find xenv.in_state bt)
-      ~default:{ unique_site = Var.Map.empty; multi_site = Var.Set.empty } in
-  (* The block's own last def of each flag var. *)
-  let flag_map =
-    List.fold_left bi.idefs ~init:Var.Map.empty
-      ~f:(fun acc (i, d) ->
-        let lhs = Def.lhs d in
-        if List.exists all_flags ~f:(fun fl -> is_flag fv fl lhs) then
-          Core.Map.set acc ~key:lhs ~data:(i, Def.rhs d)
-        else acc) in
-  (* Block ctx: single-def value rhs — own defs, plus the unique reaching
-     defs of vars with no site here — + last def position per var. *)
-  let ctx =
-    let counts =
-      List.fold_left bi.idefs ~init:Var.Map.empty
-        ~f:(fun acc (_, d) ->
-          Core.Map.update acc (Def.lhs d) ~f:(function
-            | None -> 1
-            | Some n -> n + 1)) in
-    let rhs =
-      List.fold_left bi.idefs ~init:Var.Map.empty
-        ~f:(fun acc (i, d) ->
-          let v = Def.lhs d in
-          if
-            (match Core.Map.find counts v with Some n -> Int.equal n 1 | None -> false)
-          then Core.Map.set acc ~key:v ~data:(Def.rhs d)
-          else acc) in
-    let xrhs =
-      Core.Map.to_alist in_st.unique_site
-      |> List.fold_left ~init:Var.Map.empty
-           ~f:(fun acc (key, data) ->
-             if Core.Set.mem bi.defined key then acc
-             else Core.Map.set acc ~key ~data:(Def.rhs data)) in
-    { rhs; xrhs } in
-  (* One reaching def per flag var: the block's last def (the fold
-     keeps one def per var), else the reaching state's. *)
-  (* Each flag's reaching def, computed once per block and reused by
-     the facts fold and every jmp's compilation. *)
-  let flag_def (fl : flag) : (var * (Tid.t * int) * exp) option =
-    let within =
-      Core.Map.to_alist flag_map
-      |> List.filter_map ~f:(fun (v, (i, rhs)) ->
-             if is_flag fv fl v then Some (v, (bt, i), rhs) else None) in
-    match within with
-    | cand :: _ -> Some cand
-    | [] -> (
-        let reaching =
-          Core.Map.to_alist in_st.unique_site
-          |> List.filter_map ~f:(fun (v, d) ->
-                 if is_flag fv fl v then
-                   match Core.Map.find xenv.site (Term.tid d) with
-                   | Some site -> Some (v, site, Def.rhs d)
-                   | None -> None
-                 else None) in
-        match reaching with [ cand ] -> Some cand | _ -> None)
-  in
-  let flag_defs =
-    List.map all_flags ~f:(fun fl -> (fl, flag_def fl)) in
-  let flag_def (fl : flag) =
-    Option.join (Base.List.Assoc.find flag_defs fl ~equal:Stdlib.( = )) in
-  let facts =
-    List.fold_left all_flags ~init:empty_facts ~f:(fun acc fl ->
-        match flag_def fl with
-        | Some (_, _, rhs) -> (
-            match extract_facts fl rhs acc with Some f -> f | None -> acc)
-        | None -> acc) in
-  let jmps = Term.enum jmp_t blk |> Seq.to_list in
-  let compiled =
-    List.map jmps ~f:(fun j ->
-        let result =
-          Option.bind (parse_bexp (Jmp.cond j)) ~f:(eval_bexp fv ctx facts) in
-        let new_cond =
-          Option.bind result ~f:(fun i ->
-              let producers =
-                List.filter_map i.flags ~f:(fun fl ->
-                    Option.map (flag_def fl) ~f:(fun (_, site, _) -> site)) in
-              let guard = cross_guard xenv blk bi in_st producers in
-              let cond = render_atom i.atom in
-              if guard cond then Some cond else None) in
-        (j, new_cond, result)) in
-  let changed = List.exists compiled ~f:(fun (_, c, _) -> Option.is_some c) in
-  let consumed_vars =
-    if not changed then Var.Set.empty
-    else
-      (* for each rewritten jmp, the flag vars its atoms read. *)
-      List.filter_map compiled ~f:(fun (_, c, r) ->
-          match (c, r) with
-          | Some _, Some i ->
-              Some
-                (List.filter_map i.flags ~f:(fun fl ->
-                     Option.map (flag_def fl) ~f:(fun (v, _, _) -> v)))
-          | _ -> None)
-      |> List.concat |> Var.Set.of_list
-  in
-  ({ changed; consumed_vars }, compiled)
+        match Core.Map.find_multi preds b with
+        | (p, Goto_edge) :: rest
+          when List.for_all rest ~f:(fun (q, k) ->
+              Tid.equal p q && (match k with Goto_edge -> true | Other_edge -> false)) ->
+          Some p
+        | _ -> None in
+    (* [later]: the vars defined between this block's end and the jump. *)
+    let rec walk e consumed (blk : blk term) hops later visited cands =
+      let defs = Term.enum def_t blk |> Seq.to_list in
+      let n = List.length defs in
+      let e, consumed, cands, defined, stop =
+        List.foldi (List.rev defs) ~init:(e, consumed, cands, later, false)
+          ~f:(fun k (e, consumed, cands, defined, stop) d ->
+              let lhs = Def.lhs d in
+              let defined = Core.Set.add defined (Var.base lhs) in
+              if stop || not (Core.Set.exists (Exp.free_vars e) ~f:(Var.same lhs))
+              then (e, consumed, cands, defined, stop)
+              else
+                let e = simplify (subst lhs (Def.rhs d) e) in
+                let consumed =
+                  if is_flag flags lhs then Core.Set.add consumed lhs else consumed in
+                if size e > size_cap then (e, consumed, cands, defined, true)
+                else
+                  let cands =
+                    if acceptable flags e then
+                      { cond = e; blk = Term.tid blk; at = Some (Term.tid d); hops;
+                        pos = n - 1 - k;
+                        inline =
+                          not (Core.Set.exists (Exp.free_vars e) ~f:(fun v ->
+                              Core.Set.mem defined (Var.base v)));
+                        consumed } :: cands
+                    else cands in
+                  (e, consumed, cands, defined, false)) in
+      if stop then cands
+      else
+        match unique_goto_pred (Term.tid blk) with
+        | Some p when not (Core.Set.mem visited p) ->
+          (match Core.Map.find blocks p with
+           | Some pb -> walk e consumed pb (hops + 1) defined (Core.Set.add visited p) cands
+           | None -> cands)
+        | _ -> cands in
+    let cands =
+      walk orig Var.Set.empty b0 0 Var.Set.empty
+        (Tid.Set.singleton (Term.tid b0)) start in
+    match List.min_elt cands ~compare:(fun x y -> Poly.compare (order x) (order y)) with
+    | Some c when not (Exp.equal c.cond orig) -> Some c
+    | _ -> None
 
 let uses_of ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
   Hike_stack_model.sub_reads ~abi s
 
-(* Compiles every eligible cond, then drops every def of a consumed flag var
-   whose only use was the rewritten jump.  A compiled cond reading memory
-   binds the comparison to a fresh 1-bit def — the VSA tags the def, and the
-   tag is what licenses the emitter's frame addressing. *)
+(* Compiles every jump's cond, then drops every def of a consumed flag var
+   no read survives.  A compiled cond that reads memory, or whose vars are
+   rewritten before the jump, is bound to a fresh 1-bit def at its own
+   position — the VSA tags the def, and the tag licenses the emitter's
+   frame addressing. *)
 let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
   let abi = Hike_abi.of_target target in
-  let fv = flag_vars target in
-  let xenv = reaching_defs sub in
-  let consumed = ref Var.Set.empty in
-  let sub1 =
-    Term.map blk_t sub ~f:(fun blk ->
-        let plan, compiled = plan_block xenv fv blk in
-        if not plan.changed then blk
-        else begin
-          consumed := Core.Set.union !consumed plan.consumed_vars;
-          (* The mem-operand comparisons become defs (in jmp order, all
-             after the block's own defs — the operands' values are the
-             block-end values either way); the cond reads its def. *)
-          let cmp_by_jmp =
-            List.filter_map compiled ~f:(fun (j, c, _) ->
-                match c with
-                | Some c when reads_mem c ->
-                    Some
-                      (Term.tid j,
-                       Def.create
-                         (Hike_synth.fresh ~bits:1 Hike_synth.Comparison) c)
-                | _ -> None)
-          in
-          let blk =
-            List.fold_left cmp_by_jmp ~init:blk ~f:(fun blk (_, d) ->
-                Term.append def_t blk d) in
-          Term.map jmp_t blk ~f:(fun j ->
-              let cond =
-                Option.value
-                  (Option.map
-                     (List.find cmp_by_jmp ~f:(fun (jt, _) ->
-                          Tid.equal (Term.tid j) jt))
-                     ~f:(fun (_, d) -> Bil.Var (Def.lhs d)))
-                  ~default:(Jmp.cond j) in
-              match
-                List.find compiled ~f:(fun (j', _, _) ->
-                    Tid.equal (Term.tid j) (Term.tid j'))
-              with
-              | Some (_, Some c, _) -> Jmp.with_cond j (if reads_mem c then cond else c)
-              | _ -> j)
-        end)
-  in
-  if Core.Set.is_empty !consumed then sub1
+  let flags = flag_vars target in
+  let preds = preds_of sub in
+  let entry = Option.map (Term.first blk_t sub) ~f:Term.tid in
+  let blocks =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b -> Core.Map.set m ~key:(Term.tid b) ~data:b) in
+  let plans =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun b ->
+        Term.enum jmp_t b
+        |> Seq.filter_map ~f:(fun j ->
+            Option.map (compile_jmp ~flags ~blocks ~preds ~entry b j)
+              ~f:(fun c -> (Term.tid j, c))))
+    |> Seq.to_list in
+  if List.is_empty plans then sub
   else
-    let used = uses_of ~abi sub1 in
-    let dead = Core.Set.diff !consumed used in
+    let conds, inserts =
+      List.fold plans ~init:(Tid.Map.empty, []) ~f:(fun (conds, ins) (jt, c) ->
+          if c.inline && not (Hike_stack_model.reads_mem c.cond) then
+            (Core.Map.set conds ~key:jt ~data:c.cond, ins)
+          else
+            let d = Def.create (Hike_synth.fresh ~bits:1 Hike_synth.Comparison) c.cond in
+            (Core.Map.set conds ~key:jt ~data:(Bil.Var (Def.lhs d)), (c, d) :: ins)) in
+    let consumed =
+      List.fold plans ~init:Var.Set.empty ~f:(fun acc (_, c) -> Core.Set.union acc c.consumed) in
+    let sub1 =
+      Term.map blk_t sub ~f:(fun blk ->
+          let blk =
+            List.fold inserts ~init:blk ~f:(fun blk (c, d) ->
+                if not (Tid.equal c.blk (Term.tid blk)) then blk
+                else
+                  match c.at with
+                  | Some before -> Term.prepend def_t ~before blk d
+                  | None -> Term.append def_t blk d) in
+          Term.map jmp_t blk ~f:(fun j ->
+              match Core.Map.find conds (Term.tid j) with
+              | Some c -> Jmp.with_cond j c
+              | None -> j)) in
+    let dead = Core.Set.diff consumed (uses_of ~abi sub1) in
     if Core.Set.is_empty dead then sub1
     else
       Term.map blk_t sub1 ~f:(fun blk ->
-          if
-            Term.enum def_t blk
-            |> Seq.exists ~f:(fun d -> Core.Set.mem dead (Def.lhs d))
-          then
-            Term.filter def_t blk ~f:(fun d ->
-                not (Core.Set.mem dead (Def.lhs d)))
-          else blk)
+          Term.filter def_t blk ~f:(fun d -> not (Core.Set.mem dead (Def.lhs d))))

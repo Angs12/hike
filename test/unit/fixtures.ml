@@ -295,7 +295,8 @@ let jump_target =
         [zero_flag], [flag "ZF"];
         [carry_flag], [flag "CF"];
         [sign_flag], [flag "SF"];
-        [overflow_flag], [flag "OF"]]
+        [overflow_flag], [flag "OF"];
+        [parity_flag], [flag "PF"]]
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let sub = Hike.Jump.compile_sub jump_target sub in

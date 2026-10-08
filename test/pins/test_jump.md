@@ -1,34 +1,41 @@
 # Pins — test_jump
 
-Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-45`),
-migrating `test_cbat/test_jump.ml`.  Every source `check` site is carried as
-one pin; none retired.  Production mechanism: `src/hike_jump.ml`
-(`Hike.Jump.compile_sub`, target-driven by the `jump_target` flag-role
-target in `test/unit/fixtures.ml`).
+Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-51`),
+migrating `test_cbat/test_jump.ml`.  Production mechanism:
+`src/hike_jump.ml` (`Hike.Jump.compile_sub`, target-driven by the
+`jump_target` flag-role target in `test/unit/fixtures.ml`, which declares
+ZF/CF/SF/OF/PF).
 
-There is no `Test_seam` for this pass, so no switch can be
-flipped from the test tier.  Production `src/` is never modified.  The
-disable recipes below are textual and name the source site to break; the
-recorded red is the state that recipe produces (re-demonstrated whenever
-the cited mechanism changes).  Every pin builds its own fixture inside its
-closure — no cross-pin state.
+The compiler walks each jump's block backward — and on into a unique goto
+predecessor — substituting every def it passes into the cond and
+simplifying after each step.  The smallest flag-free form wins (ties: one
+inlinable at the jump, then the latest); it is inlined when its vars hold
+the same values at the jump, else bound to a fresh comparison def at its
+own position.  No flag-free form leaves the cond unchanged.
 
-The red-evidence cells below state the expected failure mode; the recipes
-are textual (the mechanism is not runtime-switchable at the pin), so no
-measured red is claimed here.
+There is no `Test_seam` for this pass, so no switch can be flipped from
+the test tier.  The disable recipes below are textual and name the source
+site to break.  Every pin builds its own fixture inside its closure — no
+cross-pin state.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| JMP-27 | `signed_item` needs an SF and either the xor-core OF triple or the and-form `OF ≡ 0`; a missing OF def leaves no fact → the identity (`parse_bexp`/`eval_bexp` residual). | In `signed_item`, add a `| None, _ -> Some (Rel (LT, true, xv, yv))` arm that fabricates the signed ordering without OF. | to be recorded |
-| JMP-30 | `zero_exp` builds the zero at the compared operand's own width, so a 32-bit `x32−y32` renders 32-bit `EQ x32 y32`. | In `zero_exp`, always return `Word.zero 64` regardless of `e`'s width. | to be recorded |
-| JMP-32 | `compile_sub`'s `Term.map blk_t` / `Term.map jmp_t` rewrite preserves the CFG (block count and `Goto (Direct …)` targets intact). | In `compile_sub`, rebuild a rewritten jmp's kind as an unconditional `Goto (Direct (Tid.create ()))`. | to be recorded |
-| JMP-35 | Ambiguous reaching defs (several predecessors) enter `rm`, so `flag_def` finds no candidate → residual. | In `flag_def`'s reaching arm, take `List.hd` of the ambiguous candidates instead of requiring a singleton. | to be recorded |
-| JMP-36 | `parse_bexp` returns `None` for a non-bexp cond (`PF:unknown`), leaving the jmp residual. | In `parse_bexp`, make the catch-all return `Some (V pf)` for an `Unknown`. | to be recorded |
-| JMP-37 | The consistency checks (`is_minus_xy`, `same_exp`) refuse a `jbe` whose ZF subtraction and CF borrow disagree → residual. | In `combine`, drop the `same_exp c p1 p2 && same_exp c q1 q2` pair-agreement guard. | to be recorded |
-| JMP-38 | The inc/dec class: no CF def in the block gives `facts.cf = None`, so a CF-consuming `jbe` has no atom → residual. | In `flag_item`, default a missing CF fact to the constant-false `Rel (EQ, false, x, x)`. | to be recorded |
-| JMP-39 | A residual (unchanged) block drops no defs — `plan_block.changed` false means `consumed_vars` is empty and the block is returned whole. | In `plan_block`, set `consumed_vars` unconditionally from `i.flags` regardless of `changed`. | to be recorded |
-| JMP-40 | Within one block the LAST def of a flag is the reaching one (all defs precede all jmps; the first is a dead write) — the second ZF def's `yv` comparison emits. | In `plan_block`, build `flag_map`/`rhs` with the FIRST def per var (`Core.Map.set` only when absent). | to be recorded |
-| JMP-42 | An unconditional jump cond (`Int 1`) is not a bexp — `parse_bexp` returns `None` and the cond is untouched. | In `plan_block`, default a failed `parse_bexp` to a compiled constant. | to be recorded |
-| JMP-43 | No `Int`-cond def family is consumed, so all five cmp defs survive. | In `plan_block`, set `changed = true` unconditionally (consuming flag defs for the `Int 1` cond). | to be recorded |
-| JMP-44 | `CF := 1` is the const-true flag fact: a `jb` over it compiles to the const-true branch and the CF def dies. | Drop the `CF, e when is_one_int e` arm in `extract_facts`. | JMP-44 red: the cond stays `Var CF` and the def survives. |
-| JMP-45 | `cmp x, 0` folds the diff to `x`, leaving `OF := high:1[x & (x ^ t)]` with `t := x`; the folded OF is identically zero (the `x ^ d` factor with `d` resolving to `x`), so `jle` compiles to `x <=s 0` and the flag defs die. | In `src/hike_jump.ml` `extract_facts`, drop the `Ovf_folded` arm (the `AND(a, XOR(a, d))` shape). | JMP-45 red: the cond stays the residual `zf_or_core` (review). |
+| JMP-27 | A test group with no OF def leaves OF in the substituted cond; `acceptable` refuses a form that still reads a flag, so the cond is unchanged. | In `acceptable`, drop the flag check. | the cond becomes the half-substituted xor over OF. |
+| JMP-30 | `rewrite` rebuilds an equality's zero at the compared operand's width and folds `(x − y) = 0` to `x = y`, so a 32-bit compare renders `EQ x32 y32`. | Drop the `EQ (MINUS (a, b), 0)` rule in `rewrite`. | the cond stays `x32 − y32 = 0`. |
+| JMP-32 | `compile_sub` rewrites conds only; block count and `Goto (Direct …)` targets are intact. | In `compile_sub`, rebuild a rewritten jmp as `Goto (Direct (Tid.create ()))`. | targets lost. |
+| JMP-35 | A block with two predecessors ends the walk (`unique_goto_pred`), so a flag defined differently on each path is never substituted. | In `unique_goto_pred`, return the first predecessor of several. | the cond compiles from one arbitrary path's ZF. |
+| JMP-36 | `acceptable` refuses a form containing `Unknown`. | In `acceptable`, drop the `has_unknown` check. | the cond becomes `unknown[bits]`. |
+| JMP-37 | Relations over different operand pairs do not combine (`combine` needs one pair in either orientation): an inconsistent `jbe` compiles to the substituted `x <u y \| x = 0`, and the dead flag defs drop. | In `combine`, accept any two pairs. | the cond becomes a single relation over the wrong pair. |
+| JMP-38 | A flag no def in the block or a unique goto predecessor writes stays in the cond, so `acceptable` refuses every form (the inc/dec class: CF preserved). | In `acceptable`, drop the flag check. | the cond keeps CF beside the substituted ZF. |
+| JMP-39 | An unchanged jump consumes nothing, so no def is dropped. | Make `compile_sub` drop every flag def it passes. | the two defs drop. |
+| JMP-40 | The backward walk meets the LAST def of a var first and substitutes it; the earlier def is never reached for that var. | Walk the defs in block order in `compile_jmp`. | the cond reads the first ZF def's `x`. |
+| JMP-42 | A cond with no free vars is not walked. | Remove the free-vars check in `compile_jmp`. | (shape-only: the constant cond is left equal either way.) |
+| JMP-43 | No jump changes, so no def is consumed or dropped. | In `compile_sub`, drop every flag def regardless of plans. | the five cmp defs drop. |
+| JMP-44 | `CF := 1` substitutes to the constant-true cond; CF is consumed and its def dies. | Drop the constant-cond acceptance (refuse closed forms in `acceptable`). | the cond stays `CF`, the def survives. |
+| JMP-45 | `cmp x, 0`'s folded OF `x & (x ^ t)` with `t := x`: substituting `t` folds the overflow to 0 (`x ^ x`, `x & 0`, `0 <s 0`), the xor core reduces to the sign, and `ZF \| SF` combines to `x <=s 0`. | Drop the `XOR (a, a) → 0` rule in `rewrite`. | the cond stays the uncollapsed xor over the overflow term. |
+| JMP-46 | Clang -O0's reused register: `x` is written three times, so the borrow and the zero test read different `x`'s; substitution is positional, so the smallest form is `6 <u x` read where `t := x` reads it, bound to a fresh comparison def inserted before that def (x is rewritten before the jump). | Make `subst` stop at the first def of a var already substituted (position-blind resolution). | the cond stays `~(CF \| ZF)`. |
+| JMP-47 | The signed `jle` over a register rewritten after the compare: `y <=s z` (the earliest equal-size form) is preferred because it is inlinable at the jump. | In `order`, drop the inline component. | a comparison def is inserted for `x <=s z`. |
+| JMP-48 | `cmp` in a block and `jbe` in its goto successor: the walk continues into the unique goto predecessor; the flags die. | Return `None` from `unique_goto_pred`. | the cond stays `CF \| ZF`. |
+| JMP-49 | `jp` after `ucomisd`: the lifter's PF is `is_nan(a) \| is_nan(b)` over intrinsic results, defined in the predecessor block; the cond compiles to that unordered test. | Drop `parity_flag` from `flag_vars`. | the cond stays `PF` (PF is then not a flag, and the original `PF` is already acceptable). |
+| JMP-50 | Integer `jp`: PF is the low byte's parity of the result; the cond becomes that expression and the PF def dies. | Drop `parity_flag` from `flag_vars`. | the cond stays `PF`. |
+| JMP-51 | A call edge ends the walk (`preds_of` marks it `Other_edge`): the callee may write the flags, so a ZF set before the call never reaches the jump after it.  The pre-substitution compiler compiled this shape. | Mark call-return edges `Goto_edge` in `preds_of`. | the cond becomes `x = 0` across the call. |
