@@ -124,14 +124,21 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
                    (Core.Map.length block_addrs));
              None))
 
-(* A dispatch's destination words and, when the target adds a loaded
-   value to a module address, that base summand with its link-time
-   values.  The guards subtract the summand itself, so the relocation
-   of whatever global holds the base cancels; each case then compares
-   table data against [word - base]. *)
+(* A module-relative dispatch's base: the module-address var summand of
+   the target's value read at some position, with its link-time values.
+   The guards subtract the summand itself, so the relocation of whatever
+   global holds the base cancels; each case then compares table data
+   against [word - base].  [site] is the position to bind the summand at
+   when its var is rewritten before the transfer. *)
+type base = {
+  summand : exp;
+  values : int64 list;
+  site : Hike_backsubst.form option;
+}
+
 type dispatch = {
   words : Cbat_word.t list;
-  base : (exp * int64 list) option;
+  base : base option;
 }
 
 (* The base guard enumerates (base, word) pairs: a few bases at most. *)
@@ -147,45 +154,50 @@ let rec summands (e : exp) : exp list =
   | Bil.BinOp (Bil.PLUS, a, b) -> summands a @ summands b
   | e -> [ e ]
 
-(* [v] still holds its value at the transfer: no def after [at] in the
-   block rewrites it. *)
-let unchanged_after ~(blk : blk term) ~(at : def term option) (v : var) : bool =
-  match at with
-  | None -> true
-  | Some d ->
-    Term.enum def_t blk |> Seq.to_list
-    |> Base.List.drop_while ~f:(fun x -> not (Tid.equal (Term.tid x) (Term.tid d)))
-    |> (fun l -> Base.List.drop l 1)
-    |> Base.List.for_all ~f:(fun x -> not (Var.equal (Def.lhs x) v))
-
-(* [Some None]: no summand is a module address.  [Some (Some base)]: one
-   module-address var summand beside other summands, enumerable and
-   unchanged up to the transfer.  [None]: a module address the guards
-   cannot cancel, so no case series is sound. *)
-let module_base ~(denote : denote) ~(blk : blk term) ~(at : def term option)
-    (rhs : exp) : (exp * int64 list) option option =
-  let parts = summands rhs in
-  let based =
-    Base.List.filter_map parts ~f:(fun e ->
-        match denote ~blk ?def:at e with
-        | Ok ws when is_module_address ws -> Some (e, ws)
-        | _ -> None)
+(* The target's value at each position the backward substitution
+   reaches: a form whose summands hold one module-address var beside
+   others names the base, read there.  The nearest form whose summand
+   still holds at the transfer wins, else the nearest form, bound at its
+   position.  [Some None]: no form
+   has a module-address summand.  [None]: one does, but no form gives
+   an enumerable var base, so no case series is sound. *)
+let module_base ~(denote : denote) ~(graph : Hike_backsubst.graph) ~(blk : blk term)
+    (texp : exp) : base option option =
+  let classify (f : Hike_backsubst.form) =
+    let parts = summands f.exp in
+    let based =
+      Base.List.filter_map parts ~f:(fun e ->
+          match denote ~blk:f.blk ?def:f.at e with
+          | Ok ws when is_module_address ws -> Some (e, ws)
+          | _ -> None)
+    in
+    match based with
+    | [] -> `No_base
+    | [ _ ] when Base.List.length parts < 2 -> `No_base
+    | [ ((Bil.Var _ as e), ws) ] -> (
+      match Vsa.WordSet.enumerate ~cap:base_cap ws with
+      | Some ws -> (
+        match Base.Option.all (Base.List.map ws ~f:Cbat_word.to_int64_opt) with
+        | Some values ->
+          `Base { summand = e; values;
+                  site = Base.Option.some_if (not (Hike_backsubst.holds f e)) f }
+        | None -> `Bad)
+      | None -> `Bad)
+    | _ -> `Bad
   in
-  match based with
-  | [] -> Some None
-  | [ (_, _) ] when Base.List.length parts < 2 -> Some None
-  | [ ((Bil.Var v as e), ws) ] when unchanged_after ~blk ~at v -> (
-    match Vsa.WordSet.enumerate ~cap:base_cap ws with
-    | Some ws -> (
-      match Base.Option.all (Base.List.map ws ~f:Cbat_word.to_int64_opt) with
-      | Some bs -> Some (Some (e, bs))
-      | None -> None)
-    | None -> None)
-  | _ -> None
+  let classes = Base.List.map (Hike_backsubst.forms graph blk texp) ~f:classify in
+  let bases = Base.List.filter_map classes ~f:(function `Base b -> Some b | _ -> None) in
+  match Base.List.find bases ~f:(fun b -> Option.is_none b.site), bases with
+  | Some b, _ | None, b :: _ -> Some (Some b)
+  | None, [] ->
+    if Base.List.exists classes ~f:(function `Bad -> true | _ -> false) then None
+    else Some None
 
-let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
+(* A dispatch site's destination words: the target's bounded
+   denotation, read before its last def. *)
+let case_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t) ~(blk : blk term) (texp : exp) :
-    dispatch option =
+    Cbat_word.t list option =
   debug_trace (fun () ->
       Printf.sprintf "dw: blk %s texp=%s last=%b"
         (Tid.name (Term.tid blk))
@@ -204,10 +216,18 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
       | None -> (texp, None))
     | _ -> (texp, None)
   in
-  match module_base ~denote ~blk ~at rhs with
+  bounded_words ~denote ~block_addrs ~blk ?def:at rhs
+
+(* [graph] must carry every dispatch's case edges: the base walk crosses
+   only a block's sole predecessor. *)
+let dispatch_words ~(denote : denote) ~(graph : Hike_backsubst.graph)
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(last_defs : def term Var.Map.t) ~(blk : blk term) (texp : exp) :
+    dispatch option =
+  match module_base ~denote ~graph ~blk texp with
   | None -> None
   | Some base ->
-    Base.Option.map (bounded_words ~denote ~block_addrs ~blk ?def:at rhs)
+    Base.Option.map (case_words ~denote ~block_addrs ~last_defs ~blk texp)
       ~f:(fun words -> { words; base })
 
 (* The case blocks of a complete dispatch: every word names an in-sub
@@ -215,8 +235,8 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
 let resolved_cases ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) (texp : exp) : tid list option =
-  Base.Option.bind (dispatch_words ~denote ~block_addrs ~last_defs ~blk texp)
-    ~f:(fun { words; _ } ->
+  Base.Option.bind (case_words ~denote ~block_addrs ~last_defs ~blk texp)
+    ~f:(fun words ->
       let cases =
         Base.List.filter_map words ~f:(fun w ->
             match Core.Map.find block_addrs (Cbat_word.to_word w) with
@@ -349,9 +369,9 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
         with
         | Some _ -> Some Tid.Set.empty
         | None ->
-          match dispatch_words ~denote ~block_addrs ~last_defs ~blk texp with
+          match case_words ~denote ~block_addrs ~last_defs ~blk texp with
           | None -> Some all
-          | Some { words = ws; _ } ->
+          | Some ws ->
             Some
               (Base.List.fold ws ~init:Tid.Set.empty ~f:(fun acc w ->
                    let a = Cbat_word.to_word w in

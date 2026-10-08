@@ -7,19 +7,40 @@ open Bap.Std
     blk:blk term -> ?def:def term -> exp ->
     (Cbat_vsa.WordSet.t, Type.error) Result.t
 
-  (** A dispatch site's destination words (the target's bounded
-      denotation) and, when the target adds a loaded value to a module
-      address, that base summand with its link-time values: the guards
-      subtract the summand, so the base's relocation cancels and each
-      case compares [word - base].  [None] when no complete, sound case
-      series exists. *)
-  type dispatch = {
-    words : Cbat_word.t list;
-    base : (exp * int64 list) option;
+  (** A module-relative dispatch's base: the module-address var summand
+      of the target's value read at a position the backward substitution
+      reaches, with its link-time values.  The guards subtract the
+      summand, so the base's relocation cancels and each case compares
+      [word - base].  [site] is the position to bind the summand at when
+      its var is rewritten before the transfer. *)
+  type base = {
+    summand : exp;
+    values : int64 list;
+    site : Hike_backsubst.form option;
   }
 
+  (** A dispatch site's destination words (the target's bounded
+      denotation) and its base, if module-relative.  [None] when no
+      complete, sound case series exists. *)
+  type dispatch = {
+    words : Cbat_word.t list;
+    base : base option;
+  }
+
+  (** A dispatch site's destination words: the target's bounded
+      denotation.  [None] when it is not enumerable. *)
+  val case_words :
+    denote:denote ->
+    block_addrs:Tid.t Addr.Map.t ->
+    last_defs:def term Var.Map.t ->
+    blk:blk term ->
+    exp -> Cbat_word.t list option
+
+  (** The words and the base, the base read by backward substitution
+      over [graph], which must carry every dispatch's case edges. *)
   val dispatch_words :
     denote:denote ->
+    graph:Hike_backsubst.graph ->
     block_addrs:Tid.t Addr.Map.t ->
     last_defs:def term Var.Map.t ->
     blk:blk term ->

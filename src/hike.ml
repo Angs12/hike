@@ -88,7 +88,9 @@ let map_subs f proj =
 
 let pass_filter proj = Hike_filter.filter_subs proj
 
-let pass_jump proj = map_subs (Hike_jump.compile_sub (Project.target proj)) proj
+let pass_jump proj =
+  let file = Hike_decode.file_of (Project.program proj) in
+  map_subs (Hike_jump.compile_sub ~file (Project.target proj)) proj
 
 let pass_split_mem proj = Project.map_program proj ~f:Hike_split_mem.normalize
 

@@ -5,7 +5,7 @@
 
 open Bap.Std
 
-type temporary = Comparison | Load | Refinement
+type temporary = Comparison | Load | Refinement | Binding
 
 type kind =
   | K_addr of int64
@@ -57,7 +57,8 @@ let var ~addr_bits kind =
     | K_let (i, typ) -> Printf.sprintf "hike_let%d" i, typ
     | K_temporary (temporary, i) ->
       let prefix = match temporary with
-        | Comparison -> "hike_cmp" | Load -> "hike_ld" | Refinement -> "hike_rd" in
+        | Comparison -> "hike_cmp" | Load -> "hike_ld" | Refinement -> "hike_rd"
+        | Binding -> "hike_bd" in
       Printf.sprintf "%s%d" prefix i, Type.Imm addr_bits
   in
   Var.create ~is_virtual:false ~fresh:false name typ
@@ -150,6 +151,8 @@ let kind_of_var v =
     family n ~prefix:"hike_ld" ~suffix:"" (fun i -> K_temporary (Load, i))
   else if Base.String.is_prefix n ~prefix:"hike_rd" then
     family n ~prefix:"hike_rd" ~suffix:"" (fun i -> K_temporary (Refinement, i))
+  else if Base.String.is_prefix n ~prefix:"hike_bd" then
+    family n ~prefix:"hike_bd" ~suffix:"" (fun i -> K_temporary (Binding, i))
   else if Hike_abi.is_env_reg Hike_abi.x86_64_sysv v then Some (K_environment v)
   else None
 

@@ -5,7 +5,7 @@
 
 open Bap.Std
 
-type temporary = Comparison | Load | Refinement
+type temporary = Comparison | Load | Refinement | Binding
 type kind
 type table
 

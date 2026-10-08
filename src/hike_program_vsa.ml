@@ -91,7 +91,8 @@ let prepare proj =
   { target; images; linker_slots; reserved_slots; text_range; data_spans }
 
 let normalize context program =
-  Term.map sub_t program ~f:(Hike_jump.compile_sub context.target)
+  let file = Hike_decode.file_of program in
+  Term.map sub_t program ~f:(Hike_jump.compile_sub ~file context.target)
   |> Hike_split_mem.normalize |> Hike_coerce.coerce_program
   |> Hike_fp.run_program
 

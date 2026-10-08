@@ -10,6 +10,8 @@ type step = {
   noreturn : Tid.Set.t;
   roots : Core.Int64.Set.t;
   destinations : Core.Int64.Set.t Core.Int64.Map.t;
+  (* The destinations provided when [program]'s jumps compiled. *)
+  compiled : Core.Int64.Set.t Core.Int64.Map.t;
 }
 
 let run proj =
@@ -240,7 +242,8 @@ let run proj =
         match prev with
         | Some p when Disasm.Driver.equal p.decoded.grown out.grown
                       && Disasm.Subroutines.equal p.decoded.subs out.subs
-                      && Core.Set.equal p.noreturn !noreturn ->
+                      && Core.Set.equal p.noreturn !noreturn
+                      && Core.Map.equal Core.Set.equal p.compiled !destinations ->
           { p with decoded = out }
         | _ ->
         (* The lifted program is BAP's raw BIR: the normalizer chain runs
@@ -254,20 +257,27 @@ let run proj =
         in
         (* The entry sub is the target's own fact (B1): the primary
            program's entry names the address; the lifted program's sub
-           at that address carries the attr every later reader reads. *)
+           at that address carries the attr every later reader reads.
+           Every sub names the decode's package, as the primary
+           program's do, so a reader of its instruction labels (the
+           jump compiler's destinations) finds them. *)
         let raw =
-          match entry_addr with
-          | None -> lifted
-          | Some ea ->
-            Term.map sub_t lifted ~f:(fun s ->
+          Term.map sub_t lifted ~f:(fun s ->
+              let s = Term.set_attr s filename file in
+              match entry_addr with
+              | None -> s
+              | Some ea -> (
                 match Term.first blk_t s with
                 | Some b -> (
                   match Term.get_attr b address with
                   | Some a when Addr.equal a ea ->
                     Term.set_attr s Sub.entry_point ()
                   | _ -> s)
-                | None -> s)
+                | None -> s))
         in
+        (* The jump compiler reads the destinations provided so far;
+           a round that resolves more recompiles under them. *)
+        let compiled = !destinations in
         let program = Hike_program_vsa.normalize context raw in
         let used_noreturn = !noreturn in
         (* The site → terminator-instruction map, off this round's
@@ -395,7 +405,8 @@ let run proj =
                 if unclaimed w && not (Core.Set.mem !transfer_targets w) then add_root w));
         let result = { decoded = out; program = raw;
                        main_addr; noreturn = used_noreturn;
-                       roots = !root_set; destinations = !destinations } in
+                       roots = !root_set; destinations = !destinations;
+                       compiled } in
         let settled = not noreturn_changed && match prev with
           | Some p -> Disasm.Driver.equal p.decoded.grown out.grown
                       && Core.Set.equal p.roots !root_set
