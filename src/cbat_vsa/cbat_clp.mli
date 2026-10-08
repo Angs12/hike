@@ -49,6 +49,9 @@ val is_wrapped : t -> bool
 (* A wrapped Finite piece's two non-wrapping arcs. *)
 val split_wrapped : t -> t list
 
+(* The elements at most [n], and the rest. *)
+val split_at_n : t -> Cbat_word.t -> t * t
+
 val subset : t -> t -> bool
 val translate : t -> Cbat_word.t -> t
 

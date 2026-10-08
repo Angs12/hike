@@ -319,6 +319,33 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
                   ~endian ~bits addr)
         | _ -> None
 
+(* The value a read of [bits] at [addr] produces in [mv]: the image
+   words where one image backs the whole set, else the join of the cells
+   the bounded address set can touch — a strided set names its slots, a
+   contiguous band's range key covers the read (find' expands the query
+   by the size).  A bounded set no key names reads bottom on a bottom
+   memory (the path is already dead) and top — the sound identity — on
+   a live one; top also when nothing bounds the address.  The first
+   cell's data seeds the fold: join's identity is the seed, so a stored
+   relative value reads back with its origin, and multi-cell joins merge
+   per the algebra. *)
+let load_value ~(addr : wordset) ~(endian : endian) ~(bits : int) (mv : Mem.t) : wordset =
+  match section_image_load ~addr ~endian ~bits mv with
+  | Some ws -> ws
+  | None ->
+    (match Mem.Key.of_wordset addr with
+     | [] -> if Mem.is_bottom mv then WordSet.bottom bits else WordSet.top bits
+     | k0 :: ks' ->
+       Base.List.fold ks'
+         ~init:(Mem.find (bits, endian) mv k0 |> Mem.Val.data)
+         ~f:(fun acc k -> WordSet.join acc (Mem.find (bits, endian) mv k |> Mem.Val.data)))
+
+(* Some image holds a byte of [lo, hi] on the absolute line. *)
+let image_overlaps ~(lo : int64) ~(hi : int64) : bool =
+  Base.List.exists !section_images_ref ~f:(fun { img_lo; img_hi; _ } ->
+      Stdlib.Int64.unsigned_compare lo img_hi <= 0
+      && Stdlib.Int64.unsigned_compare img_lo hi <= 0)
+
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
@@ -359,29 +386,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     let res_size = Size.in_bits s in
-    (match section_image_load ~addr ~endian:e ~bits:res_size mv with
-    | Some ws -> return_imm ws
-    | None ->
-      (* The read joins the cells the bounded address set can touch: a
-         strided set names its slots, a contiguous band's range key
-         covers the read (find' expands the query by the size).  A
-         bounded set no key names reads bottom on a bottom memory (the
-         path is already dead) and top — the sound identity — on a
-         live one; top also when nothing bounds the address. *)
-      (match Mem.Key.of_wordset addr with
-       | [] ->
-         if Mem.is_bottom mv then return_imm @@ WordSet.bottom res_size
-         else return_imm @@ WordSet.top res_size
-       | k0 :: ks' ->
-         (* The first cell's data seeds the fold: join's identity is
-            the seed, so a stored relative value reads back with its
-            origin, and multi-cell joins merge per the algebra. *)
-         return_imm
-         @@ Base.List.fold ks'
-               ~init:(Mem.find (res_size, e) mv k0 |> Mem.Val.data)
-               ~f:(fun acc k ->
-                   WordSet.join acc
-                     (Mem.find (res_size, e) mv k |> Mem.Val.data))))
+    return_imm (load_value ~addr ~endian:e ~bits:res_size mv)
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
     let sz = Size.in_bits s in

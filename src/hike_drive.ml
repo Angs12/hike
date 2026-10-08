@@ -10,7 +10,7 @@ type step = {
   noreturn : Tid.Set.t;
   roots : Core.Int64.Set.t;
   destinations : Core.Int64.Set.t Core.Int64.Map.t;
-  (* The destinations provided when [program]'s jumps compiled. *)
+  (* The destinations [program]'s dispatches are armed with. *)
   compiled : Core.Int64.Set.t Core.Int64.Map.t;
 }
 
@@ -257,27 +257,35 @@ let run proj =
         in
         (* The entry sub is the target's own fact (B1): the primary
            program's entry names the address; the lifted program's sub
-           at that address carries the attr every later reader reads.
-           Every sub names the decode's package, as the primary
-           program's do, so a reader of its instruction labels (the
-           jump compiler's destinations) finds them. *)
+           at that address carries the attr every later reader reads. *)
         let raw =
-          Term.map sub_t lifted ~f:(fun s ->
-              let s = Term.set_attr s filename file in
-              match entry_addr with
-              | None -> s
-              | Some ea -> (
+          match entry_addr with
+          | None -> lifted
+          | Some ea ->
+            Term.map sub_t lifted ~f:(fun s ->
                 match Term.first blk_t s with
                 | Some b -> (
                   match Term.get_attr b address with
                   | Some a when Addr.equal a ea ->
                     Term.set_attr s Sub.entry_point ()
                   | _ -> s)
-                | None -> s))
+                | None -> s)
         in
-        (* The jump compiler reads the destinations provided so far;
-           a round that resolves more recompiles under them. *)
+        (* Every destination resolved so far is an arm of its transfer:
+           the BIR carries the edge, and the case is entered under its
+           own guard.  A round that resolves more re-arms. *)
         let compiled = !destinations in
+        let raw =
+          let dests j =
+            match Term.get_attr j address with
+            | None -> []
+            | Some a ->
+              Base.Option.value_map
+                (Core.Map.find compiled (Word.to_int64_exn a))
+                ~default:[] ~f:Core.Set.to_list
+          in
+          Term.map sub_t raw ~f:(Hike_cfg_complete.arm_dispatches ~dests)
+        in
         let program = Hike_program_vsa.normalize context raw in
         let used_noreturn = !noreturn in
         (* The site → terminator-instruction map, off this round's

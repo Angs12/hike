@@ -57,47 +57,56 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
         not (Base.Option.value_map (Hike_transfer.slot_of_target ~index e)
                ~default:false ~f:(Core.Set.mem facts.foreign_slots)))
   in
+  (* The case test for one word: the target equals the word's module
+     address, or — over a module-relative base — the loaded data equals
+     [word - base] while the base is [base]. *)
+  let case e (base : (int64 list * exp) option) (w : word) : exp =
+    let bits = Word.bitwidth w in
+    let a = Word.to_int64_exn w in
+    match base with
+    | Some (bs, b_exp) ->
+      let delta b =
+        Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.MINUS, e, b_exp),
+                   Bil.Int (Word.of_int64 ~width:bits (Int64.sub a b)))
+      in
+      (match bs with
+       | [ b ] -> delta b
+       | _ ->
+         Base.List.map bs ~f:(fun b ->
+             Bil.BinOp (Bil.AND,
+                        Bil.BinOp (Bil.EQ, b_exp,
+                                   Bil.Var (Hike_synth.module_addr ~addr_bits:bits b)),
+                        delta b))
+         |> Base.List.reduce_exn ~f:(fun x y -> Bil.BinOp (Bil.OR, x, y)))
+    | None ->
+      Bil.BinOp (Bil.EQ, e, Bil.Var (Hike_synth.module_addr ~addr_bits:bits a))
+  in
+  (* The words no arm tests, grouped by transfer kind; the last group is
+     the default.  An in-sub block word is always armed. *)
   let series sub j e words (base : (int64 list * exp) option) =
     let groups =
       Base.List.fold words ~init:[] ~f:(fun acc w ->
           let kind = name ~sub j w in
+          (match kind with
+           | Goto (Direct t) ->
+             failwith
+               (Printf.sprintf
+                  "hike: dispatch: sub %s jmp %s: block %s is a destination no arm tests"
+                  (Sub.name sub) (Tid.name (Term.tid j)) (Tid.name t))
+           | _ -> ());
           let w = Cbat_word.to_word w in
           match Base.List.Assoc.find acc kind ~equal:Base.Poly.equal with
           | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal:Base.Poly.equal
           | None -> (kind, [ w ]) :: acc)
       |> List.rev
     in
-    (* The case test for one word: the target equals the word's
-       module address, or — over a module-relative base — the loaded
-       data equals [word - base] while the base is [base]. *)
-    let case (w : word) : exp =
-      let bits = Word.bitwidth w in
-      let a = Word.to_int64_exn w in
-      match base with
-      | Some (bs, b_exp) ->
-        let delta b =
-          Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.MINUS, e, b_exp),
-                     Bil.Int (Word.of_int64 ~width:bits (Int64.sub a b)))
-        in
-        (match bs with
-         | [ b ] -> delta b
-         | _ ->
-           Base.List.map bs ~f:(fun b ->
-               Bil.BinOp (Bil.AND,
-                          Bil.BinOp (Bil.EQ, b_exp,
-                                     Bil.Var (Hike_synth.module_addr ~addr_bits:bits b)),
-                          delta b))
-           |> Base.List.reduce_exn ~f:(fun x y -> Bil.BinOp (Bil.OR, x, y)))
-      | None ->
-        Bil.BinOp (Bil.EQ, e, Bil.Var (Hike_synth.module_addr ~addr_bits:bits a))
-    in
     Base.List.mapi groups ~f:(fun i (kind, ws) ->
         let cond =
           if i + 1 = Base.List.length groups then Jmp.cond j
           else
             (match ws with
-             | w :: rest -> Base.List.fold rest ~init:(case w)
-                 ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, case w))
+             | w :: rest -> Base.List.fold rest ~init:(case e base w)
+                 ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, case e base w))
              | [] -> failwith "hike: dispatch: empty case group")
             |> Hike_coerce.coerce_exp in
         let cond = Hike_cfg_complete.and_guard
@@ -105,29 +114,60 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
         let arm = if i = 0 then j else Jmp.create kind in
         Jmp.with_kind arm kind |> fun arm -> Jmp.with_cond arm cond)
   in
+  (* A block's dispatch: its arms' guards become the relocation-safe case
+     tests; when the arms cover every word, the last arm's edge is the
+     fallback's default, else the remaining words follow the fallback as
+     a series.  An armed block without a sound series fails: its guards
+     compare model addresses. *)
+  let dispatch_blk ~sub ~plans blk =
+    let jmps = Term.enum jmp_t blk |> Seq.to_list in
+    let arms = Base.List.filter jmps ~f:(fun j -> Option.is_some (Hike_cfg_complete.arm_word j)) in
+    match Base.List.find jmps ~f:(fun j -> Core.Map.mem plans (Term.tid j)) with
+    | None when Base.List.is_empty arms -> blk
+    | None ->
+      failwith
+        (Printf.sprintf "hike: dispatch: sub %s block %s: an armed transfer has no sound case series"
+           (Sub.name sub) (Tid.name (Term.tid blk)))
+    | Some fb ->
+      let e, d, base = Core.Map.find_exn plans (Term.tid fb) in
+      let bits =
+        match Type.infer e with
+        | Ok (Type.Imm n) -> n
+        | _ -> failwith "hike: dispatch: the target is not a word"
+      in
+      let armed = Base.List.filter_map arms ~f:Hike_cfg_complete.arm_word in
+      let rest =
+        Base.List.filter d.Hike_cfg_complete.words ~f:(fun w ->
+            not (Base.Option.value_map (Cbat_word.to_int64_opt w) ~default:false
+                   ~f:(fun w -> Base.List.mem armed w ~equal:Int64.equal)))
+      in
+      let tested a =
+        let w = Word.of_int64 ~width:bits (Base.Option.value_exn (Hike_cfg_complete.arm_word a)) in
+        Jmp.with_cond a
+          (Hike_cfg_complete.and_guard (Hike_cfg_complete.guard_of fb)
+             (Hike_coerce.coerce_exp (case e base w)))
+      in
+      let default, tail =
+        match rest, Base.List.last arms with
+        | [], Some last -> (Some (Term.tid last), [ Jmp.with_kind fb (Jmp.kind last) ])
+        | _ -> (None, series sub fb e rest base)
+      in
+      Term.concat_map jmp_t blk ~f:(fun j ->
+          if Tid.equal (Term.tid j) (Term.tid fb) then tail
+          else if Option.is_some (Hike_cfg_complete.arm_word j) then
+            if Base.Option.exists default ~f:(Tid.equal (Term.tid j)) then []
+            else [ tested j ]
+          else [ j ])
+  in
   (* Every dispatch is read on the unbound sub; a base whose var is
      rewritten before the transfer is bound at its site, and the guards
      read the binding. *)
   Cbat_vsa.with_images facts.images (fun () ->
       Term.map sub_t prog ~f:(fun sub ->
           let index = Hike_transfer.index_of_sub sub in
-          (* The BIR with every dispatch's arms written as direct
-             transfers: the base walk reads every case edge. *)
-          let armed =
-            Term.map blk_t sub ~f:(fun blk ->
-                let last_defs = Cbat_vsa.last_defs blk in
-                Term.concat_map jmp_t blk ~f:(fun j ->
-                    match
-                      Base.Option.bind (target_of ~index j) ~f:(fun e ->
-                          Hike_cfg_complete.case_words ~denote:facts.denote
-                            ~block_addrs:facts.block_addrs ~last_defs ~blk e)
-                    with
-                    | None -> [ j ]
-                    | Some words ->
-                      Base.List.map words ~f:(fun w ->
-                          Jmp.create ~cond:(Jmp.cond j) (name ~sub j w))))
-          in
-          let graph = Hike_backsubst.graph_of_sub armed in
+          (* The arms are the BIR's case edges: the base walk reads
+             every predecessor. *)
+          let graph = Hike_backsubst.graph_of_sub sub in
           let plans =
             Term.enum blk_t sub
             |> Seq.concat_map ~f:(fun blk ->
@@ -155,19 +195,18 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
           in
           let binds = Base.List.filter_map plans ~f:(fun (_, (_, _, b)) -> b) in
           let plans = Tid.Map.of_alist_exn plans in
+          let plans =
+            Core.Map.map plans ~f:(fun (e, d, bound) ->
+                let base =
+                  Base.Option.map d.Hike_cfg_complete.base ~f:(fun b ->
+                      match bound with
+                      | Some (_, v) -> (b.values, Bil.Var v)
+                      | None -> (b.values, b.summand))
+                in
+                (e, d, base))
+          in
           Hike_backsubst.bind sub binds
-          |> Term.map blk_t ~f:(fun blk ->
-              Term.concat_map jmp_t blk ~f:(fun j ->
-                  match Core.Map.find plans (Term.tid j) with
-                  | None -> [ j ]
-                  | Some (e, d, bound) ->
-                    let base =
-                      Base.Option.map d.base ~f:(fun b ->
-                          match bound with
-                          | Some (_, v) -> (b.values, Bil.Var v)
-                          | None -> (b.values, b.summand))
-                    in
-                    series sub j e d.words base))))
+          |> Term.map blk_t ~f:(dispatch_blk ~sub ~plans)))
 
 (* Calls execute in their own arm blocks; the selector blocks contain
    only guarded gotos and explicit false edges. A call's return remains

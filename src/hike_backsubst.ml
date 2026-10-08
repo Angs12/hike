@@ -248,25 +248,20 @@ let size_cap = 128
 
 type edge = Goto_edge | Other_edge
 
-(* Every block's incoming edges, by source block.  [targets] names an
-   indirect jump's known destination blocks; one it names none of has
-   none. *)
-let preds_of ~(targets : jmp term -> tid list) (sub : sub term) :
-    (tid * edge) list Tid.Map.t =
+(* Every block's incoming edges, by source block: the BIR's jumps.  An
+   indirect transfer names none. *)
+let preds_of (sub : sub term) : (tid * edge) list Tid.Map.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
       Term.enum jmp_t b
       |> Seq.fold ~init:m ~f:(fun m j ->
           let add m t k = Core.Map.add_multi m ~key:t ~data:(Term.tid b, k) in
-          let indirect m = List.fold (targets j) ~init:m ~f:(fun m t -> add m t Goto_edge) in
           match Jmp.kind j with
           | Goto (Direct t) -> add m t Goto_edge
           | Call c ->
-            let m = match Call.target c with Indirect _ -> indirect m | Direct _ -> m in
             (match Call.return c with Some (Direct t) -> add m t Other_edge | _ -> m)
           | Ret (Direct t) | Int (_, t) -> add m t Other_edge
-          | Goto (Indirect _) -> indirect m
-          | Ret (Indirect _) -> m))
+          | Goto (Indirect _) | Ret (Indirect _) -> m))
 
 (* The exp's value read at one position: before [at] in [blk], or at
    the block's end with no [at] (the start).  [hops] counts the blocks
@@ -294,12 +289,12 @@ type graph = {
   entry : tid option;
 }
 
-let graph_of_sub ?(targets = fun _ -> []) (sub : sub term) : graph =
+let graph_of_sub (sub : sub term) : graph =
   { blocks =
       Term.enum blk_t sub
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
           Core.Map.set m ~key:(Term.tid b) ~data:b);
-    preds = preds_of ~targets sub;
+    preds = preds_of sub;
     entry = Option.map (Term.first blk_t sub) ~f:Term.tid }
 
 let unique_goto_pred (g : graph) (b : tid) : tid option =

@@ -37,6 +37,8 @@ val b0 : t
 val b1 : t
 val of_int : width:int -> int -> t
 val of_int64 : ?width:int -> int64 -> t
+val of_z : Z.t -> int -> t
+val to_z : t -> Z.t
 
 val is_zero : t -> bool
 val is_one : t -> bool

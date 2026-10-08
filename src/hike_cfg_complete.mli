@@ -94,6 +94,15 @@ open Bap.Std
       the decode's fallthrough after it is not an edge. *)
   val clear_noreturn_returns : noreturn:Tid.Set.t -> sub term -> sub term
 
+(** The destination word a dispatch arm tests, if [j] is one. *)
+val arm_word : jmp term -> int64 option
+
+(** Each indirect transfer gains, before it, one arm per destination word
+    ([dests]) naming the start of one of the sub's blocks: a direct goto
+    guarded by [target = word] over model addresses.  The transfer stays
+    as the fallback for every word no arm tests. *)
+val arm_dispatches : dests:(jmp term -> int64 list) -> sub term -> sub term
+
 (** Rewrites a lifted term's direct targets: a call's target names a
     subroutine, a goto's a block, so the two resolve through different
     maps.  Indirect targets stay the resolution's own. *)

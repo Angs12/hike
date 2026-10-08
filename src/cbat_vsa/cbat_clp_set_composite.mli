@@ -77,6 +77,14 @@ val vla_offsets : t -> Cbat_clp.t option
 (* Memory keys retain the carried origin's line; plain values stay absolute. *)
 val address_pieces : t -> (Origin.t * Cbat_clp.Pieces.t) option
 
+(* The elements [decide] keeps, bisected per progression on its memory
+   key line: [decide line p] keeps or drops a whole sub-progression, or
+   splits it (a singleton never splits).  The origin is kept; an
+   unbounded piece, a frame-relative VLA value and a mixed-origin value
+   are kept whole. *)
+val filter_addresses :
+  t -> decide:(Origin.t -> Cbat_clp.t -> [ `Keep | `Drop | `Split ]) -> t
+
 (* Memory namespaces: Stack, Window and Vla share the stack line;
    Rip and Abs each retain their own line. *)
 val key_line : Origin.t -> Origin.t

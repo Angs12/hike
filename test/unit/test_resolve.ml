@@ -30,6 +30,19 @@ let eq_target (a : var) (b : var) (w : int64) j =
          (Hike_synth_addr.address_of_exp Hike_synth.empty face) (Some w)
   | _ -> false
 
+(* The drive's arming: every indirect transfer's destinations are
+   [words], each naming a block by its address attr. *)
+let armed (words : int64 list) (sub : sub term) : sub term =
+  Hike.Cfg_complete.arm_dispatches ~dests:(fun _ -> words) sub
+
+(* [sub] with block [i] at address [addrs.(i)]. *)
+let with_addrs (addrs : int64 array) (sub : sub term) : sub term =
+  let sb = Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) () in
+  Term.enum blk_t sub
+  |> Seq.iteri ~f:(fun i b ->
+      Sub.Builder.add_blk sb (Term.set_attr b address (Addr.of_int64 addrs.(i))));
+  Sub.Builder.result sb
+
 (* [of_wordset] fans: the pinned fixtures are single-piece address lines. *)
 let check_key1 name ks f =
   check name (match ks with [ k ] -> f k | _ -> false)
@@ -193,6 +206,10 @@ let tests : unit Alcotest.test list =
         in
         let b1_tid = tids.(4) in
         let b2_tid = tids.(5) in
+        let j2 =
+          with_addrs [| 0x1000L; 0x1100L; 0x1200L; 0x1300L; 0x3008L; 0x3010L; 0x1400L |] j2
+          |> armed [ 0x3008L; 0x3010L ]
+        in
         let envs, j2', ba' =
           produce Theory.Target.unknown
             ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
@@ -577,7 +594,7 @@ let tests : unit Alcotest.test list =
             Sub.Builder.create ~tid:(Term.tid sub25) ~name:(Sub.name sub25) ()
           in
           Base.List.iter stamped_blks ~f:(Sub.Builder.add_blk sb);
-          Sub.Builder.result sb
+          Sub.Builder.result sb |> armed [ 0x3000L; 0x3008L ]
         in
         let envs, sub25', ba' =
           produce ~block_addrs:
@@ -689,7 +706,7 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub26
           |> Seq.iteri ~f:(fun i b ->
               Sub.Builder.add_blk sb (Term.set_attr b address (Addr.of_int64 addrs.(i))));
-          Sub.Builder.result sb
+          Sub.Builder.result sb |> armed [ 0x3000L; 0x3008L ]
         in
         let block_addrs = Base.List.init 7 ~f:(fun i -> (addrs.(i), tids.(i))) in
         let envs, sub26', ba' =

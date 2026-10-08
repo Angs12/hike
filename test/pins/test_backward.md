@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-103`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-104`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -93,3 +93,4 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-101 | a cell stored after the load the guard reads keeps its edge value: the read fact holds at the load's position and the replayed later store decides the edge cell. | Meet the read fact into the edge memory (HEAD's `call_env` edge memory + `commit`). | BK-101.rewritten-kept (the edge cell loses 50). |
 | BK-102 | a store's cell takes its data's constraint: the replayed store writes the output-refined x, so clang -O0's spilled switch index is bounded at the edge. | Drop the output facts from the replay (replay from the inputs only). | BK-102 (the edge cell is unbounded). |
 | BK-103 | a cell overwritten later takes nothing from the earlier store's data: the replayed later store decides the edge cell. | Meet each store's refined data into the edge memory regardless of later stores. | BK-103 (the edge cell loses 50). |
+| BK-104 | a load's address narrows to the slots whose contents can produce the guarded value: `load_address_constraint` bisects the address set over known memory (image words here) and the address inverse bounds i by the surviving slots' hull. | Return `None` from `load_address_constraint`. | BK-104.dropped (i keeps 3). |

@@ -29,7 +29,7 @@ type direction =
 
 type word = W.t
 
-(* {base + n*step | 0 <= n < cardn}. *)
+(* {base +/- n*step | 0 <= n < cardn}; only Descending subtracts. *)
 type t = {
   base : W.t;
   step : W.t;
@@ -58,11 +58,11 @@ let is_infinite (p : t) : bool =
 (* CLP from base stepping by step. *)
 
 let fit_to (width : int) (w : W.t) : W.t =
-  if W.bitwidth w = width then w else W.extract_exn ~hi:(width - 1) w
+  if W.bitwidth w = width then W.unsigned w else W.extract_exn ~hi:(width - 1) w
 
 let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let width = Option.value ~default:(W.bitwidth base) width in
-  let cardn_w = W.cap_at_width ~width:(width + 1) cardn in
+  let cardn_w = W.cap_at_width ~width:(width + 1) (W.unsigned cardn) in
   let base' = fit_to width base in
   let step' = fit_to width step in
   
@@ -209,9 +209,16 @@ let of_list ~width l : t =
 (* Cardinality as a (width+1)-bit W.t; exact for a finite CLP. *)
 let cardinality (p : t) : W.t = cardn_of p
 
-(* Last point of the stored progression; for circular forms it is the
-   wrap predecessor, and for directional rays the ray's finite edge. *)
+(* The same denotation traversed with a positive step. *)
+let forward (p : t) : t =
+  match p.dir with
+  | Descending -> {p with base = W.modulo p.base p.step; dir = Finite}
+  | Ascending -> {p with dir = Finite}
+  | Finite | Circular -> p
+
+(* Last point of the forward traversal. *)
 let finite_end (p : t) : W.t option =
+  let p = forward p in
   let width = bitwidth p in
   let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
   if W.is_zero (cardn_of p) then None
@@ -219,12 +226,16 @@ let finite_end (p : t) : W.t option =
 
 
 let lnot (p : t) : t =
-  (* Any point works as the infinite base. *)
   Option.value_map (finite_end p) ~default:(bottom (bitwidth p))
-    ~f:(fun e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p))
+    ~f:(fun e ->
+        match p.dir with
+        | Ascending -> {p with base = W.lnot p.base; dir = Descending}
+        | Descending -> {p with base = W.lnot p.base; dir = Ascending}
+        | Finite | Circular -> {p with base = W.lnot e})
 
 
 let iter (p : t) : W.t list =
+  let p = forward p in
   let rec iter_acc b s n acc =
     if W.is_zero n then acc
     else let n' = W.pred n in
@@ -233,6 +244,7 @@ let iter (p : t) : W.t list =
 
 (* Closest element at or below i. *)
 let nearest_pred (i : W.t) (p : t) : W.t option =
+  let p = forward p in
   assert(bitwidth p = W.bitwidth i);
   let open Monads.Std.Monad.Option.Syntax in
   finite_end p >>= fun e ->
@@ -514,23 +526,25 @@ let subset_finite (p1 : t) (p2 : t) : bool =
   let nb2 = W.neg (base_of p2) in
   let p1 = translate p1 nb2 in
   let p2 = translate p2 nb2 in
-  let end1 = finite_end p1 and end2 = finite_end p2 in
-  begin match end1, end2 with
-  | None, _ -> true
-  | Some _, None -> false
-  | Some e1, Some e2 ->
-    let in_bounds = W.(<=) e1 e2 && W.(<=) (base_of p1) e2 in
-    let step_and_overlap = W.(=) (common_step ((base_of p1),(step_of p1)) (W.zero width, (step_of p2))) (step_of p2) in
-    let singleton_elem = is_one (cardn_of p1) && elem (base_of p1) p2 in
-    singleton_elem || (in_bounds && step_and_overlap)
-  end
+  (* Rotation can split the source grid into differently aligned arcs. *)
+  List.for_all (split_wrapped p1) ~f:(fun p1 ->
+      match finite_end p1, finite_end p2 with
+      | None, _ -> true
+      | Some _, None -> false
+      | Some e1, Some e2 ->
+        let in_bounds = W.(<=) e1 e2 && W.(<=) (base_of p1) e2 in
+        let step_and_overlap = W.(=) (common_step ((base_of p1),(step_of p1)) (W.zero width, (step_of p2))) (step_of p2) in
+        let singleton_elem = is_one (cardn_of p1) && elem (base_of p1) p2 in
+        singleton_elem || (in_bounds && step_and_overlap))
 
 (* Subset order. *)
-let subset (p1 : t) (p2 : t) : bool =
+let rec subset (p1 : t) (p2 : t) : bool =
   if bitwidth p1 <> bitwidth p2 then false
   else if is_bottom p1 then true
   else if is_bottom p2 then false
   else if phys_equal p1 p2 || equal p1 p2 then true
+  else if is_wrapped p1 then
+    List.for_all (split_wrapped p1) ~f:(fun arc -> subset arc p2)
   else
     let divides a b =
       if W.is_zero a then W.is_zero b
@@ -569,115 +583,70 @@ let subset (p1 : t) (p2 : t) : bool =
     | Circular, _ -> false
     | (Ascending | Descending), Finite -> false
     | Ascending, Descending | Descending, Ascending -> false
-let safe_lcm s1 s2 =
-  try
-    let step = W.lcm_exn s1 s2 in
-    if W.is_zero step then None else Some step
-  with _ -> None
+(* Congruences are integer equations. Reducing Bezout coefficients or the
+   period at word width changes the grid unless its step divides 2^width. *)
+let intersect_grids ~lo1 ~s1 ~lo2 ~s2 =
+  let lo1 = W.to_z lo1 and lo2 = W.to_z lo2 in
+  let s1 = W.to_z s1 and s2 = W.to_z s2 in
+  let g, u, _ = Z.gcdext s1 s2 in
+  let delta = Z.sub lo2 lo1 in
+  if Z.equal g Z.zero then
+    if Z.equal delta Z.zero then Some (lo1, Z.zero) else None
+  else if not (Z.equal (Z.erem delta g) Z.zero) then None
+  else
+    let step = Z.mul s1 (Z.div s2 g) in
+    let base =
+      if Z.equal step Z.zero then (if Z.equal s1 Z.zero then lo1 else lo2)
+      else Z.erem (Z.add lo1 (Z.mul s1 (Z.mul u (Z.div delta g)))) step in
+    Some (base, step)
+
+let solve_point ~lower ~lo1 ~s1 ~lo2 ~s2 ~bound =
+  Option.bind (intersect_grids ~lo1 ~s1 ~lo2 ~s2) ~f:(fun (base, step) ->
+      let width = W.bitwidth bound in
+      let bound = W.to_z bound in
+      let x =
+        if Z.equal step Z.zero then base
+        else
+          let round = if lower then Z.cdiv else Z.fdiv in
+          Z.add base (Z.mul (round (Z.sub bound base) step) step) in
+      let limit = Z.shift_left Z.one width in
+      if Z.sign x < 0 || Z.compare x limit >= 0
+         || (if lower then Z.compare x bound < 0 else Z.compare x bound > 0)
+      then None
+      else
+        (* A period outside the target domain leaves only this singleton. *)
+        let step = if Z.compare step limit >= 0 then Z.zero else step in
+        Some (W.of_z x width, W.of_z step width))
 
 let solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound =
-  Option.bind (safe_lcm s1 s2) ~f:(fun step ->
-    Option.bind (bounded_diophantine s1 s2 (W.sub lo2 lo1)) ~f:(fun (u, _) ->
-      let x0 = W.add lo1 (W.mul u s1) in
-      let x =
-        if W.(<) x0 min_bound then
-          let diff = W.sub min_bound x0 in
-          let q = W.div diff step in
-          let r = W.modulo diff step in
-          let k = if W.is_zero r then q else W.succ q in
-          W.add x0 (W.mul k step)
-        else
-          let diff = W.sub x0 min_bound in
-          let q = W.div diff step in
-          W.sub x0 (W.mul q step)
-      in
-      if W.(<) x min_bound then None
-      else Some (x, step)))
+  solve_point ~lower:true ~lo1 ~s1 ~lo2 ~s2 ~bound:min_bound
 
 let solve_last_point_le ~lo1 ~s1 ~lo2 ~s2 ~max_bound =
-  Option.bind (safe_lcm s1 s2) ~f:(fun step ->
-    Option.bind (bounded_diophantine s1 s2 (W.sub lo2 lo1)) ~f:(fun (u, _) ->
-      let x0 = W.add lo1 (W.mul u s1) in
-      let x =
-        if W.(>) x0 max_bound then
-          let diff = W.sub x0 max_bound in
-          let q = W.div diff step in
-          let r = W.modulo diff step in
-          let k = if W.is_zero r then q else W.succ q in
-          W.sub x0 (W.mul k step)
-        else
-          let diff = W.sub max_bound x0 in
-          let q = W.div diff step in
-          W.add x0 (W.mul q step)
-      in
-      if W.(>) x max_bound then None
-      else Some (x, step)))
+  solve_point ~lower:false ~lo1 ~s1 ~lo2 ~s2 ~bound:max_bound
 
 let solve_grid_interval ~width ~lo1 ~s1 ~lo2 ~s2 ~min_bound ~max_bound : t =
   if W.(>) min_bound max_bound then bottom width
-  else if W.is_zero s1 && W.is_zero s2 then
-    if W.(=) lo1 lo2 && W.(>=) lo1 min_bound && W.(<=) lo1 max_bound then
-      create ~width lo1
-    else bottom width
-  else if W.is_zero s1 then
-    if W.(>=) lo1 min_bound && W.(<=) lo1 max_bound &&
-       W.is_zero (W.modulo (W.sub lo1 lo2) s2) then
-      create ~width lo1
-    else bottom width
-  else if W.is_zero s2 then
-    if W.(>=) lo2 min_bound && W.(<=) lo2 max_bound &&
-       W.is_zero (W.modulo (W.sub lo2 lo1) s1) then
-      create ~width lo2
-    else bottom width
   else
     match solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound with
-    | None -> bottom width
-    | Some (x, step) ->
-      if W.(>) x max_bound then bottom width
-      else
-        let diff_hi = W.sub max_bound x in
-        let rem = W.modulo diff_hi step in
-        let hi' = W.sub max_bound rem in
-        let cardn = cardn_from_bounds x step hi' in
-        create x ~step ~cardn
+    | Some (base, step) when W.(<=) base max_bound ->
+      create ~width base ~step ~cardn:(cardn_from_bounds base step max_bound)
+    | _ -> bottom width
 
 let solve_ascending_ascending ~width (p1 : t) (p2 : t) ~min_bound : t =
-  if W.is_zero p1.step then
-    (if elem p1.base p2 && W.(>=) p1.base min_bound then create ~width p1.base else bottom width)
-  else if W.is_zero p2.step then
-    (if elem p2.base p1 && W.(>=) p2.base min_bound then create ~width p2.base else bottom width)
-  else
-    match solve_first_point_ge ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound with
-    | None -> bottom width
-    | Some (x, step) -> create_ascending ~width ~base:x ~step
+  match solve_first_point_ge ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound with
+  | None -> bottom width
+  | Some (base, step) -> create_ascending ~width ~base ~step
 
 let solve_descending_descending ~width (p1 : t) (p2 : t) ~max_bound : t =
-  if W.is_zero p1.step then
-    (if elem p1.base p2 && W.(<=) p1.base max_bound then create ~width p1.base else bottom width)
-  else if W.is_zero p2.step then
-    (if elem p2.base p1 && W.(<=) p2.base max_bound then create ~width p2.base else bottom width)
-  else
-    match solve_last_point_le ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~max_bound with
-    | None -> bottom width
-    | Some (x, step) -> create_descending ~width ~base:x ~step
+  match solve_last_point_le ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~max_bound with
+  | None -> bottom width
+  | Some (base, step) -> create_descending ~width ~base ~step
 
 let solve_ascending_circular ~width (asc : t) (circ : t) : t =
-  if W.is_zero asc.step then
-    (if elem asc.base circ then create ~width asc.base else bottom width)
-  else if W.is_zero circ.step then bottom width
-  else
-    match solve_first_point_ge ~lo1:asc.base ~s1:asc.step ~lo2:circ.base ~s2:circ.step ~min_bound:asc.base with
-    | None -> bottom width
-    | Some (x, step) -> create_ascending ~width ~base:x ~step
+  solve_ascending_ascending ~width asc circ ~min_bound:asc.base
 
 let solve_descending_circular ~width (desc : t) (circ : t) : t =
-  if W.is_zero desc.step then
-    (if elem desc.base circ then create ~width desc.base else bottom width)
-  else if W.is_zero circ.step then bottom width
-  else
-    match solve_last_point_le ~lo1:desc.base ~s1:desc.step ~lo2:circ.base ~s2:circ.step ~max_bound:desc.base with
-    | None -> bottom width
-    | Some (x, step) -> create_descending ~width ~base:x ~step
+  solve_descending_descending ~width desc circ ~max_bound:desc.base
 
 (* Union; same width expected.  The finite arm's hull is MODULAR: the
    grid step divides both steps and every endpoint's modular distance
@@ -747,75 +716,11 @@ let rec union (p1 : t) (p2 : t) : t =
 
 let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   let width = bitwidth p1 in
-  let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
-  let translation = (base_of p1) in
-  let translated_p1 = translate p1 (W.neg (base_of p1)) in
-  let translated_p2 = translate p2 (W.neg (base_of p1)) in
-  let p1, p2 = translated_p1, translated_p2 in
-  if is_wrapped p2 then begin
-    (* The translated second operand wraps: its high arc [base, max]
-       and low arc [0, finite_end] meet the base-0 first operand
-       separately; the results join. *)
-    let max_w = W.ones width in
-    let s1 = step_of p1 and s2 = step_of p2 in
-    let e1 = Option.value (finite_end p1) ~default:(base_of p1) in
-    let e2 = Option.value (finite_end p2) ~default:(base_of p2) in
-    let lo1 = base_of p1 in
-    let high =
-      solve_grid_interval ~width ~lo1 ~s1 ~lo2:(base_of p2) ~s2
-        ~min_bound:(base_of p2) ~max_bound:(W.min e1 max_w) in
-    let k_wrap = W.succ (W.div (W.sub max_w (base_of p2)) s2) in
-    let low_base = W.add (base_of p2) (W.mul k_wrap s2) in
-    let low =
-      solve_grid_interval ~width ~lo1 ~s1 ~lo2:low_base ~s2
-        ~min_bound:low_base ~max_bound:(W.min e1 e2) in
-    translate (union high low) translation
-  end
-  else
-  let p1_infinite = is_infinite p1 in
-  let p2_infinite = is_infinite p2 in
-  let open Monads.Std.Monad.Option.Syntax in
-  (match begin
-    finite_end p1 >>= fun e1 ->
-    finite_end p2 >>= fun e2 ->
-      let step = W.lcm_exn (step_of p1) (step_of p2) in
-      if W.is_zero step then begin
-        (* Singleton case: exact or empty. *)
-        if W.is_zero (step_of p2) then
-          Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
-          !!(create (base_of p2))
-        else
-          Option.some_if (elem (base_of p1) p2) () >>= fun _ ->
-          !! (create (base_of p1))
-      end else begin
-        bounded_diophantine (step_of p1) (step_of p2) (base_of p2) >>= fun (x,_) ->
-        let base = W.mul x (step_of p1) in
-        let base =
-          if p2_infinite then base
-          else match min_elem p2 with
-            | None -> base
-            | Some m when W.(<) base m ->
-              let w1 = width + 1 in
-              let d = W.extract_exn ~hi:width (W.sub m base) in
-              let s = W.extract_exn ~hi:width step in
-              let q = W.div d s in
-              let r = W.modulo d s in
-              let k = if W.is_zero r then q else W.succ q in
-              let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
-              if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
-            | Some _ -> base in
-        let min_e = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
-        if W.(<=) base min_e then begin
-          let cardn = cardn_from_bounds base step min_e in
-          !!(create base ~step ~cardn)
-        end else begin
-          let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
-          !!safe_operand
-        end
-      end
-  end with
-  | None -> bottom width
-  | Some x -> x) |> (fun p -> translate p translation)
+  match min_elem p1, max_elem p1, min_elem p2, max_elem p2 with
+  | Some lo1, Some hi1, Some lo2, Some hi2 ->
+    solve_grid_interval ~width ~lo1 ~s1:(step_of p1) ~lo2 ~s2:(step_of p2)
+      ~min_bound:(W.max lo1 lo2) ~max_bound:(W.min hi1 hi2)
+  | _ -> bottom width
 
 (* Circular step-1 arc (start, length) of a finite CLP; None otherwise.
    [create] keeps step-1 shapes verbatim, so the arc is (base, cardn)
@@ -1113,6 +1018,7 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
 
 
 let pp ppf (p : t) =
+  let p = forward p in
   let width = bitwidth p in
   match finite_end p with
   | None -> Format.fprintf ppf "{}:%i" width

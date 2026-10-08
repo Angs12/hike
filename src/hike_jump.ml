@@ -22,41 +22,6 @@ let flag_vars (target : Theory.Target.t) : var list =
 
 let is_flag (flags : var list) (v : var) : bool = List.exists flags ~f:(Var.same v)
 
-(* An indirect transfer's destination blocks: the [Insn.Slot.dests]
-   facts on its instruction, the ones the discovery provides as it
-   resolves them.  The BIR carries no edge for them; a transfer with no
-   fact has none. *)
-let targets_of ?(file : string option) (sub : sub term) : jmp term -> tid list =
-  let by_addr =
-    Term.enum blk_t sub
-    |> Seq.filter_map ~f:(fun b ->
-        Option.map (Term.get_attr b address) ~f:(fun a -> (Bitvec.to_int64 (Word.to_bitvec a), Term.tid b)))
-    |> Seq.to_list |> Int64.Map.of_alist_reduce ~f:(fun a _ -> a) in
-  let dests ~file (a : addr) : int64 list =
-    let v : int64 list Toplevel.var = Toplevel.var "hike-jump-dests" in
-    Toplevel.put v
-      (let open KB.Syntax in
-       Theory.Label.for_addr ~package:file (Word.to_bitvec a) >>= fun label ->
-       KB.collect Theory.Semantics.slot label >>= fun sema ->
-       match KB.Value.get Insn.Slot.dests sema with
-       | None -> KB.return []
-       | Some ds ->
-         KB.List.filter_map (Core.Set.to_list ds) ~f:(fun d ->
-             KB.collect Theory.Label.addr d >>| Option.map ~f:Bitvec.to_int64));
-    Toplevel.get v in
-  match file with
-  | None -> fun _ -> []
-  | Some file ->
-    fun j ->
-      let indirect =
-        match Jmp.kind j with
-        | Goto (Indirect _) -> true
-        | Call c -> (match Call.target c with Indirect _ -> true | Direct _ -> false)
-        | _ -> false in
-      match Term.get_attr j address with
-      | Some a when indirect -> List.filter_map (dests ~file a) ~f:(Core.Map.find by_addr)
-      | _ -> []
-
 let acceptable (flags : var list) (e : exp) : bool =
   (not (B.has_unknown e))
   && not (Core.Set.exists (Exp.free_vars e) ~f:(is_flag flags))
@@ -81,11 +46,10 @@ let uses_of ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
    rewritten before the jump, is bound to a fresh 1-bit def at its own
    position — the VSA tags the def, and the tag licenses the emitter's
    frame addressing. *)
-let compile_sub ?(file : string option) (target : Theory.Target.t) (sub : sub term) :
-    sub term =
+let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
   let abi = Hike_abi.of_target target in
   let flags = flag_vars target in
-  let g = B.graph_of_sub ~targets:(targets_of ?file sub) sub in
+  let g = B.graph_of_sub sub in
   let plans =
     Term.enum blk_t sub
     |> Seq.concat_map ~f:(fun b ->

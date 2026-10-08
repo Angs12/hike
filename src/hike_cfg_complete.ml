@@ -230,13 +230,34 @@ let dispatch_words ~(denote : denote) ~(graph : Hike_backsubst.graph)
     Base.Option.map (case_words ~denote ~block_addrs ~last_defs ~blk texp)
       ~f:(fun words -> { words; base })
 
+(* A dispatch arm: a direct goto, guarded by its indirect transfer's
+   target equalling one destination word, placed before that transfer in
+   its block.  The tag is the word: the guard compares model addresses
+   until [Split_blocks.materialize] rewrites it relocation-safe. *)
+let arm_tag : int64 Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-dispatch-arm"
+    ~uuid:"2a9e6c1d-4b7f-4e03-8d52-91c6f0a3b7e8"
+    (module Core.Int64)
+
+let arm_word (j : jmp term) : int64 option = Term.get_attr j arm_tag
+
 (* The case blocks of a complete dispatch: every word names an in-sub
    block, or the series would drop live cases. *)
 let resolved_cases ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) (texp : exp) : tid list option =
+  (* An armed word's edge is its arm, entered under its guard. *)
+  let armed =
+    Term.enum jmp_t blk |> Seq.filter_map ~f:arm_word |> Seq.to_list
+    |> Core.Int64.Set.of_list
+  in
   Base.Option.bind (case_words ~denote ~block_addrs ~last_defs ~blk texp)
     ~f:(fun words ->
+      let words =
+        Base.List.filter words ~f:(fun w ->
+            not (Base.Option.value_map (Cbat_word.to_int64_opt w) ~default:false
+                   ~f:(Core.Set.mem armed)))
+      in
       let cases =
         Base.List.filter_map words ~f:(fun w ->
             match Core.Map.find block_addrs (Cbat_word.to_word w) with
@@ -258,6 +279,50 @@ let guard_of (j : jmp term) : exp option =
 
 let and_guard (guard : exp option) (cond : exp) : exp =
   Base.Option.fold guard ~init:cond ~f:(fun cond g -> Bil.BinOp (Bil.AND, g, cond))
+
+(* The target of a transfer an arm can stand in for: an indirect goto,
+   or the noreturn call that renders an indirect tail jump. *)
+let jump_target (j : jmp term) : exp option =
+  match Jmp.kind j with
+  | Goto (Indirect e) -> Some e
+  | Call c when Option.is_none (Call.return c) -> (
+    match Call.target c with Indirect e -> Some e | Direct _ -> None)
+  | _ -> None
+
+(* Each indirect transfer gains one arm per destination word ([dests])
+   naming the start of one of [sub]'s blocks; the transfer stays after
+   them as the fallback for every word no arm tests.  The BIR then
+   carries every resolved edge, and each case block is entered under
+   its own guard.  An armed jump is a goto: its noreturn-call rendering
+   would leave the block's goto series, and a word naming a sub is the
+   tail call [Split_blocks.materialize] makes of it. *)
+let arm_dispatches ~(dests : jmp term -> int64 list) (sub : sub term) : sub term =
+  let starts =
+    Term.enum blk_t sub
+    |> Seq.filter_map ~f:(fun b ->
+        Base.Option.map (Term.get_attr b address) ~f:(fun a ->
+            (Word.to_int64_exn a, Term.tid b)))
+    |> Seq.to_list
+    |> Core.Int64.Map.of_alist_reduce ~f:(fun a _ -> a)
+  in
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.concat_map jmp_t blk ~f:(fun j ->
+          match jump_target j with
+          | Some e -> (
+            match Type.infer e with
+            | Ok (Type.Imm bits) ->
+            let arms =
+              Base.List.filter_map (dests j) ~f:(fun w ->
+                  Base.Option.map (Core.Map.find starts w) ~f:(fun t ->
+                      let test =
+                        Bil.BinOp (Bil.EQ, e, Bil.Int (Word.of_int64 ~width:bits w)) in
+                      Jmp.create ~cond:(and_guard (guard_of j) test) (Goto (Direct t))
+                      |> fun a -> Term.set_attr a arm_tag w))
+              in
+              if Base.List.is_empty arms then [ j ]
+              else arms @ [ Jmp.with_kind j (Goto (Indirect e)) ]
+            | _ -> [ j ])
+          | None -> [ j ]))
 
 (* The return epilogue's replacement: the canonical direct return edge. *)
 let ret_jmp : jmp term = Hike_return.create ()

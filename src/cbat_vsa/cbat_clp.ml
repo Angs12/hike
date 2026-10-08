@@ -29,6 +29,7 @@ let modulo = Cbat_clp_arith.modulo
 let smodulo = Cbat_clp_arith.smodulo
 let neg = Cbat_clp_arith.neg
 let logand = Cbat_clp_arith.logand
+let split_at_n = Cbat_clp_arith.split_at_n
 let logor = Cbat_clp_arith.logor
 let logxor = Cbat_clp_arith.logxor
 let lshift = Cbat_clp_arith.lshift
@@ -660,8 +661,8 @@ module Pieces = struct
   let translate (ps : t) (delta : Cbat_word.t) : t =
     normalize (List.map ps ~f:(fun p -> C.translate p delta))
 
-  (* Positional widening: sorted pairs, excess hulled into the last pair,
-     a top pair collapsing the whole list. *)
+  (* Hull excess pieces into their side's last pair before widening, so
+     growth in an excess piece is extrapolated too. *)
   let positional (f : progression -> progression -> progression) (a : t)
       (b : t) : t =
     match a, b with
@@ -674,26 +675,18 @@ module Pieces = struct
       let top_hit = Stdlib.ref false in
       let out = Stdlib.ref [] in
       for i = 0 to n - 1 do
-        let w = f aa.(i) ba.(i) in
+        let tail arr =
+          let p = Stdlib.ref arr.(i) in
+          if i = n - 1 then
+            for j = n to Stdlib.Array.length arr - 1 do
+              p := coalesce !p arr.(j)
+            done;
+          !p in
+        let w = f (tail aa) (tail ba) in
         if C.is_top w then top_hit := true else out := w :: !out
       done;
       if !top_hit then [ C.top (width_of b) ]
-      else begin
-        let out = List.rev !out in
-        let excess =
-          if List.length a > n then List.drop a n
-          else if List.length b > n then List.drop b n
-          else []
-        in
-        let out =
-          match List.rev out, excess with
-          | _, [] -> out
-          | last :: rev_rest, _ ->
-            List.rev (List.fold excess ~init:last ~f:coalesce :: rev_rest)
-          | [], _ -> excess
-        in
-        normalize out
-      end
+      else normalize (List.rev !out)
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b

@@ -18,9 +18,7 @@ val simplify : exp -> exp
     ends a walk, as does the entry block. *)
 type graph
 
-(** [targets] names an indirect jump's known destination blocks (none by
-    default): the BIR carries no edge for them. *)
-val graph_of_sub : ?targets:(jmp term -> tid list) -> sub term -> graph
+val graph_of_sub : sub term -> graph
 
 (** The exp's value read at one position: before [at] in [blk], or at
     the block's end with no [at] (the start).  [hops] counts the blocks

@@ -825,6 +825,54 @@ let bounded_cell_key (ws : wordset) : Mem.Key.t list =
   if WordSet.is_top ws || WordSet.is_infinite ws then []
   else Mem.Key.of_wordset ws
 
+(* The load's address pre-image: the addresses whose read can produce a
+   value in [produced].  Only known memory — a stored cell or a section
+   image — excludes an address: a range covering neither reads top and
+   stays whole; a covered range halves down to single addresses, each
+   read by the forward load and dropped iff its value, on the
+   constraint's own origin, misses [produced].  [None] when nothing is
+   excluded, or everything is (the leaf rule's identity). *)
+let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
+    ~(endian : endian) ~(size : Size.t) (produced : wordset) : wordset option =
+  let bits = Size.in_bits size in
+  match mem, denote_imm_exp addr env with
+  | Bil.Var m, Ok aws
+    when bits mod 8 = 0 && WordSet.bitwidth produced = bits
+         && not (WordSet.is_top aws || WordSet.is_infinite aws || WordSet.is_bottom aws) -> (
+    match Var.typ m with
+    | Type.Mem (addr_i, addressable_size) ->
+      let mv = AI.find_memory (mem_idx addr_i addressable_size) env m in
+      if Mem.is_bottom mv then None
+      else
+        let nb = bits / 8 in
+        let decide line p =
+          match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
+          | Some lo, Some hi ->
+            let last = Cbat_word.add hi (Cbat_word.of_int ~width:(Cbat_word.bitwidth hi) (nb - 1)) in
+            let image =
+              (match line with Hike_origin.Abs -> true | _ -> false)
+              && (match Cbat_word.to_int64_opt lo, Cbat_word.to_int64_opt last with
+                  | Some l, Some h -> image_overlaps ~lo:l ~hi:h
+                  | _ -> true) in
+            if Cbat_word.(<) last hi then `Keep
+            else if not (image || Mem.has_cell_in mv ~origin:line ~lo ~hi:last) then `Keep
+            else if Cbat_word.is_one (Cbat_clp.cardinality p) then
+              let one =
+                match line with
+                | Hike_origin.Stack -> WordSet.stack_word p
+                | _ -> WordSet.of_clp p in
+              let v = load_value ~addr:one ~endian ~bits mv in
+              if Option.equal Hike_origin.equal (WordSet.origin v) (WordSet.origin produced)
+                 && Cbat_word.is_zero (WordSet.cardinality (WordSet.meet v produced))
+              then `Drop
+              else `Keep
+            else `Split
+          | _ -> `Keep in
+        let kept = WordSet.filter_addresses aws ~decide in
+        if WordSet.is_bottom kept || WordSet.equal kept aws then None else Some kept
+    | Type.Imm _ | Type.Unk -> None)
+  | _ -> None
+
 let rec constrain_operands ~(env : AI.t)
     ?(cells : pending list ref = ref [])
     ?(nonneg : exp -> bool = fun _ -> false)
@@ -893,6 +941,7 @@ let rec constrain_operands ~(env : AI.t)
      | Ok _ | Error _ -> env)
   | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
   | Bil.Load (m, a, en, s) ->
+    let addr_cstr = load_address_constraint ~env ~mem:m ~addr:a ~endian:en ~size:s produced in
     (* The cell fact meets the env's memory and threads to the store
        that wrote it; the entry carries the touched byte range (the
        address denotation expanded by the read size) and the read's
@@ -913,7 +962,8 @@ let rec constrain_operands ~(env : AI.t)
                      :: !cells)
         | Error _ -> ())
      | _ -> ());
-    env
+    Option.value_map addr_cstr ~default:env
+      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
   | Bil.Store (m, a, u, en, s) ->
     (* The store consumes the first pending entry whose range it
        overwrites: the constraint speaks about the store's data or

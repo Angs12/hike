@@ -1017,6 +1017,53 @@ let address_pieces (t : t) : (Origin.t * P.t) option =
   | FinSet s -> Some (Origin.Abs, pieces_of_finset s)
   | Many _ -> None
 
+(* A finite non-wrapped progression split at its value midpoint; a
+   singleton has no halves. *)
+let halves (p : clp) : (clp * clp) option =
+  match Clp.min_elem p, Clp.max_elem p with
+  | Some lo, Some hi when Cbat_word.(<) lo hi ->
+    let one = Cbat_word.one (Cbat_word.bitwidth lo) in
+    Some (Clp.split_at_n p (Cbat_word.add lo (Cbat_word.rshift (Cbat_word.sub hi lo) one)))
+  | _ -> None
+
+(* The elements of [t] [decide] keeps, bisected per progression on its
+   memory key line: [decide line p] keeps or drops a whole
+   sub-progression [p], or splits it; a singleton never splits, and an
+   undecided one stays.  The origin is kept.  An unbounded piece, a
+   frame-relative VLA value and a mixed-origin value are kept whole. *)
+let filter_addresses (t : t)
+    ~(decide : Origin.t -> clp -> [ `Keep | `Drop | `Split ]) : t =
+  let rec bisect line acc (p : clp) =
+    match decide line p with
+    | `Keep -> p :: acc
+    | `Drop -> acc
+    | `Split ->
+      (match halves p with
+       | Some (a, b) -> bisect line (bisect line acc a) b
+       | None -> p :: acc) in
+  let filter line (ps : P.t) : P.t option =
+    let progs = P.to_list ps in
+    if List.exists progs ~f:Clp.is_infinite then None
+    else
+      let kept =
+        List.fold progs ~init:[] ~f:(fun acc p ->
+            List.fold (Clp.split_wrapped p) ~init:acc ~f:(bisect line)) in
+      Some (List.fold kept ~init:(P.bottom (P.bitwidth ps))
+              ~f:(fun acc p -> P.join acc (P.of_progression p))) in
+  match t with
+  | Rel (Origin.Vla _, _) | Many _ -> t
+  | Rel (o, ps) ->
+    Option.value_map (filter (key_line o) ps) ~default:t ~f:(fun ps -> Rel (o, ps))
+  | Clp ps ->
+    Option.value_map (filter Origin.Abs ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
+  | FinSet s ->
+    let width = FinSet.bitwidth s in
+    of_list ~width
+      (List.filter (FinSet.iter s) ~f:(fun w ->
+           match decide Origin.Abs (Clp.singleton w) with
+           | `Drop -> false
+           | `Keep | `Split -> true))
+
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)
 let stride (t : t) : int =

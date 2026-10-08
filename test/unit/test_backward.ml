@@ -1776,6 +1776,38 @@ let tests : unit Alcotest.test list =
                 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
         in
         check "BK-103" (Ws.elem (w32 50) (cell_at m (v64 "RBP") out)));
+
+    pin "BK-104"
+      "a guard on a loaded value narrows the load's address to the slots \
+       whose contents can produce it: x = table[i] with table = [20, 10, \
+       20, 30] and x = 20 keep i's slots 0 and 2, so i is bounded by 2"
+      (fun () ->
+        let m = memv "w104_m" in
+        let i = v64 "w104_i" and x = wr_v32 "w104_x" and zf = v1 "w104_zf" in
+        let le32 n =
+          String.init 4 (fun k -> Char.chr ((n lsr (8 * k)) land 0xff)) in
+        let img_bytes = Bytes.of_string (String.concat "" (List.map le32 [ 20; 10; 20; 30 ])) in
+        let images =
+          [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x400FL; img_bytes;
+              img_slots = Core.Int64.Set.empty } ] in
+        let out =
+          Vsa.with_images images (fun () ->
+              wr_refine "w104" m zf
+                [ Def.create i
+                    (Bil.BinOp (Bil.AND, Bil.Var (v64 "RDI"), Bil.Int (Cbat_word.to_word (w64 3))));
+                  Def.create x
+                    (Bil.Load
+                       ( Bil.Var m,
+                         Bil.BinOp
+                           ( Bil.PLUS, Bil.Int (Cbat_word.to_word (w64 0x4000)),
+                             Bil.BinOp (Bil.LSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 2))) ),
+                         LittleEndian, `r32 ));
+                  Def.create zf
+                    (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 20)))) ])
+        in
+        let iv = AI.find_word 64 out (Var.base i) in
+        check "BK-104.kept" (Ws.elem (w64 0) iv && Ws.elem (w64 2) iv);
+        check "BK-104.dropped" (not (Ws.elem (w64 3) iv)));
   ]
 
 let () = run "backward" tests
