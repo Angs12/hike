@@ -11,7 +11,8 @@
   hike_stack_model
   hike_stack_ptr
   hike_synth_addr
-  hike_transfer)
+  hike_transfer
+  hike_variadic)
  (libraries
   bap
   bap-core-theory

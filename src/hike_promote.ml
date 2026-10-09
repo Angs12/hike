@@ -203,13 +203,6 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     ~(vla_tids : Tid.Set.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
-  (* A fixed-signature sub (@main, an emittable intrinsic) carries a
-     convention of its own, never the ABI's, so it is not a variadic
-     definition however its body is built. *)
-  let variadic =
-    (not callee_exempt)
-    && Model.is_variadic_construction ~abi ~entry ~denote sub
-  in
   let tree =
     Core.Map.find ctx.sub_trees (Term.tid sub)
     |> Core.Option.value ~default:Sections.Tree.empty
@@ -296,8 +289,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     if Core.Set.is_empty window_values then layout
     else { layout with Hike_stack_model.window_param = true }
   in
-  let sub = Hike_stack_model.set_layout layout sub in
-  if variadic then Hike_stack_model.set_variadic sub else sub
+  Hike_stack_model.set_layout layout sub
 
 (* The program driver: per-sub sites and resolution, the rewrite. *)
 let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)

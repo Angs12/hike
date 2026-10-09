@@ -146,6 +146,10 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
         Core.Map.find acc (Term.tid sub)
         |> Base.Option.value_map ~default:sub ~f:snd)
   in
+  let prog =
+    Hike.Variadic.stamp ~abi:facts.abi ~entry:Hike.Stack_model.segment_base
+      ~denote:facts.denote prog
+  in
   let result =
     Hike.Attribution.run ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
       ~spans ~meta:[] ~tls:None ~relative:[] ~externals:[] prog

@@ -20,6 +20,7 @@ module Split_blocks = Hike_split_blocks
 module Coerce = Hike_coerce
 module Fp = Hike_fp
 module Stack_model = Hike_stack_model
+module Variadic = Hike_variadic
 module Def_slots = Hike_def_slots
 module Sections = Hike_sections
 module Image = Hike_image
@@ -634,6 +635,14 @@ let pass_attrib proj =
   Hike_kb.install result.facts;
   Project.with_program proj result.program
 
+(* The variadic stamp reads the analysis denotation on the filtered
+   program, before attribution rewrites its blocks. *)
+let pass_variadic proj =
+  let facts = Hike_kb.facts () in
+  Project.map_program proj
+    ~f:(Hike_variadic.stamp ~abi:facts.abi ~entry:Hike_stack_model.segment_base
+          ~denote:facts.denote)
+
 let pass_convlir ~output proj = convert_binary output proj
 
 let pass_split_blocks proj =
@@ -652,7 +661,8 @@ let () =
       let discover = chain ~name:"discover" ~deps:[] pass_discover in
       let vsa = chain ~name:"vsa" ~deps:[ discover ] pass_vsa in
       let filter = chain ~name:"filter" ~deps:[ vsa ] pass_filter in
-      let sections = chain ~name:"sections" ~deps:[ filter ] pass_attrib in
+      let variadic = chain ~name:"variadic" ~deps:[ filter ] pass_variadic in
+      let sections = chain ~name:"sections" ~deps:[ variadic ] pass_attrib in
       let split_blocks =
         chain ~name:"split-blocks" ~deps:[ sections ] pass_split_blocks
       in

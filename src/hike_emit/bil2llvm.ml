@@ -543,7 +543,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           create_fun_declaration ctx tid
         else
           create_fun ctx tid ~rets:(get_rets ctx tid) ~args:(get_args ctx tid)
-            ~variadic:(Hike_stack_model.is_variadic sub))
+            ~variadic:(Hike_variadic.is_variadic sub))
   in
   let thunk_phase () =
     Base.List.iter subs_list ~f:(fun sub ->

@@ -64,7 +64,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       Term.enum sub_t program
       |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc sub ->
              let reads_window =
-               Hike_stack_model.is_variadic sub
+               Hike_variadic.is_variadic sub
                || Base.Option.value_map
                     (Core.Map.find sections.sub_trees (Term.tid sub))
                     ~default:false ~f:(fun tree ->

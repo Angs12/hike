@@ -55,6 +55,10 @@ module Fp = Hike_fp
     vocabulary: the producer/emitter contract point. *)
 module Stack_model = Hike_stack_model
 
+(** The variadic pass: the lifted va_list construction stamps a sub as
+    a real LLVM variadic definition. *)
+module Variadic = Hike_variadic
+
 (** The def-carried KB value slots: the producer stamps each def's
     value, the emitter reads the tags off the term. *)
 module Def_slots = Hike_def_slots

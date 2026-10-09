@@ -1025,14 +1025,14 @@ let tests : unit Alcotest.test list =
     pin "PR-37" "the va_list construction stamps the sub variadic"
       (fun () ->
         let sub' = rewrite_one (rw_variadic ~overflow:true ()) in
-        check "PR-37a" (Cu.is_variadic sub');
+        check "PR-37a" (Hike.Variadic.is_variadic sub');
         check_ir "PR-37b" ", ...)" (emit_ir [ sub' ]));
 
     (* PR-38: the same registers spilled into the frame with no
        overflow pointer are not the va_list construction. *)
     pin "PR-38" "the register spills alone are not variadic" (fun () ->
         let sub' = rewrite_one (rw_variadic ~overflow:false ()) in
-        check "PR-38" (not (Cu.is_variadic sub')))
+        check "PR-38" (not (Hike.Variadic.is_variadic sub')))
   ]
 
 let () = run "promote" tests
