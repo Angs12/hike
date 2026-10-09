@@ -4,8 +4,13 @@
 
 open Bap.Std
 
-type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
-               | FCONVERT of int | FORDER | FHLT | ISNAN
+(* A float-to-integer conversion's rounding, as the lifter names it:
+   [rne] for the rounding conversions, [rtz] for the truncating ones. *)
+type rounding = Rne | Rtz
+
+type native_fp = FMUL | FADD | FSUB | FDIV | FREM
+               | SFLOAT of int | SINT of rounding * int
+               | FCONVERT of int | FORDER | FHLT | ISNAN | FSQRT
 
 let fp_intrinsic_name = Hike_abi.strip_at
 
@@ -13,6 +18,21 @@ let fp_intrinsic_name = Hike_abi.strip_at
    ([intrinsic:x0]) for a single- AND a double-precision operand, and
    BAP's var identity is type-blind, so the width must be in the name.
    [hike-fp] qualifies every occurrence. *)
+
+(* The integer conversions: the lifter's suffix is the RESULT width (the
+   constructor's argument); [hike-fp] appends the operand width, which
+   is independent of the result's. *)
+let conversion_rows : (string * native_fp * int option) list =
+  Base.List.concat_map
+    [ ("cast_sfloat_rne", fun r -> SFLOAT r);
+      ("cast_sint_rne", fun r -> SINT (Rne, r));
+      ("cast_sint_rtz", fun r -> SINT (Rtz, r)) ]
+    ~f:(fun (stem, op) ->
+        Base.List.concat_map [ 64; 32 ] ~f:(fun res ->
+            let name = Printf.sprintf "intrinsic:%s_ieee754_binary_%d" stem res in
+            (name, op res, None)
+            :: Base.List.map [ 64; 32 ] ~f:(fun w ->
+                (Printf.sprintf "%s_%d" name w, op res, Some w))))
 
 (* One row per mapped intrinsic name, with the operand width it names.
    The unsized spellings ([_binary]) carry none: the lifter picks the
@@ -37,10 +57,6 @@ let native_fp_table : (string * native_fp * int option) list =
     ("intrinsic:is_nan_rne_ieee754_binary_32", ISNAN, Some 32);
     ("intrinsic:is_nan_ieee754_binary_64", ISNAN, Some 64);
     ("intrinsic:is_nan_ieee754_binary_32", ISNAN, Some 32);
-    ("intrinsic:cast_sfloat_rne_ieee754_binary_64", SFLOAT, Some 64);
-    ("intrinsic:cast_sfloat_rne_ieee754_binary_32", SFLOAT, Some 32);
-    ("intrinsic:cast_sint_rne_ieee754_binary_64", SINT, Some 64);
-    ("intrinsic:cast_sint_rne_ieee754_binary_32", SINT, Some 32);
     (* Exact width conversions: the suffix is the result width. *)
     ("intrinsic:fconvert_rne_ieee754_binary_64", FCONVERT 64, Some 64);
     ("intrinsic:fconvert_rne_ieee754_binary_32", FCONVERT 32, Some 32);
@@ -52,10 +68,14 @@ let native_fp_table : (string * native_fp * int option) list =
     ("intrinsic:fdiv_rne_ieee754_binary", FDIV, None);
     ("intrinsic:frem_rne_ieee754_binary", FREM, None);
     ("intrinsic:forder_rne_ieee754_binary", FORDER, None);
+    ("intrinsic:fsqrt_rne_ieee754_binary_64", FSQRT, Some 64);
+    ("intrinsic:fsqrt_rne_ieee754_binary_32", FSQRT, Some 32);
+    ("intrinsic:fsqrt_rne_ieee754_binary", FSQRT, None);
     ("intrinsic:is_nan_rne_ieee754_binary", ISNAN, None);
     ("intrinsic:is_nan_ieee754_binary", ISNAN, None);
     ("intrinsic:forder_ieee754_binary", FORDER, None);
     ("intrinsic:hlt", FHLT, None) ]
+  @ conversion_rows
 
 (* The table as a hash map, built once: call dispatch consults it
    per call site per sub. *)
@@ -114,11 +134,17 @@ let fp_sig_of (op : native_fp) ~(w : int) : fp_sig =
   let x0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Input 0 in
   let y0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Output 0 in
   match op with
-  | FMUL | FADD | FSUB | FDIV | FREM | FORDER ->
+  | FMUL | FADD | FSUB | FDIV | FREM ->
     { fp_args = [ x0 w; Hike_synth.fp_lane ~addr_bits:w Hike_synth.Input 1 ];
       fp_rets = [ y0 w ] }
-  | SFLOAT | SINT | ISNAN ->
-    { fp_args = [ x0 w ]; fp_rets = [ y0 w ] }
+  (* The predicates answer one bit. *)
+  | FORDER ->
+    { fp_args = [ x0 w; Hike_synth.fp_lane ~addr_bits:w Hike_synth.Input 1 ];
+      fp_rets = [ y0 1 ] }
+  | ISNAN -> { fp_args = [ x0 w ]; fp_rets = [ y0 1 ] }
+  | FSQRT -> { fp_args = [ x0 w ]; fp_rets = [ y0 w ] }
+  | SFLOAT res_w | SINT (_, res_w) ->
+    { fp_args = [ x0 w ]; fp_rets = [ y0 res_w ] }
   | FCONVERT res_w ->
     { fp_args = [ x0 (conv_in_w op) ];
       fp_rets = [ y0 res_w ] }

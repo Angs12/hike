@@ -30,6 +30,38 @@ let bitcast_to_fp llvm_builder v fp_ty =
 
 
 
+(* x86's float-to-integer conversion: [rne] rounds to nearest-even
+   first, [rtz] truncates; an unordered or out-of-range source answers
+   the integer indefinite (the most negative value), where LLVM's
+   [fptosi] would be poison. *)
+let build_fp_to_int ctx llvm_builder (rnd : rounding) (xf : Llvm.llvalue)
+    ~(src_w : int) ~(res_w : int) : Llvm.llvalue =
+  let llvm_ctx = ctx.llvm_ctx in
+  let fp_ty, _ = fp_ty_of llvm_ctx src_w in
+  let xf =
+    match rnd with
+    | Rtz -> xf
+    | Rne ->
+      let fty = Llvm.function_type fp_ty [| fp_ty |] in
+      let name = if src_w <= 32 then "llvm.roundeven.f32" else "llvm.roundeven.f64" in
+      let f = Llvm.declare_function name fty ctx.llvm_module in
+      Llvm.build_call fty f [| xf |] "" llvm_builder
+  in
+  let int_ty = Llvm.integer_type llvm_ctx res_w in
+  let bound = Float.ldexp 1.0 (res_w - 1) in
+  let lo = Llvm.const_float fp_ty (-. bound) in
+  let hi = Llvm.const_float fp_ty bound in
+  let in_range =
+    Llvm.build_and
+      (Llvm.build_fcmp Llvm.Fcmp.Oge xf lo "" llvm_builder)
+      (Llvm.build_fcmp Llvm.Fcmp.Olt xf hi "" llvm_builder)
+      "" llvm_builder
+  in
+  let i = Llvm.build_fptosi xf int_ty "" llvm_builder in
+  let indefinite =
+    Llvm.const_of_int64 int_ty (Int64.shift_left 1L (res_w - 1)) true in
+  Llvm.build_select in_range i indefinite "" llvm_builder
+
 let build_fp_binop ctx llvm_builder op a b ~(w : int) =
   let fp_ty, ret_ty = fp_ty_of ctx.llvm_ctx w in
   let da = bitcast_to_fp llvm_builder a fp_ty in
@@ -71,8 +103,8 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
   | FHLT ->
       (* Halt traps without binding results or emitting fallthrough. *)
       create_interrupt ctx llvm_builder
-  | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FCONVERT _ | FORDER
-   | ISNAN ->
+  | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT _ | SINT _ | FCONVERT _ | FORDER
+   | ISNAN | FSQRT ->
   let llvm_ctx = ctx.llvm_ctx in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
@@ -104,20 +136,19 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
         let b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
         build_fp_binop ctx llvm_builder op a b ~w
-    | SFLOAT ->
+    | SFLOAT res_w ->
         (* [sitofp] converts at the operand's own LLVM type (the
            lifter's extract/cast chain built it). *)
         let x = Bil2llvm_ptr.as_integer ctx llvm_builder (arg_value 0) in
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let d = Llvm.build_sitofp x tgt_fp_ty "" llvm_builder in
         Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
-    | SINT ->
+    | SINT (rnd, res_w) ->
         let x = Bil2llvm_ptr.as_integer ctx llvm_builder (arg_value 0) in
         let src_w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
-        let _, res_lane_ty = fp_ty_of llvm_ctx res_w in
         let d = Llvm.build_bitcast x src_fp_ty "" llvm_builder in
-        Llvm.build_fptosi d res_lane_ty "" llvm_builder
+        build_fp_to_int ctx llvm_builder rnd d ~src_w ~res_w
     | FCONVERT res_w ->
         let x = arg_value 0 in
         let in_w = conv_in_w op in
@@ -145,7 +176,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
             (bitcast_to_fp llvm_builder b src_fp_ty)
             "" llvm_builder
         in
-        Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+        p
     | ISNAN ->
         let x = arg_value 0 in
         let w = int_width_or in_w x in
@@ -154,7 +185,19 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
         let p =
           Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
         in
-        Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+        p
+    | FSQRT ->
+        let x = arg_value 0 in
+        let w = int_width_or in_w x in
+        let fp_ty, lane_ty = fp_ty_of llvm_ctx w in
+        let fty = Llvm.function_type fp_ty [| fp_ty |] in
+        let name = if w <= 32 then "llvm.sqrt.f32" else "llvm.sqrt.f64" in
+        let f = Llvm.declare_function name fty ctx.llvm_module in
+        let d =
+          Llvm.build_call fty f [| bitcast_to_fp llvm_builder x fp_ty |] ""
+            llvm_builder
+        in
+        Llvm.build_bitcast d lane_ty "" llvm_builder
     | FHLT -> assert false
   in
   (* Ret temps bind their stamped version at the call block: the SSA

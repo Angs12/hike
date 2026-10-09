@@ -17,13 +17,14 @@ let op_ir_string = function
   | Bil2llvm_fp.FSUB -> "fsub"
   | Bil2llvm_fp.FDIV -> "fdiv"
   | Bil2llvm_fp.FREM -> "frem"
-  | Bil2llvm_fp.SFLOAT -> "sitofp"
-  | Bil2llvm_fp.SINT -> "fptosi"
+  | Bil2llvm_fp.SFLOAT _ -> "sitofp"
+  | Bil2llvm_fp.SINT _ -> "fptosi"
   | Bil2llvm_fp.FCONVERT 64 -> "fpext"
   | Bil2llvm_fp.FCONVERT _ -> "fptrunc"
   | Bil2llvm_fp.FORDER -> "fcmp olt"
   | Bil2llvm_fp.FHLT -> "unreachable"
   | Bil2llvm_fp.ISNAN -> "fcmp uno"
+  | Bil2llvm_fp.FSQRT -> "llvm.sqrt"
 
 let string_of_natfp = function
   | Bil2llvm_fp.FMUL -> "FMUL"
@@ -31,17 +32,19 @@ let string_of_natfp = function
   | Bil2llvm_fp.FSUB -> "FSUB"
   | Bil2llvm_fp.FDIV -> "FDIV"
   | Bil2llvm_fp.FREM -> "FREM"
-  | Bil2llvm_fp.SFLOAT -> "SFLOAT"
-  | Bil2llvm_fp.SINT -> "SINT"
+  | Bil2llvm_fp.SFLOAT w -> "SFLOAT " ^ string_of_int w
+  | Bil2llvm_fp.SINT (Bil2llvm_fp.Rne, w) -> "SINT rne " ^ string_of_int w
+  | Bil2llvm_fp.SINT (Bil2llvm_fp.Rtz, w) -> "SINT rtz " ^ string_of_int w
   | Bil2llvm_fp.FCONVERT 64 -> "FCONVERT 64"
   | Bil2llvm_fp.FCONVERT _ -> "FCONVERT 32"
   | Bil2llvm_fp.FORDER -> "FORDER"
   | Bil2llvm_fp.FHLT -> "FHLT"
   | Bil2llvm_fp.ISNAN -> "ISNAN"
+  | Bil2llvm_fp.FSQRT -> "FSQRT"
 
 (* Unary rows take one x-def, binary rows two. *)
 let fp_unary = function
-  | Bil2llvm_fp.SFLOAT | Bil2llvm_fp.SINT | Bil2llvm_fp.FCONVERT _ | Bil2llvm_fp.ISNAN | Bil2llvm_fp.FHLT -> true
+  | Bil2llvm_fp.SFLOAT _ | Bil2llvm_fp.SINT _ | Bil2llvm_fp.FCONVERT _ | Bil2llvm_fp.ISNAN | Bil2llvm_fp.FSQRT | Bil2llvm_fp.FHLT -> true
   | _ -> false
 
 (* One table row: the intrinsic maps to its constructor AND its native op is
@@ -102,11 +105,11 @@ let tests : unit Alcotest.test list =
     pin "FP-18" "forder_rne (unwidth'd) maps to FORDER and emits fcmp olt"
       (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary" Bil2llvm_fp.FORDER);
     pin "FP-19" "cast_sfloat_64 maps to SFLOAT and emits sitofp"
-      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_64" Bil2llvm_fp.SFLOAT);
+      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_64" (Bil2llvm_fp.SFLOAT 64));
     pin "FP-20" "cast_sint_64 maps to SINT and emits fptosi"
-      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_64" Bil2llvm_fp.SINT);
+      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_64" (Bil2llvm_fp.SINT (Bil2llvm_fp.Rne, 64)));
     pin "FP-21" "cast_sint_32 maps to SINT and emits fptosi"
-      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_32" Bil2llvm_fp.SINT);
+      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_32" (Bil2llvm_fp.SINT (Bil2llvm_fp.Rne, 32)));
     pin "FP-22" "fconvert_64 maps to FCONVERT 64 and emits fpext"
       (fun () -> fp_assert "intrinsic:fconvert_rne_ieee754_binary_64" (Bil2llvm_fp.FCONVERT 64));
     pin "FP-23" "fconvert_32 maps to FCONVERT 32 and emits fptrunc"
@@ -137,7 +140,7 @@ let tests : unit Alcotest.test list =
     pin "FP-39" "is_nan_ieee754_binary_32 maps to ISNAN and emits fcmp uno"
       (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_32" Bil2llvm_fp.ISNAN);
     pin "FP-40" "cast_sfloat_rne_ieee754_binary_32 maps to SFLOAT and emits sitofp"
-      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" Bil2llvm_fp.SFLOAT);
+      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" (Bil2llvm_fp.SFLOAT 32));
 
 
 
