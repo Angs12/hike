@@ -106,50 +106,6 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         let v = create_exp ctx scope llvm_builder blk_tid exp in
         Bil2llvm_ptr.as_integer ctx llvm_builder v)
 
-type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
-
-let fp_double_libm : string list =
-  [ "acos"; "acosh"; "asin"; "asinh"; "atan"; "atan2"; "atanh"; "cbrt";
-    "ceil"; "copysign"; "cos"; "cosh"; "drem"; "erf"; "erfc"; "exp";
-    "exp2"; "exp10"; "expm1"; "fabs"; "fdim"; "floor"; "fma"; "fmax";
-    "fmin"; "fmod"; "gamma"; "hypot"; "j0"; "j1"; "jn"; "ldexp";
-    "lgamma"; "log"; "log10"; "log1p"; "log2"; "logb"; "modf";
-    "nearbyint"; "nextafter"; "nexttoward"; "nextup"; "nextdown"; "pow";
-    "pow10"; "remainder"; "rint"; "round"; "scalb"; "scalbln"; "scalbn";
-    "significand"; "sin"; "sinh"; "sqrt"; "tan"; "tanh"; "tgamma";
-    "trunc"; "y0"; "y1"; "yn" ]
-
-let fp_double_parsing : string list = [ "atof"; "strtod"; "strtod_l" ]
-let fp_float_parsing : string list = [ "strtof"; "strtof_l" ]
-let fp_longdouble_parsing : string list = [ "strtold"; "strtold_l" ]
-
-let fp_double_libm_set = Base.Set.of_list (module Base.String) fp_double_libm
-let fp_double_parsing_set = Base.Set.of_list (module Base.String) fp_double_parsing
-let fp_float_parsing_set = Base.Set.of_list (module Base.String) fp_float_parsing
-let fp_longdouble_parsing_set = Base.Set.of_list (module Base.String) fp_longdouble_parsing
-let fp_double_direct_set = Base.Set.union fp_double_libm_set fp_double_parsing_set
-
-let fp_ret_kind_of_extern ctx (sub_tid : tid) : fp_ret_kind option =
-  if not (is_extern ctx sub_tid) then None
-  else
-    let name = strip_at (Tid.name sub_tid) in
-    if Base.Set.mem fp_double_direct_set name then Some FpDouble
-    else if Base.Set.mem fp_float_parsing_set name then Some FpFloat
-    else if Base.Set.mem fp_longdouble_parsing_set name then Some FpLongDouble
-    else if String.length name > 1 then
-      let last = name.[String.length name - 1] in
-      let base = String.sub name 0 (String.length name - 1) in
-      if last = 'f' && Base.Set.mem fp_double_libm_set base then Some FpFloat
-      else if last = 'l' && Base.Set.mem fp_double_libm_set base then
-        Some FpLongDouble
-      else None
-    else None
-
-let fp_lltype llvm_ctx = function
-  | FpFloat -> Llvm.float_type llvm_ctx
-  | FpDouble -> Llvm.double_type llvm_ctx
-  | FpLongDouble -> Llvm.x86fp80_type llvm_ctx
-
 let ret_type_of_rets ctx rets =
   match rets with
   | [] -> Llvm.void_type ctx.llvm_ctx
@@ -162,10 +118,7 @@ let register_fn ctx sub_tid fn fn_typ =
   ctx.ll_funcs :=
     Core.Map.add_exn !(ctx.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ)
 
-let create_ret_type ctx sub_tid =
-  match fp_ret_kind_of_extern ctx sub_tid with
-  | Some kind -> fp_lltype ctx.llvm_ctx kind
-  | None -> ret_type_of_rets ctx (get_rets ctx sub_tid)
+let create_ret_type ctx sub_tid = ret_type_of_rets ctx (get_rets ctx sub_tid)
 
 (* The LLVM types of one arg list: Both-intent args pass pointers, an
    extern's FP params lower to doubles, the rest keep the BIR type. *)
@@ -286,6 +239,15 @@ let get_func ctx tid =
 (* Binds the call result into the ret lanes: a single ret zeroext,
    multiple rets extract from the aggregate. *)
 let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
+  (* A vector return lane binds as the register's integer bits. *)
+  let bind_call_ret ctx scope blk_tid ret v =
+    let v =
+      if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Vector then
+        Llvm.build_bitcast v (var_lltype ctx (Arg.lhs ret)) "" llvm_builder
+      else v
+    in
+    bind_call_ret ctx scope blk_tid ret v
+  in
   match rets with
   | [] ->
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
@@ -344,40 +306,6 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
   in
   slots 0 []
 
-(* An extern float call's return lanes: RAX (and RDX for long
-   doubles) split the FP bits; RDX of float externs stays undef. *)
-let bind_extern_fp_rets ctx scope llvm_builder blk_tid fn_typ fn args rets
-    ~(first : Arg.t) ~(kind : fp_ret_kind) =
-  let ret_val = Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder in
-  let first_ret (v : Llvm.llvalue) = insert_local scope blk_tid (Arg.lhs first) v in
-  let second_ret (v : Llvm.llvalue) =
-    match rets with
-    | _ :: rd :: _ -> insert_local scope blk_tid (Arg.lhs rd) v
-    | _ -> ()
-  in
-  match kind with
-  | FpLongDouble ->
-    let bits =
-      Llvm.build_bitcast ret_val (Llvm.integer_type ctx.llvm_ctx 80) ""
-        llvm_builder
-    in
-    let rax = Llvm.build_trunc bits (ctx.i64_ty) "" llvm_builder in
-    let high =
-      Llvm.build_lshr bits
-        (Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 80) 64)
-        "" llvm_builder
-    in
-    let rdx = Llvm.build_trunc high (ctx.i64_ty) "" llvm_builder in
-    first_ret rax;
-    second_ret rdx
-  | FpFloat | FpDouble ->
-    let d =
-      Llvm.build_fpcast ret_val (Llvm.double_type ctx.llvm_ctx) "" llvm_builder
-    in
-    let i = Llvm.build_bitcast d (ctx.i64_ty) "" llvm_builder in
-    first_ret i;
-    second_ret (Llvm.undef (ctx.i64_ty))
-
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
   let args = create_call_args ctx scope blk_tid llvm_builder target in
@@ -388,11 +316,7 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
   in
   let rets = get_rets ctx target in
   let fn, fn_typ = get_func ctx target in
-  (match (fp_ret_kind_of_extern ctx target, rets) with
-  | Some kind, ret :: _ ->
-    bind_extern_fp_rets ctx scope llvm_builder blk_tid fn_typ fn args rets
-      ~first:ret ~kind
-  | _, rets -> bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets);
+  bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets;
   (match fallthrough with
   | Some fallthrough -> finish_call scope llvm_builder (Some fallthrough)
   | None -> if emit_unreachable then finish_call scope llvm_builder None)
@@ -599,9 +523,13 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
         in
         (* The ret lane's LLVM type drives: pointer lanes return the
            pointer, integer lanes the integer form. *)
-        match Llvm.classify_type (lane_type ctx ret) with
+        let ty = lane_type ctx ret in
+        match Llvm.classify_type ty with
         | Llvm.TypeKind.Pointer ->
             Bil2llvm_ptr.as_pointer ctx llvm_builder v
+        | Llvm.TypeKind.Vector ->
+            Llvm.build_bitcast (Bil2llvm_ptr.as_integer ctx llvm_builder v) ty ""
+              llvm_builder
         | _ -> Bil2llvm_ptr.as_integer ctx llvm_builder v)
   in
   match rets with

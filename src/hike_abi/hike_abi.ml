@@ -12,8 +12,7 @@ type t = {
   thread_pointer : var;          (* the TLS base register *)
   int_param_regs : var list;     (* SysV integer/pointer arg registers *)
   vector_param_regs : var list;  (* FP/vector arg registers (YMM0-7) *)
-  return_regs : var list;        (* integer return registers *)
-  vector_return_reg : var option; (* the FP return carrier (SysV: YMM0) *)
+  return_regs : var list;        (* return registers, integer and vector *)
   callee_saved : var list;       (* callee-saved GPRs (incl. RBP) *)
   caller_saved_gprs : var list;  (* GPRs a call may clobber (SysV) *)
   variadic_count_reg : var option; (* the lane carrying the vector-register
@@ -45,8 +44,7 @@ let x86_64_sysv : t =
       Base.List.map ~f:r256
         (Base.List.map ~f:(fun i -> "YMM" ^ Base.Int.to_string i)
            (Base.List.range 0 8));
-    return_regs = [ rax; r64 "RDX" ];
-    vector_return_reg = Some (r256 "YMM0");
+    return_regs = [ rax; r64 "RDX"; r256 "YMM0" ];
     callee_saved = Base.List.map ~f:r64 [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ];
     caller_saved_gprs =
       Base.List.map ~f:r64
@@ -161,7 +159,6 @@ let of_target (target : Theory.Target.t) : t =
       int_param_regs = x86_64_sysv.int_param_regs;
       vector_param_regs = x86_64_sysv.vector_param_regs;
       return_regs = x86_64_sysv.return_regs;
-      vector_return_reg = x86_64_sysv.vector_return_reg;
       callee_saved = x86_64_sysv.callee_saved;
       caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
       variadic_count_reg = x86_64_sysv.variadic_count_reg;

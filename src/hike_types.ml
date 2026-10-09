@@ -39,13 +39,7 @@ let compute_sub_sig ~(free_vars : var list)
        target answers no returns. *)
     let carriers =
       if not (Abi.is_primary_target target) then []
-      else if
-        Model.fixed_signature sub
-        || Model.is_declared sub
-      then abi.Abi.return_regs
-      else
-        abi.Abi.return_regs
-        @ Base.Option.to_list abi.Abi.vector_return_reg
+      else abi.Abi.return_regs
     in
     Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in

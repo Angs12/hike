@@ -669,11 +669,7 @@ let tests : unit Alcotest.test list =
         check "MOD-41 returns include implicit ABI reads"
           (Core.Set.equal (Model.jmp_reads ~abi ret)
              (Core.Set.of_list (module Var)
-                (abi.Abi.return_regs
-                 @ (match abi.Abi.vector_return_reg with
-                    | Some v -> [ v ]
-                    | None -> [])
-                 @ [ abi.Abi.sp ])));
+                (abi.Abi.return_regs @ [ abi.Abi.sp ])));
         check "MOD-41 block uses respect local definitions"
           (Core.Set.equal (Model.blk_free_vars block)
              (Var.Set.singleton rax)));

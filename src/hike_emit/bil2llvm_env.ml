@@ -356,11 +356,18 @@ let synthetic_rets ctx =
   reg_args ~intent:Out ctx.abi.Abi.return_regs
 
 (* One signature lane's LLVM type: the pointer-tagged lanes pass
-   pointers, the rest keep the BIR type. *)
+   pointers, a return lane wider than a word (the vector carrier) is a
+   vector of words so the machine returns it in the vector register, the
+   rest keep the BIR type. *)
 let lane_type ctx (a : Arg.t) : Llvm.lltype =
   if Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a then
     ctx.ptr_ty
-  else var_lltype ctx (Arg.lhs a)
+  else
+    match Arg.intent a, Var.typ (Arg.lhs a) with
+    | Some Out, Type.Imm w when w > ctx.addr_bits ->
+      Llvm.vector_type (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
+        (w / ctx.addr_bits)
+    | _ -> var_lltype ctx (Arg.lhs a)
 
 let get_args ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
