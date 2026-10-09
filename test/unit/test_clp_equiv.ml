@@ -921,14 +921,22 @@ let run_sweep () : int * int * int =
 
     (* translate *)
     let w_16 = CW.of_int ~width:w64 16 in
+    (* Ascending[8, ..] + 16 carries its top two elements across the
+       word boundary to 0 and 8. *)
     let trans_asc = Ws.Clp.translate asc w_16 in
     incr checked;
-    if not (Ws.Clp.is_ascending trans_asc) then
-      bad "TICKET03 translate: non-wrapping translate on Ascending should remain Ascending";
+    if not (Ws.Clp.elem (CW.zero w64) trans_asc
+            && Ws.Clp.elem w_8 trans_asc
+            && Ws.Clp.elem (CW.of_int ~width:w64 24) trans_asc) then
+      bad "TICKET03 translate: a wrapping Ascending translate keeps the carried elements";
+    let trans_down = Ws.Clp.translate asc_16 (CW.neg w_8) in
     incr checked;
-    (match Ws.Clp.min_elem trans_asc with
-     | Some m when CW.equal m (CW.of_int ~width:w64 24) -> ()
-     | _ -> bad "TICKET03 translate: base should be 24");
+    if not (Ws.Clp.is_ascending trans_down) then
+      bad "TICKET03 translate: an ordered translate on Ascending should remain Ascending";
+    incr checked;
+    (match Ws.Clp.min_elem trans_down with
+     | Some m when CW.equal m w_8 -> ()
+     | _ -> bad "TICKET03 translate: base should be 8");
 
     let trans_desc = Ws.Clp.translate desc w_16 in
     incr checked;

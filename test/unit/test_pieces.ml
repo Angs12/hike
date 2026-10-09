@@ -174,6 +174,38 @@ let tests : unit Alcotest.test list =
           (P.elem (w64 0) r && P.elem (w64 4096) r && P.elem (w64 8192) r
           && (not (P.is_top r)) && not (P.is_bottom r)));
 
+    pin "PCS-14"
+      "a directional translate contains every shifted element, including \
+       those carried across the word boundary"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let covers p i =
+          let t = Clp.translate p i in
+          List.for_all (fun x -> Clp.elem (Cbat_word.add x i) t) (Clp.iter p)
+        in
+        for base = 0 to 255 do
+          List.iter (fun step ->
+            let rays =
+              [ Clp.create_ascending ~width:8 ~base:(w8 base) ~step:(w8 step);
+                Clp.create_descending ~width:8 ~base:(w8 base) ~step:(w8 step) ]
+            in
+            List.iter (fun p ->
+              for k = 0 to 36 do
+                let i = w8 (k * 7) in
+                if not (covers p i) then
+                  Alcotest.failf "PCS-14.exhaustive: %s + %d"
+                    (Sexplib.Sexp.to_string (Clp.sexp_of_t p)) (k * 7)
+              done) rays)
+            [ 1; 2; 3; 5; 8; 16; 48 ]
+        done;
+        let full = Clp.create_descending ~width:64 ~base:(w64 (-8)) ~step:(w64 8) in
+        let shifted = Clp.add full (Clp.singleton (w64 8)) in
+        check "PCS-14.full"
+          (List.for_all (fun x -> Clp.elem (w64 x) shifted) [ 0; 8; -8; -16 ]);
+        let ray = Clp.create_ascending ~width:64 ~base:(w64 (-0x58)) ~step:(w64 8) in
+        let up = Clp.translate ray (w64 8) in
+        check "PCS-14.ray" (Clp.elem (w64 0) up && Clp.elem (w64 (-0x50)) up));
+
 
 
 

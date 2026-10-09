@@ -500,16 +500,20 @@ let translate (p : t) i : t =
     let new_base = W.add (base_of p) i in
     match p.dir with
     | Finite -> create ~width new_base ~step:(step_of p) ~cardn:(cardn_of p)
-    | Ascending ->
-      if W.(<) new_base (base_of p) && W.(>) i (W.zero width) then
-        infinite (new_base, step_of p)
-      else
-        create_ascending ~width ~base:new_base ~step:(step_of p)
-    | Descending ->
-      if W.(>) new_base (base_of p) && W.(<) new_base i then
-        infinite (new_base, step_of p)
-      else
-        create_descending ~width ~base:new_base ~step:(step_of p)
+    | Ascending | Descending -> (
+      (* A ray's image keeps its order unless the shift carries elements
+         across the word boundary.  An ordered image keeps the ray to the
+         same edge (a superset); a wrapped image is the exact progression. *)
+      let lo = W.add (base_of (forward p)) i in
+      match finite_end p with
+      | None -> p
+      | Some e ->
+        let hi = W.add e i in
+        if W.(<) hi lo then
+          create ~width lo ~step:(step_of p) ~cardn:(cardn_of p)
+        else if is_ascending p then
+          create_ascending ~width ~base:lo ~step:(step_of p)
+        else create_descending ~width ~base:hi ~step:(step_of p))
     | Circular ->
       infinite (new_base, step_of p)
 
