@@ -6,6 +6,7 @@ module Abi = Hike_abi
 
 (* Public re-exports; consumers use [Hike.Abi], etc. *)
 module Vsa = Hike_vsa
+module Summary = Hike_summary
 module Drive = Hike_drive
 module Diag = Hike_diag
 module Cfg_complete = Hike_cfg_complete

@@ -47,6 +47,10 @@ open Bap_core_theory
     sub term ->
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
 
+  (** The persistent registers a sub's defs write (partial defs at
+      their base register). *)
+  val written_regs_of_sub : sub term -> Var.Set.t
+
   (** The program's kill summaries (every subs' transitive written
       register set); computed once per program at the boundary and
       consumed by the fixpoint. *)

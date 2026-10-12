@@ -58,6 +58,7 @@
   test_image
   test_drive
   test_noreturn
+  test_summary
   test_integration)
  (modules :standard \ harness common fixtures test_clp_equiv)
  (libraries

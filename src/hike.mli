@@ -12,6 +12,9 @@ module Diag = Hike_diag
 
 module Vsa = Hike_vsa
 
+(** A function's final summary: what a caller reads about a callee. *)
+module Summary = Hike_summary
+
 (** Program discovery, before jump compilation and normalization. *)
 module Drive = Hike_drive
 
