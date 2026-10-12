@@ -65,7 +65,8 @@ let x86_64_sysv : t =
     entry_symbol = "_start";
     noreturn_symbols =
       [ "longjmp"; "siglongjmp"; "__stack_chk_fail"; "abort"; "exit";
-        "_exit"; "_Exit"; "quick_exit"; "__assert_fail"; "pthread_exit" ];
+        "_exit"; "_Exit"; "quick_exit"; "__assert_fail"; "pthread_exit";
+        "__libc_start_main" ];
   }
 
 (* Var-based predicates; [Var.same] compares base vars (EAX ~ RAX),

@@ -8,6 +8,7 @@ module Abi = Hike_abi
 module Vsa = Hike_vsa
 module Summary = Hike_summary
 module Drive = Hike_drive
+module Worklist = Hike_worklist
 module Decode = Hike_decode
 module Diag = Hike_diag
 module Cfg_complete = Hike_cfg_complete
@@ -74,6 +75,10 @@ let output =
     Extension.Type.("output file" %: string)
     "output-file" ~doc:"File to output LLVM IR"
 
+let worklist =
+  Extension.Configuration.flag "worklist"
+    ~doc:"Discover functions with the callee-first worklist (ADR 0027)"
+
 (* The previous pass's ACTUAL registered name: BAP prefixes every pass
    with the bundle name, so the chain reads back the registered name
    instead of assuming a bundle prefix. *)
@@ -98,7 +103,9 @@ let dbg_closure (msg : unit -> string) =
   ignore msg
 #endif
 
-let pass_discover proj = Project.with_program proj (Hike_drive.run proj)
+let pass_discover ~worklist proj =
+  Project.with_program proj
+    (if worklist then Hike_worklist.run proj else Hike_drive.run proj)
 
 let pass_vsa proj =
   let target = Project.target proj in
@@ -660,7 +667,8 @@ let () =
       (* The filter runs AFTER the VSA: the complete program — the
          re-decode's own subs included — is what gets filtered, so the
          re-discovered stubs and externs drop by the same rules. *)
-      let discover = chain ~name:"discover" ~deps:[] pass_discover in
+      let worklist = Extension.Configuration.get ctx worklist in
+      let discover = chain ~name:"discover" ~deps:[] (pass_discover ~worklist) in
       let vsa = chain ~name:"vsa" ~deps:[ discover ] pass_vsa in
       let filter = chain ~name:"filter" ~deps:[ vsa ] pass_filter in
       let variadic = chain ~name:"variadic" ~deps:[ filter ] pass_variadic in

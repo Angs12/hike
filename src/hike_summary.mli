@@ -10,6 +10,15 @@ type t = { written : Core.Int.Set.t option; returns : bool }
 (** Nothing proven: anything written, control may come back. *)
 val unknown : t
 
+(** Nothing written, control never comes back: the bottom a recursive
+    cycle's solve ascends from. *)
+val optimistic : t
+
+(** The least summary above both. *)
+val join : t -> t -> t
+
+val equal : t -> t -> bool
+
 (** The summary of a solved sub, over its reachable blocks.  Each exit
     contributes: a return comes back; a direct or resolved transfer
     joins the callee's summary ([callee] for a sub, [slot] for the

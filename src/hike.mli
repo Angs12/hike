@@ -20,6 +20,7 @@ module Drive = Hike_drive
 
 (** The BAP decoder adapter: scans, function bodies, the sub lift. *)
 module Decode = Hike_decode
+module Worklist = Hike_worklist
 
 (** The CFG completion, fused into the solver's loop: resolution is an
     in-loop step of the fixpoint, materialization runs once at drain. *)

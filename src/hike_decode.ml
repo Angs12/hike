@@ -83,12 +83,6 @@ let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
 
 let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t = explore_cfg state
 
-(* The jump that ends a block, if the decode recorded one. *)
-let terminator_jump (state : Driver.state) (blk : Block.t) : Driver.jump option =
-  match Base.List.last (Block.insns blk) with
-  | Some (mem, _) -> Driver.jump state (Memory.min_addr mem)
-  | None -> None
-
 (* One function's candidate graph: every block the decode reaches from
    [entry] without entering another entry ([is_entry]), every edge kept,
    call fallthroughs included.  A transfer into another entry is a call
@@ -101,30 +95,47 @@ let function_cfg ~(file : string) (state : Driver.state) ~(entry : Addr.t)
     (Kb.Symbol.in_package file @@ fun () -> explore_cfg ~entry ~follow state);
   Toplevel.get run
 
-(* Each call block of [cfg] with its decoded destinations; an indirect
-   call the decode did not resolve has none. *)
-let calls (state : Driver.state) (cfg : Graphs.Cfg.t) : (Block.t * Addr.t list) list =
-  Graphs.Cfg.nodes cfg
-  |> Seq.filter_map ~f:(fun b ->
-      match terminator_jump state b with
-      | Some j when Driver.is_call j ->
-        Some (b, Core.Set.to_list (Driver.destinations j))
-      | _ -> None)
-  |> Seq.to_list
+(* What a destination label names: a code address, or a symbol with no
+   address in the module (an external or an intrinsic). *)
+type dest = Code of int64 | Symbol of string | Unknown
 
-(* The body: a call's fallthrough stays only when [keep_fall] accepts its
-   destinations (the callee may return), then only what [entry] reaches
+let dest (label : Tid.t) : dest =
+  let addr = Toplevel.eval Theory.Label.addr (Kb.return label) in
+  let name = Toplevel.eval Theory.Label.name (Kb.return label) in
+  match addr, name with
+  | Some a, _ -> Code (Bitvec.to_int64 a)
+  | None, Some n -> Symbol n
+  | None, None -> Unknown
+
+(* The destinations the decode recorded on a block's last instruction. *)
+let dests (blk : Block.t) : Tid.t list =
+  match Kb.Value.get Insn.Slot.dests (Block.terminator blk) with
+  | Some s -> Core.Set.to_list s
+  | None -> []
+
+let is_call (blk : Block.t) : bool = Insn.is Insn.call (Block.terminator blk)
+
+(* Whether the block's last instruction is its only one with
+   semantics. *)
+let transfers_only (blk : Block.t) : bool =
+  match Base.List.rev (Block.insns blk) with
+  | _ :: rest -> Base.List.for_all rest ~f:(fun (_, i) -> Base.List.is_empty (Insn.bil i))
+  | [] -> false
+
+let block_at (cfg : Graphs.Cfg.t) (addr : Addr.t) : Block.t option =
+  Graphs.Cfg.nodes cfg |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) addr)
+
+(* The body: a call block's fallthrough stays only when [keep_fall]
+   accepts it (the callee may return), then only what [entry] reaches
    stays. *)
-let trim (state : Driver.state) (cfg : Graphs.Cfg.t) ~(entry : Block.t)
-    ~(keep_fall : Addr.t list -> bool) : Graphs.Cfg.t =
+let trim (cfg : Graphs.Cfg.t) ~(entry : Block.t) ~(keep_fall : Block.t -> bool) :
+    Graphs.Cfg.t =
   let cut =
     Graphs.Cfg.edges cfg
     |> Seq.fold ~init:cfg ~f:(fun g e ->
-        match Graphs.Cfg.Edge.label e, terminator_jump state (Graphs.Cfg.Edge.src e) with
-        | `Fall, Some j
-          when Driver.is_call j
-               && not (keep_fall (Core.Set.to_list (Driver.destinations j))) ->
-          Graphs.Cfg.Edge.remove e g
+        let src = Graphs.Cfg.Edge.src e in
+        match Graphs.Cfg.Edge.label e with
+        | `Fall when is_call src && not (keep_fall src) -> Graphs.Cfg.Edge.remove e g
         | _ -> g)
   in
   let reached =
@@ -145,6 +156,26 @@ let lift ~(file : string) ~(tid : Tid.t) ~(name : string) (entry : Block.t)
   Sub.create ~tid ~name ~blks:(Term.enum blk_t lifted |> Seq.to_list) ()
   |> fun s -> Term.set_attr s address (Block.addr entry)
 
+(* The decode channel: a resolved destination becomes a fact on the
+   dispatch INSTRUCTION's own label ([provide] unions, so a later
+   destination joins the earlier ones). *)
+let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
+  let run : unit Toplevel.var = Toplevel.var "hike-decode-dests" in
+  Toplevel.put run
+    (let open Kb.Syntax in
+     let addr a = Word.to_bitvec (Addr.of_int64 a) in
+     Theory.Label.for_addr ~package:file (addr site) >>= fun label ->
+     Theory.Label.for_addr ~package:file (addr dest) >>= fun dest ->
+     Kb.collect Theory.Semantics.slot label >>= fun sema ->
+     let cur =
+       match Kb.Value.get Insn.Slot.dests sema with
+       | Some s -> s
+       | None -> Core.Set.empty (module Theory.Label)
+     in
+     Kb.provide Theory.Semantics.slot label
+       (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
+  Toplevel.get run
+
 let initial proj =
   let state = Project.state proj in
   let grown = Project.State.disassembly state in
@@ -154,8 +185,9 @@ let initial proj =
      cfg_of_state grown);
   { grown; cfg = Toplevel.get cfg; subs = Project.State.subroutines state }
 
-let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
-    out option =
+(* A fresh decode of every code region with [roots] as subroutine
+   facts and every provided destination fact. *)
+let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.state =
 #ifdef VSA_DEBUG
   Printf.eprintf "hike-dbg-roots: [%s]\n%!"
     (Base.List.map roots ~f:(Printf.sprintf "%Lx") |> String.concat ",");
@@ -195,7 +227,7 @@ let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
      (monotone — [provide] unions), so the driver keeps decoding at the
      addresses the VSA resolved.  No brancher re-declaration: a promise's
      answer is cached at its first query, while a provided fact grows. *)
-  let out : out option Toplevel.var = Toplevel.var "hike-drive-rescan" in
+  let out : Driver.state Toplevel.var = Toplevel.var "hike-decode-scan" in
   Toplevel.put out
     (let open Kb.Syntax in
      Theory.instance () >>= fun theory ->
@@ -212,12 +244,19 @@ let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
      Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) @@ fun () ->
      Kb.promising Theory.Label.is_subroutine ~promise:entry_promise @@ fun () ->
      let mems = code_mems proj |> List.rev in
-     kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems
-     >>= fun grown ->
-     cfg_of_state grown >>= fun cfg ->
-     Subs.update Subs.empty grown >>| fun subs ->
-     Some { grown; cfg; subs });
+     kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems);
   Toplevel.get out
+
+let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
+    out option =
+  let grown = scan proj ~file ~roots in
+  let out : out Toplevel.var = Toplevel.var "hike-drive-rescan" in
+  Toplevel.put out
+    (let open Kb.Syntax in
+     Kb.Symbol.in_package file @@ fun () ->
+     cfg_of_state grown >>= fun cfg ->
+     Subs.update Subs.empty grown >>| fun subs -> { grown; cfg; subs });
+  Some (Toplevel.get out)
 
 (* The program of a grown decode: BAP's own lift of the partition — the
    same three calls the loader makes ([Symtab.create] over the state and

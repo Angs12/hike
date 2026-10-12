@@ -37,21 +37,18 @@ let tests = [
   pin "DEC-01" "a function's candidate graph stops at another entry and names its calls"
     (fun () ->
       with_binary call_ret (fun project ->
-          let state, cfg, _ = candidate project (addr 0x400078L) in
+          let _, cfg, entry = candidate project (addr 0x400078L) in
           check "DEC-01.blocks" (starts cfg = [ 0x400078L; 0x40007dL ]);
-          check "DEC-01.calls"
-            (match D.calls state cfg with
-             | [ (b, [ g ]) ] ->
-               Word.to_int64_exn (Block.addr b) = 0x400078L
-               && Word.to_int64_exn g = 0x40007eL
-             | _ -> false)));
+          check "DEC-01.call" (D.is_call entry);
+          check "DEC-01.dests"
+            (List.map D.dest (D.dests entry) = [ D.Code 0x40007eL ])));
 
   pin "DEC-02" "a call's fallthrough stays only when the callee may return"
     (fun () ->
       with_binary call_ret (fun project ->
-          let state, cfg, entry = candidate project (addr 0x400078L) in
+          let _, cfg, entry = candidate project (addr 0x400078L) in
           let lift keep =
-            D.trim state cfg ~entry ~keep_fall:(fun _ -> keep)
+            D.trim cfg ~entry ~keep_fall:(fun _ -> keep)
             |> D.lift ~file:(file_of project) ~tid:(Tid.create ()) ~name:"f" entry in
           let returning = lift true and noreturn = lift false in
           check "DEC-02.returning.blocks" (Term.length blk_t returning = 2);

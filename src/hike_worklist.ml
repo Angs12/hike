@@ -1,0 +1,719 @@
+(* The callee-first discovery worklist (ADR 0027).  A function is
+   explored from BAP's decode, its callees are solved before it, and its
+   body is lifted, linked and solved; its summary is published once and
+   never revised.  A recursive cycle is solved jointly from the
+   optimistic side until no member's summary changes.  A solve that
+   reaches an unsolved callee pauses and resumes once the callee is
+   final. *)
+
+open Bap.Std
+open Bap_core_theory
+module Kb = Bap_core_theory.KB
+module D = Hike_decode
+module S = Hike_summary
+module Vsa = Cbat_vsa
+
+(* A lifted function: [decoded] is every block start of its candidate
+   graph; [raw] is the linked, armed body as lifted; [solved] is the
+   normalized body the solve rewrote, with its environments and block
+   addresses. *)
+type func = {
+  decoded : Core.Int64.Set.t;
+  raw : sub term;
+  solved : sub term;
+  envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t;
+  block_addrs : Tid.t Addr.Map.t;
+  summary : S.t;
+}
+
+(* A solved entry: a lifted function, a stub that stands for an external
+   symbol, or an address where nothing decodes. *)
+type final = Function of func | Alias of Tid.t | Missing
+
+(* [Open] entries are on the pause stack. *)
+type status = Fresh | Open of int | Final of final
+
+type entry = {
+  addr : int64;
+  tid : Tid.t;
+  name : string;
+  mutable status : status;
+  (* The lowest stack index this entry's solve read (Tarjan's lowlink). *)
+  mutable low : int;
+}
+
+(* A solve in progress: the lowest stack index it read. *)
+type frame = { mutable reach : int }
+
+type t = {
+  proj : Project.t;
+  file : string;
+  context : Hike_program_vsa.context;
+  abi : Hike_abi.t;
+  slot_names : string Core.Int64.Map.t;
+  mutable state : Disasm.Driver.state;
+  (* The subroutine facts every scan carries, in discovery order. *)
+  mutable roots : int64 list;
+  (* The provided destinations, by dispatch instruction. *)
+  mutable dests : Core.Int64.Set.t Core.Int64.Map.t;
+  entries : (int64, entry) Core.Hashtbl.t;
+  by_tid : (Tid.t, entry) Core.Hashtbl.t;
+  (* External and intrinsic targets: name and summary. *)
+  symbols : (Tid.t, string * S.t) Core.Hashtbl.t;
+  (* Each lifted term tid's owner. *)
+  owner : (Tid.t, int64) Core.Hashtbl.t;
+  (* Code words found in solved bodies, newest first. *)
+  mutable found : int64 list;
+  (* Published entries, newest first. *)
+  mutable order : int64 list;
+  mutable next_index : int;
+  mutable stack : entry list;
+  tentative : (int64, S.t) Core.Hashtbl.t;
+  (* Tentative summaries read, newest first. *)
+  mutable reads : (entry * S.t) list;
+  results : (int64, final) Core.Hashtbl.t;
+}
+
+let eval (x : 'a Kb.t) : 'a =
+  let v = Toplevel.var "hike-worklist" in
+  Toplevel.put v x;
+  Toplevel.get v
+
+let label_for_name t name =
+  eval (Kb.Symbol.in_package t.file (fun () -> Theory.Label.for_name name))
+
+let is_entry t (a : int64) : bool =
+  Core.Hashtbl.mem t.entries a
+  || Disasm.Driver.is_subroutine t.state (Addr.of_int64 a)
+
+let rescan t = t.state <- D.scan t.proj ~file:t.file ~roots:t.roots
+
+(* ---- targets ---- *)
+
+let entry_of t (a : int64) : entry =
+  match Core.Hashtbl.find t.entries a with
+  | Some e -> e
+  | None ->
+    let label =
+      eval (Theory.Label.for_addr ~package:t.file
+              (Word.to_bitvec (Addr.of_int64 a)))
+    in
+    let name =
+      match eval (Kb.collect Theory.Label.name label) with
+      | Some n -> n
+      | None -> Printf.sprintf "sub_%Lx" a
+    in
+    let tid = label_for_name t name in
+    let tid = if Core.Hashtbl.mem t.by_tid tid then eval Theory.Label.fresh else tid in
+    let e = { addr = a; tid; name; status = Fresh; low = max_int } in
+    Core.Hashtbl.set t.entries ~key:a ~data:e;
+    Core.Hashtbl.set t.by_tid ~key:tid ~data:e;
+    e
+
+(* The loader-level name of an external label: its symbol without the
+   kind suffix.  An intrinsic keeps its full name. *)
+let symbol t (label_name : string) : Tid.t =
+  let name =
+    if Hike_abi.is_intrinsic_name label_name then label_name
+    else
+      match Base.String.index label_name ':' with
+      | Some i -> Base.String.prefix label_name i
+      | None -> label_name
+  in
+  let tid = label_for_name t name in
+  if not (Core.Hashtbl.mem t.symbols tid) then begin
+    let summary =
+      if Hike_abi.is_intrinsic_name name then
+        { S.unknown with
+          written = Base.Option.some_if (Hike_abi.is_atomic_intrinsic_name name)
+              Core.Int.Set.empty }
+      else
+        { S.unknown with
+          returns =
+            not (Base.List.mem t.abi.Hike_abi.noreturn_symbols name
+                   ~equal:String.equal) }
+    in
+    Core.Hashtbl.set t.symbols ~key:tid ~data:(name, summary)
+  end;
+  tid
+
+(* The target expression of an indirect transfer. *)
+let indirect_target (j : jmp term) : exp option =
+  match Jmp.kind j with
+  | Goto (Indirect e) -> Some e
+  | Call c -> (match Call.target c with Indirect e -> Some e | Direct _ -> None)
+  | _ -> None
+
+let symbol_summary t tid = snd (Core.Hashtbl.find_exn t.symbols tid)
+
+let final_summary t = function
+  | Function f -> f.summary
+  | Alias x -> symbol_summary t x
+  | Missing -> S.unknown
+
+let read_open t frame e index =
+  frame.reach <- min frame.reach index;
+  let s = Core.Hashtbl.find_exn t.tentative e.addr in
+  t.reads <- (e, s) :: t.reads;
+  s
+
+(* ---- the pause stack ---- *)
+
+(* An entry's summary for the solve in [frame]: final, or tentative
+   while the entry is on the stack (the read joins [frame] to its
+   cycle). *)
+let rec summary t frame (e : entry) : S.t =
+  match e.status with
+  | Fresh ->
+    visit t e;
+    frame.reach <- min frame.reach e.low;
+    summary t frame e
+  | Open index -> read_open t frame e index
+  | Final f -> final_summary t f
+
+(* Tarjan's walk with iteration at the cycle head: a member's solve
+   leaves it on the stack; the head re-solves the cycle until every
+   tentative summary it read is current, then publishes every member. *)
+and visit t (e : entry) : unit =
+  let index = t.next_index in
+  t.next_index <- index + 1;
+  e.status <- Open index;
+  t.stack <- e :: t.stack;
+  if not (Core.Hashtbl.mem t.tentative e.addr) then
+    Core.Hashtbl.set t.tentative ~key:e.addr ~data:S.optimistic;
+  let rec iterate () =
+    let frame = { reach = index } in
+    let mark = t.reads in
+    let result = build t frame e in
+    Core.Hashtbl.set t.results ~key:e.addr ~data:result;
+    Core.Hashtbl.update t.tentative e.addr ~f:(function
+        | Some s -> S.join s (final_summary t result)
+        | None -> final_summary t result);
+    e.low <- frame.reach;
+    if frame.reach >= index then
+      if current t ~mark then close_cycle t e ~publish:true
+      else begin
+        close_cycle t e ~publish:false;
+        iterate ()
+      end
+  in
+  iterate ()
+
+(* Whether every tentative summary read since [mark] is still the
+   member's current one. *)
+and current t ~mark : bool =
+  let rec since = function
+    | l when l == mark -> []
+    | [] -> []
+    | r :: rest -> r :: since rest
+  in
+  Base.List.for_all (since t.reads) ~f:(fun (e, s) ->
+      match e.status with
+      | Open _ -> S.equal s (Core.Hashtbl.find_exn t.tentative e.addr)
+      | Fresh | Final _ -> true)
+
+(* Pops the members above [head]: published with their last results, or
+   reset for the head's next iteration (their tentative summaries
+   stay). *)
+and close_cycle t (head : entry) ~publish : unit =
+  let rec pop () =
+    match t.stack with
+    | m :: rest when publish || m != head ->
+      t.stack <- rest;
+      if publish then begin
+        m.status <- Final (Core.Hashtbl.find_exn t.results m.addr);
+        Core.Hashtbl.remove t.tentative m.addr;
+        t.order <- m.addr :: t.order
+      end
+      else m.status <- Fresh;
+      Core.Hashtbl.remove t.results m.addr;
+      if m != head then pop ()
+    | _ -> ()
+  in
+  pop ()
+
+(* ---- one function ---- *)
+
+and build t frame (e : entry) : final =
+  let entry = Addr.of_int64 e.addr in
+  let cfg =
+    D.function_cfg ~file:t.file t.state ~entry ~is_entry:(fun a ->
+        is_entry t (Word.to_int64_exn a))
+  in
+  match D.block_at cfg entry with
+  | None -> Missing
+  | Some blk -> (
+    match stub_symbol blk with
+    | Some name -> Alias (symbol t name)
+    | None -> body t frame e cfg blk)
+
+(* A stub: an entry block whose one instruction transfers to exactly
+   one external symbol (the loader binds it; decision 10). *)
+and stub_symbol (blk : Block.t) : string option =
+  match D.dests blk with
+  | [ label ] when D.transfers_only blk -> (
+    match D.dest label with
+    | Symbol n when not (Hike_abi.is_intrinsic_name n) -> Some n
+    | _ -> None)
+  | _ -> None
+
+(* The body's local closure: lift, solve, and while the solve resolves
+   new dispatch destinations, decode them and lift again. *)
+and body t frame e cfg blk : final =
+  let keep_fall = walk t frame cfg blk in
+  let raw =
+    D.trim cfg ~entry:blk ~keep_fall
+    |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
+    |> link t frame |> claim t e |> arm t
+  in
+  let decoded =
+    Graphs.Cfg.nodes cfg
+    |> Seq.map ~f:(fun b -> Word.to_int64_exn (Block.addr b))
+    |> Seq.to_list |> Core.Int64.Set.of_list
+  in
+  let f = solve t frame ~decoded raw in
+  if learn_dests t cfg f then build t frame e
+  else begin
+    t.found <- Base.List.rev_append (code_words t f) t.found;
+    Function f
+  end
+
+(* The callee-first walk: each reached call's destinations are solved
+   before its fallthrough is followed, and the fallthrough is kept only
+   when one of them may return. *)
+and walk t frame cfg (entry : Block.t) : Block.t -> bool =
+  let returns blk =
+    match D.dests blk with
+    | [] -> true
+    | labels -> Base.List.exists labels ~f:(fun l -> (target_summary t frame l).returns)
+  in
+  let rec go (seen, kept) b =
+    if Core.Set.mem seen b then (seen, kept)
+    else
+      let fall = (not (D.is_call b)) || returns b in
+      let kept = if fall then Core.Set.add kept b else kept in
+      Graphs.Cfg.Node.outputs b cfg
+      |> Seq.fold ~init:(Core.Set.add seen b, kept) ~f:(fun acc edge ->
+          match Graphs.Cfg.Edge.label edge with
+          | `Fall when not fall -> acc
+          | _ -> go acc (Graphs.Cfg.Edge.dst edge))
+  in
+  let _, kept = go (Block.Set.empty, Block.Set.empty) entry in
+  Core.Set.mem kept
+
+and target_summary t frame (label : Tid.t) : S.t =
+  match D.dest label with
+  | Code a -> summary t frame (entry_of t a)
+  | Symbol n -> symbol_summary t (symbol t n)
+  | Unknown -> S.unknown
+
+(* The tid a transfer to [label] names: a solved entry's (an alias's
+   symbol for a stub), or the external symbol's. *)
+and callee_tid t frame (label : Tid.t) : Tid.t =
+  match D.dest label with
+  | Code a -> (
+    let e = entry_of t a in
+    ignore (summary t frame e);
+    match e.status with Final (Alias x) -> x | _ -> e.tid)
+  | Symbol n -> symbol t n
+  | Unknown -> label
+
+(* Program-level linking: a jump that leaves the body is a tail call,
+   and every call target (a recursive call's included) names its
+   callee. *)
+and link t frame (sub : sub term) : sub term =
+  let own =
+    Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Seq.to_list
+    |> Core.Set.of_list (module Tid)
+  in
+  let tail target = Call (Call.create ~target ()) in
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map jmp_t blk ~f:(fun j ->
+          match Jmp.kind j with
+          | Goto (Direct l) when Core.Set.mem own l -> j
+          | Goto (Direct l) -> Jmp.with_kind j (tail (Direct (callee_tid t frame l)))
+          | Goto (Indirect e) -> Jmp.with_kind j (tail (Indirect e))
+          | Call c -> (
+            match Call.target c with
+            | Direct l -> Jmp.with_kind j (Call (Call.with_target c (Direct (callee_tid t frame l))))
+            | Indirect _ -> j)
+          | Ret _ | Int _ -> j))
+
+(* Every term is owned by one function.  The lift reuses an
+   instruction's term tids wherever it is lifted, so a block holding a
+   term another function's body owns is copied with fresh tids (the
+   overlap of decision 7). *)
+and claim t (e : entry) (sub : sub term) : sub term =
+  let terms b =
+    Term.tid b
+    :: (Seq.to_list (Seq.map (Term.enum phi_t b) ~f:Term.tid)
+        @ Seq.to_list (Seq.map (Term.enum def_t b) ~f:Term.tid)
+        @ Seq.to_list (Seq.map (Term.enum jmp_t b) ~f:Term.tid))
+  in
+  let foreign b =
+    Base.List.exists (terms b) ~f:(fun tid ->
+        match Core.Hashtbl.find t.owner tid with
+        | Some a -> not (Int64.equal a e.addr)
+        | None -> false)
+  in
+  let fresh x = Term.with_attrs (Term.clone x) (Term.attrs x) in
+  let copy b =
+    fresh b |> Term.map phi_t ~f:fresh |> Term.map def_t ~f:fresh |> Term.map jmp_t ~f:fresh
+  in
+  let copies =
+    Term.enum blk_t sub |> Seq.filter ~f:foreign
+    |> Seq.map ~f:(fun b -> (Term.tid b, copy b))
+    |> Seq.to_list |> Core.Map.of_alist_exn (module Tid)
+  in
+  let rename tid =
+    Base.Option.value_map (Core.Map.find copies tid) ~default:tid ~f:Term.tid
+  in
+  let label = Label.change ~direct:rename in
+  let relink j =
+    Jmp.with_kind j
+      (match Jmp.kind j with
+       | Goto l -> Goto (label l)
+       | Ret l -> Ret (label l)
+       | Int (n, r) -> Int (n, rename r)
+       | Call c -> (
+         match Call.return c with
+         | Some r -> Call (Call.with_return c (label r))
+         | None -> Call c))
+  in
+  let sub =
+    Term.map blk_t sub ~f:(fun b ->
+        let b = Base.Option.value (Core.Map.find copies (Term.tid b)) ~default:b in
+        Term.map jmp_t b ~f:relink)
+  in
+  Term.enum blk_t sub
+  |> Seq.iter ~f:(fun b ->
+      Base.List.iter (terms b) ~f:(fun tid ->
+          Core.Hashtbl.set t.owner ~key:tid ~data:e.addr));
+  sub
+
+(* Each dispatch gains one arm per destination the solves resolved. *)
+and arm t (sub : sub term) : sub term =
+  let dests j =
+    match Term.get_attr j address with
+    | None -> []
+    | Some a ->
+      Base.Option.value_map (Core.Map.find t.dests (Word.to_int64_exn a))
+        ~default:[] ~f:Core.Set.to_list
+  in
+  Hike_cfg_complete.arm_dispatches ~dests sub
+
+(* The solve, paused at each unsolved callee until it is solved. *)
+and solve t frame ~decoded (raw : sub term) : func =
+  let ctx = t.context in
+  let sub = Hike_program_vsa.prepare_function ctx ~is_entry:(is_entry t) raw in
+  let block_addrs =
+    Term.enum blk_t sub
+    |> Seq.filter_map ~f:(fun b ->
+        Base.Option.map (Term.get_attr b address) ~f:(fun a -> (a, Term.tid b)))
+    |> Seq.to_list |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
+  in
+  let lookup a = if is_entry t a then Some (entry_of t a).tid else None in
+  let callee tid : Vsa.Call_effects.callee =
+    match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
+    | Some (_, s), _ -> Summary s.written
+    | None, None -> Summary None
+    | None, Some e -> (
+      match e.status with
+      | Fresh -> Blocked
+      | Open index -> Summary (read_open t frame e index).written
+      | Final f -> Summary (final_summary t f).written)
+  in
+  let images = ctx.images and foreign_slots = ctx.linker_slots in
+  let rec run = function
+    | Hike_vsa.Done (envs, solved, block_addrs) -> (envs, solved, block_addrs)
+    | Paused p ->
+      Core.Set.iter p.p_blocked ~f:(fun tid ->
+          ignore (summary t frame (Core.Hashtbl.find_exn t.by_tid tid)));
+      run (Hike_vsa.resume ctx.target ~lookup ~images ~callee ~foreign_slots p)
+  in
+  let envs, solved, block_addrs =
+    run (Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs ~foreign_slots sub)
+  in
+  let summary =
+    S.of_solved ~abi:t.abi
+      ~callee:(fun tid ->
+          match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
+          | Some (_, s), _ -> Some s
+          | None, Some e -> Some (summary t frame e)
+          | None, None -> None)
+      ~slot:(fun a ->
+          Base.Option.map (Core.Map.find t.slot_names a) ~f:(fun n ->
+              symbol_summary t (symbol t n)))
+      ~lookup ~foreign_slots ~block_addrs ~envs solved
+  in
+  { decoded; raw; solved; envs; block_addrs; summary }
+
+(* ---- facts from a solved body ---- *)
+
+(* The words of a bounded denotation; [None] when it is too wide. *)
+and bounded_words (ws : Vsa.WordSet.t) : int64 list option =
+  if Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws || Vsa.WordSet.is_infinite ws
+  then None
+  else
+    Base.Option.map (Vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
+        Base.List.filter_map words ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w)))
+
+(* The resolved destinations of the body's indirect transfers become
+   decode facts on their instructions.  Whether any is new: the body
+   is then decoded and lifted again. *)
+and learn_dests t cfg (f : func) : bool =
+  let instruction =
+    Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
+      (Base.List.map (D.terminators cfg) ~f:(fun (b, i) ->
+           (Word.to_int64_exn b, Word.to_int64_exn i)))
+  in
+  let learned =
+    Term.enum blk_t f.solved |> Seq.to_list
+    |> Base.List.concat_map ~f:(fun blk ->
+        match Core.Map.find f.envs (Term.tid blk), Term.get_attr blk address with
+        | Some (pre, post), Some site -> (
+          match Core.Map.find instruction (Word.to_int64_exn site) with
+          | None -> []
+          | Some site ->
+            Term.enum jmp_t blk |> Seq.to_list
+            |> Base.List.filter_map ~f:indirect_target
+            |> Base.List.concat_map ~f:(fun e ->
+                match Vsa.denote_exp_at ~pre ~post ~blk e with
+                | Ok ws ->
+                  Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
+                    ~f:(fun w -> (site, w))
+                | Error _ -> []))
+        | _ -> [])
+    |> Base.List.filter ~f:(fun (site, w) ->
+        match Core.Map.find t.dests site with
+        | Some ws -> not (Core.Set.mem ws w)
+        | None -> true)
+  in
+  Base.List.iter learned ~f:(fun (site, w) ->
+      t.dests <- Core.Map.update t.dests site ~f:(function
+          | Some ws -> Core.Set.add ws w
+          | None -> Core.Int64.Set.singleton w);
+      D.provide_dest ~file:t.file ~site w);
+  if Base.List.is_empty learned then false
+  else begin
+    rescan t;
+    true
+  end
+
+(* The single code words the body's defs carry: a value computed into
+   a register, or each word a store writes. *)
+and code_words t (f : func) : int64 list =
+  let wb = Hike_abi.word_bits t.abi in
+  let singleton ~pre ~post ~blk ~def e =
+    match Vsa.denote_exp_at ~pre ~post ~blk ~def e with
+    | Ok ws -> (
+      match bounded_words ws with Some [ w ] -> Some w | _ -> None)
+    | Error _ -> None
+  in
+  Term.enum blk_t f.solved |> Seq.to_list
+  |> Base.List.concat_map ~f:(fun blk ->
+      match Core.Map.find f.envs (Term.tid blk) with
+      | None -> []
+      | Some (pre, post) ->
+        Term.enum def_t blk |> Seq.to_list
+        |> Base.List.concat_map ~f:(fun d ->
+            let values =
+              match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+              | None -> [ Def.rhs d ]
+              | Some data -> (
+                match Hike_stack_model.addr_of_rhs (Def.rhs d) with
+                | Some (_, size) when Size.in_bits size > wb ->
+                  Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
+                      Bil.extract ~hi:((k + 1) * wb - 1) ~lo:(k * wb) data)
+                | _ -> [ data ])
+            in
+            Base.List.filter_map values ~f:(singleton ~pre ~post ~blk ~def:d)))
+
+(* ---- the program ---- *)
+
+let create proj : t =
+  let context = Hike_program_vsa.prepare proj in
+  {
+    proj;
+    file = D.file_of (Project.program proj);
+    context;
+    abi = Hike_abi.of_target context.target;
+    slot_names =
+      Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
+        (Hike_image.external_references proj);
+    state = (D.initial proj).grown;
+    roots = [];
+    dests = Core.Int64.Map.empty;
+    entries = Core.Hashtbl.create (module Core.Int64);
+    by_tid = Core.Hashtbl.create (module Tid);
+    symbols = Core.Hashtbl.create (module Tid);
+    owner = Core.Hashtbl.create (module Tid);
+    found = [];
+    order = [];
+    next_index = 0;
+    stack = [];
+    tentative = Core.Hashtbl.create (module Core.Int64);
+    reads = [];
+    results = Core.Hashtbl.create (module Core.Int64);
+  }
+
+(* Solves each root, decoding the ones BAP has not taken as entries in
+   one scan first. *)
+let solve_roots t (addrs : int64 list) : unit =
+  let fresh =
+    Base.List.dedup_and_sort ~compare:Int64.compare
+      (Base.List.filter addrs ~f:(fun a -> not (is_entry t a)))
+  in
+  if not (Base.List.is_empty fresh) then begin
+    t.roots <- t.roots @ fresh;
+    rescan t
+  end;
+  Base.List.iter addrs ~f:(fun a -> ignore (summary t { reach = max_int } (entry_of t a)))
+
+let functions t : (int64 * func) list =
+  Base.List.rev t.order
+  |> Base.List.filter_map ~f:(fun a ->
+      match (Core.Hashtbl.find_exn t.entries a).status with
+      | Final (Function f) -> Some (a, f)
+      | _ -> None)
+
+(* The code words no lifted function decodes as one of its blocks name
+   functions only data reaches; they are solved as roots until none is
+   left. *)
+let rec close t : unit =
+  let in_text w =
+    match t.context.text_range with
+    | Some (lo, hi) -> Int64.compare w lo >= 0 && Int64.compare w hi <= 0
+    | None -> false
+  in
+  let decoded =
+    Base.List.fold (functions t) ~init:Core.Int64.Set.empty ~f:(fun acc (_, f) ->
+        Core.Set.union acc f.decoded)
+  in
+  let unclaimed w = not (Core.Set.mem decoded w) in
+  let words =
+    Base.List.rev t.found
+    |> Base.List.filter ~f:(fun w -> in_text w && unclaimed w)
+    |> Base.List.stable_dedup ~compare:Int64.compare
+  in
+  t.found <- [];
+  if not (Base.List.is_empty words) then begin
+    solve_roots t words;
+    close t
+  end
+
+(* Main: the first integer argument at every call of the entry's solved
+   body; one agreed address is main. *)
+let main_of t (f : func) : int64 option =
+  let arg0 = fst (Hike_abi.argc_argv_regs t.abi) in
+  let named =
+    Term.enum blk_t f.solved |> Seq.to_list
+    |> Base.List.filter_map ~f:(fun blk ->
+        let calls =
+          Term.enum jmp_t blk
+          |> Seq.exists ~f:(fun j -> match Jmp.kind j with Call _ -> true | _ -> false)
+        in
+        match Core.Map.find f.envs (Term.tid blk) with
+        | Some (_, post) when calls -> (
+          match Vsa.denote_exp_at ~pre:post ~post ~blk (Bil.Var arg0) with
+          | Ok ws -> (match bounded_words ws with Some [ w ] -> Some w | _ -> None)
+          | Error _ -> None)
+        | _ -> None)
+    |> Base.List.dedup_and_sort ~compare:Int64.compare
+  in
+  match named with
+  | [ main ] -> Some main
+  | [] -> None
+  | _ ->
+    Hike_diag.warn "discover: the entry's calls name different main addresses; no main";
+    None
+
+(* Whether a reached indirect call of [f] may target a function no
+   denotation names: anything but a linker slot, a return, or bounded
+   words that each name a block of [f] or an entry. *)
+let unresolved_call t (f : func) : bool =
+  let index = Hike_transfer.index_of_sub f.solved in
+  Term.enum blk_t f.solved
+  |> Seq.exists ~f:(fun blk ->
+      match Core.Map.find f.envs (Term.tid blk) with
+      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun j ->
+            match indirect_target j with
+            | Some e when not (Hike_return.is_jmp j) -> (
+              match Hike_transfer.slot_of_target ~index e with
+              | Some a when Core.Set.mem t.context.linker_slots a -> false
+              | _ -> (
+                match Vsa.denote_exp_at ~pre ~post ~blk e with
+                | Ok ws -> (
+                  match bounded_words ws with
+                  | Some words ->
+                    not (Base.List.for_all words ~f:(fun w ->
+                        Core.Map.mem f.block_addrs (Addr.of_int64 w) || is_entry t w))
+                  | None -> true)
+                | Error _ -> true))
+            | _ -> false)
+      | _ -> false)
+
+let synthetic (tid : Tid.t) (name : string) : sub term =
+  let sub = Term.set_attr (Sub.create ~tid ~name ()) Term.synthetic () in
+  if Hike_abi.is_intrinsic_name name then Term.set_attr sub Sub.intrinsic () else sub
+
+(* The worklist's program: main's closure (or, on refusal, every BAP
+   subroutine's) as linked, armed raw bodies, plus a block-less sub per
+   external and intrinsic target. *)
+let run (proj : Project.t) : program term =
+  let t = create proj in
+  let entry = Hike_image.entry_point proj in
+  Base.Option.iter entry ~f:(fun a -> solve_roots t [ a ]);
+  let main =
+    match Base.Option.map entry ~f:(fun a -> (Core.Hashtbl.find_exn t.entries a).status) with
+    | Some (Final (Function f)) -> main_of t f
+    | _ -> None
+  in
+  let relocated =
+    let init_fini =
+      Base.List.filter_map [ ".init_array"; ".fini_array" ] ~f:(fun name ->
+          Hike_image.get_section_mem name proj |> Hike_image.get_section_data
+          |> Base.Option.map ~f:(fun (_, lo, hi) ->
+              (Word.to_int64_exn lo, Word.to_int64_exn hi)))
+    in
+    Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj)
+    |> Base.List.filter ~f:(fun (slot, _) ->
+        not (Base.List.exists init_fini ~f:(fun (lo, hi) ->
+            Int64.compare slot lo >= 0 && Int64.compare slot hi <= 0)))
+    |> Base.List.map ~f:snd
+  in
+  t.found <- Base.List.rev_append relocated t.found;
+  Base.Option.iter main ~f:(fun a -> solve_roots t [ a ]);
+  close t;
+  if Base.Option.is_none main
+  || Base.List.exists (functions t) ~f:(fun (_, f) -> unresolved_call t f)
+  then begin
+    if Base.Option.is_none main then
+      Hike_diag.warn "discover: no main; every BAP subroutine is a root";
+    solve_roots t
+      (Term.enum sub_t (Project.program proj)
+       |> Seq.filter_map ~f:(fun s ->
+           Base.Option.bind (Term.first blk_t s) ~f:(fun b ->
+               Base.Option.map (Term.get_attr b address) ~f:Word.to_int64_exn))
+       |> Seq.to_list);
+    close t
+  end;
+  let lifted =
+    Base.List.map (functions t) ~f:(fun (a, f) ->
+        let sub = Term.set_attr f.raw filename t.file in
+        let sub =
+          if Base.Option.is_some main && Base.Option.equal Int64.equal entry (Some a)
+          then Term.set_attr sub Sub.entry_point () else sub
+        in
+        if Base.Option.equal Int64.equal main (Some a)
+        then Term.set_attr sub Hike_stack_model.main_role () else sub)
+  in
+  let externals =
+    Core.Hashtbl.to_alist t.symbols
+    |> Base.List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> String.compare a b)
+    |> Base.List.map ~f:(fun (tid, (name, _)) -> synthetic tid name)
+  in
+  Base.List.fold (lifted @ externals) ~init:(Program.create ())
+    ~f:(fun p s -> Term.append sub_t p s)

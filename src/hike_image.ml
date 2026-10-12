@@ -86,6 +86,14 @@ let get_bias (proj : Project.t) : int64 =
   | b :: _ -> b
   | [] -> 0L
 
+(* The image's entry address, biased like every memory address. *)
+let entry_point (proj : Project.t) : int64 option =
+  let open Ogre in
+  let c = Ogre.collect Query.(select (from Image.Scheme.entry_point)) in
+  match Ogre.run c (Project.specification proj) with
+  | Ok (s, _) -> Base.Option.map (Base.Sequence.hd s) ~f:(Int64.add (get_bias proj))
+  | Error _ -> None
+
 (* Every RELATIVE site with its runtime value (an in-module address):
    the loader's (site, addend) fact — [R_X86_64_RELATIVE]'s r_offset and
    r_addend — plus the bias. *)

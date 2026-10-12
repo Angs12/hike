@@ -16,6 +16,9 @@ val get_copy_relocations :
     address the dynamic linker binds there. *)
 val external_references : Project.t -> (int64 * string) list
 
+(** The image's entry address. *)
+val entry_point : Project.t -> int64 option
+
 (** The load bias: memory-image addresses are the file vaddrs plus it. *)
 val get_bias : Project.t -> int64
 

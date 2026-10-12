@@ -97,9 +97,27 @@ let normalize context program =
   |> Hike_split_mem.normalize |> Hike_coerce.coerce_program
   |> Hike_fp.run_program
 
+(* The rip tag is read once, here: a tagged literal naming a function
+   entry or a data section becomes a module address, so every
+   denotation of it carries its [Rip] anchor. *)
+let tag_rip context ~(is_entry : int64 -> bool) program =
+  let is_address a =
+    is_entry a
+    || Base.List.exists context.data_spans ~f:(fun span ->
+        Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
+        && Int64.unsigned_compare a span.ds_hi <= 0)
+  in
+  Hike_rip.prepare_program ~addr_bits:(Hike_abi.addr_size_bits context.target)
+    ~is_address program
+
+let prepare_function context ~is_entry sub =
+  let program = Term.append sub_t (Program.create ()) sub in
+  Base.Option.value_exn
+    (Term.first sub_t (tag_rip context ~is_entry (normalize context program)))
+
 let solve context proj ~noreturn program =
   let program = normalize context program in
-  let { target; images; linker_slots; data_spans; _ } = context in
+  let { target; images; linker_slots; _ } = context in
   let block_addrs =
     Term.enum sub_t program
     |> Seq.concat_map ~f:(Term.enum blk_t)
@@ -132,18 +150,8 @@ let solve context proj ~noreturn program =
     | Some t -> Some t
     | None -> Core.Map.find entry_addrs v
   in
-  (* The rip tag is read once, here: a tagged literal naming a function
-     entry or a data section becomes a module address, so every
-     denotation of it carries its [Rip] anchor. *)
   let program =
-    let is_address a =
-      Option.is_some (lookup a)
-      || Base.List.exists data_spans ~f:(fun span ->
-          Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
-          && Int64.unsigned_compare a span.ds_hi <= 0)
-    in
-    Hike_rip.prepare_program ~addr_bits:(Hike_abi.addr_size_bits target)
-      ~is_address program
+    tag_rip context ~is_entry:(fun a -> Option.is_some (lookup a)) program
   in
   let sub_addrs =
     Core.Map.fold block_addrs ~init:Addr.Map.empty

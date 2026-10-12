@@ -67,25 +67,7 @@ let run proj =
     Base.List.exists init_fini_slots ~f:(fun (lo, hi) ->
         Int64.compare slot lo >= 0 && Int64.compare slot hi <= 0)
   in
-  (* The decode channel: a resolved destination becomes a fact on the
-     dispatch INSTRUCTION's own label. *)
-  let provide_dests site w =
-    let run : unit Toplevel.var = Toplevel.var "hike-drive-dests" in
-    Toplevel.put run
-      (let open KB.Syntax in
-       let addr a = Word.to_bitvec (Addr.of_int64 a) in
-       Theory.Label.for_addr ~package:file (addr site) >>= fun label ->
-       Theory.Label.for_addr ~package:file (addr w) >>= fun dest ->
-       KB.collect Theory.Semantics.slot label >>= fun sema ->
-       let cur =
-         match KB.Value.get Insn.Slot.dests sema with
-         | Some s -> s
-         | None -> Core.Set.empty (module Theory.Label)
-       in
-       KB.provide Theory.Semantics.slot label
-         (KB.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
-    Toplevel.get run
-  in
+  let provide_dests site w = Hike_decode.provide_dest ~file ~site w in
   (* The run's roots: the relocation lane's code words seed them (main's
      denotation is a round's own discovery); the harvest grows them. *)
   let roots = ref [] in

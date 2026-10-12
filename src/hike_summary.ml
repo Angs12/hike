@@ -17,8 +17,17 @@ type t = { written : Core.Int.Set.t option; returns : bool }
    back. *)
 let unknown = { written = None; returns = true }
 
+(* Nothing written, never comes back: where a recursive cycle's
+   solve starts (ADR 0027 decision 6). *)
+let optimistic = { written = Some Core.Int.Set.empty; returns = false }
+
 let union_written a b =
   match a, b with Some x, Some y -> Some (Core.Set.union x y) | _ -> None
+
+let join a b = { written = union_written a.written b.written; returns = a.returns || b.returns }
+
+let equal a b =
+  Base.Option.equal Core.Set.equal a.written b.written && Bool.equal a.returns b.returns
 
 (* One reachable exit's effect: what it adds to the written set and
    whether control may reach the caller through it. *)
@@ -27,7 +36,7 @@ type contribution = { adds : Core.Int.Set.t option; back : bool }
 let internal = { adds = Some Core.Int.Set.empty; back = false }
 let pessimistic = { adds = None; back = true }
 
-let join a b = { adds = union_written a.adds b.adds; back = a.back || b.back }
+let join_contribution a b = { adds = union_written a.adds b.adds; back = a.back || b.back }
 
 (* A transfer into a callee: its writes join; a tail transfer comes back
    iff the callee does.  An unknown callee writes anything. *)
@@ -93,7 +102,7 @@ let of_solved ~(abi : Hike_abi.t) ~(callee : Tid.t -> t option)
       | None -> pessimistic
       | Some words ->
         Base.List.fold words ~init:internal ~f:(fun acc w ->
-            join acc
+            join_contribution acc
               (match Cbat_word.to_int64 w with
                | Error _ -> pessimistic
                | Ok a -> (
@@ -139,5 +148,5 @@ let of_solved ~(abi : Hike_abi.t) ~(callee : Tid.t -> t option)
        ~init:{ adds = Some (Cbat_var_id.intern_set (Hike_vsa.written_regs_of_sub sub));
                back = false }
        ~f:(fun acc blk ->
-           Term.enum jmp_t blk |> Seq.fold ~init:acc ~f:(fun acc j -> join acc (effect_of blk j)))
+           Term.enum jmp_t blk |> Seq.fold ~init:acc ~f:(fun acc j -> join_contribution acc (effect_of blk j)))
   |> fun e -> { written = e.adds; returns = e.back }
