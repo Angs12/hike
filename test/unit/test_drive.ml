@@ -2,48 +2,6 @@ open Bap.Std
 open Bap_core_theory
 open Hike_test.Harness
 
-(* A minimal x86-64 ELF avoids a compiler or external corpus dependency. *)
-let with_binary code f =
-  let names = "\000.text\000.shstrtab\000" in
-  let names_off = 120 + String.length code in
-  let sections_off = names_off + String.length names in
-  let bytes = Bytes.make (sections_off + 3 * 64) '\000' in
-  let put off size value =
-    for i = 0 to size - 1 do
-      Bytes.set bytes (off + i)
-        (Char.chr (Int64.to_int (Int64.logand
-          (Int64.shift_right_logical value (8 * i)) 255L)))
-    done in
-  Bytes.blit_string "\x7fELF\x02\x01\x01" 0 bytes 0 7;
-  put 16 2 2L; put 18 2 62L; put 20 4 1L;
-  put 24 8 0x400078L; put 32 8 64L;
-  put 40 8 (Int64.of_int sections_off); put 60 2 3L; put 62 2 2L;
-  put 52 2 64L; put 54 2 56L; put 56 2 1L; put 58 2 64L;
-  put 64 4 1L; put 68 4 5L;
-  put 80 8 0x400000L; put 88 8 0x400000L;
-  put 96 8 (Int64.of_int (Bytes.length bytes));
-  put 104 8 (Int64.of_int (Bytes.length bytes)); put 112 8 4096L;
-  Bytes.blit_string code 0 bytes 120 (String.length code);
-  Bytes.blit_string names 0 bytes names_off (String.length names);
-  let text = sections_off + 64 in
-  put text 4 1L; put (text + 4) 4 1L; put (text + 8) 8 6L;
-  put (text + 16) 8 0x400078L; put (text + 24) 8 120L;
-  put (text + 32) 8 (Int64.of_int (String.length code));
-  put (text + 48) 8 1L;
-  let strings = sections_off + 128 in
-  put strings 4 7L; put (strings + 4) 4 3L;
-  put (strings + 24) 8 (Int64.of_int names_off);
-  put (strings + 32) 8 (Int64.of_int (String.length names));
-  put (strings + 48) 8 1L;
-  let file = Filename.temp_file "hike-drive" ".elf" in
-  Fun.protect ~finally:(fun () -> Sys.remove file) (fun () ->
-      let out = open_out_bin file in
-      output_bytes out bytes;
-      close_out out;
-      match Project.create (Project.Input.load ~loader:"llvm" file) with
-      | Ok project -> f project
-      | Error error -> failwith (Core.Error.to_string_hum error))
-
 let tests = [
   pin "DRIVE-01" "discovery returns raw BIR without installing final analysis facts"
     (fun () ->

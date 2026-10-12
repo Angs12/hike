@@ -42,10 +42,11 @@ let code_mems (proj : Project.t) : mem list =
   |> Seq.map ~f:fst
   |> Seq.to_list
 
-(* The cfg of a grown state: every block's insns merged with their
-   semantics (the [with_basic] merge — [of_basic] alone would drop the
-   lifter's call shape), the edges labeled fall/cond/jump. *)
-let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t =
+(* A cfg over the grown state: every explored block's insns merged
+   with their semantics (the [with_basic] merge — [of_basic] alone would
+   drop the lifter's call shape), the edges labeled fall/cond/jump.
+   [entry] and [follow] are the driver's own exploration bounds. *)
+let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
   let open Kb.Syntax in
   let follows_after m1 m2 =
     Addr.equal (Addr.succ (Memory.max_addr m1)) (Memory.min_addr m2)
@@ -54,7 +55,7 @@ let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t =
     let insn = Block.terminator blk in
     Insn.is Insn.jump insn && Insn.is Insn.conditional insn
   in
-  Driver.explore state
+  Driver.explore ?entry ?follow state
     ~init:Graphs.Cfg.empty
     ~block:(fun mem insns ->
       Driver.execution_order insns
@@ -79,6 +80,70 @@ let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t =
         else `Jump
       in
       Kb.return (Graphs.Cfg.Edge.insert (Graphs.Cfg.Edge.create src dst k) g))
+
+let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t = explore_cfg state
+
+(* The jump that ends a block, if the decode recorded one. *)
+let terminator_jump (state : Driver.state) (blk : Block.t) : Driver.jump option =
+  match Base.List.last (Block.insns blk) with
+  | Some (mem, _) -> Driver.jump state (Memory.min_addr mem)
+  | None -> None
+
+(* One function's candidate graph: every block the decode reaches from
+   [entry] without entering another entry ([is_entry]), every edge kept,
+   call fallthroughs included.  A transfer into another entry is a call
+   or a tail call, so its target stays out of the graph. *)
+let function_cfg ~(file : string) (state : Driver.state) ~(entry : Addr.t)
+    ~(is_entry : Addr.t -> bool) : Graphs.Cfg.t =
+  let follow a = Kb.return (Addr.equal a entry || not (is_entry a)) in
+  let run : Graphs.Cfg.t Toplevel.var = Toplevel.var "hike-decode-function" in
+  Toplevel.put run
+    (Kb.Symbol.in_package file @@ fun () -> explore_cfg ~entry ~follow state);
+  Toplevel.get run
+
+(* Each call block of [cfg] with its decoded destinations; an indirect
+   call the decode did not resolve has none. *)
+let calls (state : Driver.state) (cfg : Graphs.Cfg.t) : (Block.t * Addr.t list) list =
+  Graphs.Cfg.nodes cfg
+  |> Seq.filter_map ~f:(fun b ->
+      match terminator_jump state b with
+      | Some j when Driver.is_call j ->
+        Some (b, Core.Set.to_list (Driver.destinations j))
+      | _ -> None)
+  |> Seq.to_list
+
+(* The body: a call's fallthrough stays only when [keep_fall] accepts its
+   destinations (the callee may return), then only what [entry] reaches
+   stays. *)
+let trim (state : Driver.state) (cfg : Graphs.Cfg.t) ~(entry : Block.t)
+    ~(keep_fall : Addr.t list -> bool) : Graphs.Cfg.t =
+  let cut =
+    Graphs.Cfg.edges cfg
+    |> Seq.fold ~init:cfg ~f:(fun g e ->
+        match Graphs.Cfg.Edge.label e, terminator_jump state (Graphs.Cfg.Edge.src e) with
+        | `Fall, Some j
+          when Driver.is_call j
+               && not (keep_fall (Core.Set.to_list (Driver.destinations j))) ->
+          Graphs.Cfg.Edge.remove e g
+        | _ -> g)
+  in
+  let reached =
+    Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) ~init:Block.Set.empty
+      ~f:Core.Set.add cut entry
+  in
+  Graphs.Cfg.nodes cut
+  |> Seq.fold ~init:cut ~f:(fun g b ->
+      if Core.Set.mem reached b then g else Graphs.Cfg.Node.remove b g)
+
+(* The body lifted by BAP's own sub lifter: blocks named by their
+   address labels, a call's return the cfg's fallthrough edge. *)
+let lift ~(file : string) ~(tid : Tid.t) ~(name : string) (entry : Block.t)
+    (cfg : Graphs.Cfg.t) : sub term =
+  let run : sub term Toplevel.var = Toplevel.var "hike-decode-lift" in
+  Toplevel.put run (Kb.Symbol.in_package file @@ fun () -> Sub.KB.lift entry cfg);
+  let lifted = Toplevel.get run in
+  Sub.create ~tid ~name ~blks:(Term.enum blk_t lifted |> Seq.to_list) ()
+  |> fun s -> Term.set_attr s address (Block.addr entry)
 
 let initial proj =
   let state = Project.state proj in
