@@ -343,7 +343,8 @@ let normalize_round (s : Sub.t) : Sub.t =
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)
     ~def_reads ~def_writes ~phi_reads ~phi_writes ~jmp_reads
-    ?(written : Int.Set.t option Tid.Map.t = Tid.Map.empty)
+    ?(callee : Tid.t -> Cbat_call_effects.callee =
+        fun _ -> Cbat_call_effects.Summary None)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (s : Sub.t) (init : vsa_sol) : vsa_sol =
@@ -471,7 +472,7 @@ let rec static_graph_vsa
                 let p_entry = Stages.time `Glue (fun () -> get p) in
                 let rc = !rc_cell in
                 let res = Stages.time `Denote (fun () ->
-                  Cbat_forward.denote_block ~preserved ~written ~resolved
+                  Cbat_forward.denote_block ~preserved ~callee ~resolved
                         ~edge_conds ~disabled:disabled_conds
                         ~rctx:rc
                         ~source:p p_entry ~target:v) in

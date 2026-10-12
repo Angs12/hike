@@ -21,14 +21,23 @@ type site = {
   pushed : bool;
 }
 
-(* An indirect target's summary: the target exp's denotation in the
+(* What a call site reads about its callee: its published kill summary
+   ([None] = any caller-saved GPR), or [Blocked] while the callee has no
+   summary yet — nothing flows past the call until it has one, so a
+   paused solve resumes from a state below its final one. *)
+type callee = Summary of Core.Int.Set.t option | Blocked
+
+(* The per-program kill-summary map read as callees. *)
+val callee_of_written : Core.Int.Set.t option Tid.Map.t -> Tid.t -> callee
+
+(* An indirect target's callee: the target exp's denotation in the
    pre-call env — a singleton word naming a lifted sub through [lookup]
-   reads that sub's own kill summary through [summary_of]; anything
-   unresolved reads [None]. *)
-val indirect_summary :
+   reads that sub through [callee]; anything unresolved is
+   [Summary None]. *)
+val indirect_callee :
   lookup:(int64 -> Tid.t option) ->
-  summary_of:(Tid.t -> Core.Int.Set.t option) ->
-  env:AI.t -> exp -> Core.Int.Set.t option
+  callee:(Tid.t -> callee) ->
+  env:AI.t -> exp -> callee
 
 (* The caller's post-call state: the preserved caller-saved GPRs kept,
    the rest topped; the frame kept at/above the highest possible

@@ -49,7 +49,7 @@ let walk_discards ~(target : tid) (rel : edge_rel) : bool =
 (* Denotation of a block's jumps. *)
 let denote_jump
     ~(preserved : Int.Set.t)
-    ~(written : Int.Set.t option Tid.Map.t)
+    ~(callee : Tid.t -> Cbat_call_effects.callee)
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
@@ -99,25 +99,24 @@ let denote_jump
       | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
       | Some (Indirect _)
       | Some (Direct _) ->
-        (* Calls abstract; every caller's def is denoted. *)
-        let summary =
+        (* Calls abstract; every caller's def is denoted.  A blocked
+           callee has no summary yet: nothing flows past it. *)
+        let site_callee =
           match Call.target c with
-          | Direct ct ->
-            (match Core.Map.find written ct with
-             | Some (Some ws) -> Some ws
-             | _ -> None)
+          | Direct ct -> callee ct
           | Indirect texp ->
-            Cbat_call_effects.indirect_summary
-              ~lookup:rctx.Cbat_runctx.rc_sub_lookup
-              ~summary_of:(fun tid -> Option.join (Core.Map.find written tid))
-              ~env texp
+            Cbat_call_effects.indirect_callee
+              ~lookup:rctx.Cbat_runctx.rc_sub_lookup ~callee ~env texp
         in
-        let _written_lanes, pushed =
-          match Core.Map.find rctx.rc_blocks (Term.tid b) with
-          | Some bf -> bf.bf_call_facts
-          | None -> failwith "hike: no call facts for block (rctx)"
-        in
-        call_site_transfer ~summary ~pushed
+        match site_callee with
+        | Cbat_call_effects.Blocked -> AI.bottom
+        | Cbat_call_effects.Summary summary ->
+          let _written_lanes, pushed =
+            match Core.Map.find rctx.rc_blocks (Term.tid b) with
+            | Some bf -> bf.bf_call_facts
+            | None -> failwith "hike: no call facts for block (rctx)"
+          in
+          call_site_transfer ~summary ~pushed
     in
     let env_res =
       match Jmp.kind jmp with
@@ -145,7 +144,7 @@ let denote_jump
 (* Block denotation toward a target. *)
 let denote_block
     ~(preserved : Int.Set.t)
-    ~(written : Int.Set.t option Tid.Map.t)
+    ~(callee : Tid.t -> Cbat_call_effects.callee)
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
@@ -168,7 +167,7 @@ let denote_block
          p
      in
      fun ~target ->
-       denote_jump ~preserved ~written ~resolved ~edge_conds ~disabled
+       denote_jump ~preserved ~callee ~resolved ~edge_conds ~disabled
          ~rctx
          b postcond ~entry:env ~target
    | None -> fun ~target ->

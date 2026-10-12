@@ -14,18 +14,22 @@ type site = {
   pushed : bool;
 }
 
-let indirect_summary ~(lookup : int64 -> Tid.t option)
-    ~(summary_of : Tid.t -> Int.Set.t option) ~(env : AI.t)
-    (texp : exp) : Int.Set.t option =
+type callee = Summary of Int.Set.t option | Blocked
+
+let callee_of_written (written : Int.Set.t option Tid.Map.t) (tid : Tid.t) : callee =
+  Summary (Option.join (Core.Map.find written tid))
+
+let indirect_callee ~(lookup : int64 -> Tid.t option)
+    ~(callee : Tid.t -> callee) ~(env : AI.t) (texp : exp) : callee =
   match Cbat_transfer.denote_imm_exp texp env with
-  | Error _ -> None
+  | Error _ -> Summary None
   | Ok ws ->
     (match WordSet.enumerate ~cap:1 ws with
      | Some [ target ] ->
        (match Cbat_word.to_int64 target with
-        | Ok v -> Option.bind (lookup v) ~f:summary_of
-        | Error _ -> None)
-     | _ -> None)
+        | Ok v -> Option.value_map (lookup v) ~default:(Summary None) ~f:callee
+        | Error _ -> Summary None)
+     | _ -> Summary None)
 
 (* Segment-relative bounds of a stack value; None when no bound exists.
    [key_extent] is the shared key-space clamp — the same rule the

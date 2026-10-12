@@ -431,6 +431,45 @@ let tests : unit Alcotest.test list =
         check "VSA-67"
           (Ws.equal (AI.find_word 64 post r) (Ws.singleton (w64 0x2d))));
 
+
+    pin "VSA-68" "a solve paused on a callee resumes to the cold solve's result"
+      (fun () ->
+        let rsi = v64 "RSI" and rcx = v64 "RCX" and rbx = v64 "RBX" in
+        let k n = Bil.int (Word.of_int64 ~width:64 n) in
+        let callee_tid = Tid.create () in
+        let sub, tids =
+          sub_of "caller"
+            [ ([ Def.create rsi (k 5L); Def.create rcx (k 7L) ],
+               [ (1, fun t -> mk_call_jmp t callee_tid) ]);
+              ([ Def.create rbx Bil.(var rsi + k 1L);
+                 Def.create sp Bil.(var sp + k 8L) ],
+               [ (0, mk_ret) ]) ] in
+        let writes_rcx =
+          Vsa.Call_effects.Summary
+            (Some (Cbat_var_id.intern_set (Var.Set.singleton rcx))) in
+        let solve ~callee =
+          Hv.start Theory.Target.unknown ~lookup:(fun _ -> None) ~images:[]
+            ~callee ~block_addrs:(Core.Map.empty (module Addr))
+            ~foreign_slots:Core.Int64.Set.empty sub in
+        let resume p ~callee =
+          Hv.resume Theory.Target.unknown ~lookup:(fun _ -> None) ~images:[]
+            ~callee ~foreign_slots:Core.Int64.Set.empty p in
+        match solve ~callee:(fun _ -> Vsa.Call_effects.Blocked) with
+        | Hv.Done _ -> check "VSA-68.paused" false
+        | Hv.Paused p ->
+          check "VSA-68.blocked" (Core.Set.equal p.p_blocked (Tid.Set.singleton callee_tid));
+          check "VSA-68.seed"
+            (AI.equal (Graphlib.Std.Solution.get p.p_seed tids.(1)) AI.bottom);
+          match resume p ~callee:(fun _ -> writes_rcx), solve ~callee:(fun _ -> writes_rcx) with
+          | Hv.Done (warm, _, _), Hv.Done (cold, _, _) ->
+            check "VSA-68.equal"
+              (Core.Map.equal (fun (a, b) (c, d) -> AI.equal a c && AI.equal b d) warm cold);
+            check "VSA-68.flowed"
+              (match Core.Map.find warm tids.(1) with
+               | Some (_, post) ->
+                 Ws.equal (AI.find_word 64 post rbx) (Ws.singleton (w64 6))
+               | None -> false)
+          | _ -> check "VSA-68.done" false);
   ]
 
 let () = run "vsa" tests

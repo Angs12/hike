@@ -9,11 +9,12 @@ module Ws = Cbat_clp_set_composite
 module Model = Hike.Stack_model
 
 let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
+  let callee = Option.map Vsa.Call_effects.callee_of_written written in
   Vsa.static_graph_vsa ~abi
     ~def_reads:Model.def_reads ~def_writes:Model.def_writes
     ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
     ~jmp_reads:(Model.jmp_reads ~abi)
-    ?written ?resolved ?sub_lookup sub init
+    ?callee ?resolved ?sub_lookup sub init
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
    Each probe owns its per-sub report; this seam owns project loading and

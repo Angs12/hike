@@ -24,6 +24,48 @@ open Bap_core_theory
     img_slots : Core.Int64.Set.t;
   }
 
+  type lookup_fn = int64 -> Tid.t option
+
+  (** A solve paused on callees with no summary yet: [p_seed] is the
+      phase's solution (every blocked call's continuation bottom),
+      [p_blocked] the callees it waits on. *)
+  type paused = {
+    p_sub : sub term;
+    p_resolved : Tid.Set.t Tid.Map.t;
+    p_block_addrs : Tid.t Addr.Map.t;
+    p_seed : Cbat_vsa.vsa_sol;
+    p_blocked : Tid.Set.t;
+  }
+
+  (** A solve's end: the per-block (pre, post) environments, the
+      rewritten sub and the grown block-address map, or a pause. *)
+  type outcome =
+    | Done of (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
+    | Paused of paused
+
+  (** The fused solve under [callee]: phases of solve + resolution
+      growth, pausing when a reachable call's callee is [Blocked]. *)
+  val start :
+    Theory.Target.t ->
+    lookup:lookup_fn ->
+    images:section_image list ->
+    callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
+    block_addrs:Tid.t Addr.Map.t ->
+    foreign_slots:Core.Int64.Set.t ->
+    ?noreturn:Tid.Set.t ->
+    sub term ->
+    outcome
+
+  (** Continues a paused solve from its seed under the new [callee]. *)
+  val resume :
+    Theory.Target.t ->
+    lookup:lookup_fn ->
+    images:section_image list ->
+    callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
+    foreign_slots:Core.Int64.Set.t ->
+    paused ->
+    outcome
+
   (** The fused solve: phases of solve + resolution growth until
       stable, materialization once at drain.  Returns the per-block
       (pre, post) environments, the rewritten sub, the grown

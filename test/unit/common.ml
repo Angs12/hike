@@ -64,11 +64,12 @@ module Sm = Hike.Stack_model
 module Ds = Hike.Def_slots
 
 let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
+  let callee = Option.map Vsa.Call_effects.callee_of_written written in
   Vsa.static_graph_vsa ~abi
     ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
     ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
     ~jmp_reads:(Sm.jmp_reads ~abi)
-    ?written ?resolved ?sub_lookup sub init
+    ?callee ?resolved ?sub_lookup sub init
 
 let mk_rctx ~abi ?sub_lookup sub =
   Vsa.Test_seam.mk_rctx ~abi

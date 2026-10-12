@@ -97,7 +97,7 @@ val static_graph_vsa :
   phi_reads:(phi term -> Var.Set.t) ->
   phi_writes:(phi term -> Var.Set.t) ->
   jmp_reads:(jmp term -> Var.Set.t) ->
-  ?written:Core.Int.Set.t option Tid.Map.t ->
+  ?callee:(Tid.t -> Cbat_call_effects.callee) ->
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
   Sub.t -> vsa_sol -> vsa_sol

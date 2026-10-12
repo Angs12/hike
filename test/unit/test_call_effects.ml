@@ -178,14 +178,14 @@ let tests : unit Alcotest.test list =
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
         let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let summary_of t = if Tid.equal t sub_tid then Some gs else None in
+        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
         let bounded =
           AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x5000))
         in
         check "CE-08"
-          (match Ce.indirect_summary ~lookup ~summary_of ~env:bounded (Bil.Var tgt) with
-          | Some ws -> Core.Int.Set.equal ws gs
-          | None -> false));
+          (match Ce.indirect_callee ~lookup ~callee ~env:bounded (Bil.Var tgt) with
+          | Ce.Summary (Some ws) -> Core.Int.Set.equal ws gs
+          | _ -> false));
 
     (* An unbounded target resolves to nothing. *)
     pin "CE-09" "an unbounded target resolves to nothing" (fun () ->
@@ -194,15 +194,15 @@ let tests : unit Alcotest.test list =
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
         let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let summary_of t = if Tid.equal t sub_tid then Some gs else None in
+        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
         let spread =
           AI.add_word AI.top ~key:tgt
             ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ])
         in
         check "CE-09"
-          (match Ce.indirect_summary ~lookup ~summary_of ~env:spread (Bil.Var tgt) with
-          | None -> true
-          | Some _ -> false));
+          (match Ce.indirect_callee ~lookup ~callee ~env:spread (Bil.Var tgt) with
+          | Ce.Summary None -> true
+          | _ -> false));
 
     (* A foreign singleton resolves to nothing. *)
     pin "CE-10" "a foreign singleton resolves to nothing" (fun () ->
@@ -211,14 +211,14 @@ let tests : unit Alcotest.test list =
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
         let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let summary_of t = if Tid.equal t sub_tid then Some gs else None in
+        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
         let foreign =
           AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x9000))
         in
         check "CE-10"
-          (match Ce.indirect_summary ~lookup ~summary_of ~env:foreign (Bil.Var tgt) with
-          | None -> true
-          | Some _ -> false));
+          (match Ce.indirect_callee ~lookup ~callee ~env:foreign (Bil.Var tgt) with
+          | Ce.Summary None -> true
+          | _ -> false));
 
     (* A preserved word keeps its value-set. *)
 

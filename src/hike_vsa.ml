@@ -138,12 +138,147 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
 (* The fused solve: each phase runs the engine over the resolved
    extra-edge set, then the resolver grows the edges and splits
    mid-block case entries — a resolution event — and the next phase
-   solves warm.  The BIR's claims are immutable during the solve; at
-   drain the materialization lands once.  Non-convergence is the top
-   identity: empty environments, the shape-canonicalized sub, the
-   input block-address map. *)
+   solves warm.  A phase whose reachable calls wait on a callee with no
+   summary yet pauses instead: the phase's solution is the seed the
+   resume warms from (a blocked call's continuation is bottom, so the
+   seed stays below the final state).  The BIR's claims are immutable
+   during the solve; at drain the materialization lands once.
+   Non-convergence is the top identity: empty environments, the
+   shape-canonicalized sub, the input block-address map. *)
 type lookup_fn = int64 -> Tid.t option
 
+type paused = {
+  p_sub : sub term;
+  p_resolved : Tid.Set.t Tid.Map.t;
+  p_block_addrs : Tid.t Addr.Map.t;
+  p_seed : Vsa.vsa_sol;
+  p_blocked : Tid.Set.t;
+}
+
+type outcome =
+  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
+  | Paused of paused
+
+(* The callees the solution's reachable calls wait on.  Only a call
+   with a continuation waits: nothing flows past a tail call (or the
+   canonical return, which BAP exposes as one). *)
+let blocked_callees ~(lookup : lookup_fn)
+    ~(callee : Tid.t -> Vsa.Call_effects.callee) (sol : Vsa.vsa_sol)
+    (sub : sub term) : Tid.Set.t =
+  let blocked t =
+    match callee t with Vsa.Call_effects.Blocked -> true | Summary _ -> false
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+      let calls =
+        Term.enum jmp_t blk
+        |> Seq.filter_map ~f:(fun j ->
+            match Jmp.kind j with
+            | Call c when Base.Option.is_some (Call.return c) -> Some c
+            | _ -> None)
+        |> Seq.to_list
+      in
+      if Base.List.is_empty calls
+      || Vsa.AI.equal (Graphlib.Std.Solution.get sol (Term.tid blk)) Vsa.AI.bottom
+      then acc
+      else
+        let _, post = Vsa.fold_block_states ~sol blk ~init:() ~f:(fun _ _ _ () -> ()) in
+        Base.List.fold calls ~init:acc ~f:(fun acc c ->
+            let target =
+              match Call.target c with
+              | Direct t -> Some t
+              | Indirect e -> (
+                match Vsa.denote_imm_exp e post with
+                | Ok ws -> Hike_resolve.resolve_target ~lookup ws
+                | Error _ -> None)
+            in
+            match target with
+            | Some t when blocked t -> Core.Set.add acc t
+            | _ -> acc))
+
+let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
+    ~(images : Vsa.section_image list)
+    ~(callee : Tid.t -> Vsa.Call_effects.callee)
+    ~(foreign_slots : Core.Int64.Set.t) ~(sub : sub term)
+    ~(resolved : Tid.Set.t Tid.Map.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(seed : Vsa.vsa_sol option) : outcome =
+  self_arm target;
+  let abi = Hike_abi.of_target target in
+  (* The images arm the whole fused solve: every denotation the
+     phases, the completion's rewrites, and the replay compute reads
+     them through one bracket. *)
+  Vsa.with_images images (fun () ->
+      let rec phases (resolved : Tid.Set.t Tid.Map.t)
+          (block_addrs : Tid.t Addr.Map.t)
+          (init : Vsa.vsa_sol option) =
+        let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
+        let sol =
+          Vsa.static_graph_vsa ~abi
+            ~def_reads:Model.def_reads ~def_writes:Model.def_writes
+            ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
+            ~jmp_reads:(Model.jmp_reads ~abi)
+            ~callee ~resolved ~sub_lookup:lookup
+            sub seed
+        in
+        let blocked = blocked_callees ~lookup ~callee sol sub in
+        if not (Core.Set.is_empty blocked) then
+          `Paused { p_sub = sub; p_resolved = resolved;
+                    p_block_addrs = block_addrs; p_seed = sol;
+                    p_blocked = blocked }
+        else
+          let resolved', events =
+            Hike_cfg_complete.resolve_phase ~abi ~sol ~block_addrs
+              ~foreign_slots sub resolved
+          in
+          if events then phases resolved' block_addrs (Some sol)
+          else `Drained (sol, block_addrs)
+      in
+      match
+        try Some (phases resolved block_addrs seed)
+        with Vsa.Fixpoint_not_converged (n, _) ->
+#ifdef VSA_DEBUG
+          Vsa.Cbat_attr_census.bump "backstop.sub";
+#endif
+          Hike_diag.warn
+            "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
+            (Sub.name sub) n;
+          None
+      with
+      | Some (`Paused p) -> Paused p
+      | Some (`Drained (sol, block_addrs')) ->
+        let sub' =
+          Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
+            ~foreign_slots sub
+        in
+        (* The round-down normalization rides the returned sub: the
+           attribution re-denotes from these rhs's, and the solve's
+           materialization may reintroduce the shift pair. *)
+        let sub' = Vsa.normalize_round sub' in
+        let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub' in
+        Done (envs, stamped, block_addrs')
+      | None ->
+        Done
+          ( Tid.Map.empty,
+            Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
+            block_addrs ))
+
+let start (target : Theory.Target.t) ~(lookup : lookup_fn)
+    ~(images : Vsa.section_image list)
+    ~(callee : Tid.t -> Vsa.Call_effects.callee)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(foreign_slots : Core.Int64.Set.t)
+    ?(noreturn : Tid.Set.t = Tid.Set.empty) (sub : sub term) : outcome =
+  let sub = Hike_cfg_complete.clear_noreturn_returns ~noreturn sub in
+  solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub
+    ~resolved:Tid.Map.empty ~block_addrs ~seed:None
+
+let resume (target : Theory.Target.t) ~(lookup : lookup_fn)
+    ~(images : Vsa.section_image list)
+    ~(callee : Tid.t -> Vsa.Call_effects.callee)
+    ~(foreign_slots : Core.Int64.Set.t) (p : paused) : outcome =
+  solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub:p.p_sub
+    ~resolved:p.p_resolved ~block_addrs:p.p_block_addrs ~seed:(Some p.p_seed)
+
+(* The kill-summary map never blocks, so the solve runs to the end. *)
 let fixpoint (target : Theory.Target.t)
     ~(lookup : lookup_fn)
     ~(sub_addrs : Tid.t Addr.Map.t)
@@ -154,56 +289,10 @@ let fixpoint (target : Theory.Target.t)
     ?(noreturn : Tid.Set.t = Tid.Set.empty)
     (sub : sub term) :
     (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  self_arm target;
-  let sub = Hike_cfg_complete.clear_noreturn_returns ~noreturn sub in
-  let abi = Hike_abi.of_target target in
-  (* The images arm the whole fused solve: every denotation the
-     phases, the completion's rewrites, and the replay compute reads
-     them through one bracket. *)
-  Vsa.with_images images (fun () ->
-      let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
-          (block_addrs : Tid.t Addr.Map.t)
-          (init : Vsa.vsa_sol option) =
-        let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
-        let sol =
-          Vsa.static_graph_vsa ~abi
-            ~def_reads:Model.def_reads ~def_writes:Model.def_writes
-            ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
-            ~jmp_reads:(Model.jmp_reads ~abi)
-            ~written ~resolved ~sub_lookup:lookup
-            sub seed
-        in
-        let resolved', events =
-          Hike_cfg_complete.resolve_phase ~abi ~sol ~block_addrs
-            ~foreign_slots sub resolved
-        in
-        if events then phases sub resolved' block_addrs (Some sol)
-        else (sol, sub, block_addrs)
-      in
-      let converged =
-        try Some (phases sub Tid.Map.empty block_addrs None)
-        with Vsa.Fixpoint_not_converged (n, _) ->
-#ifdef VSA_DEBUG
-          Vsa.Cbat_attr_census.bump "backstop.sub";
-#endif
-          Hike_diag.warn
-            "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
-            (Sub.name sub) n;
-          None
-      in
-      match converged with
-      | Some (sol, sub', block_addrs') ->
-        let sub'' =
-          Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
-            ~foreign_slots sub'
-        in
-        (* The round-down normalization rides the returned sub: the
-           attribution re-denotes from these rhs's, and the solve's
-           materialization may reintroduce the shift pair. *)
-        let sub'' = Vsa.normalize_round sub'' in
-        let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
-        (envs, stamped, block_addrs')
-      | None ->
-        ( Tid.Map.empty,
-          Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-          block_addrs ))
+  match
+    start target ~lookup ~images
+      ~callee:(Vsa.Call_effects.callee_of_written written)
+      ~block_addrs ~foreign_slots ~noreturn sub
+  with
+  | Done (envs, sub, block_addrs) -> (envs, sub, block_addrs)
+  | Paused _ -> assert false
