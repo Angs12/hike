@@ -11,9 +11,7 @@ module Model = Hike_stack_model
    solution state by the solve's own replay. *)
 type denote = Hike_kb.denote
 
-(* The dispatch words the resolution's phases enumerated, with each
-   site's address and call class: the drive loop's fact source.  The
-   facts ride the solve's return, never a global. *)
+(* The phase solution's denotation. *)
 let denote_of_sol (sol : Vsa.vsa_sol) : denote =
   fun ~blk ?def e ->
     Vsa.solve_denote
@@ -526,25 +524,6 @@ let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
    destination is that single unconditional edge — the guards select
    nothing.  A guarded series keeps its edges: the split makes each piece
    a block of its own, so their destinations never collide. *)
-(* The noreturn fact's consumption: a call whose resolved target is a
-   classified never-returning sub carries no return continuation, so the
-   decode's fallthrough after it is not an edge.  Runs before the
-   fallthrough materialization and the solve's phases. *)
-let clear_noreturn_returns ~(noreturn : Tid.Set.t) (sub : sub term) : sub term =
-  if Core.Set.is_empty noreturn then sub
-  else
-    Term.map blk_t sub ~f:(fun blk ->
-        Term.map jmp_t blk ~f:(fun j ->
-            match Jmp.kind j with
-            | Call c -> (
-                match Call.target c with
-                | Direct t
-                  when Core.Set.mem noreturn t
-                       && Base.Option.is_some (Call.return c) ->
-                  Jmp.with_kind j (Call (Call.with_noreturn c))
-                | _ -> j)
-            | _ -> j))
-
 let materialize_fallthroughs (sub : sub term) : sub term =
   let direct (j : jmp term) : Tid.t option =
     match Jmp.kind j with Goto (Direct t) -> Some t | _ -> None

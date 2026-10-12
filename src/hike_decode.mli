@@ -1,15 +1,13 @@
 (* Internal BAP adapter for the discovery pass. *)
 open Bap.Std
 
-type out = {
-  grown : Disasm.Driver.state;
-  cfg : Graphs.Cfg.t;
-  subs : Disasm.Subroutines.t;
-}
+(** The package the program's subs name as their source file. *)
 val file_of : program term -> string
-val initial : Project.t -> out
-val program_of_state : file:string -> Disasm.Driver.state -> Disasm.Subroutines.t -> program term
-val rescan : Project.t -> file:string -> roots:int64 list -> out option
+
+(** The loader's decode. *)
+val initial : Project.t -> Disasm.Driver.state
+
+(** Each block's start address and its last instruction's address. *)
 val terminators : Graphs.Cfg.t -> (Addr.t * Addr.t) list
 
 (** Provides [dest] as a destination fact on the instruction at [site]. *)

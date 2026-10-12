@@ -16,9 +16,6 @@ type site = {
 
 type callee = Summary of Int.Set.t option | Blocked
 
-let callee_of_written (written : Int.Set.t option Tid.Map.t) (tid : Tid.t) : callee =
-  Summary (Option.join (Core.Map.find written tid))
-
 let indirect_callee ~(lookup : int64 -> Tid.t option)
     ~(callee : Tid.t -> callee) ~(env : AI.t) (texp : exp) : callee =
   match Cbat_transfer.denote_imm_exp texp env with

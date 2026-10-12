@@ -81,13 +81,9 @@ let run_binary (path : string) (name : string) : unit =
      per-block (pre, post) envs: the walks read the forms production
      analyses. *)
   let envs, sub', _grown =
-    Hike.Vsa.fixpoint (Project.target proj)
-      ~lookup:(fun _ -> None)
-      ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
-      ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
-                  (Program.create ~subs:[ sub ] ()))
-            ~block_addrs:(Core.Map.empty (module Addr))
-      ~foreign_slots:(Core.Int64.Set.empty) sub
+    Probe_common.solve
+      ~callee:(Probe_common.callee_of (Program.create ~subs:[ sub ] ()))
+      (Project.target proj) sub
   in
   let pre_of tid = match Core.Map.find envs tid with
     | Some (pre, _) -> pre

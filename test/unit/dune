@@ -5,7 +5,6 @@
   hike
   hike.hike_core
   hike.hike_emit
-  hike.hike_noreturn
   bap
   bap-main
   bap-core-theory
@@ -56,8 +55,6 @@
   test_hike_fp
   test_probe
   test_image
-  test_drive
-  test_noreturn
   test_summary
   test_decode
   test_worklist
@@ -69,7 +66,6 @@
   hike
   hike.hike_core
   hike.hike_emit
-  hike.hike_noreturn
   bap
   bap-main
   bap-core-theory

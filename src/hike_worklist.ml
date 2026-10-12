@@ -14,12 +14,10 @@ module S = Hike_summary
 module Vsa = Cbat_vsa
 
 (* A lifted function: [decoded] is every block start of its candidate
-   graph; [raw] is the linked, armed body as lifted; [solved] is the
-   normalized body the solve rewrote, with its environments and block
-   addresses. *)
+   graph; [solved] is the normalized body the solve rewrote, with its
+   environments and block addresses. *)
 type func = {
   decoded : Core.Int64.Set.t;
-  raw : sub term;
   solved : sub term;
   envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t;
   block_addrs : Tid.t Addr.Map.t;
@@ -446,7 +444,7 @@ and solve t frame ~decoded (raw : sub term) : func =
               symbol_summary t (symbol t n)))
       ~lookup ~foreign_slots ~block_addrs ~envs solved
   in
-  { decoded; raw; solved; envs; block_addrs; summary }
+  { decoded; solved; envs; block_addrs; summary }
 
 (* ---- facts from a solved body ---- *)
 
@@ -541,7 +539,7 @@ let create proj : t =
     slot_names =
       Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
         (Hike_image.external_references proj);
-    state = (D.initial proj).grown;
+    state = D.initial proj;
     roots = [];
     dests = Core.Int64.Map.empty;
     entries = Core.Hashtbl.create (module Core.Int64);
@@ -556,6 +554,13 @@ let create proj : t =
     reads = [];
     results = Core.Hashtbl.create (module Core.Int64);
   }
+
+(* Data-found and refusal roots lie in the executable's text: the PLT and
+   the runtime's init and fini code are the loader's. *)
+let in_text t (w : int64) : bool =
+  match t.context.text_range with
+  | Some (lo, hi) -> Int64.compare w lo >= 0 && Int64.compare w hi <= 0
+  | None -> false
 
 (* Solves each root, decoding the ones BAP has not taken as entries in
    one scan first. *)
@@ -581,11 +586,6 @@ let functions t : (int64 * func) list =
    functions only data reaches; they are solved as roots until none is
    left. *)
 let rec close t : unit =
-  let in_text w =
-    match t.context.text_range with
-    | Some (lo, hi) -> Int64.compare w lo >= 0 && Int64.compare w hi <= 0
-    | None -> false
-  in
   let decoded =
     Base.List.fold (functions t) ~init:Core.Int64.Set.empty ~f:(fun acc (_, f) ->
         Core.Set.union acc f.decoded)
@@ -593,7 +593,7 @@ let rec close t : unit =
   let unclaimed w = not (Core.Set.mem decoded w) in
   let words =
     Base.List.rev t.found
-    |> Base.List.filter ~f:(fun w -> in_text w && unclaimed w)
+    |> Base.List.filter ~f:(fun w -> in_text t w && unclaimed w)
     |> Base.List.stable_dedup ~compare:Int64.compare
   in
   t.found <- [];
@@ -655,14 +655,61 @@ let unresolved_call t (f : func) : bool =
             | _ -> false)
       | _ -> false)
 
-let synthetic (tid : Tid.t) (name : string) : sub term =
-  let sub = Term.set_attr (Sub.create ~tid ~name ()) Term.synthetic () in
-  if Hike_abi.is_intrinsic_name name then Term.set_attr sub Sub.intrinsic () else sub
+(* One jump per block for the downstream passes: each non-goto jump
+   moves to a block of its own, entered under the jump's condition. *)
+let simplify_jmps (sub : sub term) : sub term =
+  Term.concat_map blk_t sub ~f:(fun blk ->
+      match Term.enum jmp_t blk |> Seq.to_list with
+      | [ _ ] -> [ blk ]
+      | jmps ->
+        let builder = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
+        let moved =
+          Base.List.filter_map jmps ~f:(fun j ->
+              match Jmp.kind j with
+              | Goto _ ->
+                Blk.Builder.add_jmp builder j;
+                None
+              | _ ->
+                let own = Blk.create ~jmps:[ Jmp.with_cond j Bil.(int (Word.one 1)) ] () in
+                Blk.Builder.add_jmp builder
+                  (Jmp.create_goto ~cond:(Jmp.cond j) (Direct (Term.tid own)));
+                Some own)
+        in
+        moved @ [ Term.with_attrs (Blk.Builder.result builder) (Term.attrs blk) ])
+
+type result = { program : program term; facts : Hike_kb.facts }
+
+(* The analysis facts of the published solves: every block's
+   environments, the block and entry addresses, and the entry lookup. *)
+let facts t : Hike_kb.facts =
+  let funcs = functions t in
+  let union maps =
+    Base.List.fold maps ~init:Addr.Map.empty ~f:(fun acc m ->
+        Core.Map.merge_skewed acc m ~combine:(fun ~key:_ a _ -> a))
+  in
+  let tid_of (e : entry) =
+    match e.status with Final (Alias x) -> x | _ -> e.tid
+  in
+  let lookup a = Base.Option.map (Core.Hashtbl.find t.entries a) ~f:tid_of in
+  let sub_addrs =
+    Core.Hashtbl.data t.entries
+    |> Base.List.map ~f:(fun e -> (Addr.of_int64 e.addr, tid_of e))
+    |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
+  in
+  { (Hike_kb.build ~target:t.context.target ~lookup
+       ~block_envs:(Base.List.fold funcs ~init:Tid.Map.empty ~f:(fun acc (_, f) ->
+           Core.Map.merge_skewed acc f.envs ~combine:(fun ~key:_ a _ -> a)))
+       ~block_addrs:(union (Base.List.map funcs ~f:(fun (_, f) -> f.block_addrs))))
+    with
+    Hike_kb.sub_addrs;
+    images = t.context.images;
+    foreign_slots = t.context.linker_slots }
 
 (* The worklist's program: main's closure (or, on refusal, every BAP
-   subroutine's) as linked, armed raw bodies, plus a block-less sub per
-   external and intrinsic target. *)
-let run (proj : Project.t) : program term =
+   subroutine's) as solved bodies with one jump per block, plus a
+   block-less declaration per external target (the emitter maps
+   intrinsic targets itself); and the solves' analysis facts. *)
+let run (proj : Project.t) : result =
   let t = create proj in
   let entry = Hike_image.entry_point proj in
   Base.Option.iter entry ~f:(fun a -> solve_roots t [ a ]);
@@ -691,18 +738,19 @@ let run (proj : Project.t) : program term =
   || Base.List.exists (functions t) ~f:(fun (_, f) -> unresolved_call t f)
   then begin
     if Base.Option.is_none main then
-      Hike_diag.warn "discover: no main; every BAP subroutine is a root";
+      Hike_diag.warn "discover: no main; every BAP subroutine in the text is a root";
     solve_roots t
       (Term.enum sub_t (Project.program proj)
        |> Seq.filter_map ~f:(fun s ->
            Base.Option.bind (Term.first blk_t s) ~f:(fun b ->
                Base.Option.map (Term.get_attr b address) ~f:Word.to_int64_exn))
+       |> Seq.filter ~f:(in_text t)
        |> Seq.to_list);
     close t
   end;
   let lifted =
     Base.List.map (functions t) ~f:(fun (a, f) ->
-        let sub = Term.set_attr f.raw filename t.file in
+        let sub = Term.set_attr (simplify_jmps f.solved) filename t.file in
         let sub =
           if Base.Option.is_some main && Base.Option.equal Int64.equal entry (Some a)
           then Term.set_attr sub Sub.entry_point () else sub
@@ -713,7 +761,11 @@ let run (proj : Project.t) : program term =
   let externals =
     Core.Hashtbl.to_alist t.symbols
     |> Base.List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> String.compare a b)
-    |> Base.List.map ~f:(fun (tid, (name, _)) -> synthetic tid name)
+    |> Base.List.filter_map ~f:(fun (tid, (name, _)) ->
+        Base.Option.some_if (not (Hike_abi.is_intrinsic_name name))
+          (Term.set_attr (Sub.create ~tid ~name ()) Term.synthetic ()))
   in
-  Base.List.fold (lifted @ externals) ~init:(Program.create ())
-    ~f:(fun p s -> Term.append sub_t p s)
+  { program =
+      Base.List.fold (lifted @ externals) ~init:(Program.create ())
+        ~f:(fun p s -> Term.append sub_t p s);
+    facts = facts t }

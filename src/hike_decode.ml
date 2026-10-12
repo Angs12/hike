@@ -1,23 +1,14 @@
-(* The drive loop's re-decode.  One decode context — the program's own
+(* The BAP decoder adapter.  One decode context — the program's own
    package, unit, and theory instance — re-drives BAP's scan with the
-   run's discoveries: an [is_subroutine] fact per discovered entry
-   (durable for the partition, promised for the scan's root
-   classification), and the resolved dispatch destinations provided on
-   the instruction labels' [Insn.Slot.dests] facts so the driver keeps
-   decoding at them.  The scan starts fresh every round; the grown state
-   is the round's complete decode. *)
+   worklist's discoveries: an [is_subroutine] fact per discovered entry,
+   and the resolved dispatch destinations provided on the instruction
+   labels' [Insn.Slot.dests] facts so the driver keeps decoding at them.
+   Each scan starts fresh; a function's body is explored from it. *)
 
 open Bap.Std
 open Bap_core_theory
 module Kb = Bap_core_theory.KB
 module Driver = Disasm.Driver
-module Subs = Disasm.Subroutines
-
-type out = {
-  grown : Driver.state;
-  cfg : Graphs.Cfg.t;
-  subs : Subs.t;
-}
 
 (* A plain recursive fold over the knowledge monad. *)
 let rec kb_fold (f : 'a -> 'x -> 'a Kb.t) (acc : 'a) (xs : 'x list) :
@@ -80,8 +71,6 @@ let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
         else `Jump
       in
       Kb.return (Graphs.Cfg.Edge.insert (Graphs.Cfg.Edge.create src dst k) g))
-
-let cfg_of_state (state : Driver.state) : Graphs.Cfg.t Kb.t = explore_cfg state
 
 (* One function's candidate graph: every block the decode reaches from
    [entry] without entering another entry ([is_entry]), every edge kept,
@@ -176,14 +165,9 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
        (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
   Toplevel.get run
 
-let initial proj =
-  let state = Project.state proj in
-  let grown = Project.State.disassembly state in
-  let cfg = Toplevel.var "hike-drive-initial-cfg" in
-  Toplevel.put cfg
-    (Kb.Symbol.in_package (file_of (Project.program proj)) @@ fun () ->
-     cfg_of_state grown);
-  { grown; cfg = Toplevel.get cfg; subs = Project.State.subroutines state }
+(* The loader's decode. *)
+let initial (proj : Project.t) : Driver.state =
+  Project.State.disassembly (Project.state proj)
 
 (* A fresh decode of every code region with [roots] as subroutine
    facts and every provided destination fact. *)
@@ -246,29 +230,6 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
      let mems = code_mems proj |> List.rev in
      kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems);
   Toplevel.get out
-
-let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
-    out option =
-  let grown = scan proj ~file ~roots in
-  let out : out Toplevel.var = Toplevel.var "hike-drive-rescan" in
-  Toplevel.put out
-    (let open Kb.Syntax in
-     Kb.Symbol.in_package file @@ fun () ->
-     cfg_of_state grown >>= fun cfg ->
-     Subs.update Subs.empty grown >>| fun subs -> { grown; cfg; subs });
-  Some (Toplevel.get out)
-
-(* The program of a grown decode: BAP's own lift of the partition — the
-   same three calls the loader makes ([Symtab.create] over the state and
-   the partition, [Program.lift]) — so every sub the decode and the
-   partition name is in the program, discovered callees included. *)
-let program_of_state ~(file : string) (state : Driver.state) (subs : Subs.t) : program term =
-  let run : program term Toplevel.var = Toplevel.var "hike-drive-program" in
-  Toplevel.put run
-    (Kb.Symbol.in_package file @@ fun () ->
-     let open Kb.Syntax in
-     Symtab.create state subs >>= fun symtab -> Program.KB.lift symtab);
-  Toplevel.get run
 
 (* Each decoded block's start address and its terminator instruction's
    address.  The solver's jmp rewrites rebuild jmps with [Jmp.create

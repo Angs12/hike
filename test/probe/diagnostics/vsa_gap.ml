@@ -51,12 +51,12 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) usage_text
     in
-    (* The kill-summary regime: the pass computes whole-program
-       summaries; a single-sub run degrades every callee to unknown. *)
-    let written =
+    (* The callee regime: each program sub's own writes, or ("none")
+       every callee unknown. *)
+    let callee =
       match written_mode with
-      | "none" -> Tid.Map.empty
-      | _ -> Hike.Vsa.kill_summaries ~abi:(Hike.Abi.of_target target) prog
+      | "none" -> fun _ -> Vsa.Call_effects.Summary None
+      | _ -> callee_of prog
     in
     Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
     (* The pass's transforms, in chain order. *)
@@ -79,7 +79,7 @@ let () =
     let abi = Hike.Abi.of_target target in
     let t0 = Unix.gettimeofday () in
     match
-      static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) sub
+      static_graph_vsa ~abi ~callee ~sub_lookup:(fun _ -> None) sub
         (Vsa.init_sol ~abi sub)
     with
     | sol ->

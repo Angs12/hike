@@ -63,8 +63,7 @@ module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Ds = Hike.Def_slots
 
-let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
-  let callee = Option.map Vsa.Call_effects.callee_of_written written in
+let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
     ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
     ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
@@ -107,23 +106,35 @@ let top_facts : Hike.Kb.facts =
     ~block_addrs:(Core.Map.empty (module Addr))
     ~target:Theory.Target.unknown
 
-(* The producer, composed: the fixpoint's two products (the block
-   environments and the REWRITTEN SUB) — the tests' one-line driver.
-   [written] is computed at the boundary, exactly like the pass. *)
+(* The fixtures' callees: a sub of [prog] writes the registers its
+   own defs write; any other target writes anything. *)
+let callee_of (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
+  match Term.find sub_t prog tid with
+  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hv.written_regs_of_sub s)))
+  | None -> Summary None
+
+(* The production solve with every callee summarized, so it never
+   pauses: the block environments, the rewritten sub and the grown
+   block-address map. *)
+let solve ?(images = []) ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) :
+    (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
+  match
+    Hv.start target ~lookup:(fun _ -> None) ~images ~callee ~block_addrs
+      ~foreign_slots:Core.Int64.Set.empty sub
+  with
+  | Hv.Done (envs, sub', block_addrs') -> (envs, sub', block_addrs')
+  | Hv.Paused _ -> Alcotest.fail "solve: a fixture callee is blocked"
+
+(* The producer, composed: the solve's products for [sub] with [prog]'s
+   subs as its callees — the tests' one-line driver. *)
 let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
     (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  let envs, sub', ba' =
-    Hv.fixpoint target ~lookup:(fun _ -> None)
-      ~sub_addrs:(Core.Map.empty (module Addr)) ~images
-      ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
-      ~foreign_slots:Core.Int64.Set.empty
-      ~block_addrs:
-        (Core.Map.of_alist_exn (module Addr)
-           (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
-      sub
-  in
-  (envs, sub', ba')
+  solve ~images ~callee:(callee_of prog) target
+    ~block_addrs:
+      (Core.Map.of_alist_exn (module Addr)
+         (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
+    sub
 
 (* Runs the production attribution protocol over fixture analysis facts. *)
 let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
@@ -166,13 +177,8 @@ let fixture_facts (subs : sub term list) :
     Base.List.fold subs ~init:(Tid.Map.empty, [], true)
       ~f:(fun (m, stamped, ok) sub ->
         let envs, sub', _ =
-          Hv.fixpoint Theory.Target.unknown
-            ~lookup:(fun _ -> None)
-            ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
-            ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
-                        (Program.create ~subs:[ sub ] ()))
-            ~foreign_slots:Core.Int64.Set.empty
-            ~block_addrs:(Core.Map.empty (module Addr)) sub
+          solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
+            Theory.Target.unknown sub
         in
         (Core.Map.merge m envs
            ~f:(fun ~key:_ el ->

@@ -27,9 +27,6 @@ type site = {
    paused solve resumes from a state below its final one. *)
 type callee = Summary of Core.Int.Set.t option | Blocked
 
-(* The per-program kill-summary map read as callees. *)
-val callee_of_written : Core.Int.Set.t option Tid.Map.t -> Tid.t -> callee
-
 (* An indirect target's callee: the target exp's denotation in the
    pre-call env — a singleton word naming a lifted sub through [lookup]
    reads that sub through [callee]; anything unresolved is

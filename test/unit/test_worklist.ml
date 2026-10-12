@@ -15,13 +15,18 @@ let calls (sub : sub term) : Call.t list =
   |> Seq.filter_map ~f:(fun j -> match Jmp.kind j with Call c -> Some c | _ -> None)
   |> Seq.to_list
 
-(* Every direct call comes back (a raw [ret] is an indirect one). *)
-let returns_after_every_call sub =
+(* Every call to a sub of [prog] comes back. *)
+let returns_after_every_call prog sub =
   List.for_all (fun c ->
-      match Call.target c with Direct _ -> Call.return c <> None | Indirect _ -> true)
+      match Call.target c with
+      | Direct t when Term.find sub_t prog t <> None -> Call.return c <> None
+      | _ -> true)
     (calls sub)
 
-let lift code = with_binary code Hike.Worklist.run
+let lift code = with_binary code (fun p -> (Hike.Worklist.run p).program)
+
+let starts_at a t =
+  Base.Option.equal Addr.equal (Term.get_attr t address) (Some (Addr.of_int64 a))
 
 let tests = [
   pin "WL-01" "a call to a callee that never returns keeps no fallthrough" (fun () ->
@@ -37,25 +42,21 @@ let tests = [
       let prog =
         lift "\xe8\x01\x00\x00\x00\xc3\x85\xff\x74\x05\xe8\x01\x00\x00\x00\xc3\
               \xe8\xf1\xff\xff\xff\xc3" in
-      check_bound "WL-02.f" (at prog 0x40007eL) returns_after_every_call;
-      check_bound "WL-02.g" (at prog 0x400088L) returns_after_every_call);
+      check_bound "WL-02.f" (at prog 0x40007eL) (returns_after_every_call prog);
+      check_bound "WL-02.g" (at prog 0x400088L) (returns_after_every_call prog));
 
   pin "WL-03" "a block two functions reach gets one tid per function" (fun () ->
       (* call f; call g; ret; f: jmp L; g: jmp L; L: ret *)
       let prog =
         lift "\xe8\x06\x00\x00\x00\xe8\x03\x00\x00\x00\xc3\xeb\x02\xeb\x00\xc3" in
-      let blocks =
-        Term.enum sub_t prog |> Seq.concat_map ~f:(Term.enum blk_t) |> Seq.to_list in
       let tids =
-        List.concat_map (fun b ->
-            Term.tid b
-            :: (Seq.to_list (Seq.map (Term.enum def_t b) ~f:Term.tid)
-                @ Seq.to_list (Seq.map (Term.enum jmp_t b) ~f:Term.tid)))
-          blocks in
-      let at_l =
-        List.filter (fun b -> Term.get_attr b address = Some (Addr.of_int64 0x400087L))
-          blocks in
-      check "WL-03.both" (List.length at_l >= 2);
+        Term.enum sub_t prog |> Seq.concat_map ~f:(Term.enum blk_t) |> Seq.to_list
+        |> List.concat_map (fun b ->
+            Term.tid b :: Seq.to_list (Seq.map (Term.enum def_t b) ~f:Term.tid)) in
+      (* Each function's body holds its jump and L's return. *)
+      let holds_l a = check_bound "WL-03.both" (at prog a) (fun s -> Term.length blk_t s = 2) in
+      holds_l 0x400083L;
+      holds_l 0x400085L;
       check "WL-03.unique"
         (List.length (List.sort_uniq Tid.compare tids) = List.length tids));
 
@@ -88,6 +89,24 @@ let tests = [
         lift "\xe8\x01\x00\x00\x00\xc3\x85\xff\x74\x05\xe8\xf7\xff\xff\xff\xc3" in
       check_bound "WL-05" (at prog 0x40007eL) (fun f ->
           List.exists (fun c -> Call.target c = Direct (Term.tid f)) (calls f)));
+
+  pin "WL-06" "both arms of a conditional survive discovery" (fun () ->
+      (* test edi,edi; je +6; mov eax,42; ret; xor eax,eax; ret *)
+      let prog = lift "\x85\xff\x74\x06\xb8\x2a\x00\x00\x00\xc3\x31\xc0\xc3" in
+      check_bound "WL-06" (at prog 0x400078L) (fun s -> Term.length blk_t s >= 3));
+
+  pin "WL-07" "a resolved indirect jump's target is a block of its function" (fun () ->
+      (* lea rax,[rip+2]; jmp rax; mov eax,42; ret *)
+      let prog = lift "\x48\x8d\x05\x02\x00\x00\x00\xff\xe0\xb8\x2a\x00\x00\x00\xc3" in
+      check "WL-07.no-function" (at prog 0x400081L = None);
+      check_bound "WL-07.block" (at prog 0x400078L) (fun s ->
+          Seq.exists (Term.enum blk_t s) ~f:(starts_at 0x400081L)));
+
+  pin "WL-08" "a resolved indirect call's destination is a function" (fun () ->
+      (* lea rax,[rip+3]; call rax; ret; mov eax,42; ret *)
+      let prog =
+        lift "\x48\x8d\x05\x03\x00\x00\x00\xff\xd0\xc3\xb8\x2a\x00\x00\x00\xc3" in
+      check "WL-08" (at prog 0x400082L <> None));
 ]
 
 let () = run "worklist" tests

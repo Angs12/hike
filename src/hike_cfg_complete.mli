@@ -89,11 +89,6 @@ open Bap.Std
       share collapses to one unconditional edge (ADR 0024). *)
   val materialize_fallthroughs : sub term -> sub term
 
-  (** The noreturn fact's consumption: a call whose resolved target is a
-      classified never-returning sub carries no return continuation, so
-      the decode's fallthrough after it is not an edge. *)
-  val clear_noreturn_returns : noreturn:Tid.Set.t -> sub term -> sub term
-
 (** The destination word a dispatch arm tests, if [j] is one. *)
 val arm_word : jmp term -> int64 option
 

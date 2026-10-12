@@ -404,13 +404,8 @@ let tests : unit Alcotest.test list =
               [], [] ]
         in
         let envs, _, _ =
-          Hv.fixpoint Theory.Target.unknown
-            ~lookup:(fun _ -> None)
-            ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
-            ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
-                        (Program.create ~subs:[ sub ] ()))
-            ~foreign_slots:Core.Int64.Set.empty
-            ~block_addrs:(Core.Map.empty (module Addr)) sub
+          solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
+            Theory.Target.unknown sub
         in
         (* The RELOAD block's post state holds the reloaded value; the
            through-pointer reads keep the band only if that value is

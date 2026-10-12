@@ -318,39 +318,6 @@ let tests : unit Alcotest.test list =
     (* L2b: the full 1-bit domain reads cardinality 2. *)
 
 
-    (* PIPE-40: the recursive may-write summary is the least fixpoint
-       over the direct-call graph — a cycle unions, it does not kill. *)
-    pin "VSA-65"
-      "a recursive callee's may-write summary unions through the cycle (its caller sees the union, not a kill-all)"
-      (fun () ->
-        let rbx = Var.create ~is_virtual:false ~fresh:false "rec_rbx" (Type.Imm 64) in
-        let rax = Var.create ~is_virtual:false ~fresh:false "rec_rax" (Type.Imm 64) in
-        let ftid = Tid.create () in
-        let f, _ =
-          sub_of ~tid:ftid "rec_f"
-            [ [ Def.create rbx (Bil.Int (Cbat_word.to_word (w64 1))) ],
-              [ (1, fun t -> mk_call_jmp t ftid) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let main, _ =
-          sub_of "rec_main"
-            [ [ Def.create rax (Bil.Int (Cbat_word.to_word (w64 2))) ],
-              [ (1, fun t -> mk_call_jmp t ftid) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let prog = Program.create ~subs:[ main; f ] () in
-        let sums = Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog in
-        let has tid v =
-          match Core.Map.find sums tid with
-          | Some (Some s) -> Core.Set.mem s (Cbat_var_id.intern v)
-          | Some None | None -> false
-        in
-        check "VSA-65"
-          (has ftid rbx
-           && has (Term.tid main) rbx
-           && has (Term.tid main) rax
-           && not (has ftid rax)));
-
     pin "VSA-66"
       "round-pair: the two-def [(x >> k) << k] idiom — a temp saves x, the shift-back becomes the mask"
       (fun () ->

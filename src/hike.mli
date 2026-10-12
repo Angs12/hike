@@ -15,11 +15,10 @@ module Vsa = Hike_vsa
 (** A function's final summary: what a caller reads about a callee. *)
 module Summary = Hike_summary
 
-(** Program discovery, before jump compilation and normalization. *)
-module Drive = Hike_drive
-
 (** The BAP decoder adapter: scans, function bodies, the sub lift. *)
 module Decode = Hike_decode
+
+(** Callee-first discovery: the solved program and its analysis facts. *)
 module Worklist = Hike_worklist
 
 (** The CFG completion, fused into the solver's loop: resolution is an
@@ -84,7 +83,7 @@ module Promote = Hike_promote
 module Attribution = Hike_attribution
 
 (** The analysis closure: the run's facts as ONE value, built by
-    [Kb.build] at the pass_vsa boundary, installed once, and threaded
+    [Kb.build] at the discover boundary, installed once, and threaded
     through every consumer as a parameter.  Also the term-carried KB
     value slots' home. *)
 module Kb = Hike_kb

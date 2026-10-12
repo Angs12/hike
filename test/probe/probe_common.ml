@@ -8,13 +8,28 @@ module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 module Model = Hike.Stack_model
 
-let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
-  let callee = Option.map Vsa.Call_effects.callee_of_written written in
+let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
     ~def_reads:Model.def_reads ~def_writes:Model.def_writes
     ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
     ~jmp_reads:(Model.jmp_reads ~abi)
     ?callee ?resolved ?sub_lookup sub init
+
+(* A probe's callees: a sub of [prog] writes the registers its own defs
+   write; any other target writes anything. *)
+let callee_of (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
+  match Term.find sub_t prog tid with
+  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hike.Vsa.written_regs_of_sub s)))
+  | None -> Summary None
+
+(* The production solve of one sub with every callee summarized. *)
+let solve ~callee target (sub : sub term) =
+  match
+    Hike.Vsa.start target ~lookup:(fun _ -> None) ~images:[] ~callee
+      ~block_addrs:Addr.Map.empty ~foreign_slots:Core.Int64.Set.empty sub
+  with
+  | Hike.Vsa.Done (envs, sub', block_addrs) -> (envs, sub', block_addrs)
+  | Hike.Vsa.Paused _ -> failwith "probe: a callee is blocked"
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
    Each probe owns its per-sub report; this seam owns project loading and

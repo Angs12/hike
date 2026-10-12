@@ -1,9 +1,0 @@
-(library
- (name hike_noreturn)
- (public_name hike.hike_noreturn)
- (wrapped false)
- (modules hike_noreturn)
- (libraries bap bap-core-theory core hike.hike_abi)
- (preprocess
-  (action
-   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))

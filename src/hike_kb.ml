@@ -1,5 +1,5 @@
 (* The analysis closure: the run's facts as ONE value, built by
-   [build] at the pass_vsa boundary and threaded through every
+   [build] at the discover boundary and threaded through every
    consumer as a parameter.  The KB value slots (sec-tag, dyn-alloc,
    window) stay the term-carried half; the module has no read API for
    the closure — [install]/[facts] move the record across the pass
@@ -33,7 +33,7 @@ type facts = {
      [AI.top]. *)
   denote : denote;
   (* The run's resolution lookup: one name table for the program,
-     built at the pass_vsa boundary beside the other facts. *)
+     built at the discover boundary beside the other facts. *)
   lookup : int64 -> Tid.t option;
   (* Each VLA allocation's frame fact (its frame-relative offset band and
      the base's entry-line range), keyed by its SP-assigning def's tid —
@@ -78,7 +78,7 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     escape_roots = Tid.Map.empty;
     synth = Hike_synth.empty }
 
-(* The run's record, installed once at the pass_vsa boundary. *)
+(* The run's record, installed once at the discover boundary. *)
 let run : facts option ref = ref None
 
 let install (f : facts) = run := Some f
@@ -86,7 +86,7 @@ let install (f : facts) = run := Some f
 let facts () =
   match !run with
   | Some f -> f
-  | None -> failwith "hike: no analysis facts installed (pass_vsa did not run)"
+  | None -> failwith "hike: no analysis facts installed (discover did not run)"
 
 (* The optional read for passes that also run on fixtures (no analysis). *)
 let facts_opt () : facts option = !run

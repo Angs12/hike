@@ -11,7 +11,7 @@ let file_of project = D.file_of (Project.program project)
 
 (* The decoded state and one function's candidate graph and entry block. *)
 let candidate ?is_entry project entry =
-  let state = (D.initial project).grown in
+  let state = D.initial project in
   let is_entry =
     Base.Option.value is_entry ~default:(Disasm.Driver.is_subroutine state) in
   let cfg = D.function_cfg ~file:(file_of project) state ~entry ~is_entry in
@@ -70,6 +70,20 @@ let tests = [
           let _, cfg, _ =
             candidate ~is_entry:(Addr.equal g) project (addr 0x400078L) in
           check "DEC-03" (starts cfg = [ 0x400078L ])));
+
+  pin "DEC-04" "a locked RMW lifts to its operation's atomic intrinsic, with no lock markers"
+    (fun () ->
+      (* lock add [rdi], rsi; ret *)
+      with_binary "\xf0\x48\x01\x37\xc3" (fun project ->
+          let _, cfg, entry = candidate project (addr 0x400078L) in
+          let sub = D.lift ~file:(file_of project) ~tid:(Tid.create ()) ~name:"f" entry cfg in
+          let targets =
+            List.filter_map (fun c ->
+                match Call.target c with Direct t -> Some (Tid.name t) | Indirect _ -> None)
+              (calls_of sub) in
+          check "DEC-04.atomic"
+            (List.exists (fun n -> Hike.Abi.strip_at n = "intrinsic:x86:atomic_add_64") targets);
+          check "DEC-04.markers" (not (List.exists Hike.Abi.is_lock_marker targets))));
 ]
 
 let () = run "decode" tests
