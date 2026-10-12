@@ -34,7 +34,17 @@ val substitute_relocated_words :
   relative:(int64 * int64) list ->
   (Bytes.t * int64 * int64) list
 
-val get_section_images : Project.t -> (Bytes.t * int64 * int64) list
+(** The never-written runtime ranges: read-only PT_LOAD segments and the
+    page-rounded PT_GNU_RELRO ranges, inclusive. *)
+val readonly_ranges : Project.t -> page:int64 -> (int64 * int64) list
+
+(** The fragments of an image inside the given ranges. *)
+val clip_image :
+  Bytes.t * int64 * int64 -> (int64 * int64) list -> (Bytes.t * int64 * int64) list
+
+(** The images the analysis may read: relocated sections restricted to
+    the never-written ranges. *)
+val get_section_images : Project.t -> page:int64 -> (Bytes.t * int64 * int64) list
 
 val get_named_region_info : Project.t -> region Base.Sequence.t
 

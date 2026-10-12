@@ -156,9 +156,64 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
     runs 0 []
   end
 
-(* Every section's image: the relocation-free sections whole, a section
-   holding relocated words as its substituted fragments. *)
-let get_section_images (proj : Project.t) : (Bytes.t * int64 * int64) list =
+(* The runtime ranges the process never writes once relocation is done:
+   every PT_LOAD segment without PF_W, and each PT_GNU_RELRO range, whose
+   end the loader's mprotect rounds down to a page.  Inclusive, bias
+   applied. *)
+let readonly_ranges (proj : Project.t) ~(page : int64) : (int64 * int64) list =
+  let open Ogre in
+  let name = Type.("name" %: str) in
+  let addr = Type.("addr" %: int) in
+  let size = Type.("size" %: int) in
+  let typ = Type.("type" %: int) in
+  let align = Type.("align" %: int) in
+  let flag n = Type.(n %: bool) in
+  let types () = declare ~name:"llvm:elf-program-header-type"
+      Type.(scheme name $ typ $ align) (fun n t _ -> (n, t)) in
+  let virtuals () = declare ~name:"llvm:elf-virtual-program-header"
+      Type.(scheme name $ addr $ size) (fun n a s -> (n, (a, s))) in
+  let flags () = declare ~name:"llvm:elf-program-header-flags"
+      Type.(scheme name $ flag "ld" $ flag "r" $ flag "w" $ flag "x")
+      (fun n _ _ w _ -> (n, w)) in
+  let rows table =
+    fst (run (collect Query.(select (from table))) (Project.specification proj)
+         |> Core.Or_error.ok_exn) |> Base.Sequence.to_list in
+  let bias = get_bias proj in
+  let writable = rows flags in
+  let extent = rows virtuals in
+  Base.List.filter_map (rows types) ~f:(fun (id, t) ->
+      match Base.List.Assoc.find extent ~equal:String.equal id with
+      | None -> None
+      | Some (vaddr, memsz) ->
+        let lo = Int64.add vaddr bias in
+        let range hi = if Int64.compare hi lo >= 0 then Some (lo, hi) else None in
+        if Int64.equal t 1L
+        && not (Base.Option.value ~default:true
+                  (Base.List.Assoc.find writable ~equal:String.equal id))
+        then range (Int64.pred (Int64.add lo memsz))
+        else if Int64.equal t 0x6474e552L then
+          range (Int64.pred (Int64.logand (Int64.add lo memsz) (Int64.neg page)))
+        else None)
+
+(* The fragments of [img] inside [ranges]. *)
+let clip_image ((bytes, lo, hi) : Bytes.t * int64 * int64)
+    (ranges : (int64 * int64) list) : (Bytes.t * int64 * int64) list =
+  Base.List.filter_map ranges ~f:(fun (rlo, rhi) ->
+      let a = if Int64.compare rlo lo > 0 then rlo else lo in
+      let b = if Int64.compare rhi hi < 0 then rhi else hi in
+      if Int64.compare a b > 0 then None
+      else
+        let off = Int64.to_int (Int64.sub a lo) in
+        let len = Int64.to_int (Int64.sub b a) + 1 in
+        Some (Bytes.sub bytes off len, a, b))
+
+(* The images the analysis may read: each section's bytes, its relocated
+   words substituted, restricted to the never-written ranges.  A
+   writable byte has no image, so a load that finds no stored cell there
+   reads the abstract value, never the file contents. *)
+let get_section_images (proj : Project.t) ~(page : int64) :
+    (Bytes.t * int64 * int64) list =
+  let readonly = readonly_ranges proj ~page in
   let bias = get_bias proj in
   let relative = relative_values proj ~bias in
   let relocated = get_relocated_words proj in
@@ -178,6 +233,7 @@ let get_section_images (proj : Project.t) : (Bytes.t * int64 * int64) list =
       Seq.of_list
         (substitute_relocated_words ~bytes ~lo ~hi ~relocated:sites
            ~relative))
+  |> Seq.concat_map ~f:(fun img -> Seq.of_list (clip_image img readonly))
   |> Seq.to_list
 
 let get_named_region_info proj =

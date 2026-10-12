@@ -94,13 +94,14 @@ let production_input (proj : Project.t) : program term =
   |> Hike.Coerce.coerce_program
   |> Hike.Fp.run_program
 
-(* pass_vsa's image set: every section, with relocated words resolved. *)
+(* The analysis image set: never-written memory, relocated words resolved. *)
 let section_images (proj : Project.t) : Vsa.section_image list =
   let slots =
     Hike.Image.external_references proj |> Base.List.map ~f:fst
     |> Core.Int64.Set.of_list
   in
   Hike.Image.get_section_images proj
+    ~page:(Hike.Abi.of_target (Project.target proj)).Hike.Abi.page_size
   |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
          { Vsa.img_lo;
            img_hi;

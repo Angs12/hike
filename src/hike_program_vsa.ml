@@ -63,12 +63,12 @@ let prepare proj =
     | None -> Core.Int64.Set.empty
   in
   (* Image-backed loads are sound only where the runtime content is
-     known: a relocation-free section is its file bytes, a section
-     holding relocated words is its RELATIVE words' runtime values plus
-     the bytes no relocation names, and a linker-owned slot's word is
-     no value at all. *)
+     known and fixed: never-written memory only, a relocated word as its
+     RELATIVE runtime value, and a linker-owned slot's word as no value
+     at all. *)
   let images =
     Hike_image.get_section_images proj
+      ~page:(Hike_abi.of_target target).Hike_abi.page_size
     |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
            { Cbat_vsa.img_lo;
              img_hi;

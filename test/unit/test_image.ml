@@ -1,5 +1,5 @@
-(* Image pins: the RELA addend parse and the relocated-word
-   substitution.  One Alcotest group per pin; each pin builds its own
+(* Image pins: the relocated-word substitution, PT_TLS, and the
+   never-written ranges the analysis images are restricted to.  One Alcotest group per pin; each pin builds its own
    fixture, so no state crosses pins. *)
 
 open Bap.Std
@@ -62,8 +62,67 @@ let with_tls_image ~filesz ~memsz f =
                     |> Core.Or_error.ok_exn in
       f project)
 
+(* An ELF whose program headers are [phdrs] rows of
+   (type, flags, offset, vaddr, filesz, memsz); no sections.  The entry
+   at 0x400100 is a [ret]. *)
+let with_phdrs (phdrs : (int64 * int64 * int64 * int64 * int64 * int64) list)
+    ~(file_size : int) f =
+  let bytes = Bytes.make file_size '\000' in
+  let put off size value =
+    for i = 0 to size - 1 do
+      Bytes.set bytes (off + i)
+        (Char.chr (Int64.to_int (Int64.logand
+            (Int64.shift_right_logical value (8 * i)) 255L)))
+    done in
+  Bytes.blit_string "\x7fELF\x02\x01\x01" 0 bytes 0 7;
+  put 16 2 2L; put 18 2 62L; put 20 4 1L;
+  put 24 8 0x400100L; put 32 8 64L;
+  put 52 2 64L; put 54 2 56L; put 56 2 (Int64.of_int (List.length phdrs));
+  put 58 2 64L;
+  List.iteri (fun i (typ, flags, off, vaddr, filesz, memsz) ->
+      let h = 64 + (56 * i) in
+      put h 4 typ; put (h + 4) 4 flags; put (h + 8) 8 off;
+      put (h + 16) 8 vaddr; put (h + 24) 8 vaddr;
+      put (h + 32) 8 filesz; put (h + 40) 8 memsz; put (h + 48) 8 4096L)
+    phdrs;
+  Bytes.set bytes 0x100 '\xc3';
+  let path = Filename.temp_file "hike-phdrs" ".elf" in
+  Fun.protect ~finally:(fun () -> Sys.remove path) (fun () ->
+      let out = open_out_bin path in
+      output_bytes out bytes; close_out out;
+      let project = Project.create (Project.Input.load ~loader:"llvm" path)
+                    |> Core.Or_error.ok_exn in
+      f project)
+
 let tests : unit Alcotest.test list =
   [
+    pin "IMG-06"
+      "only read-only PT_LOAD segments and page-rounded PT_GNU_RELRO \
+       ranges are never written"
+      (fun () ->
+        with_phdrs ~file_size:0x2800
+          [ (1L, 5L, 0L, 0x400000L, 0x200L, 0x200L);
+            (1L, 6L, 0x1000L, 0x401000L, 0x1800L, 0x1800L);
+            (0x6474e552L, 4L, 0x1000L, 0x401000L, 0x1100L, 0x1100L) ]
+          (fun project ->
+            let ranges =
+              List.sort compare (Img.readonly_ranges project ~page:4096L) in
+            check "IMG-06.ranges"
+              (ranges = [ (0x400000L, 0x4001ffL); (0x401000L, 0x401fffL) ])));
+
+    pin "IMG-07" "an image keeps only its bytes inside the ranges"
+      (fun () ->
+        let bytes = Bytes.init 0x30 (fun i -> Char.chr i) in
+        let frags =
+          Img.clip_image (bytes, 0x1000L, 0x102fL)
+            [ (0x0L, 0x100fL); (0x1020L, 0x1023L); (0x2000L, 0x2fffL) ] in
+        check "IMG-07.fragments"
+          (match frags with
+           | [ (b0, 0x1000L, 0x100fL); (b1, 0x1020L, 0x1023L) ] ->
+             Bytes.equal b0 (Bytes.sub bytes 0 0x10)
+             && Bytes.equal b1 (Bytes.sub bytes 0x20 4)
+           | _ -> false));
+
     pin "IMG-04"
       "PT_TLS alone supplies the image, extent, alignment and Variant-II offset"
       (fun () ->
