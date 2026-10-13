@@ -18,3 +18,10 @@ let name = function
   | Gotplt -> "got.plt"
   | Datarelro -> "data.rel.ro"
   | Text -> "text"
+
+(* A loaded range's runtime write permission, from the program headers:
+   [Read_only] lies in a PT_LOAD without PF_W, [Relro] in a PT_GNU_RELRO
+   range (written only by the loader's relocation), [Writable] is any
+   other byte. *)
+type access = Read_only | Relro | Writable
+[@@deriving bin_io, equal, compare, sexp]

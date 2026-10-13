@@ -472,7 +472,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
       max_addr = Word.of_int64 ~width:64 hi; bytes = arr; owners }
   in
   let build_entry (entry : Hike_stack_model.sec_meta) : section =
-    let { Hike_stack_model.sm_type; sm_const; sm_lo = si_lo;
+    let { Hike_stack_model.sm_type; sm_access; sm_lo = si_lo;
           sm_hi = si_hi; sm_words = si_words; sm_copy_relocs; _ } =
       entry
     in
@@ -501,6 +501,15 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
           owners }
     in
     let llvm_name = Model.sec_name sm_type in
+    (* Only never-written bytes are constant.  A RELRO section is mutable:
+       the loader relocates it, so the dynamic relocations land in a
+       writable segment and the module links as a PIE with no text
+       relocations. *)
+    let sm_const =
+      match sm_access with
+      | Hike_section.Read_only -> true
+      | Relro | Writable -> false
+    in
     let comps = comps_of si_lo si_hi in
     match entry.Hike_stack_model.sm_image with
     | None ->

@@ -1,7 +1,7 @@
 # Pins: Hike_image
 
 Module `src/hike_image.ml` (interface `src/hike_image.mli`).
-One row per pin in `test/unit/test_image.ml` (ids `IMG-01`..`IMG-07`).
+One row per pin in `test/unit/test_image.ml` (ids `IMG-01`..`IMG-08`).
 
 The module reads the ELF image the solve consumes.  A section whose words
 the loader's relocation facts name is not its static image, so the pinned
@@ -25,5 +25,6 @@ the pinned branch, and the pin's exact assertion fails under it.
 
 | IMG-04 | PT_TLS type, extent, first-byte alignment and file bytes come from Ogre, with no section table. | Ignore the type/alignment facts or round without the prefix. | The sectionless initialized layout assertions fail. |
 | IMG-05 | A file-empty PT_TLS has a zero-only extent; filesz greater than memsz refuses. | Accept the invalid header. | The malformed-header refusal assertion fails. |
-| IMG-06 | The never-written ranges are the PT_LOAD segments without PF_W plus each PT_GNU_RELRO range with its end rounded down to the page (the loader's mprotect), from the `llvm:elf-program-header*` facts. A writable segment contributes nothing. | Drop the PF_W test, or keep the RELRO end unrounded. | IMG-06.ranges FAILs: the RW segment appears, or the RELRO range ends at 0x4020ff. |
+| IMG-06 | The protections are the PT_LOAD segments without PF_W (`Read_only`) plus each PT_GNU_RELRO range (`Relro`) with its end rounded down to the page (the loader's mprotect), from the `llvm:elf-program-header*` facts. A writable segment contributes nothing. | Drop the PF_W test, or keep the RELRO end unrounded. | IMG-06.ranges FAILs: the RW segment appears, or the RELRO range ends at 0x4020ff. |
 | IMG-07 | `clip_image` keeps exactly the bytes of an image inside the ranges, one fragment per overlapping range. | Return the image unclipped. | IMG-07.fragments FAILs. |
+| IMG-08 | `access` gives a range the protection that covers it wholly, `Read_only` before `Relro`; a range no protection covers, or one straddling a protection's end, is `Writable`. The emitter's section constness follows it; the analysis images clip to the same protections. | Answer `Read_only` for any overlap. | IMG-08.straddle FAILs. |

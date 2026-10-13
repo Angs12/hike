@@ -32,7 +32,7 @@ include Vocab
    [sm_image] is None for the bss region (zeroed, copy-relocated). *)
 type sec_meta = {
   sm_type : sec;
-  sm_const : bool;
+  sm_access : Hike_section.access;
   sm_lo : int64;
   sm_hi : int64;
   sm_words : int;

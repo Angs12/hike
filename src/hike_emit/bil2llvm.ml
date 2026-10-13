@@ -637,7 +637,7 @@ type section_type = Bil2llvm_env.section_type
 
 type sec_meta = Hike_stack_model.sec_meta = {
   sm_type : section_type;
-  sm_const : bool;
+  sm_access : Hike_section.access;
   sm_lo : int64;
   sm_hi : int64;
   sm_words : int;

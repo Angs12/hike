@@ -106,9 +106,23 @@ let tests : unit Alcotest.test list =
             (0x6474e552L, 4L, 0x1000L, 0x401000L, 0x1100L, 0x1100L) ]
           (fun project ->
             let ranges =
-              List.sort compare (Img.readonly_ranges project ~page:4096L) in
+              List.sort compare (Img.protections project ~page:4096L) in
             check "IMG-06.ranges"
-              (ranges = [ (0x400000L, 0x4001ffL); (0x401000L, 0x401fffL) ])));
+              (ranges = [ (0x400000L, 0x4001ffL, Hike_section.Read_only);
+                          (0x401000L, 0x401fffL, Hike_section.Relro) ])));
+
+    pin "IMG-08" "a range's access is the protection covering it wholly"
+      (fun () ->
+        let prot =
+          [ (0x1000L, 0x1fffL, Hike_section.Read_only);
+            (0x3000L, 0x3fffL, Hike_section.Relro);
+            (0x3800L, 0x38ffL, Hike_section.Read_only) ] in
+        let access lo hi = Img.access prot ~lo ~hi in
+        check "IMG-08.read-only" (access 0x1000L 0x1fffL = Hike_section.Read_only);
+        check "IMG-08.relro" (access 0x3000L 0x30ffL = Hike_section.Relro);
+        check "IMG-08.read-only-first" (access 0x3800L 0x3807L = Hike_section.Read_only);
+        check "IMG-08.straddle" (access 0x1f00L 0x2fffL = Hike_section.Writable);
+        check "IMG-08.outside" (access 0x2000L 0x2007L = Hike_section.Writable));
 
     pin "IMG-07" "an image keeps only its bytes inside the ranges"
       (fun () ->

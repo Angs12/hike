@@ -37,9 +37,17 @@ val substitute_relocated_words :
   relative:(int64 * int64) list ->
   (Bytes.t * int64 * int64) list
 
-(** The never-written runtime ranges: read-only PT_LOAD segments and the
-    page-rounded PT_GNU_RELRO ranges, inclusive. *)
-val readonly_ranges : Project.t -> page:int64 -> (int64 * int64) list
+(** The never-written runtime ranges with their access: read-only
+    PT_LOAD segments ([Read_only]) and the page-rounded PT_GNU_RELRO
+    ranges ([Relro]), inclusive. *)
+val protections :
+  Project.t -> page:int64 -> (int64 * int64 * Hike_section.access) list
+
+(** The access of the bytes [lo, hi]: the protection of a range covering
+    them wholly, otherwise [Writable]. *)
+val access :
+  (int64 * int64 * Hike_section.access) list -> lo:int64 -> hi:int64 ->
+  Hike_section.access
 
 (** The fragments of an image inside the given ranges. *)
 val clip_image :
@@ -50,6 +58,15 @@ val clip_image :
 val get_section_images : Project.t -> page:int64 -> (Bytes.t * int64 * int64) list
 
 val get_named_region_info : Project.t -> region Base.Sequence.t
+
+(** A loaded section's byte range; the stack lines have none. *)
+val section_range : Project.t -> Hike_section.t -> (int64 * int64) option
+
+(** A section's runtime access under the protections; a section with no
+    bytes is [Writable]. *)
+val section_access :
+  (int64 * int64 * Hike_section.access) list -> Project.t -> Hike_section.t ->
+  Hike_section.access
 
 (** PT_TLS layout and file image; missing facts or unreadable bytes are errors. *)
 val tls_spec : Project.t -> Hike_spec.tls_spec option

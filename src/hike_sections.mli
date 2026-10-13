@@ -253,7 +253,7 @@ val global_comps_of :
     emitter spec, and copy-reloc slots all project from this builder. *)
 type sec_meta = {
   sm_type : sec;
-  sm_const : bool;
+  sm_access : Hike_section.access;
   sm_lo : int64;
   sm_hi : int64;
   sm_words : int;

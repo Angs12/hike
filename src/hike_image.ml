@@ -164,11 +164,12 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
     runs 0 []
   end
 
-(* The runtime ranges the process never writes once relocation is done:
-   every PT_LOAD segment without PF_W, and each PT_GNU_RELRO range, whose
-   end the loader's mprotect rounds down to a page.  Inclusive, bias
-   applied. *)
-let readonly_ranges (proj : Project.t) ~(page : int64) : (int64 * int64) list =
+(* The runtime ranges the process never writes once relocation is done,
+   with their access: every PT_LOAD segment without PF_W is [Read_only],
+   each PT_GNU_RELRO range [Relro], its end rounded down to a page as the
+   loader's mprotect does.  Inclusive, bias applied. *)
+let protections (proj : Project.t) ~(page : int64) :
+    (int64 * int64 * Hike_section.access) list =
   let open Ogre in
   let name = Type.("name" %: str) in
   let addr = Type.("addr" %: int) in
@@ -194,14 +195,34 @@ let readonly_ranges (proj : Project.t) ~(page : int64) : (int64 * int64) list =
       | None -> None
       | Some (vaddr, memsz) ->
         let lo = Int64.add vaddr bias in
-        let range hi = if Int64.compare hi lo >= 0 then Some (lo, hi) else None in
+        let range hi access =
+          if Int64.compare hi lo >= 0 then Some (lo, hi, access) else None in
         if Int64.equal t 1L
         && not (Base.Option.value ~default:true
                   (Base.List.Assoc.find writable ~equal:String.equal id))
-        then range (Int64.pred (Int64.add lo memsz))
+        then range (Int64.pred (Int64.add lo memsz)) Hike_section.Read_only
         else if Int64.equal t 0x6474e552L then
           range (Int64.pred (Int64.logand (Int64.add lo memsz) (Int64.neg page)))
+            Hike_section.Relro
         else None)
+
+(* The access of the bytes [lo, hi]: the protection of a range covering
+   them wholly, [Read_only] before [Relro]; any other byte may be
+   written. *)
+let access (prot : (int64 * int64 * Hike_section.access) list) ~(lo : int64)
+    ~(hi : int64) : Hike_section.access =
+  let covering =
+    Base.List.filter_map prot ~f:(fun (plo, phi, a) ->
+        Base.Option.some_if
+          (Int64.unsigned_compare plo lo <= 0
+           && Int64.unsigned_compare hi phi <= 0) a)
+  in
+  if Base.List.mem covering Hike_section.Read_only ~equal:Hike_section.equal_access
+  then Hike_section.Read_only
+  else if Base.List.mem covering Hike_section.Relro
+      ~equal:Hike_section.equal_access
+  then Hike_section.Relro
+  else Hike_section.Writable
 
 (* The fragments of [img] inside [ranges]. *)
 let clip_image ((bytes, lo, hi) : Bytes.t * int64 * int64)
@@ -221,7 +242,8 @@ let clip_image ((bytes, lo, hi) : Bytes.t * int64 * int64)
    reads the abstract value, never the file contents. *)
 let get_section_images (proj : Project.t) ~(page : int64) :
     (Bytes.t * int64 * int64) list =
-  let readonly = readonly_ranges proj ~page in
+  let readonly =
+    Base.List.map (protections proj ~page) ~f:(fun (lo, hi, _) -> (lo, hi)) in
   let bias = get_bias proj in
   let relative = relative_values proj ~bias in
   let relocated = get_relocated_words proj in
@@ -257,6 +279,33 @@ let get_named_region_info proj =
   in
   let regions = Ogre.collect query in
   fst (Ogre.run regions (Project.specification proj) |> Core.Or_error.ok_exn)
+
+(* A loaded section's bytes: the stack lines have none, the bss is the
+   loader's named region, every other section its memory-map image. *)
+let section_range (proj : Project.t) (s : Hike_section.t) :
+    (int64 * int64) option =
+  match s with
+  | Stack | Args | Vla -> None
+  | Bss ->
+    Seq.find (get_named_region_info proj) ~f:(fun { name; _ } ->
+        String.equal name ("." ^ Hike_section.name Bss))
+    |> Base.Option.bind ~f:(fun { addr; size; _ } ->
+        Base.Option.some_if (Int64.compare size 0L > 0)
+          (addr, Int64.pred (Int64.add addr size)))
+  | Text | Rodata | Data | Got | Gotplt | Datarelro ->
+    get_section_mem ("." ^ Hike_section.name s) proj
+    |> Base.Option.map ~f:(fun (mem, _) ->
+        (Word.to_int64_exn (Memory.min_addr mem),
+         Word.to_int64_exn (Memory.max_addr mem)))
+
+(* A section's runtime access: the one rule the analysis images and the
+   emitted globals' constness both follow.  A section with no bytes may
+   be written. *)
+let section_access (prot : (int64 * int64 * Hike_section.access) list)
+    (proj : Project.t) (s : Hike_section.t) : Hike_section.access =
+  match section_range proj s with
+  | Some (lo, hi) -> access prot ~lo ~hi
+  | None -> Hike_section.Writable
 
 
 (* Header type and alignment come from the ELF producer; joining by the

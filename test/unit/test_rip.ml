@@ -134,7 +134,7 @@ let tests = [
             (Some 0x2000L)));
   pin "RIP-03" "resolved section values and accesses emit through the owning global"
     (fun () ->
-       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_const = false;
+       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
                     sm_lo = 0x4000L; sm_hi = 0x401fL; sm_words = 4;
                     sm_image = Some (Bytes.make 32 '\000'); sm_copy_relocs = [] } in
        let comp = { Hike.Stack_model.comp_id = 7; sec_lo = 0x4000L;
@@ -171,7 +171,7 @@ let tests = [
                      (Bil.BinOp (Bil.EQ, Bil.Var (v64 "RAX"), Bil.Var address)));
                (2, mk_goto)];
               [], [(0, mk_ret)]; [], [(0, mk_ret)] ] in
-       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_const = false;
+       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
                     sm_lo = 0x4008L; sm_hi = 0x400fL; sm_words = 1;
                     sm_image = Some (Bytes.make 8 '\000'); sm_copy_relocs = [] } in
        let spec = { empty_spec with spec_sections = [Some meta];
@@ -203,7 +203,7 @@ let tests = [
     (fun () ->
        let mem = Synth.bytes ~addr_bits:64 (Synth.Global 7) in
        let loaded = v64 "RDX" in
-       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_const = false;
+       let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
                     sm_lo = 0x4008L; sm_hi = 0x401fL; sm_words = 3;
                     sm_image = Some (Bytes.make 24 '\000'); sm_copy_relocs = [] } in
        let spec = { empty_spec with spec_sections = [Some meta];

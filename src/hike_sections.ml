@@ -27,7 +27,7 @@ type data_span = {
    emitter spec, and copy-reloc slots all project from this builder. *)
 type sec_meta = Model.sec_meta = {
   sm_type : sec;
-  sm_const : bool;
+  sm_access : Hike_section.access;
   sm_lo : int64;
   sm_hi : int64;
   sm_words : int;
@@ -37,17 +37,23 @@ type sec_meta = Model.sec_meta = {
 
 let bss_region proj =
   let regions = Hike_image.get_named_region_info proj in
-  Base.Option.map (Seq.find regions ~f:(fun { name; _ } -> String.equal name ".bss"))
+  Base.Option.map
+    (Seq.find regions ~f:(fun { name; _ } ->
+         String.equal name ("." ^ Model.sec_name Bss)))
     ~f:(fun { addr; size; _ } ->
       (addr, size, Hike_image.get_copy_relocations proj ~bss_addr:addr ~bss_size:size))
 
 let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
-  let byte_row (sm_type : sec) ~is_const =
+  let prot =
+    Hike_image.protections proj
+      ~page:(Hike_abi.of_target (Project.target proj)).Hike_abi.page_size
+  in
+  let byte_row (sm_type : sec) =
     let llvm_name = Model.sec_name sm_type in
     Hike_image.get_section_mem ("." ^ llvm_name) proj |> Hike_image.get_section_data
     |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
         { sm_type;
-          sm_const = is_const;
+          sm_access = Hike_image.section_access prot proj sm_type;
           sm_lo = Word.to_int64_exn min_addr;
           sm_hi = Word.to_int64_exn max_addr;
           sm_words = Hike_stack_bounds.cdiv (Bytes.length arr) word;
@@ -57,7 +63,7 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
   let bss_row =
     Base.Option.map (bss_region proj) ~f:(fun (addr, size, copy_relocs) ->
         { sm_type = Bss;
-          sm_const = false;
+          sm_access = Hike_image.section_access prot proj Bss;
           sm_lo = addr;
           sm_hi = Stdlib.Int64.sub (Stdlib.Int64.add addr size) 1L;
           sm_words =
@@ -67,16 +73,13 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
           sm_image = None;
           sm_copy_relocs = copy_relocs })
   in
-  (* A section the loader relocates is runtime-written: its global is
-     mutable, so the dynamic relocations land in a writable segment and
-     the module links as a PIE with no text relocations. *)
-  [ byte_row Data ~is_const:false;
-    byte_row Rodata ~is_const:true;
+  [ byte_row Data;
+    byte_row Rodata;
     bss_row;
-    byte_row Got ~is_const:false;
-    byte_row Gotplt ~is_const:false;
-    byte_row Datarelro ~is_const:false;
-    byte_row Text ~is_const:true ]
+    byte_row Got;
+    byte_row Gotplt;
+    byte_row Datarelro;
+    byte_row Text ]
 
 (* Every copy-relocated slot address (absolute): loads and stores at a
    slot go through the slot's relocated pointer. *)

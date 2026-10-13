@@ -318,7 +318,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let img = Bytes.make 8 '\000' in
         let meta =
-          { B2l.sm_type = Sm.Data; sm_const = false;
+          { B2l.sm_type = Sm.Data; sm_access = Hike_section.Writable;
             sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
             sm_image = Some img; sm_copy_relocs = [] }
         in
@@ -350,14 +350,14 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let text_img = Bytes.make 16 '\000' in
         let text_meta =
-          { B2l.sm_type = Sm.Text; sm_const = true;
+          { B2l.sm_type = Sm.Text; sm_access = Hike_section.Read_only;
             sm_lo = 0x500L; sm_hi = 0x50FL; sm_words = 2;
             sm_image = Some text_img; sm_copy_relocs = [] }
         in
         let img = Bytes.make 8 '\000' in
         Bytes.set img 0 '\x42';
         let meta =
-          { B2l.sm_type = Sm.Data; sm_const = false;
+          { B2l.sm_type = Sm.Data; sm_access = Hike_section.Writable;
             sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
             sm_image = Some img; sm_copy_relocs = [] }
         in
@@ -386,7 +386,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let text_img = Bytes.make 16 '\000' in
         let text_meta =
-          { B2l.sm_type = Sm.Text; sm_const = true;
+          { B2l.sm_type = Sm.Text; sm_access = Hike_section.Read_only;
             sm_lo = 0x500L; sm_hi = 0x50FL; sm_words = 2;
             sm_image = Some text_img; sm_copy_relocs = [] }
         in
@@ -394,7 +394,7 @@ let tests : unit Alcotest.test list =
         Bytes.set img 0 '\x08';
         Bytes.set img 1 '\x05';
         let meta =
-          { B2l.sm_type = Sm.Data; sm_const = false;
+          { B2l.sm_type = Sm.Data; sm_access = Hike_section.Writable;
             sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
             sm_image = Some img; sm_copy_relocs = [] }
         in
@@ -421,7 +421,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let ro_img = Bytes.make 8 '\000' in
         let ro_meta =
-          { B2l.sm_type = Sm.Rodata; sm_const = true;
+          { B2l.sm_type = Sm.Rodata; sm_access = Hike_section.Read_only;
             sm_lo = 0x216948L; sm_hi = 0x21694FL; sm_words = 1;
             sm_image = Some ro_img; sm_copy_relocs = [] }
         in
@@ -430,7 +430,7 @@ let tests : unit Alcotest.test list =
         Bytes.set img 1 'i';
         Bytes.set img 2 '!';
         let meta =
-          { B2l.sm_type = Sm.Data; sm_const = false;
+          { B2l.sm_type = Sm.Data; sm_access = Hike_section.Writable;
             sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
             sm_image = Some img; sm_copy_relocs = [] }
         in
