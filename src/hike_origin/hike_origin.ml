@@ -128,8 +128,8 @@ module Vla_seed = struct
 
   let keys () : Tid.Set.t = Core.Map.key_set !extents
 
-  (* Drop the table: the final replay re-seeds it against the converged
-     denotations, so fixpoint-transient events do not survive. *)
+  (* Drop the whole table; a sub's final replay clears only its own
+     allocations through [filter]. *)
   let reset () : unit = extents := empty
 
   let take () : vla_extent Tid.Map.t =

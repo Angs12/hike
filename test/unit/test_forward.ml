@@ -28,6 +28,55 @@ let img_fixture =
   let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
   (img_var, images, m, k, env_with_addrs, load32)
 
+(* The band round-trip fixture: a VLA allocation whose pointer is
+   stored and reloaded in a loop.  Returns the sub, its block tids and
+   the pointer register. *)
+let vla_roundtrip () =
+  let m, rsp, rbp = memv "t19_m", v64 "RSP", v64 "t19_rbp" in
+  let rax = v64 "t19_rax" in
+  let rn = v64 "t19_n" in
+  let lit k = Bil.Int (Cbat_word.to_word (w64 k)) in
+  let d_rbp = Def.create rbp (Bil.Var rsp) in
+  let d_frame = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, lit 16)) in
+  (* n read from a cell: the VLA size is non-literal. *)
+  let d_n_cell =
+    Def.create m
+      (Bil.Store (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
+                  Bil.Int (Cbat_word.to_word (w32 8)), LittleEndian, `r32))
+  in
+  let d_n_load =
+    Def.create rn
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
+                 LittleEndian, `r64))
+  in
+  let d_sub = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rn)) in
+  let d_ptr = Def.create rax (Bil.Var rsp) in
+  let d_align =
+    Def.create rax
+      (Bil.BinOp (Bil.AND, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 (-4)))))
+  in
+  let cell = Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 8) in
+  let d_save =
+    Def.create m (Bil.Store (Bil.Var m, cell, Bil.Var rax, LittleEndian, `r64))
+  in
+  let d_reload = Def.create rax (Bil.Load (Bil.Var m, cell, LittleEndian, `r64)) in
+  let i = v64 "t19_i" in
+  let d_i1 = Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, lit 1)) in
+  let cond = Bil.BinOp (Bil.LE, Bil.Var i, lit 3) in
+  let sub, tids =
+    sub_of "t19_vla_roundtrip"
+      [ [ d_rbp; d_frame; d_n_cell; d_n_load; d_sub; d_ptr; d_align;
+          d_save; d_i1 ],
+        [ (1, mk_goto) ];
+        [ d_reload ],
+        [ (3, fun t -> mk_jmp_to t cond);
+          (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [],
+        [ (1, mk_goto) ];
+        [], [] ]
+  in
+  (sub, tids, rax)
+
 let tests : unit Alcotest.test list =
   [
     (* FWD-01: an Ite whose flag is {0,1} joins both arms. *)
@@ -360,49 +409,7 @@ let tests : unit Alcotest.test list =
     pin "FWD-19"
       "a stored band pointer reloads with its band (the store->load round trip keeps the origin)"
       (fun () ->
-        let m, rsp, rbp = memv "t19_m", v64 "RSP", v64 "t19_rbp" in
-        let rax = v64 "t19_rax" in
-        let rn = v64 "t19_n" in
-        let lit k = Bil.Int (Cbat_word.to_word (w64 k)) in
-        let d_rbp = Def.create rbp (Bil.Var rsp) in
-        let d_frame = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, lit 16)) in
-        (* n read from a cell: the VLA size is non-literal. *)
-        let d_n_cell =
-          Def.create m
-            (Bil.Store (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
-                        Bil.Int (Cbat_word.to_word (w32 8)), LittleEndian, `r32))
-        in
-        let d_n_load =
-          Def.create rn
-            (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
-                       LittleEndian, `r64))
-        in
-        let d_sub = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rn)) in
-        let d_ptr = Def.create rax (Bil.Var rsp) in
-        let d_align =
-          Def.create rax
-            (Bil.BinOp (Bil.AND, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 (-4)))))
-        in
-        let cell = Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 8) in
-        let d_save =
-          Def.create m (Bil.Store (Bil.Var m, cell, Bil.Var rax, LittleEndian, `r64))
-        in
-        let d_reload = Def.create rax (Bil.Load (Bil.Var m, cell, LittleEndian, `r64)) in
-        let i = v64 "t19_i" in
-        let d_i1 = Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, lit 1)) in
-        let cond = Bil.BinOp (Bil.LE, Bil.Var i, lit 3) in
-        let sub, tids =
-          sub_of "t19_vla_roundtrip"
-            [ [ d_rbp; d_frame; d_n_cell; d_n_load; d_sub; d_ptr; d_align;
-                d_save; d_i1 ],
-              [ (1, mk_goto) ];
-              [ d_reload ],
-              [ (3, fun t -> mk_jmp_to t cond);
-                (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
-              [],
-              [ (1, mk_goto) ];
-              [], [] ]
-        in
+        let sub, tids, rax = vla_roundtrip () in
         let envs, _, _ =
           solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
             Theory.Target.unknown sub
@@ -421,6 +428,19 @@ let tests : unit Alcotest.test list =
            | Some _ -> true
            | None -> false));
 
+    pin "FWD-20" "a sub's VLA frames survive another sub's solve" (fun () ->
+        let vla, _, _ = vla_roundtrip () in
+        let other, _ = sub_of "t20_other" [ [], [ (0, mk_ret) ] ] in
+        let solve_one s =
+          ignore (solve ~callee:(callee_of (Program.create ~subs:[ s ] ()))
+                    Theory.Target.unknown s) in
+        Vsa.WordSet.Origin.Vla_seed.reset ();
+        solve_one vla;
+        let frames = Vsa.WordSet.Origin.Vla_seed.keys () in
+        solve_one other;
+        check "FWD-20.seeded" (not (Core.Set.is_empty frames));
+        check "FWD-20.kept"
+          (Core.Set.is_subset frames ~of_:(Vsa.WordSet.Origin.Vla_seed.keys ())));
   ]
 
 let () = run "forward" tests
