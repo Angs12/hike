@@ -246,7 +246,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
-  let want = if is_ptr_var var then Some ctx.ptr_ty else None in
+  let want = if is_ptr_var scope var then Some ctx.ptr_ty else None in
   let res =
     match Core.Map.find !(scope.atomic_plan) (Term.tid def) with
     | Some action ->

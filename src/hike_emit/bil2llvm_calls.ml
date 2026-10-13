@@ -75,7 +75,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       then
         (match window_ptr () with
          | Some w -> w
-         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+         | None -> Llvm.undef (sort_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let i =
           Base.Option.value ~default:0
@@ -157,13 +157,13 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
         match Llvm.classify_type (Llvm.type_of param) with
         (* A pointer-typed lane is an address lane, so the body wants the
            pointer itself: `is_ptr_var` holds for every kind lane, because
-           the kind pass retypes its parameter to `Mem`.  The conversion
+           the type pass puts its parameter in the pointer environment.  The conversion
            below is therefore unreachable for a lane this tree produced —
            it stays as the identity for a pointer parameter nothing
            claimed. *)
         | Llvm.TypeKind.Pointer
           when not (Hike_stack_model.is_ptr_arg arg)
-               && not (is_ptr_var (Arg.lhs arg)) ->
+               && not (is_ptr_var scope (Arg.lhs arg)) ->
             Llvm.build_ptrtoint param
               (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
               "" llvm_builder
@@ -243,7 +243,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   let bind_call_ret ctx scope blk_tid ret v =
     let v =
       if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Vector then
-        Llvm.build_bitcast v (var_lltype ctx (Arg.lhs ret)) "" llvm_builder
+        Llvm.build_bitcast v (sort_lltype ctx (Arg.lhs ret)) "" llvm_builder
       else v
     in
     bind_call_ret ctx scope blk_tid ret v

@@ -153,11 +153,11 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
             Phi.values phi
             |> Seq.exists ~f:(fun (_, e) ->
                    match e with
-                   | Bil.Var v -> is_ptr_var v
+                   | Bil.Var v -> is_ptr_var scope v
                    | _ -> false)
           in
           let typ =
-            if incoming_ptr then ctx.ptr_ty else var_lltype ctx var
+            if incoming_ptr then ctx.ptr_ty else var_lltype ctx scope var
           in
           let res = Llvm.build_empty_phi typ "" llvm_builder in
           insert_bir_phi scope tid var res;
@@ -274,6 +274,7 @@ let create_sub ctx scope sub =
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
+    scope.ptr_env := Hike_stack_model.ptr_vars sub;
     create_blocks ctx scope llvm_ctx blks fn sub;
     load_ssa_versions scope blks;
     (* The lock-marker brackets' plan, before any body emits. *)

@@ -730,6 +730,35 @@ let versions_tag : Versions.t Value.Tag.t =
     ~uuid:"1f0d4b8e-52a6-4c11-9f0a-3d7c2b1e8a44"
     (module Versions)
 
+(* The type pass's pointer environment: the vars whose values are
+   pointers.  The emitter reads a def's, phi's, or read's LLVM type off
+   it; the BIR keeps its own sorts. *)
+module Ptr_vars = struct
+  open! Core
+
+  type t = var list [@@deriving bin_io, compare, sexp]
+
+  let pp ppf vs = Format.pp_print_list Var.pp ppf vs
+end
+
+let ptr_vars_tag : Ptr_vars.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ptr-vars"
+    ~uuid:"41bc4b83-a431-466e-962e-26b308c9203c"
+    (module Ptr_vars)
+
+let ptr_vars (sub : sub term) : Var.Set.t =
+  match Term.get_attr sub ptr_vars_tag with
+  | Some vs -> Var.Set.of_list vs
+  | None -> Var.Set.empty
+
+let set_ptr_vars (vs : Var.Set.t) (sub : sub term) : sub term =
+  Term.set_attr sub ptr_vars_tag (Core.Set.to_list vs)
+
+(* A var is pointer-typed when it or its base is in the environment:
+   the SSA versions of a pointer register share its type. *)
+let is_ptr_typed (env : Var.Set.t) (v : var) : bool =
+  Core.Set.mem env v || Core.Set.mem env (Var.base v)
+
 let ssa_tag : unit Value.Tag.t =
   Value.Tag.register ~package:"hike" ~name:"hike-ssa"
     ~uuid:"2c1e5f9a-63b7-4d22-8a1b-4e8d3f2c9b55"

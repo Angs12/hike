@@ -246,15 +246,15 @@ let tests : unit Alcotest.test list =
         let prog = Program.create ~subs:stamped () in
         let sub_of_m = Types.sub_of_program prog in
         let pks, _ = Types.ptr_kinds ~facts ~sub_of:sub_of_m prog in
-        let mem_typ = Types.mem_type_of_target facts.Hike.Kb.target in
         let prog =
           Term.map sub_t prog ~f:(fun sub ->
               let ptr_vars =
                 Core.Map.find pks (Term.tid sub)
                 |> Base.Option.value ~default:Var.Set.empty
               in
-              Types.retype_sub ~mem_typ ~ptr_vars sub)
+              Model.set_ptr_vars ptr_vars sub)
           |> Types.stamp_arg_kinds ~param_kinds:pks
+          |> Types.stamp_lane_types
         in
         let callee =
           Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
@@ -269,7 +269,7 @@ let tests : unit Alcotest.test list =
           (match Core.Map.find pks (Term.tid callee) with
            | Some s ->
              Core.Set.mem s rdi
-             && Var.typ (Arg.lhs arg) = mem_typ
+             && Model.is_ptr_arg arg
              && Model.is_arg_ptr_kind arg
            | None -> false));
 

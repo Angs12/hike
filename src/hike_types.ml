@@ -541,55 +541,14 @@ let kind_census (prog : program term) : unit =
   Printf.eprintf "hike-kinds: defs=%d ptr=%d window=%d\n%!" !defs !ptrs !wins
 #endif
 
-(* The value type of a pointer lane: `Mem (addr, byte)`; the emitter's
-   `typ_lltype` lowers it to LLVM `ptr`.  The address size is the
-   target's, never a literal. *)
-let mem_type_of_target (target : Bap_core_theory.Theory.Target.t) : Type.t =
-  let bits = Bap_core_theory.Theory.Target.bits target in
-  let addr_size = if bits <= 32 then `r32 else `r64 in
-  Type.Mem (addr_size, `r8)
-
-(* Retypes EVERY var occurrence to its inferred sort: a pointer var to
-   [Mem], every other var to the sort it already has.  The pass owns the
-   typing; the emitter reads [Var.typ] and never re-derives. *)
-let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t) (sub : sub term) :
-    sub term =
-  (* Only the sort changes: the var's ident (name and SSA version) is
-     preserved, so defs and reads keep matching across blocks. *)
-  let mem_sort =
-    match mem_typ with
-    | Type.Mem (a, b) ->
-        Bap_core_theory.Theory.Value.Sort.forget
-          (Bap_core_theory.Theory.Mem.define
-             (Bap_core_theory.Theory.Bitv.define (Size.in_bits a))
-             (Bap_core_theory.Theory.Bitv.define (Size.in_bits b)))
-    | _ -> assert false
-  in
-  let repl v =
-    if Core.Set.mem ptr_vars v || Core.Set.mem ptr_vars (Var.base v) then
-      Var.reify (Bap_core_theory.Theory.Var.create mem_sort (Var.ident v))
-    else v
-  in
-  (* An argument lane's sort is the convention's fact (the exact lane
-     var the param-kind fixpoint proves), never the body's own
-     redefinition of the register: a lane the body mem-sorts but no
-     caller proves would flip its declared type with no call site
-     coerced to match. *)
-  let repl_arg v =
-    if Core.Set.mem ptr_vars v then
-      Var.reify (Bap_core_theory.Theory.Var.create mem_sort (Var.ident v))
-    else v
-  in
-  (object
-     inherit Term.mapper as super
-
-     method! map_sym v = repl v
-     method! map_def d = Def.with_lhs (super#map_def d) (repl (Def.lhs d))
-     method! map_phi p = Phi.with_lhs (super#map_phi p) (repl (Phi.lhs p))
-     method! map_arg a =
-       let a = super#map_arg a in
-       Arg.create ?intent:(Arg.intent a) (repl_arg (Arg.lhs a)) (Arg.rhs a)
-   end)#map_sub sub
+(* A lane is a pointer when its own var is: the convention's fact (the
+   exact lane var the param-kind fixpoint proves), never a body
+   redefinition of the register. *)
+let stamp_lane_types (prog : program term) : program term =
+  Term.map sub_t prog ~f:(fun sub ->
+      let env = Model.ptr_vars sub in
+      Term.map arg_t sub ~f:(fun a ->
+          if Core.Set.mem env (Arg.lhs a) then Model.set_ptr_arg a else a))
 
 (* The signature pass: write every sub's lane list onto its own [arg]
    terms.  It does not need the value types, so it runs BEFORE SSA. *)
@@ -597,12 +556,10 @@ let sign_run (proj : Project.t) : Project.t =
   let target = Project.target proj in
   Project.map_program proj ~f:(sign_program ~target)
 
-(* The type pass: infer every value's sort (AFTER SSA, per version),
-   retype every var, and stamp the lane kinds.  The emitter then lowers
-   mechanically. *)
+(* The type pass: infer every value's type (AFTER SSA, per version) and
+   stamp it — the sub's pointer environment, the lane kinds and lane
+   types.  The BIR keeps its sorts; the emitter reads the stamps. *)
 let run (proj : Project.t) : Project.t =
-  let target = Project.target proj in
-  let mem_typ = mem_type_of_target target in
   Project.map_program proj ~f:(fun prog ->
       match Hike_kb.facts_opt () with
       | None -> prog
@@ -709,9 +666,10 @@ let run (proj : Project.t) : Project.t =
                 let ptr_vars =
                   Core.Set.diff ptr_vars target_vars
                 in
-                retype_sub ~mem_typ ~ptr_vars sub)
+                Model.set_ptr_vars ptr_vars sub)
           in
           let prog = stamp_arg_kinds ~param_kinds:pks prog in
+          let prog = stamp_lane_types prog in
 #ifdef VSA_DEBUG
           kind_census prog;
 #endif
