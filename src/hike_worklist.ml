@@ -502,40 +502,42 @@ and learn_dests t cfg (f : func) : bool =
     true
   end
 
-(* The single code words the body's defs carry: a value computed into
-   a register, or each word a store writes.  A call instruction's own
-   defs push its return address, which names no function, so they are
-   skipped; BAP's lifter tags every def with its instruction. *)
+(* The code words that leave the body: every word of a bounded
+   value with the text origin in an integer argument register at a
+   call, or in an integer return register at a return.  A code value the
+   body only calls is a resolved destination; one it only uses as an
+   address names no function; one stored and reloaded keeps its origin
+   through memory. *)
 and code_words t (f : func) : int64 list =
   let wb = Hike_abi.word_bits t.abi in
-  let singleton ~pre ~post ~blk ~def e =
-    match Vsa.denote_exp_at ~pre ~post ~blk ~def e with
+  let ints regs =
+    Base.List.filter regs ~f:(fun v -> Type.equal (Var.typ v) (Type.Imm wb)) in
+  let args = ints t.abi.Hike_abi.int_param_regs in
+  let rets = ints t.abi.Hike_abi.return_regs in
+  let text ~blk post v =
+    match Vsa.denote_exp_at ~pre:post ~post ~blk (Bil.Var v) with
     | Ok ws -> (
-      match bounded_words ws with Some [ w ] -> Some w | _ -> None)
-    | Error _ -> None
+      match Vsa.WordSet.origin ws with
+      | Some (Vsa.WordSet.Origin.Rip Hike_section.Text) ->
+        Base.Option.value (bounded_words ws) ~default:[]
+      | _ -> [])
+    | Error _ -> []
   in
   Term.enum blk_t f.solved |> Seq.to_list
   |> Base.List.concat_map ~f:(fun blk ->
       match Core.Map.find f.envs (Term.tid blk) with
-      | None -> []
-      | Some (pre, post) ->
-        Term.enum def_t blk |> Seq.to_list
-        |> Base.List.filter ~f:(fun d ->
-            match Term.get_attr d Disasm.insn with
-            | Some insn -> not (Insn.is Insn.call insn)
-            | None -> true)
-        |> Base.List.concat_map ~f:(fun d ->
-            let values =
-              match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
-              | None -> [ Def.rhs d ]
-              | Some data -> (
-                match Hike_stack_model.addr_of_rhs (Def.rhs d) with
-                | Some (_, size) when Size.in_bits size > wb ->
-                  Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
-                      Bil.extract ~hi:((k + 1) * wb - 1) ~lo:(k * wb) data)
-                | _ -> [ data ])
-            in
-            Base.List.filter_map values ~f:(singleton ~pre ~post ~blk ~def:d)))
+      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+        let jmps = Term.enum jmp_t blk |> Seq.to_list in
+        let calls =
+          Base.List.exists jmps ~f:(fun j ->
+              match Jmp.kind j with
+              | Call _ -> not (Hike_return.is_jmp j)
+              | _ -> false)
+        in
+        let returns = Base.List.exists jmps ~f:Hike_return.is_jmp in
+        (if calls then Base.List.concat_map args ~f:(text ~blk post) else [])
+        @ (if returns then Base.List.concat_map rets ~f:(text ~blk post) else [])
+      | _ -> [])
 
 (* ---- the program ---- *)
 
@@ -600,8 +602,7 @@ let functions t : (int64 * func) list =
 let rec close t : unit =
   let words =
     Base.List.rev t.found
-    |> Base.List.filter ~f:(fun w ->
-        in_text t w && not (Core.Set.mem t.jump_dests w))
+    |> Base.List.filter ~f:(fun w -> not (Core.Set.mem t.jump_dests w))
     |> Base.List.stable_dedup ~compare:Int64.compare
   in
   t.found <- [];
