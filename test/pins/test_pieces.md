@@ -1,8 +1,9 @@
 # Pins: Cbat_clp.Pieces
 
-Module `Cbat_clp.Pieces`. One row per pin in `test/unit/test_pieces.ml`.
+Module `Cbat_clp.Pieces` (and the exact run list, `Cbat_clp.Exact`). One row per pin in
+`test/unit/test_pieces.ml`.
 
-Except PCS-09 through PCS-14's observed failures, red evidence is by review; the disable
+Except PCS-09 through PCS-18's observed failures, red evidence is by review; the disable
 recipes invert the pinned contracts in the vendored domain library.
 
 | id | mechanism | disable recipe | red evidence |
@@ -20,3 +21,5 @@ recipes invert the pinned contracts in the vendored domain library.
 | PCS-14 | a directional ray's translate contains every shifted element: an ordered image keeps the ray to its edge, a wrapped image is the exact progression | restore the per-direction base-wrap guards in `Cbat_clp_core.translate` | observed FAIL before the correction (`PCS-14.exhaustive` at width 8); the full descending stack class `+ 8` collapsed to `{0}` and broke `tls_initialized` at gcc O2/O3 with protection |
 | PCS-15 | the canonical merge: union/intersection/diff outputs stay ordered and sound over random progressions (the merge paths, no re-sort) | replace `merge_sorted` with `List.append` (the union merge degenerates to an append) | observed FAIL at `canonical:min-order` under that inversion (2026-10-13; PCS-16 also FAILs) |
 | PCS-16 | the union merge is a linear merge: disjoint spans keep every piece, operand order does not matter, and re-union is idempotent | drop the fold/cap in `union` (return the raw append) | observed FAIL under that inversion (2026-10-13) |
+| PCS-17 | the exact run-list constructor keeps a nine-element five-run set exactly its elements through union, intersection, diff and to_pieces (no hull, no cap) | hull the run builder in `Cbat_clp.Exact.of_elements` to one covering progression (`Cbat_clp_core.of_list`) | observed FAIL at `PCS-17.base` under that inversion (2026-10-13): `els=[1;…;50] raw=[1;…;50] card=50 pieces=1 want [1;2;10;11;20;21;30;31;50] in 5 pieces`; constructor budget promotion also FAILs `PCS-17.union` |
+| PCS-18 | a 10x10 element product is still exact: the cardinality is the concrete product count and every product is present | promote over `fin_set_size` inside `Cbat_clp.Exact.of_elements` (hull the over-budget result) | observed FAIL at `PCS-18` under that inversion (2026-10-13): `concrete=100 card=1998 elements=1998 missing=0 extra=1898` |

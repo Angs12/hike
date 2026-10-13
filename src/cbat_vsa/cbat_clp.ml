@@ -740,3 +740,182 @@ module Pieces = struct
   let join = union
   let meet = intersection
 end
+
+(* ==================== Exact: the uncapped exact run list =============== *)
+
+(* The finite tier as an exact [progression] run list: the element set of
+   [Cbat_fin_set], carried as the runs [Pieces.runs_from_elements] builds.
+   Unlike [Pieces], the list is uncapped and unbudgeted; the caller's
+   canonical promotion applies [fin_set_size].  Every constructor rebuilds
+   the runs, so the list is canonical: sorted by [compare_piece], disjoint,
+   non-wrapping, exactly the element set.  [] is bottom; the width survives
+   in the record. *)
+module Exact = struct
+  module C = Cbat_clp_core
+  module W = Cbat_word
+
+  type t = { width : int; pieces : progression list }
+  [@@deriving bin_io, sexp, compare]
+
+  let is_bottom (t : t) : bool = t.pieces = []
+
+  (* The raw run list. *)
+  let to_pieces (t : t) : progression list = t.pieces
+
+  let elements (t : t) : W.t list = List.concat_map t.pieces ~f:C.iter
+  let iter = elements
+
+  (* The exact runs of an element list.  Elements are grouped by their own
+     width (a run's width is the words'), deduplicated and kept in the set
+     order, so mixed-width operands keep [Cbat_fin_set]'s semantics. *)
+  let of_elements ~(width : int) (els : W.t list) : progression list =
+    let els = List.dedup_and_sort els ~compare:W.compare in
+    let groups =
+      List.group els ~break:(fun a b -> W.bitwidth a <> W.bitwidth b) in
+    List.sort
+      (List.concat_map groups ~f:(fun g ->
+           Pieces.runs_from_elements
+             ~width:(W.bitwidth (List.hd_exn g)) g))
+      ~compare:Pieces.compare_piece
+
+  let make ~(width : int) (els : W.t list) : t =
+    { width; pieces = of_elements ~width els }
+
+  (* [Cbat_fin_set]'s element equality: distinct words, width included. *)
+  let word_mem (w : W.t) (els : W.t list) : bool =
+    List.exists els ~f:(fun x -> W.equal x w)
+
+  let bottom (width : int) : t = { width; pieces = [] }
+  let of_list ~(width : int) (l : W.t list) : t = make ~width l
+
+  let singleton (w : W.t) : t =
+    { width = W.bitwidth w; pieces = [ C.singleton w ] }
+
+  let bitwidth (t : t) : int = t.width
+  let get_idx (t : t) : int = t.width
+
+  let cardinality (t : t) : W.t =
+    List.length (elements t) |> W.of_int ~width:(t.width + 1)
+
+  let elem (w : W.t) (t : t) : bool =
+    (* The bitwidth gates membership; the piece guard keeps [C.elem]'s
+       equal-width assertion for mixed-width values. *)
+    W.bitwidth w = t.width
+    && List.exists t.pieces ~f:(fun p ->
+           W.bitwidth w = C.bitwidth p && C.elem w p)
+
+  let equal (a : t) (b : t) : bool =
+    a.width = b.width && List.equal C.equal a.pieces b.pieces
+
+  let overlap (a : t) (b : t) : bool =
+    a.width = b.width
+    && (let eb = elements b in
+        List.exists (elements a) ~f:(fun w -> word_mem w eb))
+
+  (* The width mismatch is [Cbat_fin_set]'s: the declared width is the
+     wider side and the elements keep their own width; [diff] keeps the
+     left set. *)
+  let union (a : t) (b : t) : t =
+    make ~width:(Stdlib.max a.width b.width)
+      (List.append (elements a) (elements b))
+
+  let intersection (a : t) (b : t) : t =
+    let eb = elements b in
+    make ~width:(Stdlib.max a.width b.width)
+      (List.filter (elements a) ~f:(fun w -> word_mem w eb))
+
+  let diff (a : t) (b : t) : t =
+    if a.width <> b.width then a
+    else
+      let eb = elements b in
+      make ~width:a.width
+        (List.filter (elements a) ~f:(fun w -> not (word_mem w eb)))
+
+  (* The pointwise element map, at the same width. *)
+  let lift (f : W.t -> W.t) (a : t) : t =
+    make ~width:a.width (List.map (elements a) ~f)
+
+  (* The Cartesian element image; [width] is [Cbat_fin_set]'s per-op width
+     rule: the wider side, or the left side for the shifts. *)
+  let lift2 ?(width = fun w1 w2 -> Stdlib.max w1 w2)
+      (f : W.t -> W.t -> W.t) (a : t) (b : t) : t =
+    let eb = elements b in
+    make ~width:(width a.width b.width)
+      (List.concat_map (elements a) ~f:(fun w1 ->
+           List.map eb ~f:(fun w2 -> f w1 w2)))
+
+  let add = lift2 W.add
+  let sub = lift2 W.sub
+  let mul = lift2 W.mul
+  let div = lift2 W.div
+  let sdiv = lift2 (fun w1 w2 -> W.div (W.signed w1) (W.signed w2))
+  let modulo = lift2 W.modulo
+  let smodulo = lift2 (fun w1 w2 -> W.modulo (W.signed w1) (W.signed w2))
+
+  let arshift = lift2 ~width:(fun w1 _ -> w1) W.arshift
+  let rshift = lift2 ~width:(fun w1 _ -> w1) W.rshift
+  let lshift = lift2 ~width:(fun w1 _ -> w1) W.lshift
+
+  let logand = lift2 W.logand
+  let logor = lift2 W.logor
+  let logxor = lift2 W.logxor
+
+  let lnot = lift W.lnot
+  let neg = lift W.neg
+
+  let extract ?hi ?(lo = 0) (t : t) : t =
+    let new_bw =
+      let hi = Option.value ~default:(t.width - 1) hi in
+      hi - lo + 1 in
+    if new_bw <= 0 then t
+    else make ~width:new_bw (List.map (elements t) ~f:(W.extract_exn ?hi ~lo))
+
+  let cast (c : Bil.cast) (sz : int) (t : t) : t =
+    if sz <= 0 then t
+    else make ~width:sz (List.map (elements t) ~f:(W.cast c sz))
+
+  let concat = lift2 ~width:(fun w1 w2 -> w1 + w2) W.concat
+
+  (* True when consecutive elements are spaced by a multiple of [w]. *)
+  let splits_by (t : t) (w : W.t) : bool =
+    let rec go prev = function
+      | [] -> true
+      | x :: rest -> W.is_zero (W.modulo (W.sub x prev) w) && go x rest
+    in
+    match elements t with [] -> true | x :: rest -> go x rest
+
+  let min_elem (t : t) : W.t option =
+    List.min_elt (elements t) ~compare:W.compare
+
+  let max_elem (t : t) : W.t option =
+    List.max_elt (elements t) ~compare:W.compare
+
+  let min_elem_signed (t : t) : W.t option =
+    List.min_elt (List.map (elements t) ~f:W.signed) ~compare:W.compare
+
+  let max_elem_signed (t : t) : W.t option =
+    List.max_elt (List.map (elements t) ~f:W.signed) ~compare:W.compare
+
+  let precedes (a : t) (b : t) : bool =
+    a.width = b.width
+    && (let eb = elements b in
+        List.for_all (elements a) ~f:(fun w -> word_mem w eb))
+
+  let overlap_generic (type ws)
+      (module WS : Cbat_wordset_intf.S with type t = ws)
+      (t : t) (s' : ws) : bool =
+    (* Width mismatch answers may-overlap. *)
+    if WS.bitwidth s' <> t.width then not (is_bottom t)
+    else List.exists (elements t) ~f:(fun w -> WS.elem w s')
+
+  (* An exact value is never a top; a growing widen is the caller's
+     promotion signal, so the union is the sound answer if it arrives. *)
+  let widen_join = union
+  let join = union
+  let meet = intersection
+
+  let pp ppf (t : t) =
+    Format.fprintf ppf "@[{@ ";
+    List.iter (elements t) ~f:(Format.fprintf ppf "%a@ " W.pp);
+    Format.fprintf ppf "}@]"
+end

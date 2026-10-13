@@ -124,5 +124,67 @@ module Pieces : sig
   val concat : t -> t -> t
 end
 
+(* The exact finite element set: [Cbat_fin_set]'s semantics over an
+   uncapped [progression] run list.  No budget and no [max_pieces] cap —
+   the caller's canonical promotion applies the budget. *)
+module Exact : sig
+  type t [@@deriving bin_io, sexp, compare]
+
+  val to_pieces : t -> progression list
+
+  val bottom : int -> t
+  val singleton : Cbat_word.t -> t
+  val of_list : width:int -> Cbat_word.t list -> t
+  val is_bottom : t -> bool
+
+  val bitwidth : t -> int
+  val cardinality : t -> Cbat_word.t
+  val elem : Cbat_word.t -> t -> bool
+  val iter : t -> Cbat_word.t list
+  val elements : t -> Cbat_word.t list
+
+  val equal : t -> t -> bool
+  val overlap : t -> t -> bool
+
+  val union : t -> t -> t
+  val intersection : t -> t -> t
+  val diff : t -> t -> t
+  val join : t -> t -> t
+  val meet : t -> t -> t
+  val widen_join : t -> t -> t
+
+  val add : t -> t -> t
+  val sub : t -> t -> t
+  val mul : t -> t -> t
+  val div : t -> t -> t
+  val sdiv : t -> t -> t
+  val modulo : t -> t -> t
+  val smodulo : t -> t -> t
+  val arshift : t -> t -> t
+  val rshift : t -> t -> t
+  val lshift : t -> t -> t
+  val logand : t -> t -> t
+  val logor : t -> t -> t
+  val logxor : t -> t -> t
+
+  val lnot : t -> t
+  val neg : t -> t
+  val extract : ?hi:int -> ?lo:int -> t -> t
+  val cast : Bil.cast -> int -> t -> t
+  val concat : t -> t -> t
+
+  val splits_by : t -> Cbat_word.t -> bool
+  val precedes : t -> t -> bool
+  val min_elem : t -> Cbat_word.t option
+  val max_elem : t -> Cbat_word.t option
+  val min_elem_signed : t -> Cbat_word.t option
+  val max_elem_signed : t -> Cbat_word.t option
+  val overlap_generic :
+    (module Cbat_wordset_intf.S with type t = 'ws) -> t -> 'ws -> bool
+
+  val get_idx : t -> int
+  val pp : Format.formatter -> t -> unit
+end
+
 
 

@@ -8,6 +8,7 @@ open Hike_test.Harness
 open Hike_test.Common
 
 module P = Clp.Pieces
+module Ex = Clp.Exact
 
 (* Interval builder: [lo, hi] step 1 at width 32. *)
 let int32 ~lo ~hi = Clp.interval ~width:32 (w32 lo) (w32 hi)
@@ -298,6 +299,79 @@ let tests : unit Alcotest.test list =
           && List.length (P.to_list u) = 4
           && P.equal u (P.union u a)
           && P.equal u (P.union u b)));
+
+    pin "PCS-17"
+      "exactness survives: a nine-element five-run set stays exactly its \
+       elements through union, intersection, diff and to_pieces (no hull, \
+       no cap)"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let nums v = List.map Cbat_word.to_int_exn (Ex.elements v) in
+        let sorted = List.sort Stdlib.compare in
+        let bshow l = String.concat ";" (List.map string_of_int l) in
+        let card v = Cbat_word.to_int_exn (Ex.cardinality v) in
+        let runs v =
+          List.concat_map (fun p -> Clp.iter p) (Ex.to_pieces v)
+          |> List.map Cbat_word.to_int_exn |> sorted in
+        (* Elements and raw runs must both be exactly [want] (same order),
+           cardinality [List.length want], in [pieces] runs. *)
+        let require what v want pieces =
+          let got = sorted (nums v) in
+          let raw = runs v in
+          if
+            got <> want || raw <> want
+            || card v <> List.length want
+            || List.length (Ex.to_pieces v) <> pieces
+          then
+            Alcotest.failf
+              "PCS-17.%s: els=[%s] raw=[%s] card=%d pieces=%d want [%s] in \
+               %d pieces"
+              what (bshow got) (bshow raw) (card v)
+              (List.length (Ex.to_pieces v)) (bshow want) pieces in
+        let s =
+          Ex.of_list ~width:8
+            (List.map w8 [ 1; 2; 10; 11; 20; 21; 30; 31; 50 ]) in
+        require "base" s [ 1; 2; 10; 11; 20; 21; 30; 31; 50 ] 5;
+        let t =
+          Ex.of_list ~width:8
+            (List.map w8 [ 2; 3; 4; 10; 11; 12; 99 ]) in
+        require "union" (Ex.union s t)
+          [ 1; 2; 3; 4; 10; 11; 12; 20; 21; 30; 31; 50; 99 ] 5;
+        require "intersection" (Ex.intersection s t) [ 2; 10; 11 ] 2;
+        require "diff" (Ex.diff s t) [ 1; 20; 21; 30; 31; 50 ] 3);
+
+    pin "PCS-18"
+      "a 10x10 element product is still exact: the cardinality is the \
+       concrete product count and every product is present"
+      (fun () ->
+        let width = 16 in
+        let w = Cbat_word.of_int ~width in
+        let a_els = [ 2; 3; 5; 7; 11; 13; 17; 19; 23; 29 ] in
+        let b_els = [ 31; 37; 41; 43; 47; 53; 59; 61; 67; 71 ] in
+        let a = Ex.of_list ~width (List.map w a_els) in
+        let b = Ex.of_list ~width (List.map w b_els) in
+        let concrete =
+          List.concat_map
+            (fun x -> List.map (fun y -> Cbat_word.mul (w x) (w y)) b_els)
+            a_els
+          |> List.sort_uniq Cbat_word.compare in
+        let r = Ex.mul a b in
+        let r_els = List.sort Cbat_word.compare (Ex.elements r) in
+        let card = Cbat_word.to_int_exn (Ex.cardinality r) in
+        let missing = List.filter (fun p -> not (Ex.elem p r)) concrete in
+        let extra =
+          List.filter
+            (fun p -> not (List.exists (fun q -> Cbat_word.equal q p) concrete))
+            r_els in
+        if
+          List.length concrete <> 100 || card <> 100
+          || List.length r_els <> 100 || missing <> [] || extra <> []
+        then
+          Alcotest.failf
+            "PCS-18: concrete=%d card=%d elements=%d missing=%d extra=%d"
+            (List.length concrete) card (List.length r_els) (List.length missing)
+            (List.length extra);
+        check "PCS-18" true);
 
   ]
 
