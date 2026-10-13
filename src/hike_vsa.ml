@@ -52,23 +52,25 @@ type paused = {
   p_block_addrs : Tid.t Addr.Map.t;
   p_seed : Vsa.vsa_sol;
   p_blocked : Tid.Set.t;
+  p_wake : Tid.Set.t;
 }
 
 type outcome =
   | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
   | Paused of paused
 
-(* The callees the solution's reachable calls wait on.  Only a call
-   with a continuation waits: nothing flows past a tail call (or the
-   canonical return, which BAP exposes as one). *)
+(* The callees the solution's reachable calls wait on, and the blocks
+   of those calls.  Only a call with a continuation waits: nothing flows
+   past a tail call (or the canonical return, which BAP exposes as
+   one). *)
 let blocked_callees ~(lookup : lookup_fn)
     ~(callee : Tid.t -> Vsa.Call_effects.callee) (sol : Vsa.vsa_sol)
-    (sub : sub term) : Tid.Set.t =
+    (sub : sub term) : Tid.Set.t * Tid.Set.t =
   let blocked t =
     match callee t with Vsa.Call_effects.Blocked -> true | Summary _ -> false
   in
   Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+  |> Seq.fold ~init:(Tid.Set.empty, Tid.Set.empty) ~f:(fun acc blk ->
       let calls =
         Term.enum jmp_t blk
         |> Seq.filter_map ~f:(fun j ->
@@ -92,7 +94,9 @@ let blocked_callees ~(lookup : lookup_fn)
                 | Error _ -> None)
             in
             match target with
-            | Some t when blocked t -> Core.Set.add acc t
+            | Some t when blocked t ->
+              let callees, blocks = acc in
+              (Core.Set.add callees t, Core.Set.add blocks (Term.tid blk))
             | _ -> acc))
 
 let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
@@ -100,7 +104,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(callee : Tid.t -> Vsa.Call_effects.callee)
     ~(foreign_slots : Core.Int64.Set.t) ~(sub : sub term)
     ~(resolved : Tid.Set.t Tid.Map.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(seed : Vsa.vsa_sol option) : outcome =
+    ~(seed : Vsa.vsa_sol option) ~(wake : Tid.Set.t) : outcome =
   self_arm target;
   let abi = Hike_abi.of_target target in
   (* The images arm the whole fused solve: every denotation the
@@ -109,32 +113,32 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
   Vsa.with_images images (fun () ->
       let rec phases (resolved : Tid.Set.t Tid.Map.t)
           (block_addrs : Tid.t Addr.Map.t)
-          (init : Vsa.vsa_sol option) =
+          (init : Vsa.vsa_sol option) (wake : Tid.Set.t) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
           Vsa.static_graph_vsa ~abi
             ~def_reads:Model.def_reads ~def_writes:Model.def_writes
             ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
             ~jmp_reads:(Model.jmp_reads ~abi)
-            ~callee ~resolved ~sub_lookup:lookup
+            ~callee ~resolved ~sub_lookup:lookup ~wake
             sub seed
         in
-        let blocked = blocked_callees ~lookup ~callee sol sub in
+        let blocked, blocks = blocked_callees ~lookup ~callee sol sub in
         if not (Core.Set.is_empty blocked) then
           `Paused { p_sub = sub; p_resolved = resolved;
                     p_block_addrs = block_addrs; p_seed = sol;
-                    p_blocked = blocked }
+                    p_blocked = blocked; p_wake = blocks }
         else
           let resolved', events =
             Hike_cfg_complete.resolve_phase ~abi ~sol ~block_addrs
               ~foreign_slots sub resolved
           in
-          if events then phases resolved' block_addrs (Some sol)
+          if events then phases resolved' block_addrs (Some sol) Tid.Set.empty
           else `Drained (sol, block_addrs)
       in
       (* A sub without a converged solution has no sound summary or
          body; the lift stops. *)
-      match phases resolved block_addrs seed with
+      match phases resolved block_addrs seed wake with
       | exception Vsa.Fixpoint_not_converged (n, _) ->
         failwith
           (Printf.sprintf "hike-vsa: sub %s: fixpoint not converged in %d iterations"
@@ -158,7 +162,7 @@ let start (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(block_addrs : Tid.t Addr.Map.t) ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) : outcome =
   solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub
-    ~resolved:Tid.Map.empty ~block_addrs ~seed:None
+    ~resolved:Tid.Map.empty ~block_addrs ~seed:None ~wake:Tid.Set.empty
 
 let resume (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)
@@ -166,3 +170,4 @@ let resume (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(foreign_slots : Core.Int64.Set.t) (p : paused) : outcome =
   solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub:p.p_sub
     ~resolved:p.p_resolved ~block_addrs:p.p_block_addrs ~seed:(Some p.p_seed)
+    ~wake:p.p_wake

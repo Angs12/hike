@@ -90,6 +90,8 @@ val entry_block_of : sub term -> blk term option
    pair becomes the mask AND + identity copy. *)
 val normalize_round : Sub.t -> Sub.t
 
+(* The fixpoint from [init]; a [wake] block's successors re-join even
+   when no state changes (a resumed solve's blocked calls). *)
 val static_graph_vsa :
   abi:Hike_abi.t ->
   def_reads:(def term -> Var.Set.t) ->
@@ -100,6 +102,7 @@ val static_graph_vsa :
   ?callee:(Tid.t -> Cbat_call_effects.callee) ->
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
+  ?wake:Tid.Set.t ->
   Sub.t -> vsa_sol -> vsa_sol
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's

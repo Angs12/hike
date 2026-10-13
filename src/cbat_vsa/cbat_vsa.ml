@@ -347,6 +347,7 @@ let rec static_graph_vsa
         fun _ -> Cbat_call_effects.Summary None)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
+    ?(wake : Tid.Set.t = Tid.Set.empty)
     (s : Sub.t) (init : vsa_sol) : vsa_sol =
   let s = normalize_round s in
   let preserved = preserved_of_sub ~abi ~def_reads s in
@@ -604,6 +605,10 @@ let rec static_graph_vsa
      a stable warm seed — its incoming set grew without any
      predecessor's value changing. *)
   Core.Set.iter dg.Cbat_dispatch_graph.gained_preds ~f:enqueue;
+  (* A woken block's successors re-join from the warm seed: its outgoing
+     edges changed without any state of the walk changing (a resumed
+     solve's blocked calls now have a callee summary). *)
+  Core.Set.iter wake ~f:(fun b -> succs b |> List.iter ~f:enqueue);
   let pop_min () =
     match Core.Map.min_elt !pending with
     | None -> None

@@ -28,13 +28,15 @@ open Bap_core_theory
 
   (** A solve paused on callees with no summary yet: [p_seed] is the
       phase's solution (every blocked call's continuation bottom),
-      [p_blocked] the callees it waits on. *)
+      [p_blocked] the callees it waits on, [p_wake] the blocks of the
+      blocked calls. *)
   type paused = {
     p_sub : sub term;
     p_resolved : Tid.Set.t Tid.Map.t;
     p_block_addrs : Tid.t Addr.Map.t;
     p_seed : Cbat_vsa.vsa_sol;
     p_blocked : Tid.Set.t;
+    p_wake : Tid.Set.t;
   }
 
   (** A solve's end: the per-block (pre, post) environments, the
