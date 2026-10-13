@@ -18,14 +18,14 @@ module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
 module Clp = Cbat_clp
 module P = Clp.Pieces
-module FinSet = Cbat_fin_set
+module Exact = Clp.Exact
 module Origin = Hike_origin
 
 type clp = Clp.t
 type word = Cbat_word.t
-type fset = FinSet.t
+type fset = Exact.t
 
-(* Large sets are one Clp piece union; small ones FinSets; relative
+(* Large sets are one Clp piece union; small ones exact run lists; relative
    addresses carry their origin: [Rel (o, offs)] = [o]'s base plus the
    exact offset piece union [offs], one origin per value.  A value is
    ONE of those (the common case — no list cell), or [Many] of the
@@ -36,7 +36,7 @@ type fset = FinSet.t
    a tag except its certified low bits. *)
 type t =
   | Clp of P.t
-  | FinSet of FinSet.t
+  | Exact of Exact.t
   | Many of t list
   | Rel of Origin.t * P.t
 [@@deriving bin_io, sexp, compare]
@@ -58,13 +58,13 @@ let rec bitwidth (t : t) : int =
   match t with
   | Rel (_, _) -> 64
   | Clp ps -> P.bitwidth ps
-  | FinSet s -> FinSet.bitwidth s
+  | Exact s -> Exact.bitwidth s
   | Many ps -> List.fold ps ~init:0 ~f:(fun a q -> Stdlib.max a (bitwidth q))
 
 let rec is_bottom (t : t) : bool =
   match t with
   | Clp ps | Rel (_, ps) -> P.is_bottom ps
-  | FinSet s -> Cbat_word.is_zero (FinSet.cardinality s)
+  | Exact s -> Cbat_word.is_zero (Exact.cardinality s)
   | Many ps -> List.for_all ps ~f:is_bottom
 
 (* |segment| * |offs| at width 65.  The product SATURATES: a wrapped
@@ -92,11 +92,17 @@ let hull_of_pieces (ps : P.t) : clp option =
 let pieces_of_words ~width (l : word list) : P.t = P.of_list ~width l
 
 let pieces_of_finset (s : fset) : P.t =
-  pieces_of_words ~width:(FinSet.bitwidth s) (FinSet.iter s)
+  pieces_of_words ~width:(Exact.bitwidth s) (Exact.iter s)
+
+(* The exact run list as its piece union: the runs are already canonical,
+   so this rebuilds the union without the element-level conversion. *)
+let pieces_of_exact (s : fset) : P.t =
+  List.fold (Exact.to_pieces s) ~init:(P.bottom (Exact.bitwidth s))
+    ~f:(fun acc p -> P.union acc (P.of_progression p))
 
 let clp_of_finset fs : clp =
-  let width = FinSet.bitwidth fs in
-  match FinSet.iter fs with
+  let width = Exact.bitwidth fs in
+  match Exact.iter fs with
   | [] -> Clp.bottom width
   | [ x ] -> Clp.singleton x
   | l -> Clp.of_list ~width l
@@ -113,7 +119,7 @@ let stack_word_i64 (k : int64) : t =
 let module_address (a : int64) : t =
   match Origin.Regions.of_address a with
   | Some r -> Rel (Origin.Rip r, P.singleton (w64_of_i64 a))
-  | None -> FinSet (FinSet.singleton (w64_of_i64 a))
+  | None -> Exact (Exact.singleton (w64_of_i64 a))
 
 (* A fresh VLA frame: offset 0 is the allocation base (the post-move SP). *)
 let vla_frame (tid : Tid.t) : t =
@@ -208,17 +214,17 @@ let rec to_plain (t : t) : t =
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
-     | Clp _ | FinSet _ | Rel _ as q -> q
+     | Clp _ | Exact _ | Rel _ as q -> q
      | Many ps' -> Many ps')
-  | Clp _ | FinSet _ -> t
+  | Clp _ | Exact _ -> t
 
 (* ---------------- canonicalization ---------------- *)
 
 (* The canonical value: one leaf, or [Many] of the canonical leaf list
-   in the fixed order Clp, FinSet, Rel (no nesting); bottoms drop
-   (an all-bottom value keeps one empty FinSet so the width survives);
-   an over-budget FinSet pool promotes to its exact piece runs; a lone
-   small plain piece union keeps its exact FinSet twin (the tier).
+   in the fixed order Clp, Exact, Rel (no nesting); bottoms drop
+   (an all-bottom value keeps one empty Exact so the width survives);
+   an over-budget Exact pool promotes to its exact piece runs; a lone
+   small plain piece union keeps its exact small-tier twin (the tier).
    The relative pool groups by origin: a pool of two or more origins
    is not a value — its members materialise into the plain pool. *)
 and canonical (ps : t list) : t =
@@ -255,22 +261,22 @@ and canonical (ps : t list) : t =
     Rel (o, offs)
   | [], None ->
     (match ps with
-     | [] -> FinSet (FinSet.bottom 1)
+     | [] -> Exact (Exact.bottom 1)
      | _ ->
        let w =
          List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q)) in
-       FinSet (FinSet.bottom w))
+       Exact (Exact.bottom w))
   | _ ->
     let clps =
       List.append mixed_pool
         (List.filter_map ps ~f:(function Clp x -> Some x | _ -> None))
     in
     let fss =
-      List.filter_map ps ~f:(function FinSet x -> Some x | _ -> None) in
+      List.filter_map ps ~f:(function Exact x -> Some x | _ -> None) in
     let fs_total =
       List.fold fss ~init:0 ~f:(fun a s ->
           a
-          + (match Cbat_word.to_int (FinSet.cardinality s) with
+          + (match Cbat_word.to_int (Exact.cardinality s) with
              | Ok n -> n
              | Error _ -> Stdlib.max_int))
     in
@@ -296,20 +302,20 @@ and canonical (ps : t list) : t =
       else
         match fss with
         | [] -> None
-        | x :: rest -> Some (List.fold rest ~init:x ~f:FinSet.union)
+        | x :: rest -> Some (List.fold rest ~init:x ~f:Exact.union)
     in
-    (* Contained pieces drop: a FinSet leaf covered by the Clp leaf adds
-       no element, and a Clp leaf covered by the FinSet is that FinSet.
+    (* Contained pieces drop: an Exact leaf covered by the Clp leaf adds
+       no element, and a Clp leaf covered by the Exact is that Exact.
        Both would double-count the overlap in [cardinality]. *)
     let clp_piece, fs_piece =
       match clp_piece, fs_piece with
       | Some cps, Some fss
-        when List.for_all (FinSet.iter fss) ~f:(fun w -> P.elem w cps) ->
+        when List.for_all (Exact.iter fss) ~f:(fun w -> P.elem w cps) ->
         (Some cps, None)
       | Some cps, Some fss
         when (not (P.is_top cps))
              && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
-             && List.for_all (P.elements cps) ~f:(fun w -> FinSet.elem w fss)
+             && List.for_all (P.elements cps) ~f:(fun w -> Exact.elem w fss)
         -> (None, Some fss)
       | c, f -> c, f
     in
@@ -318,7 +324,7 @@ and canonical (ps : t list) : t =
       | Some cps, None
         when (not (P.is_bottom cps)) && not (P.is_top cps)
              && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
-        -> None, Some (FinSet.of_list ~width:(P.bitwidth cps) (P.elements cps))
+        -> None, Some (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
       | c, f -> c, f
     in
     (* A bottom relative pool drops against live plain pieces. *)
@@ -330,7 +336,7 @@ and canonical (ps : t list) : t =
     let leaves =
       List.filter_map
         [ Option.map clp_piece ~f:(fun x -> Clp x);
-          Option.map fs_piece ~f:(fun x -> FinSet x);
+          Option.map fs_piece ~f:(fun x -> Exact x);
           Option.map so_piece ~f:(fun x -> Rel (fst x, snd x)) ]
         ~f:(fun q -> q)
     in
@@ -339,8 +345,8 @@ and canonical (ps : t list) : t =
      | [] ->
        (* No leaf survived: a bottom at the widest input, never an empty
           [Many] (which would carry width 0). *)
-       FinSet
-         (FinSet.bottom
+       Exact
+         (Exact.bottom
             (List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q))))
      | ps -> Many ps))
 
@@ -354,7 +360,7 @@ let plain_view (t : t) : t = match t with Rel _ -> to_plain t | q -> q
 let rec origin (t : t) : Origin.t option =
   match t with
   | Rel (o, _) -> Some o
-  | Clp _ | FinSet _ -> None
+  | Clp _ | Exact _ -> None
   | Many ps ->
     (match List.map ps ~f:origin with
      | (Some o) :: rest ->
@@ -374,7 +380,7 @@ let set_origin (o : Origin.t) (t : t) : t =
 let rec plain_is_top (t : t) : bool =
   match t with
   | Clp ps -> P.is_top ps
-  | FinSet _ -> false
+  | Exact _ -> false
   | Rel (_, offs) -> P.is_top offs
   | Many ps -> List.exists ps ~f:plain_is_top
 
@@ -385,11 +391,11 @@ let as_clp (t : t) : clp =
     (match hull_of_pieces ps with
      | Some p -> p
      | None -> Clp.top (Stdlib.max 1 (P.bitwidth ps)))
-  | FinSet s -> clp_of_finset s
+  | Exact s -> clp_of_finset s
   | Many ps ->
     let hulls =
       List.filter_map ps ~f:(function
-        | FinSet s -> Some (clp_of_finset s)
+        | Exact s -> Some (clp_of_finset s)
         | Clp hps -> hull_of_pieces hps
         | Rel _ -> None
         | Many _ -> None)
@@ -402,13 +408,13 @@ let as_clp (t : t) : clp =
 let of_list ~width l : t =
   canonical
     [ (if List.length l > Utils.fin_set_size then Clp (P.of_list ~width l)
-       else FinSet (FinSet.of_list ~width l)) ]
+       else Exact (Exact.of_list ~width l)) ]
 
-let singleton w : t = FinSet (FinSet.singleton w)
+let singleton w : t = Exact (Exact.singleton w)
 
 let of_clp (p : clp) : t = canonical [ Clp (P.of_progression p) ]
 
-let bottom i = FinSet (FinSet.bottom i)
+let bottom i = Exact (Exact.bottom i)
 let top i = canonical [ Clp (P.top i) ]
 
 (* One leaf, or the [Many] pieces. *)
@@ -429,12 +435,12 @@ let clp_leaf (t : t) : P.t option =
   match t with
   | Clp ps -> Some ps
   | Many ps -> List.find_map ps ~f:(function Clp x -> Some x | _ -> None)
-  | FinSet _ | Rel _ -> None
+  | Exact _ | Rel _ -> None
 
 let fs_leaf (t : t) : fset option =
   match t with
-  | FinSet s -> Some s
-  | Many ps -> List.find_map ps ~f:(function FinSet x -> Some x | _ -> None)
+  | Exact s -> Some s
+  | Many ps -> List.find_map ps ~f:(function Exact x -> Some x | _ -> None)
   | Clp _ | Rel _ -> None
 
 let rel_leaf (t : t) : (Origin.t * P.t) option =
@@ -442,7 +448,7 @@ let rel_leaf (t : t) : (Origin.t * P.t) option =
   | Rel (o, x) -> Some (o, x)
   | Many ps ->
     List.find_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
-  | Clp _ | FinSet _ -> None
+  | Clp _ | Exact _ -> None
 
 (* The join pairing: every kind carried by EITHER side contributes — a
    shared kind takes its own join, a one-sided kind is carried (the join
@@ -456,8 +462,8 @@ let pair_join ~(clp_op : P.t -> P.t -> P.t) ~(fs_op : fset -> fset -> fset)
      | Some a, None | None, Some a -> [ Clp a ]
      | None, None -> [])
     @ (match fs_leaf t1, fs_leaf t2 with
-       | Some a, Some b -> [ FinSet (fs_op a b) ]
-       | Some a, None | None, Some a -> [ FinSet a ]
+       | Some a, Some b -> [ Exact (fs_op a b) ]
+       | Some a, None | None, Some a -> [ Exact a ]
        | None, None -> [])
     @ (match rel_leaf t1, rel_leaf t2 with
        | Some (o1, a), Some (o2, b) -> [ rel_op o1 a o2 b ]
@@ -476,7 +482,7 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
        | Some (cmin, cmax) -> Some (w64_of_i64 cmin, w64_of_i64 cmax)
        | None -> None)
     | Clp ps -> pair (P.min_elem ps) (P.max_elem ps)
-    | FinSet s -> pair (FinSet.min_elem s) (FinSet.max_elem s)
+    | Exact s -> pair (Exact.min_elem s) (Exact.max_elem s)
     | Many _ -> None
   in
   let rec go acc (t : t) =
@@ -554,7 +560,7 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
 let rec cardinality (t : t) : word =
   match t with
   | Clp ps -> P.cardinality ps
-  | FinSet s -> FinSet.cardinality s
+  | Exact s -> Exact.cardinality s
   | Rel (Origin.Vla _, offs) ->
     if P.is_bottom offs then Cbat_word.zero 65 else Cbat_word.ones 65
   (* An absolute-origin value's offsets ARE its absolute words: the
@@ -591,7 +597,7 @@ let min_elem (t : t) : word option =
        | Rel (o, offs) ->
          Option.map (plain_bounds o offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
        | Clp ps -> P.min_elem ps
-       | FinSet s -> FinSet.min_elem s
+       | Exact s -> Exact.min_elem s
        | Many _ -> None)
     (fun m a -> if Cbat_word.compare m a < 0 then m else a)
     t
@@ -604,7 +610,7 @@ let max_elem (t : t) : word option =
        | Rel (o, offs) ->
          Option.map (plain_bounds o offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
        | Clp ps -> P.max_elem ps
-       | FinSet s -> FinSet.max_elem s
+       | Exact s -> Exact.max_elem s
        | Many _ -> None)
     (fun m a -> if Cbat_word.compare m a > 0 then m else a)
     t
@@ -683,8 +689,8 @@ let signed_leaf ~(dir : int) (q : t) : word option =
     | None -> None)
   | Rel (o, offs) -> via_offsets_base (Origin.facts o).base offs
   | Clp ps -> via_pieces ps
-  | FinSet s ->
-    (if dir < 0 then FinSet.min_elem_signed s else FinSet.max_elem_signed s)
+  | Exact s ->
+    (if dir < 0 then Exact.min_elem_signed s else Exact.max_elem_signed s)
   | Many _ -> None
 
 let extremum_signed ~(dir : int) (t : t) : word option =
@@ -701,7 +707,7 @@ let max_elem_signed (t : t) : word option = extremum_signed ~dir:1 t
 let rec splits_by (t : t) (w : Cbat_word.t) =
   match t with
   | Clp offs | Rel (_, offs) -> P.splits_by offs w
-  | FinSet s -> FinSet.splits_by s w
+  | Exact s -> Exact.splits_by s w
   | Many ps -> List.for_all ps ~f:(fun q -> splits_by q w)
 
 (* Hull test: an over-approximation of membership in the projection. *)
@@ -718,7 +724,7 @@ let rec elem w (t : t) =
         | _ -> false)
      | None -> not (is_bottom t))
   | Clp ps -> P.elem w ps
-  | FinSet s -> FinSet.elem w s
+  | Exact s -> Exact.elem w s
   | Many ps -> List.exists ps ~f:(fun q -> elem w q)
 
 (* Materializes the base-0 slice only; the full projection is
@@ -740,7 +746,7 @@ let rec iter (t : t) : word list =
     List.map (P.elements offs)
       ~f:(fun w -> Cbat_word.add (w64_of_i64 (Origin.facts o).base) w)
   | Clp ps -> P.elements ps
-  | FinSet s -> FinSet.iter s
+  | Exact s -> Exact.iter s
   | Many ps -> List.concat_map ps ~f:iter
 
 (* The fixpoint's convergence check calls this on every var of every
@@ -748,7 +754,7 @@ let rec iter (t : t) : word list =
 let rec equal (t1 : t) (t2 : t) : bool =
   match t1, t2 with
   | Clp a, Clp b -> P.equal a b
-  | FinSet a, FinSet b -> FinSet.equal a b
+  | Exact a, Exact b -> Exact.equal a b
   | Rel (o1, a), Rel (o2, b) -> Origin.equal o1 o2 && P.equal a b
   | Many a, Many b ->
     List.length a = List.length b
@@ -760,9 +766,9 @@ let overlap (t1 : t) (t2 : t) : bool =
     match hull_of_pieces ps with Some p -> p | None -> Clp.bottom 1 in
   let leaf_pair q1 q2 =
     match q1, q2 with
-    | FinSet s1, FinSet s2 -> FinSet.overlap s1 s2
-    | FinSet s1, Clp ps2 -> FinSet.overlap_generic (module Clp) s1 (hull ps2)
-    | Clp ps1, FinSet s2 -> FinSet.overlap_generic (module Clp) s2 (hull ps1)
+    | Exact s1, Exact s2 -> Exact.overlap s1 s2
+    | Exact s1, Clp ps2 -> Exact.overlap_generic (module Clp) s1 (hull ps2)
+    | Clp ps1, Exact s2 -> Exact.overlap_generic (module Clp) s2 (hull ps1)
     | Clp ps1, Clp ps2 -> P.overlap ps1 ps2
     | _ -> false
   in
@@ -891,22 +897,22 @@ let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
 module Fs_repr = struct
   type t = fset
 
-  let union = FinSet.union
-  let meet = FinSet.intersection
-  let add = FinSet.add
-  let sub = FinSet.sub
-  let mul = FinSet.mul
-  let div = FinSet.div
-  let sdiv = FinSet.sdiv
-  let modulo = FinSet.modulo
-  let smodulo = FinSet.smodulo
-  let lshift = FinSet.lshift
-  let rshift = FinSet.rshift
-  let arshift = FinSet.arshift
-  let logand = FinSet.logand
-  let logor = FinSet.logor
-  let logxor = FinSet.logxor
-  let concat = FinSet.concat
+  let union = Exact.union
+  let meet = Exact.intersection
+  let add = Exact.add
+  let sub = Exact.sub
+  let mul = Exact.mul
+  let div = Exact.div
+  let sdiv = Exact.sdiv
+  let modulo = Exact.modulo
+  let smodulo = Exact.smodulo
+  let lshift = Exact.lshift
+  let rshift = Exact.rshift
+  let arshift = Exact.arshift
+  let logand = Exact.logand
+  let logor = Exact.logor
+  let logxor = Exact.logxor
+  let concat = Exact.concat
 end
 
 module Fs_binop = Binop (Fs_repr)
@@ -914,8 +920,8 @@ module Fs_binop = Binop (Fs_repr)
 let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   Fs_binop.binop op s1 s2
 
-(* One op over one leaf pair; mixed kinds take the piece union of the
-   FinSet's elements (exact runs), the operands in their own order. *)
+(* One op over one leaf pair; mixed kinds take the exact run list of the
+   Exact's elements, the operands in their own order. *)
 (* The operand's representation decides the path: the exact finite set
    is the fast path, the piece union is the general one, and Rel/Many
    are opaque to the generic lift (the stack-aware ops route around
@@ -927,34 +933,34 @@ type repr =
 
 let repr_of (q : t) : repr =
   match q with
-  | FinSet s -> Fs s
+  | Exact s -> Fs s
   | Clp ps -> Ps ps
   | Rel _ | Many _ -> Opaque
 
 let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   let wide () = P.top (Stdlib.max (bitwidth q1) (bitwidth q2)) in
   match repr_of q1, repr_of q2 with
-  | Fs s1, Fs s2 -> [ FinSet (binop_fs op s1 s2) ]
+  | Fs s1, Fs s2 -> [ Exact (binop_fs op s1 s2) ]
   | Ps a, Ps b -> [ Clp (binop_pieces op a b) ]
-  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
-  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_finset s) ps) ]
+  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_exact s)) ]
+  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_exact s) ps) ]
   | Opaque, _ | _, Opaque -> [ Clp (wide ()) ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with
-  | ((Clp _ | FinSet _ | Rel _) as q1),
-    ((Clp _ | FinSet _ | Rel _) as q2) ->
+  | ((Clp _ | Exact _ | Rel _) as q1),
+    ((Clp _ | Exact _ | Rel _) as q2) ->
     canonical (op_pair op q1 q2)
   | p1, p2 -> pairwise (op_pair op) p1 p2
 
 let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
   match t with
   | Clp ps -> canonical [ Clp (f_clp ps) ]
-  | FinSet s -> canonical [ FinSet (f_fs s) ]
+  | Exact s -> canonical [ Exact (f_fs s) ]
   | Rel _ as q ->
     (match to_plain q with
      | Clp ps -> canonical [ Clp (f_clp ps) ]
-     | FinSet s -> canonical [ FinSet (f_fs s) ]
+     | Exact s -> canonical [ Exact (f_fs s) ]
      | Rel _ | Many _ -> t)
   | Many ps -> canonical (List.map ps ~f:(fun q -> lift_unop f_clp f_fs q))
 
@@ -1014,7 +1020,7 @@ let address_pieces (t : t) : (Origin.t * P.t) option =
     | None -> Some (Origin.Stack, P.top 64))
   | Rel (o, offs) -> Some (key_line o, offs)
   | Clp ps -> Some (Origin.Abs, ps)
-  | FinSet s -> Some (Origin.Abs, pieces_of_finset s)
+  | Exact s -> Some (Origin.Abs, pieces_of_finset s)
   | Many _ -> None
 
 (* A finite non-wrapped progression split at its value midpoint; a
@@ -1056,10 +1062,10 @@ let filter_addresses (t : t)
     Option.value_map (filter (key_line o) ps) ~default:t ~f:(fun ps -> Rel (o, ps))
   | Clp ps ->
     Option.value_map (filter Origin.Abs ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
-  | FinSet s ->
-    let width = FinSet.bitwidth s in
+  | Exact s ->
+    let width = Exact.bitwidth s in
     of_list ~width
-      (List.filter (FinSet.iter s) ~f:(fun w ->
+      (List.filter (Exact.iter s) ~f:(fun w ->
            match decide Origin.Abs (Clp.singleton w) with
            | `Drop -> false
            | `Keep | `Split -> true))
@@ -1088,8 +1094,8 @@ let stride (t : t) : int =
   let leaf_stride (q : t) : int option =
     match q with
     | Clp ps | Rel (_, ps) -> of_clp_pieces ps
-    | FinSet s ->
-      (match FinSet.iter s with
+    | Exact s ->
+      (match Exact.iter s with
        | [] | [ _ ] -> Some 1
        | w1 :: rest ->
          let rec common_diff prev d = function
@@ -1226,8 +1232,8 @@ let plain_offsets (o : Origin.t) (p : t) : P.t option =
   match p with
   | Clp ps when not (P.is_bottom ps) ->
     Some (P.translate ps (Cbat_word.neg base))
-  | FinSet s ->
-    let ws = List.map ~f:(fun w -> Cbat_word.sub w base) (FinSet.iter s) in
+  | Exact s ->
+    let ws = List.map ~f:(fun w -> Cbat_word.sub w base) (Exact.iter s) in
     (match ws with
      | [] -> Some (P.bottom 64)
      | _ -> Some (pieces_of_words ~width:64 ws))
@@ -1242,8 +1248,8 @@ let singleton_of (q : t) : word option =
     (match P.min_elem ps, P.max_elem ps with
      | Some a, Some b -> pair a b
      | _ -> None)
-  | FinSet s ->
-    (match FinSet.min_elem s, FinSet.max_elem s with
+  | Exact s ->
+    (match Exact.min_elem s, Exact.max_elem s with
      | Some a, Some b -> pair a b
      | _ -> None)
   | Rel _ | Many _ -> None
@@ -1345,11 +1351,11 @@ let meet_plain (t1 : t) (t2 : t) : t =
     let q1 = match q1 with Rel _ -> to_plain q1 | q -> q in
     let q2 = match q2 with Rel _ -> to_plain q2 | q -> q in
     match q1, q2 with
-    | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
-    | FinSet s, Clp ps | Clp ps, FinSet s ->
-      [ FinSet
-          (FinSet.of_list ~width:(FinSet.bitwidth s)
-             (List.filter (FinSet.iter s)
+    | Exact s1, Exact s2 -> [ Exact (Exact.intersection s1 s2) ]
+    | Exact s, Clp ps | Clp ps, Exact s ->
+      [ Exact
+          (Exact.of_list ~width:(Exact.bitwidth s)
+             (List.filter (Exact.iter s)
                 ~f:(fun w -> P.elem w ps))) ]
     | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
     | _ -> []
@@ -1357,7 +1363,7 @@ let meet_plain (t1 : t) (t2 : t) : t =
   pairwise pair t1 t2
 
 (* The plain join: every leaf pair contributes — two Clp leaves the exact
-   piece union, two FinSet leaves the exact union, a one-sided kind its
+   piece union, two Exact leaves the exact union, a one-sided kind its
    own leaf — so the join never hulls. *)
 let join_plain (t1 : t) (t2 : t) : t =
   let rel_op o1 a o2 b =
@@ -1368,7 +1374,7 @@ let join_plain (t1 : t) (t2 : t) : t =
            (P.of_progression (as_clp (Rel (o1, a))))
            (P.of_progression (as_clp (Rel (o2, b)))))
   in
-  pair_join ~clp_op:P.union ~fs_op:FinSet.union ~rel_op t1 t2
+  pair_join ~clp_op:P.union ~fs_op:Exact.union ~rel_op t1 t2
 
 (* The plain-plain payload: the lattice ops pair by kind; every other op
    lifts through the common plain machinery. *)
@@ -1387,11 +1393,11 @@ let has_fixed_base = function
 
 let meet_rel (t1 : t) (t2 : t) : t =
   match t1, t2 with
-  | Rel (o, a), (Clp _ | FinSet _ as plain) when has_fixed_base o ->
+  | Rel (o, a), (Clp _ | Exact _ as plain) when has_fixed_base o ->
     (match plain_offsets o plain with
      | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
      | None -> meet_plain (to_plain t1) (to_plain plain))
-  | (Clp _ | FinSet _ as plain), Rel (o, a) when has_fixed_base o ->
+  | (Clp _ | Exact _ as plain), Rel (o, a) when has_fixed_base o ->
     (match plain_offsets o plain with
      | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
      | None -> meet_plain (to_plain plain) (to_plain t2))
@@ -1425,7 +1431,7 @@ let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
     let hull_of_plain (q : t) : clp option =
       match q with
       | Clp ps -> hull_of_pieces ps
-      | FinSet s -> Some (clp_of_finset s)
+      | Exact s -> Some (clp_of_finset s)
       | _ -> None
     in
     (match t1, t2 with
@@ -1467,7 +1473,7 @@ let rip_wrap (p : Hike_section.t) (t : t) : t =
     canonical
       (List.map (leaves t) ~f:(function
          | Clp ps -> Rel (Origin.Rip p, ps)
-         | FinSet s -> Rel (Origin.Rip p, pieces_of_finset s)
+         | Exact s -> Rel (Origin.Rip p, pieces_of_finset s)
          | q -> q))
 
 (* A plain computation over two module addresses of one section stays in
@@ -1551,10 +1557,10 @@ and plain_unop (op : unop) (t : t) : t =
   | Extract (hi, lo) ->
     lift_unop
       (P.extract ?hi ?lo:(Some lo))
-      (FinSet.extract ?hi ?lo:(Some lo)) t
-  | Cast (c, sz) -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
-  | Lnot -> blind_unop P.lnot FinSet.lnot t
-  | Neg -> blind_unop P.neg FinSet.neg t
+      (Exact.extract ?hi ?lo:(Some lo)) t
+  | Cast (c, sz) -> lift_unop (P.cast c sz) (Exact.cast c sz) t
+  | Lnot -> blind_unop P.lnot Exact.lnot t
+  | Neg -> blind_unop P.neg Exact.neg t
 
 (* THE general binary operator: the operands classify by pattern (a
    relative leaf allocates nothing), the table decides the row, the
@@ -1582,9 +1588,9 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
   | Rel (Origin.Rip p, a), Rel (Origin.Rip p', b)
     when Hike_section.equal p p' && (match op with Union | Meet -> true | _ -> false) ->
     rip_wrap p (lift2 op (rip_plain a) (rip_plain b))
-  | Rel (Origin.Rip p, a), (Clp _ | FinSet _) when rip_keeps op ~left:true ->
+  | Rel (Origin.Rip p, a), (Clp _ | Exact _) when rip_keeps op ~left:true ->
     rip_wrap p (lift2 op (rip_plain a) t2)
-  | (Clp _ | FinSet _), Rel (Origin.Rip p, b) when rip_keeps op ~left:false ->
+  | (Clp _ | Exact _), Rel (Origin.Rip p, b) when rip_keeps op ~left:false ->
     rip_wrap p (lift2 op t1 (rip_plain b))
   | Rel (Origin.Rip _, a), _ -> lift2 op (rip_plain a) t2
   | _, Rel (Origin.Rip _, b) -> lift2 op t1 (rip_plain b)
@@ -1643,13 +1649,13 @@ let rec diff (t1 : t) (t2 : t) : t =
       if bitwidth q1 <> bitwidth q2 then [ q1 ]
       else
         match q1, q2 with
-        | FinSet s1, FinSet s2 -> [ FinSet (FinSet.diff s1 s2) ]
-        | FinSet s, Clp ps ->
-          [ FinSet
-              (FinSet.of_list ~width:(FinSet.bitwidth s)
-                 (List.filter (FinSet.iter s)
+        | Exact s1, Exact s2 -> [ Exact (Exact.diff s1 s2) ]
+        | Exact s, Clp ps ->
+          [ Exact
+              (Exact.of_list ~width:(Exact.bitwidth s)
+                 (List.filter (Exact.iter s)
                     ~f:(fun w -> not (P.elem w ps)))) ]
-        | Clp ps, FinSet s -> [ Clp (P.diff ps (pieces_of_finset s)) ]
+        | Clp ps, Exact s -> [ Clp (P.diff ps (pieces_of_finset s)) ]
         | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
         | _ -> []
     in
@@ -1679,7 +1685,7 @@ let concat t1 t2 = lift2 Concat t1 t2
 let is_top t =
   match t with
   | Clp ps | Rel (_, ps) -> P.is_top ps
-  | FinSet _ -> false
+  | Exact _ -> false
   | Many ps ->
     List.for_all ps ~f:(function
       | Clp ps | Rel (_, ps) -> P.is_top ps
@@ -1692,7 +1698,7 @@ let piece_is_infinite (q : t) =
   match q with
   | Clp ps | Rel (_, ps) ->
     List.exists (P.to_list ps) ~f:Clp.is_infinite
-  | FinSet _ -> false
+  | Exact _ -> false
   | Many _ -> false
 
 let is_infinite t =
@@ -1707,7 +1713,7 @@ let shape_pred (which : Clp.t -> bool) (t : t) : bool =
   let leaf q =
     match q with
     | Clp ps | Rel (_, ps) -> List.for_all (P.to_list ps) ~f:which
-    | FinSet _ -> false
+    | Exact _ -> false
     | Many _ -> false
   in
   match t with
@@ -1727,14 +1733,14 @@ let rec precedes t1 t2 : bool =
   | _, Rel _ -> is_bottom t1
   | Rel _, _ -> precedes (to_plain t1) t2
   | Clp p1, Clp p2 -> P.precedes p1 p2
-  | FinSet s1, FinSet s2 -> FinSet.precedes s1 s2
-  | Clp _, FinSet _ -> false
-  | FinSet s, Clp _ -> Clp.precedes (clp_of_finset s) (as_clp t2)
+  | Exact s1, Exact s2 -> Exact.precedes s1 s2
+  | Clp _, Exact _ -> false
+  | Exact s, Clp _ -> Clp.precedes (clp_of_finset s) (as_clp t2)
   | _ -> Clp.precedes (as_clp t1) (as_clp t2)
 
 (* Values with the same origin widen in its offsets.
    A plain pair widens BY KIND — two Clp leaves via [fp] (the positional
-   piece widen), two FinSet leaves via the tier's own widen, two
+   piece widen), two Exact leaves via the tier's own widen, two
    relative leaves via the offsets widen — so a multi-piece value keeps
    its pieces through a growing widen (the interior exclusion survives).
    A kind carried by one side only (the excess) hulls the whole pair —
@@ -1751,13 +1757,13 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
   let plain_hull () =
     canonical [ Clp (P.of_progression (f (as_clp t1) (as_clp t2))) ]
   in
-  (* The FinSet tier widens by its own union while the union stays put;
+  (* The Exact tier widens by its own union while the union stays put;
      a union that grew has left the exact-small tier, so it escapes to
      the piece widen (the tier promotion the spec's Risks names) and the
      widening still extrapolates. *)
   let fs_widen (s1 : fset) (s2 : fset) : t =
-    let u = FinSet.widen_join s1 s2 in
-    if FinSet.equal u s1 then FinSet u
+    let u = Exact.widen_join s1 s2 in
+    if Exact.equal u s1 then Exact u
     else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
   in
   (* Both sides plain: every kind carried by BOTH sides pairs with its
@@ -1816,7 +1822,7 @@ let rec get_idx (t : t) : idx =
     (match hull_of_pieces ps with
      | Some p -> Clp.get_idx p
      | None -> 0)
-  | FinSet s -> FinSet.get_idx s
+  | Exact s -> Exact.get_idx s
   | Many ps ->
     List.fold ps ~init:0 ~f:(fun a q -> Stdlib.max a (get_idx q))
 
@@ -1832,7 +1838,7 @@ let pp_leaf ppf (t : t) =
     (match hull_of_pieces ps with
      | Some p -> Clp.pp ppf p
      | None -> Format.fprintf ppf "_|_")
-  | FinSet s -> FinSet.pp ppf s
+  | Exact s -> Exact.pp ppf s
   | Many _ -> ()
 
 let pp ppf (t : t) =
@@ -1936,7 +1942,7 @@ let enumerate ~(cap : int) (t : t) : word list option =
 #ifdef VSA_DEBUG
   if Cbat_word.gt_int (cardinality t) cap then begin
     let tag = match t with
-      | Clp _ -> "Clp" | FinSet _ -> "FinSet" | Rel _ -> "Rel"
+      | Clp _ -> "Clp" | Exact _ -> "Exact" | Rel _ -> "Rel"
       | Many ps -> sprintf "Many%d" (List.length ps) in
     Printf.eprintf "hike-dbg-enum: cap=%d card=%s tag=%s\n%!"
       cap (Cbat_word.to_string (cardinality t)) tag;
@@ -1952,7 +1958,7 @@ let enumerate ~(cap : int) (t : t) : word list option =
 let tag (t : t) : string =
   match t with
   | Clp _ -> "Clp"
-  | FinSet _ -> "FinSet"
+  | Exact _ -> "Exact"
   | Rel _ -> "Rel"
   | Many ps -> sprintf "Many%d" (List.length ps)
 #endif

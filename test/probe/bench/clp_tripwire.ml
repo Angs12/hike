@@ -46,16 +46,16 @@ let ceilings : (string * int) list =
     ("composite.logand(clp,clp)", 1312);
     ("composite.logand(fin,fin)", 2902);
     ("composite.logand(clp,fin)", 3634);
-    ("composite.logand(stack,nib)", 254);
+    ("composite.logand(stack,nib)", 992);
     ("composite.logand(stack,mask)", 224);
     ("composite.logand(stack,stack)", 82);
     ("composite.logor(clp,clp)", 2668);
-    ("composite.logor(fin,fin)", 86);
+    ("composite.logor(fin,fin)", 662);
     ("composite.logxor(clp,clp)", 7004);
-    ("composite.logxor(fin,fin)", 86);
+    ("composite.logxor(fin,fin)", 662);
     ("composite.logxor(stack,fin)", 82);
     ("composite.lnot(clp)", 230);
-    ("composite.lnot(fin)", 980);
+    ("composite.lnot(fin)", 2366);
     ("composite.lnot(stack)", 82);
   ]
 

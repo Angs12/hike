@@ -353,9 +353,9 @@ module Pieces = struct
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
-  let runs_from_elements ~(width : int) (els : Cbat_word.t list)
+  (* The runs of an already ascending element list. *)
+  let runs_from_sorted_elements ~(width : int) (els : Cbat_word.t list)
     : progression list =
-    let els = List.sort els ~compare:Cbat_word.compare in
     (* One run as a progression when the progression is exactly the run
        (the cardinality check rejects a wrapped over-approximation), else
        as its singletons. *)
@@ -390,6 +390,11 @@ module Pieces = struct
     match els with
     | [] -> []
     | x :: rest -> go [] x x None 1 [ x ] rest
+
+  let runs_from_elements ~(width : int) (els : Cbat_word.t list)
+    : progression list =
+    runs_from_sorted_elements ~width
+      (List.sort els ~compare:Cbat_word.compare)
 
   let of_list ~(width : int) (l : Cbat_word.t list) : t =
     if width <= 0 then []
@@ -774,7 +779,7 @@ module Exact = struct
       List.group els ~break:(fun a b -> W.bitwidth a <> W.bitwidth b) in
     List.sort
       (List.concat_map groups ~f:(fun g ->
-           Pieces.runs_from_elements
+           Pieces.runs_from_sorted_elements
              ~width:(W.bitwidth (List.hd_exn g)) g))
       ~compare:Pieces.compare_piece
 
