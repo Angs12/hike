@@ -255,7 +255,7 @@ module Pieces = struct
       Some (hull, rest)
 
   (* A union of at most [U.fin_set_size] elements stays exact: the cap
-     bounds large unions, never an exact set the FinSet tier would keep. *)
+     bounds large unions, never a set the exact tier keeps. *)
   let within_exact_budget (ps : progression list) : bool =
     let budget = U.fin_set_size in
     let rec go n = function
@@ -748,8 +748,8 @@ end
 
 (* ==================== Exact: the uncapped exact run list =============== *)
 
-(* The finite tier as an exact [progression] run list: the element set of
-   [Cbat_fin_set], carried as the runs [Pieces.runs_from_elements] builds.
+(* The exact finite tier as a [progression] run list: the small-set
+   tier's element set, carried as the runs [Pieces.runs_from_elements] builds.
    Unlike [Pieces], the list is uncapped and unbudgeted; the caller's
    canonical promotion applies [fin_set_size].  Every constructor rebuilds
    the runs, so the list is canonical: sorted by [compare_piece], disjoint,
@@ -772,7 +772,7 @@ module Exact = struct
 
   (* The exact runs of an element list.  Elements are grouped by their own
      width (a run's width is the words'), deduplicated and kept in the set
-     order, so mixed-width operands keep [Cbat_fin_set]'s semantics. *)
+     order, so mixed-width operands keep the finite tier's semantics. *)
   let of_elements ~(width : int) (els : W.t list) : progression list =
     let els = List.dedup_and_sort els ~compare:W.compare in
     let groups =
@@ -786,7 +786,7 @@ module Exact = struct
   let make ~(width : int) (els : W.t list) : t =
     { width; pieces = of_elements ~width els }
 
-  (* [Cbat_fin_set]'s element equality: distinct words, width included. *)
+  (* The finite tier's element equality: distinct words, width included. *)
   let word_mem (w : W.t) (els : W.t list) : bool =
     List.exists els ~f:(fun x -> W.equal x w)
 
@@ -817,7 +817,7 @@ module Exact = struct
     && (let eb = elements b in
         List.exists (elements a) ~f:(fun w -> word_mem w eb))
 
-  (* The width mismatch is [Cbat_fin_set]'s: the declared width is the
+  (* The width mismatch follows the finite tier: the declared width is the
      wider side and the elements keep their own width; [diff] keeps the
      left set. *)
   let union (a : t) (b : t) : t =
@@ -840,7 +840,7 @@ module Exact = struct
   let lift (f : W.t -> W.t) (a : t) : t =
     make ~width:a.width (List.map (elements a) ~f)
 
-  (* The Cartesian element image; [width] is [Cbat_fin_set]'s per-op width
+  (* The Cartesian element image; [width] is the finite tier's per-op width
      rule: the wider side, or the left side for the shifts. *)
   let lift2 ?(width = fun w1 w2 -> Stdlib.max w1 w2)
       (f : W.t -> W.t -> W.t) (a : t) (b : t) : t =

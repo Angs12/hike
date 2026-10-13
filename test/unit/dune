@@ -25,7 +25,7 @@
  (names
   test_dce
   test_clp
-  test_fin_set
+  test_exact
   test_map_lattice
   test_word
   test_ws

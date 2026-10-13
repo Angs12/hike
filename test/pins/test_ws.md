@@ -8,8 +8,8 @@ recipe is the textual inversion of the pinned contract recorded below.
 
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
-| WS-01 | W7: the FinSet diffs — exact; the mixed-width pair shares no elements | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
-| WS-02 | W8: the Clp\FinSet — the boundary-touch run removed exactly: [0,10] \ {0,1,2} = {3..10} | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-01 | W7: the Exact diffs — exact; the mixed-width pair shares no elements | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-02 | W8: the Clp\Exact — the boundary-touch run removed exactly: [0,10] \ {0,1,2} = {3..10} | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-05 | D1-5: composite meet on width-mismatched sets -> no assert, not bottom | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-07 | D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-10 | property WordSet.overlap vs meet is_bottom (7 sampled pairs) | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
@@ -28,5 +28,5 @@ recipe is the textual inversion of the pinned contract recorded below.
 
 | WS-43 | a landmark translation of two values in one module section stays in that section (`Cbat_landmarks.extrapolate` via `keep_section`), so a dispatch base keeps its `Rip` provenance through loop widening | return the plain translated interval | the extrapolated walk has no origin |
 | WS-42 | a singleton adjacent to a run canonicalizes into that run (`Pieces.adjacent_merge`), so a section-relative pointer walk widens instead of growing one byte per round | require equal non-zero steps in `adjacent_merge` | the joined walk keeps two pieces and the widen only joins |
-| WS-41 | a relative piece union within the FinSet exact budget is never capped: a section-relative target set of nine irregular words (five runs) enumerates all nine | apply the 4-piece cap regardless of cardinality | the enumeration gains hull words |
+| WS-41 | a relative piece union within the exact budget is never capped: a section-relative target set of nine irregular words (five runs) enumerates all nine | apply the 4-piece cap regardless of cardinality | the enumeration gains hull words |
 | WS-40 | stack queries and memory keys use carried origins; plain, Abs and Rip values never acquire stack identity from their bits | restore numeric-band stack inference | originless floating-point bits become stack pointers |

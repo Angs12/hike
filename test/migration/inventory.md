@@ -19,7 +19,7 @@ per-pin detail is in `test/pins/<module>.md`.
 
 | old source | old sites | new target(s) | new pins | disposition |
 |---|---|---|---|---|
-| test_cbat/test_domains.ml | 200 | test_clp (111), test_fin_set (16), test_map_lattice (24), test_word (18), test_ws (31) | 200 | CARRIED |
+| test_cbat/test_domains.ml | 200 | test_clp (111), test_exact (16), test_map_lattice (24), test_word (18), test_ws (31) | 200 | CARRIED |
 | test_cbat/test_backward.ml + test_seed.ml | 56 + 22 | test_backward | 78 | CARRIED |
 | test_cbat/test_sections.ml + test_regression.ml | 54 + 14 | test_sections | 68 | CARRIED |
 | test_cbat/test_vsa.ml | 66 | test_vsa (61), test_call_effects (5) | 66 | CARRIED |

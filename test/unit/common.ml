@@ -3,7 +3,7 @@ open Bap.Std
 open Bap_core_theory
 module W = Word
 module Clp = Cbat_clp
-module Fs = Cbat_fin_set
+module Ex = Clp.Exact
 
 module Wo = Cbat_word
 module Ws = Cbat_clp_set_composite

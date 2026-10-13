@@ -156,7 +156,7 @@ let tests : unit Alcotest.test list =
        (no crash, no not_implemented fire). *)
 
 
-    (* D6b: FinSet lift2 default width — mismatched sets widen to 64. *)
+    (* D6b: Exact lift2 default width — mismatched sets widen to 64. *)
 
 
 

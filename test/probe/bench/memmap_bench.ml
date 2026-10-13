@@ -1,7 +1,7 @@
 (* memmap_bench: per-op wall + minor-word bill for the memmap's hot
    ops — find' (the per-query Seq.to_list), op_at (the per-byte cell
    op on a join), try_assemble_cells (the sort/map/reduce of an interior read),
-   and the FinSet Cartesian fold.  Same counter as clp_bench:
+   and the exact Cartesian fold.  Same counter as clp_bench:
    [Gc.minor_words] is exact and two consecutive loops must agree.
 
    Usage: memmap_bench.exe *)
@@ -11,8 +11,8 @@ open Probe_common
 
 module Ws = Cbat_clp_set_composite
 module Clp = Cbat_clp
+module Ex = Clp.Exact
 module Mem = Cbat_vsa.Mem
-module Fs = Cbat_fin_set
 module CW = Cbat_word
 
 let sink = ref 0
@@ -48,8 +48,8 @@ let () =
   let base_m =
     Mem.meet_add (Mem.top idx) ~key:(key_range 0x1000 0x1100) ~data:(cell 7)
   in
-  let s1 = Fs.of_list ~width:32 (List.init 10 (fun i -> w32 (i * 3))) in
-  let s2 = Fs.of_list ~width:32 (List.init 10 (fun i -> w32 (i * 7 + 1))) in
+  let s1 = Ex.of_list ~width:32 (List.init 10 (fun i -> w32 (i * 3))) in
+  let s2 = Ex.of_list ~width:32 (List.init 10 (fun i -> w32 (i * 7 + 1))) in
   let rows =
     [
       (* find' + the interior read (the try_assemble_cells path). *)
@@ -75,11 +75,11 @@ let () =
                (Mem.meet_add base_m ~key:(key_range 0x1040 0x10c0)
                   ~data:(cell 3))
                0x1050));
-      (* the FinSet Cartesian fold: two 10-element sets, 100 WSet.adds. *)
+      (* the exact Cartesian fold: two 10-element sets. *)
       measure ~name:"finset.logand(10,10) cartesian" ~n:50_000 (fun () ->
-          keep (CW.bitwidth (Fs.cardinality (Fs.logand s1 s2))));
+          keep (CW.bitwidth (Ex.cardinality (Ex.logand s1 s2))));
       measure ~name:"finset.logxor(10,10) cartesian" ~n:50_000 (fun () ->
-          keep (CW.bitwidth (Fs.cardinality (Fs.logxor s1 s2))));
+          keep (CW.bitwidth (Ex.cardinality (Ex.logxor s1 s2))));
     ]
   in
   print_table rows;

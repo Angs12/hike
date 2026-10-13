@@ -21,7 +21,7 @@ let pw_exact ?(width = 64) v r =
 
 let tests : unit Alcotest.test list =
   [
-    pin "WS-01" "W7: the FinSet diffs — exact; the mixed-width pair shares no elements"
+    pin "WS-01" "W7: the Exact diffs — exact; the mixed-width pair shares no elements"
       (fun () ->
         check "WS-01"
           (Ws.equal
@@ -36,7 +36,7 @@ let tests : unit Alcotest.test list =
                (Ws.diff (Ws.of_list ~width:32 [ w32 1; w32 2 ]) (Ws.of_list ~width:64 [ w64 1; w64 2 ]))
                (Ws.of_list ~width:32 [ w32 1; w32 2 ])));
 
-    pin "WS-02" "W8: the Clp\\FinSet — the boundary-touch run removed exactly: [0,10] \\ {0,1,2} = {3..10}"
+    pin "WS-02" "W8: the Clp\\Exact — the boundary-touch run removed exactly: [0,10] \\ {0,1,2} = {3..10}"
       (fun () ->
         let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
         let d8 = Ws.diff p8 (Ws.of_list ~width:32 [ w32 0; w32 1; w32 2 ]) in
@@ -104,7 +104,7 @@ let tests : unit Alcotest.test list =
         let rand_ws (w : int) : Ws.t * [ `fs | `clp ] =
           match Random.int 4 with
           | 0 ->
-              (* Small explicit set (FinSet arm). *)
+              (* Small explicit set (Exact arm). *)
               let n = 1 + Random.int 5 in
               let rec els acc i =
                 if i <= 0 then acc

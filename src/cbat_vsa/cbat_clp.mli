@@ -124,9 +124,9 @@ module Pieces : sig
   val concat : t -> t -> t
 end
 
-(* The exact finite element set: [Cbat_fin_set]'s semantics over an
-   uncapped [progression] run list.  No budget and no [max_pieces] cap —
-   the caller's canonical promotion applies the budget. *)
+(* The exact finite element set over an uncapped [progression] run list
+   (the old small-set tier's semantics).  No budget and no [max_pieces]
+   cap — the caller's canonical promotion applies the budget. *)
 module Exact : sig
   type t [@@deriving bin_io, sexp, compare]
 

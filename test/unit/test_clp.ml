@@ -377,7 +377,7 @@ let tests : unit Alcotest.test list =
 
 
     pin "CLP-100"
-      "property m6 FinSet↔Clp round-trips enumerated (200 random progression trials: soundness always, \
+      "property m6 Exact↔Clp round-trips enumerated (200 random progression trials: soundness always, \
        exactness on wrap-free arcs)"
       (fun () ->
         Random.init 20260822;
@@ -401,35 +401,35 @@ let tests : unit Alcotest.test list =
           let wrap_free = base + ((n - 1) * step) < dom in
           let seam_ok = (dom - (base + ((n - 1) * step) - base)) mod step = 0 in
           let exact_shape = wrap_free && seam_ok in
-          let subset s1 s2 = List.for_all (fun x -> Fs.elem x s2) s1 in
+          let subset s1 s2 = List.for_all (fun x -> Ex.elem x s2) s1 in
           let expect b msg = if not b then begin
               Printf.printf "FAIL: property m6 %s (trial %d)\n" msg _i;
               incr failures
             end
           in
-          (* FinSet -> Clp -> FinSet *)
-          let s = Fs.of_list ~width:w (els [] 0) in
-          let p = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
-          let s2 = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
-          expect (subset (Fs.iter s) s2) "FinSet->Clp->FinSet SOUND (s ⊆ s2)";
+          (* Exact -> Clp -> Exact *)
+          let s = Ex.of_list ~width:w (els [] 0) in
+          let p = Clp.of_list ~width:(Ex.bitwidth s) (Ex.iter s) in
+          let s2 = Ex.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
+          expect (subset (Ex.iter s) s2) "Exact->Clp->Exact SOUND (s ⊆ s2)";
           expect
-            (Cbat_word.compare (Fs.cardinality s) (Fs.cardinality s2) <= 0)
-            "FinSet->Clp->FinSet cardn non-decreasing";
-          if exact_shape then expect (Fs.equal s s2) "FinSet->Clp->FinSet EXACT (wrap-free arc)";
-          (* Clp -> FinSet -> Clp *)
+            (Cbat_word.compare (Ex.cardinality s) (Ex.cardinality s2) <= 0)
+            "Exact->Clp->Exact cardn non-decreasing";
+          if exact_shape then expect (Ex.equal s s2) "Exact->Clp->Exact EXACT (wrap-free arc)";
+          (* Clp -> Exact -> Clp *)
           let p3 =
             Clp.create (Cbat_word.of_int ~width:w base) ~step:(Cbat_word.of_int ~width:w step)
               ~cardn:(Cbat_word.of_int ~width:(w + 1) n)
           in
-          let s3 = Fs.of_list ~width:(Clp.bitwidth p3) (Clp.iter p3) in
-          let p4 = Clp.of_list ~width:(Fs.bitwidth s3) (Fs.iter s3) in
+          let s3 = Ex.of_list ~width:(Clp.bitwidth p3) (Clp.iter p3) in
+          let p4 = Clp.of_list ~width:(Ex.bitwidth s3) (Ex.iter s3) in
           expect
             (List.for_all (fun x -> Clp.elem x p4) (Clp.iter p3))
-            "Clp->FinSet->Clp SOUND (p3 ⊆ p4)";
+            "Clp->Exact->Clp SOUND (p3 ⊆ p4)";
           expect
             (Cbat_word.compare (Clp.cardinality p3) (Clp.cardinality p4) <= 0)
-            "Clp->FinSet->Clp cardn non-decreasing";
-          if exact_shape then expect (Clp.equal p3 p4) "Clp->FinSet->Clp EXACT (wrap-free arc)"
+            "Clp->Exact->Clp cardn non-decreasing";
+          if exact_shape then expect (Clp.equal p3 p4) "Clp->Exact->Clp EXACT (wrap-free arc)"
         done;
         check "CLP-100" (!failures = 0));
 

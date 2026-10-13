@@ -1,7 +1,7 @@
 (* CLP/word differential referee pin.
 
    Compares the selected CLP binary operations against a concrete
-   FinSet oracle (every enumerated pair's result must be in the CLP
+   finite-set oracle (every enumerated pair's result must be in the CLP
    answer) and the identity/directional elements against inlined,
    independent reference implementations.  The reference
    implementations below are independent of the production code.
@@ -17,7 +17,7 @@
    reference, over every op it exports.
 
    A composite-layer sweep drives [Cbat_clp_set_composite]'s own binops
-   (the mixed [FinSet]/[Clp] arm) in both operand orders against the
+   (the mixed [Exact]/[Clp] arm) in both operand orders against the
    concrete oracle, so a non-commutative op cannot silently swap its
    operands. *)
 
@@ -74,8 +74,8 @@ let ops :
   ; ("logand", Ws.Clp.logand, CW.logand); ("logor", Ws.Clp.logor, CW.logor)
   ; ("logxor", Ws.Clp.logxor, CW.logxor) ]
 
-(* The FinSet oracle: a CLP's concrete elements when it is finite and
-   small enough to enumerate. *)
+(* The concrete finite-set oracle: a CLP's concrete elements when it is
+   finite and small enough to enumerate. *)
 let small_elems (p : Ws.Clp.t) : Cbat_word.t list option =
   if Ws.Clp.is_infinite p then None
   else if CW.gt_int (Ws.Clp.cardinality p) 64 then None
@@ -683,12 +683,12 @@ let run_sweep () : int * int * int =
   (* ---- composite mixed-representation sweep ------------------------- *)
 
   (* The composite [t]'s own ops are a layer above the sub-module sweeps:
-     a small exact [FinSet] and a [Clp]-represented progression meet in
-     [op_pair]'s mixed arm, where a non-commutative op must keep each
+     a small exact [Exact] value and a [Clp]-represented progression meet
+     in [op_pair]'s mixed arm, where a non-commutative op must keep each
      operand on its own side.  Both orders are swept against the concrete
      oracle.  The progression's count exceeds [fin_set_size] (10) so
-     canonicalization keeps it a Clp rather than demoting it to a FinSet,
-     and stays small enough to enumerate. *)
+     canonicalization keeps it a Clp rather than demoting it to an Exact
+     value, and stays small enough to enumerate. *)
   let comp_elems (p : Ws.t) : Cbat_word.t list option =
     if Ws.is_infinite p then None
     else
@@ -713,7 +713,7 @@ let run_sweep () : int * int * int =
   let comp_widths = [ 8; 64 ] in
   (* The operand set includes zero: the exact-zero divisor's image is
      the concrete elementwise one. *)
-  let comp_fs_vals (w : int) : Z.t list =
+  let comp_ex_vals (w : int) : Z.t list =
     [ Z.zero; Z.one; Z.of_int 3; Z.sub (Z.shift_left Z.one w) Z.one ]
   in
   (* (base, step, count); count > [fin_set_size] keeps the Clp. *)
@@ -722,9 +722,9 @@ let run_sweep () : int * int * int =
     ; (Z.sub (Z.shift_left Z.one w) (Z.of_int 12), Z.one, 12) ]
   in
   CKL.iter comp_widths ~f:(fun w ->
-      CKL.iter (comp_fs_vals w) ~f:(fun b1 ->
+      CKL.iter (comp_ex_vals w) ~f:(fun b1 ->
           CKL.iter (comp_clp_shapes w) ~f:(fun (b2, s2, c2) ->
-              let fs = Ws.singleton (comp_cw w b1) in
+              let ex = Ws.singleton (comp_cw w b1) in
               let clp =
                 Ws.of_clp
                   (Ws.Clp.create ~width:w (comp_cw w b2) ~step:(comp_cw w s2)
@@ -734,7 +734,7 @@ let run_sweep () : int * int * int =
                 Printf.sprintf "w=%d b1=%s b2=%s s2=%s c2=%d" w
                   (Z.to_string b1) (Z.to_string b2) (Z.to_string s2) c2
               in
-              CKL.iter [ (fs, clp, "FS,CLP"); (clp, fs, "CLP,FS") ]
+              CKL.iter [ (ex, clp, "EX,CLP"); (clp, ex, "CLP,EX") ]
                 ~f:(fun (p1, p2, ord) ->
                     match comp_elems p1, comp_elems p2 with
                     | Some xs, Some ys ->
@@ -758,7 +758,7 @@ let run_sweep () : int * int * int =
                     | _ -> incr skipped);
               (* Extract is unary: each mixed operand takes the concrete
                  slice oracle on its own. *)
-              CKL.iter [ (fs, "FS"); (clp, "CLP") ]
+              CKL.iter [ (ex, "EX"); (clp, "CLP") ]
                 ~f:(fun (p, ord) ->
                     match comp_elems p with
                     | Some xs ->
