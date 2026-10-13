@@ -301,8 +301,8 @@ module Pieces = struct
 #endif
     ps
 
-  (* The insert fold and cap over an ascending list.  [normalize] is this
-     after [shape] and a sort; [union] feeds it a merge. *)
+  (* The insert fold and cap over an ascending list.  [canonical_of_list] is this
+     after [shape] and its merges; [union] feeds it a merge. *)
   let canonical_of_sorted (ps : progression list) : t =
     cap (List.rev (List.fold ps ~init:[] ~f:insert))
 
@@ -344,12 +344,7 @@ module Pieces = struct
     canonical_of_sorted
       (List.concat (merge_sort (List.map (shape ps) ~f:(fun p -> [ p ]))))
 
-  (* Canonicalize and cap: [shape], sort, merge, then the cap repair.  No
-     piece in a canonical list wraps. *)
-  let normalize (ps : progression list) : t =
-    canonical_of_sorted (List.sort (shape ps) ~compare:compare_piece)
-
-  let of_progression (p : progression) : t = normalize [ p ]
+  let of_progression (p : progression) : t = canonical_of_list [ p ]
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
@@ -400,7 +395,7 @@ module Pieces = struct
     if width <= 0 then []
     else
       let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
-      normalize (runs_from_elements ~width l)
+      canonical_of_list (runs_from_elements ~width l)
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
@@ -491,7 +486,7 @@ module Pieces = struct
     | _, [] -> a
     | _ when Stdlib.Int.equal (width_of a) (width_of b) ->
       canonical_of_sorted (merge_sorted a b)
-    | _ -> normalize (List.append a b)
+    | _ -> canonical_of_list (List.append a b)
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -657,12 +652,12 @@ module Pieces = struct
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
-    normalize (List.map ps ~f)
+    canonical_of_list (List.map ps ~f)
 
   (* Cross product with empty pair results dropped. *)
   let lift2 (f : progression -> progression -> progression) (a : t) (b : t)
     : t =
-    normalize
+    canonical_of_list
       (List.concat_map a ~f:(fun pa ->
            List.filter_map b ~f:(fun pb ->
                let r = f pa pb in
@@ -673,7 +668,7 @@ module Pieces = struct
      progression-level). *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
-    normalize
+    canonical_of_list
       (List.concat_map a ~f:(fun pa ->
            List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
                List.concat_map b ~f:(fun pb ->
@@ -699,19 +694,19 @@ module Pieces = struct
   let neg = map A.neg
 
   let extract ?hi ?lo (ps : t) : t =
-    normalize
+    canonical_of_list
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.extract_parts ?hi ?lo q)))
 
   let cast c sz (ps : t) : t =
-    normalize
+    canonical_of_list
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.cast_parts c sz q)))
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
-    normalize (List.map ps ~f:(fun p -> C.translate p delta))
+    canonical_of_list (List.map ps ~f:(fun p -> C.translate p delta))
 
   (* Hull excess pieces into their side's last pair before widening, so
      growth in an excess piece is extrapolated too. *)
@@ -738,7 +733,7 @@ module Pieces = struct
         if C.is_top w then top_hit := true else out := w :: !out
       done;
       if !top_hit then [ C.top (width_of b) ]
-      else normalize (List.rev !out)
+      else canonical_of_list (List.rev !out)
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
