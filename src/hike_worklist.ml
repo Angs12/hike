@@ -13,11 +13,9 @@ module D = Hike_decode
 module S = Hike_summary
 module Vsa = Cbat_vsa
 
-(* A lifted function: [decoded] is every block start of its candidate
-   graph; [solved] is the normalized body the solve rewrote, with its
-   environments and block addresses. *)
+(* A lifted function: [solved] is the normalized body the solve
+   rewrote, with its environments and block addresses. *)
 type func = {
-  decoded : Core.Int64.Set.t;
   solved : sub term;
   envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t;
   block_addrs : Tid.t Addr.Map.t;
@@ -54,6 +52,7 @@ type t = {
   mutable roots : int64 list;
   (* The provided destinations, by dispatch instruction. *)
   mutable dests : Core.Int64.Set.t Core.Int64.Map.t;
+  mutable jump_dests : Core.Int64.Set.t;
   entries : (int64, entry) Core.Hashtbl.t;
   by_tid : (Tid.t, entry) Core.Hashtbl.t;
   (* External and intrinsic targets: name and summary. *)
@@ -264,12 +263,7 @@ and body t frame e cfg blk : final =
     |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
     |> link t frame |> claim t e |> arm t
   in
-  let decoded =
-    Graphs.Cfg.nodes cfg
-    |> Seq.map ~f:(fun b -> Word.to_int64_exn (Block.addr b))
-    |> Seq.to_list |> Core.Int64.Set.of_list
-  in
-  let f = solve t frame ~decoded raw in
+  let f = solve t frame raw in
   if learn_dests t cfg f then build t frame e
   else begin
     t.found <- Base.List.rev_append (code_words t f) t.found;
@@ -401,7 +395,7 @@ and arm t (sub : sub term) : sub term =
   Hike_cfg_complete.arm_dispatches ~dests sub
 
 (* The solve, paused at each unsolved callee until it is solved. *)
-and solve t frame ~decoded (raw : sub term) : func =
+and solve t frame (raw : sub term) : func =
   let ctx = t.context in
   let sub = Hike_program_vsa.prepare_function ctx ~is_entry:(is_entry t) raw in
   let block_addrs =
@@ -444,7 +438,7 @@ and solve t frame ~decoded (raw : sub term) : func =
               symbol_summary t (symbol t n)))
       ~lookup ~foreign_slots ~block_addrs ~envs solved
   in
-  { decoded; solved; envs; block_addrs; summary }
+  { solved; envs; block_addrs; summary }
 
 (* ---- facts from a solved body ---- *)
 
@@ -458,12 +452,18 @@ and bounded_words (ws : Vsa.WordSet.t) : int64 list option =
 
 (* The resolved destinations of the body's indirect transfers become
    decode facts on their instructions.  Whether any is new: the body
-   is then decoded and lifted again. *)
+   is then decoded and lifted again.  A jump's destination stays inside
+   a function, as in BAP's decode, so it is never a root. *)
 and learn_dests t cfg (f : func) : bool =
   let instruction =
     Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
       (Base.List.map (D.terminators cfg) ~f:(fun (b, i) ->
            (Word.to_int64_exn b, Word.to_int64_exn i)))
+  in
+  let calls =
+    Graphs.Cfg.nodes cfg |> Seq.filter ~f:D.is_call
+    |> Seq.map ~f:(fun b -> Word.to_int64_exn (Block.addr b))
+    |> Seq.to_list |> Core.Int64.Set.of_list
   in
   let learned =
     Term.enum blk_t f.solved |> Seq.to_list
@@ -472,14 +472,18 @@ and learn_dests t cfg (f : func) : bool =
         | Some (pre, post), Some site -> (
           match Core.Map.find instruction (Word.to_int64_exn site) with
           | None -> []
-          | Some site ->
+          | Some insn ->
+            let jump =
+              not (Core.Set.mem calls (Word.to_int64_exn site)) in
             Term.enum jmp_t blk |> Seq.to_list
             |> Base.List.filter_map ~f:indirect_target
             |> Base.List.concat_map ~f:(fun e ->
                 match Vsa.denote_exp_at ~pre ~post ~blk e with
                 | Ok ws ->
                   Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
-                    ~f:(fun w -> (site, w))
+                    ~f:(fun w ->
+                        if jump then t.jump_dests <- Core.Set.add t.jump_dests w;
+                        (insn, w))
                 | Error _ -> []))
         | _ -> [])
     |> Base.List.filter ~f:(fun (site, w) ->
@@ -499,7 +503,9 @@ and learn_dests t cfg (f : func) : bool =
   end
 
 (* The single code words the body's defs carry: a value computed into
-   a register, or each word a store writes. *)
+   a register, or each word a store writes.  A call instruction's own
+   defs push its return address, which names no function, so they are
+   skipped; BAP's lifter tags every def with its instruction. *)
 and code_words t (f : func) : int64 list =
   let wb = Hike_abi.word_bits t.abi in
   let singleton ~pre ~post ~blk ~def e =
@@ -514,6 +520,10 @@ and code_words t (f : func) : int64 list =
       | None -> []
       | Some (pre, post) ->
         Term.enum def_t blk |> Seq.to_list
+        |> Base.List.filter ~f:(fun d ->
+            match Term.get_attr d Disasm.insn with
+            | Some insn -> not (Insn.is Insn.call insn)
+            | None -> true)
         |> Base.List.concat_map ~f:(fun d ->
             let values =
               match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
@@ -542,6 +552,7 @@ let create proj : t =
     state = D.initial proj;
     roots = [];
     dests = Core.Int64.Map.empty;
+    jump_dests = Core.Int64.Set.empty;
     entries = Core.Hashtbl.create (module Core.Int64);
     by_tid = Core.Hashtbl.create (module Tid);
     symbols = Core.Hashtbl.create (module Tid);
@@ -582,18 +593,15 @@ let functions t : (int64 * func) list =
       | Final (Function f) -> Some (a, f)
       | _ -> None)
 
-(* The code words no lifted function decodes as one of its blocks name
-   functions only data reaches; they are solved as roots until none is
-   left. *)
+(* The code words name functions, as BAP's subroutine facts do: a word
+   inside another function's decoded bytes is still an entry, and a
+   resolved jump destination is not one.  They are solved as roots until
+   none is left. *)
 let rec close t : unit =
-  let decoded =
-    Base.List.fold (functions t) ~init:Core.Int64.Set.empty ~f:(fun acc (_, f) ->
-        Core.Set.union acc f.decoded)
-  in
-  let unclaimed w = not (Core.Set.mem decoded w) in
   let words =
     Base.List.rev t.found
-    |> Base.List.filter ~f:(fun w -> in_text t w && unclaimed w)
+    |> Base.List.filter ~f:(fun w ->
+        in_text t w && not (Core.Set.mem t.jump_dests w))
     |> Base.List.stable_dedup ~compare:Int64.compare
   in
   t.found <- [];
