@@ -501,14 +501,14 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
           owners }
     in
     let llvm_name = Model.sec_name sm_type in
-    (* Only never-written bytes are constant.  A RELRO section is mutable:
-       the loader relocates it, so the dynamic relocations land in a
-       writable segment and the module links as a PIE with no text
+    (* Bytes the program never writes are constant.  The module is
+       always PIE, so a constant global that needs relocations lands in
+       .data.rel.ro: the loader relocates it there, with no text
        relocations. *)
     let sm_const =
       match sm_access with
-      | Hike_section.Read_only -> true
-      | Relro | Writable -> false
+      | Hike_section.Read_only | Relro -> true
+      | Writable -> false
     in
     let comps = comps_of si_lo si_hi in
     match entry.Hike_stack_model.sm_image with
