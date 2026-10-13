@@ -30,7 +30,16 @@ module Word_ops = Cbat_word
 (* Memories are byte-addressable. *)
 let addressable_width = 8
 
-module Key = Cbat_mem_key
+module Key = struct
+  include Cbat_mem_key
+
+  (* The hull ends as the unsigned words the queries speak; a point's
+     [pwidth]/[pvalue] pair is exactly a [pwidth]-bit word. *)
+  let hull (k : t) : Cbat_word.t * Cbat_word.t =
+    let word (p : point) : Cbat_word.t =
+      Cbat_word.of_word (Word.of_int64 ~width:p.pwidth p.pvalue) in
+    word (lower k), word (upper k)
+end
 
 (* Value stored at each key. *)
 module Val : sig
@@ -699,13 +708,13 @@ let widen_join_op (w : Key.t -> Val.t -> Val.t -> Val.t) : t -> t -> t =
 
 let widen_join = widen_join_op (fun _ d1 d2 -> Val.widen_join d1 d2)
 
-#ifdef VSA_DEBUG
-(* The stored cells, for the churn diagnosis. *)
+(* The stored cells, key and value.  A full treap walk: the backward
+   address filter's element-level coverage test is the per-cell caller;
+   the read path never uses it. *)
 let cells (m : t) : (Key.t * Val.t) list =
   match m.itree with
   | None -> []
   | Some it -> IT.to_sequence it |> Sequence.to_list
-#endif
 
 
 (* Meet may grow the tree. *)

@@ -1809,6 +1809,69 @@ let tests : unit Alcotest.test list =
         let iv = AI.find_word 64 out (Var.base i) in
         check "BK-104.kept" (Ws.elem (w64 0) iv && Ws.elem (w64 2) iv);
         check "BK-104.dropped" (not (Ws.elem (w64 3) iv)));
+
+    pin "BK-105"
+      "T27 step 4: cell coverage is element-level — a strided piece whose \
+       span crosses a cell but whose elements never read it is not covered; \
+       an element on the cell's bytes (or a read reaching in from below) \
+       is"
+      (fun () ->
+        let mv = Mem.top t_mem_idx in
+        let cell =
+          t_key_of (Ws.of_clp (Clp.interval ~width:64 (w64 0x1001) (w64 0x1008))) in
+        let mv =
+          Mem.meet_add mv ~key:cell
+            ~data:(Mem.Val.create (Ws.singleton (w64 42)) LittleEndian) in
+        let line = (Mem.Key.cell_key cell).Cbat_landmarks.origin in
+        let strided base step card =
+          Clp.create ~width:64 ~step:(w64 step)
+            ~cardn:(Cbat_word.of_int ~width:65 card) (w64 base) in
+        check "BK-105.strided-miss"
+          (not
+             (Vsa.Test_seam.piece_touches_cell mv ~line ~bytes:1
+                (strided 0x1000 0x10 2)));
+        check "BK-105.strided-hit"
+          (Vsa.Test_seam.piece_touches_cell mv ~line ~bytes:1
+             (strided 0x1001 0x10 2));
+        check "BK-105.read-reaches-in"
+          (Vsa.Test_seam.piece_touches_cell mv ~line ~bytes:2
+             (strided 0x1000 0x10 1));
+        check "BK-105.dense"
+          (Vsa.Test_seam.piece_touches_cell mv ~line ~bytes:1
+             (Clp.interval ~width:64 (w64 0x1000) (w64 0x1010))));
+
+    pin "BK-106"
+      "T27 step 4: image coverage is element-level — the whole read must fit \
+       (a dense piece starting past the fit range is not covered), and a \
+       strided piece is tested on its own grid, not its span"
+      (fun () ->
+        let img lo hi =
+          [ { Vsa.img_lo = lo; img_hi = hi; img_bytes = Bytes.make 8 '\000';
+              img_slots = Core.Int64.Set.empty } ] in
+        let strided base step card =
+          Clp.create ~width:64 ~step:(w64 step)
+            ~cardn:(Cbat_word.of_int ~width:65 card) (w64 base) in
+        let dense lo hi = Clp.interval ~width:64 (w64 lo) (w64 hi) in
+        Vsa.with_images (img 0x1000L 0x1007L) (fun () ->
+            check "BK-106.dense-fits"
+              (Vsa.Test_seam.piece_touches_image ~bytes:8 (dense 0x1000 0x1000));
+            check "BK-106.dense-overruns"
+              (not
+                 (Vsa.Test_seam.piece_touches_image ~bytes:8
+                    (dense 0x1001 0x1001)));
+            check "BK-106.strided-hit"
+              (Vsa.Test_seam.piece_touches_image ~bytes:1
+                 (strided 0x1000 0x10 3)));
+        Vsa.with_images (img 0x1001L 0x1008L) (fun () ->
+            check "BK-106.strided-miss"
+              (not
+                 (Vsa.Test_seam.piece_touches_image ~bytes:1
+                    (strided 0x1000 0x10 2))));
+        Vsa.with_images (img 0x1000L 0x1003L) (fun () ->
+            check "BK-106.too-short"
+              (not
+                 (Vsa.Test_seam.piece_touches_image ~bytes:8
+                    (dense 0x1000 0x1003)))));
   ]
 
 let () = run "backward" tests

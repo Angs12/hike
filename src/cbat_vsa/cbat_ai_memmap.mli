@@ -31,6 +31,12 @@ module Key : sig
      1 for a plain hull. *)
   val step : t -> int
 
+  (* The key's own line; cells of other lines never match a query. *)
+  val origin : t -> Hike_origin.t
+
+  (* The key's hull ends as unsigned words, low end first. *)
+  val hull : t -> Cbat_word.t * Cbat_word.t
+
   (* Same-grid strides keep their step; any mix demotes to 1. *)
   val combined_step : t -> t -> int
 
@@ -107,8 +113,8 @@ val is_bottom : t -> bool
 val has_cell_in :
   t -> origin:Hike_origin.t -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
 
-#ifdef VSA_DEBUG
-(* The stored cells, for the churn diagnosis. *)
+(* The stored cells: key and value.  The treap walk is a full scan, so
+   callers use it only where a per-cell decision is needed (the backward
+   address filter's element-level coverage test), not per read. *)
 val cells : t -> (Key.t * Val.t) list
-#endif
 

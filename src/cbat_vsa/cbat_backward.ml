@@ -825,6 +825,107 @@ let bounded_cell_key (ws : wordset) : Mem.Key.t list =
   if WordSet.is_top ws || WordSet.is_infinite ws then []
   else Mem.Key.of_wordset ws
 
+(* Whether a piece's elements fill its hull: its element count equals
+   the hull's.  Every piece the address filter decides is finite and
+   non-wrapped, so its min/max are its elements' bounds.  A step-1
+   traversal (or a singleton) is dense by construction; the hull-count
+   test is the general fallback. *)
+let piece_dense (p : Cbat_clp.t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool =
+  (not (Cbat_clp.is_infinite p))
+  && (Cbat_word.is_one (Cbat_clp.cardinality p)
+      || Cbat_word.is_one (Cbat_clp.step_of p)
+      || (let w1 = Cbat_word.bitwidth hi + 1 in
+          let hull_card =
+            Cbat_word.add
+              (Cbat_word.sub
+                 (Cbat_word.cast Bil.UNSIGNED w1 hi)
+                 (Cbat_word.cast Bil.UNSIGNED w1 lo))
+              (Cbat_word.one w1) in
+          Cbat_word.equal (Cbat_clp.cardinality p) hull_card))
+
+(* Whether one of [p]'s elements is an address whose [bytes]-wide read
+   can touch a stored cell on [line]: the read at [x] meets the cell
+   hull [cl, ch] iff [x, x+bytes-1] meets [cl, ch] iff [x] lies in the
+   (possibly wrapped) [cl-(bytes-1), ch].  The answer is definitive:
+   [Pieces.overlap] never reports disjoint for a non-empty element
+   intersection, so a piece it clears hides no read the singleton rule
+   could drop.
+
+   [has_cell_in] is the cheap necessary prefilter only: a false span
+   answer clears every element; a true one hands the decision to the
+   per-cell element test.  The cell's stride is not read: the forward
+   load consults cells by hull overlap, and narrowing by the grid could
+   clear a consulted read. *)
+let piece_touches_cell_bounds (mv : Mem.t) ~(line : Hike_origin.t)
+    ~(bytes : int) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t)
+    (p : Cbat_clp.t) : bool =
+  let w = Cbat_word.bitwidth hi in
+  let back = Cbat_word.of_int ~width:w (bytes - 1) in
+  let last = Cbat_word.add hi back in
+  (* A wrapped read can meet cells on either side of the modulus. *)
+  Cbat_word.(<) last hi
+  || (Mem.has_cell_in mv ~origin:line ~lo ~hi:last
+      && (let qp = Cbat_clp.Pieces.of_progression p in
+          List.exists (Mem.cells mv) ~f:(fun (k, _) ->
+              Hike_origin.equal (Mem.Key.origin k) line
+              && (let cl, ch = Mem.Key.hull k in
+                  Cbat_word.bitwidth cl <> w
+                  || Cbat_word.bitwidth ch <> w
+                  || Cbat_clp.Pieces.overlap qp
+                       (Cbat_clp.Pieces.of_progression
+                          (Cbat_clp.interval ~width:w
+                             (Cbat_word.sub cl back) ch))))))
+
+let piece_touches_cell (mv : Mem.t) ~(line : Hike_origin.t) ~(bytes : int)
+    (p : Cbat_clp.t) : bool =
+  match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
+  | Some lo, Some hi -> piece_touches_cell_bounds mv ~line ~bytes ~lo ~hi p
+  | _ -> true
+
+(* The read-start ranges of the threaded images that can hold a
+   [bytes]-wide read: [img_lo, img_hi-(bytes-1)] — the forward image
+   rule requires the whole read inside one image.  Images too short for
+   the read drop out once here. *)
+let image_read_starts ~(bytes : int) : (Stdlib.Int64.t * Stdlib.Int64.t) list =
+  let back = Stdlib.Int64.of_int (bytes - 1) in
+  List.filter_map !section_images_ref ~f:(fun { img_lo; img_hi; _ } ->
+      if Stdlib.Int64.unsigned_compare (Stdlib.Int64.sub img_hi img_lo) back >= 0
+      then Some (img_lo, Stdlib.Int64.sub img_hi back)
+      else None)
+
+(* Whether one of [p]'s elements is an address whose [bytes]-wide read
+   fits inside one of the [fits] ranges: a dense piece tests the ranges
+   directly, a strided piece intersects them exactly.  Images are the
+   host's (64-bit) addresses; a narrower address width keeps the sound
+   identity. *)
+let piece_touches_image_bounds ~(fits : (Stdlib.Int64.t * Stdlib.Int64.t) list)
+    ~(dense : bool) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t)
+    (p : Cbat_clp.t) : bool =
+  let w = Cbat_word.bitwidth hi in
+  if dense then
+    (match Cbat_word.to_int64_opt lo, Cbat_word.to_int64_opt hi with
+     | Some l, Some h ->
+       List.exists fits ~f:(fun (fit_lo, fit_hi) ->
+           Stdlib.Int64.unsigned_compare l fit_hi <= 0
+           && Stdlib.Int64.unsigned_compare fit_lo h <= 0)
+     | _ -> true)
+  else if w <> 64 then true
+  else
+    let qp = Cbat_clp.Pieces.of_progression p in
+    List.exists fits ~f:(fun (fit_lo, fit_hi) ->
+        Cbat_clp.Pieces.overlap qp
+          (Cbat_clp.Pieces.of_progression
+             (Cbat_clp.interval ~width:w
+                (Cbat_word.of_word (Word.of_int64 ~width:w fit_lo))
+                (Cbat_word.of_word (Word.of_int64 ~width:w fit_hi)))))
+
+let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
+  match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
+  | Some lo, Some hi ->
+    piece_touches_image_bounds ~fits:(image_read_starts ~bytes)
+      ~dense:(piece_dense p ~lo ~hi) ~lo ~hi p
+  | _ -> true
+
 (* The load's address pre-image: the addresses whose read can produce a
    value in [produced].  Only known memory — a stored cell or a section
    image — excludes an address: a range covering neither reads top and
@@ -845,17 +946,23 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
       if Mem.is_bottom mv then None
       else
         let nb = bits / 8 in
+        (* The threaded images' read-start ranges: constant across this
+           constraint's decisions (one read width). *)
+        let image_fits = image_read_starts ~bytes:nb in
         let decide line p =
           match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
           | Some lo, Some hi ->
             let last = Cbat_word.add hi (Cbat_word.of_int ~width:(Cbat_word.bitwidth hi) (nb - 1)) in
-            let image =
-              (match line with Hike_origin.Abs -> true | _ -> false)
-              && (match Cbat_word.to_int64_opt lo, Cbat_word.to_int64_opt last with
-                  | Some l, Some h -> image_overlaps ~lo:l ~hi:h
-                  | _ -> true) in
             if Cbat_word.(<) last hi then `Keep
-            else if not (image || Mem.has_cell_in mv ~origin:line ~lo ~hi:last) then `Keep
+            else if
+              not
+                ((match line with
+                  | Hike_origin.Abs ->
+                    piece_touches_image_bounds ~fits:image_fits
+                      ~dense:(piece_dense p ~lo ~hi) ~lo ~hi p
+                  | _ -> false)
+                 || piece_touches_cell_bounds mv ~line ~bytes:nb ~lo ~hi p)
+            then `Keep
             else if Cbat_word.is_one (Cbat_clp.cardinality p) then
               let one =
                 match line with

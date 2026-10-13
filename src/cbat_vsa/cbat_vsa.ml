@@ -716,4 +716,8 @@ module Test_seam = struct
 
   (* The walk's env-write sites, named for the counting refine. *)
   type write_site = Cbat_backward.write_site = Output_write | Input_write
+
+  (* T27 step 4: the address filter's element-level coverage tests. *)
+  let piece_touches_cell = Cbat_backward.piece_touches_cell
+  let piece_touches_image = Cbat_backward.piece_touches_image
 end
