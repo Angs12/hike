@@ -2,7 +2,7 @@
 ; cbat_vsa (the BIR fixpoint library) can reference these modules
 ; unqualified — dune does not auto-open wrapped dependency libraries.
 ; cbat_vsa_utils lives here because cbat_clp and
-; cbat_clp_set_composite depend on it (a cycle would result otherwise).
+; cbat_clp_set_scalar depend on it (a cycle would result otherwise).
 ; The domain library links `bap`: Bap.Std is the only provider of the
 ; Word API used here.
 ;
@@ -24,6 +24,7 @@
   cbat_fin_set
   cbat_lattice_intf
   cbat_map_lattice
+  cbat_clp_set_scalar
   cbat_clp_set_composite
   cbat_wordset_intf
   cbat_vsa_utils
