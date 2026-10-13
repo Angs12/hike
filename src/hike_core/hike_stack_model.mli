@@ -78,7 +78,6 @@ val singleton_stack_position : Cbat_clp_set_composite.t -> int64 option
 (* The return-address fact and its projections. *)
 val is_return_address : Cbat_clp_set_composite.t -> bool
 val is_return_address_tag : sec_tag -> bool
-val is_return_address_shape : abi:Abi.t -> exp -> bool
 
 (* The storage a ptr-kind value lives in. *)
 type ptr_storage =

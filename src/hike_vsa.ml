@@ -132,19 +132,15 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
           if events then phases resolved' block_addrs (Some sol)
           else `Drained (sol, block_addrs)
       in
-      match
-        try Some (phases resolved block_addrs seed)
-        with Vsa.Fixpoint_not_converged (n, _) ->
-#ifdef VSA_DEBUG
-          Vsa.Cbat_attr_census.bump "backstop.sub";
-#endif
-          Hike_diag.warn
-            "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
-            (Sub.name sub) n;
-          None
-      with
-      | Some (`Paused p) -> Paused p
-      | Some (`Drained (sol, block_addrs')) ->
+      (* A sub without a converged solution has no sound summary or
+         body; the lift stops. *)
+      match phases resolved block_addrs seed with
+      | exception Vsa.Fixpoint_not_converged (n, _) ->
+        failwith
+          (Printf.sprintf "hike-vsa: sub %s: fixpoint not converged in %d iterations"
+             (Sub.name sub) n)
+      | `Paused p -> Paused p
+      | `Drained (sol, block_addrs') ->
         let sub' =
           Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
             ~foreign_slots sub
@@ -154,12 +150,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
            materialization may reintroduce the shift pair. *)
         let sub' = Vsa.normalize_round sub' in
         let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub' in
-        Done (envs, stamped, block_addrs')
-      | None ->
-        Done
-          ( Tid.Map.empty,
-            Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-            block_addrs ))
+        Done (envs, stamped, block_addrs'))
 
 let start (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)

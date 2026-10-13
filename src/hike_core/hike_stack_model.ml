@@ -143,13 +143,6 @@ module Vsa = struct
         Int64.equal lo segment_base && Int64.equal hi segment_base
     | _ -> false
 
-  (* The shape-only projection [mem[SP]], for the consumer that runs before
-     any solution exists. *)
-  let is_return_address_shape ~(abi : Abi.t) (addr : exp) : bool =
-    match addr with
-    | Bil.Var v -> Var.same (Var.base v) abi.Hike_abi.sp
-    | _ -> false
-
 end
 include Vsa
 

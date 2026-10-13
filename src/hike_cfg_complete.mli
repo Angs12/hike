@@ -80,10 +80,6 @@ open Bap.Std
     foreign_slots:Core.Int64.Set.t ->
     sub term -> sub term
 
-  (** The shape-only return canonicalization for a sub whose fixpoint
-      did not converge (the pre-solution projection). *)
-  val canonicalize_shape_returns : abi:Hike_abi.t -> sub term -> sub term
-
   (** Names every block's successors: a conditional goto's implicit
       false edge becomes an explicit [Goto], and a destination two jumps
       share collapses to one unconditional edge (ADR 0024). *)

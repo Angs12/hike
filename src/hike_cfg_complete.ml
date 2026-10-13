@@ -555,26 +555,6 @@ let materialize_fallthroughs (sub : sub term) : sub term =
   in
   Term.map blk_t sub ~f:normalize
 
-let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
-  let word_bits = Hike_abi.word_bits abi in
-  let retaddr =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.filter_map ~f:(fun d ->
-           match load_addr_of word_bits d with
-           | Some addr when Model.is_return_address_shape ~abi addr ->
-               Some (Term.tid d)
-           | _ -> None)
-    |> Seq.to_list |> Tid.Set.of_list
-  in
-  if Core.Set.is_empty retaddr then materialize_fallthroughs sub
-  else
-    Term.map blk_t sub ~f:(fun blk ->
-        let last_defs = Vsa.last_defs blk in
-        splice_jmps blk
-          ~classify:(ret_rewrite ~retaddr ~last_defs))
-    |> materialize_fallthroughs
-
 (* One resolution event pass on the phase's own solution: the resolved
    dispatches contribute their target sets to the extra edges.  The
    words are the target denotations; the drive discovers the case
