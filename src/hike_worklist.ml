@@ -61,6 +61,9 @@ type t = {
   owner : (Tid.t, int64) Core.Hashtbl.t;
   (* Code words found in solved bodies, newest first. *)
   mutable found : int64 list;
+  (* Whether a reached call is unresolved: every code word a body
+     materialises is then a root. *)
+  mutable refused : bool;
   (* Published entries, newest first. *)
   mutable order : int64 list;
   mutable next_index : int;
@@ -267,6 +270,8 @@ and body t frame e cfg blk : final =
   if learn_dests t cfg f then build t frame e
   else begin
     t.found <- Base.List.rev_append (code_words t f) t.found;
+    if t.refused then
+      t.found <- Base.List.rev_append (materialised_words t f) t.found;
     Function f
   end
 
@@ -277,7 +282,9 @@ and walk t frame cfg (entry : Block.t) : Block.t -> bool =
   let returns blk =
     match D.dests blk with
     | [] -> true
-    | labels -> Base.List.exists labels ~f:(fun l -> (target_summary t frame l).returns)
+    | labels ->
+      Base.List.map labels ~f:(target_summary t frame)
+      |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
   in
   let rec go (seen, kept) b =
     if Core.Set.mem seen b then (seen, kept)
@@ -539,6 +546,45 @@ and code_words t (f : func) : int64 list =
         @ (if returns then Base.List.concat_map rets ~f:(text ~blk post) else [])
       | _ -> [])
 
+(* The code words a body materialises, for a call no denotation
+   resolves: every word with the text origin of a bounded value a def
+   computes or a store writes (a wide store word by word, each keeping
+   its lane's origin).  A call instruction's own defs push its return
+   address, which names no function. *)
+and materialised_words t (f : func) : int64 list =
+  let wb = Hike_abi.word_bits t.abi in
+  let text ~pre ~post ~blk ~def e =
+    match Vsa.denote_exp_at ~pre ~post ~blk ~def e with
+    | Ok ws -> (
+      match Vsa.WordSet.origin ws with
+      | Some (Vsa.WordSet.Origin.Rip Hike_section.Text) ->
+        Base.Option.value (bounded_words ws) ~default:[]
+      | _ -> [])
+    | Error _ -> []
+  in
+  Term.enum blk_t f.solved |> Seq.to_list
+  |> Base.List.concat_map ~f:(fun blk ->
+      match Core.Map.find f.envs (Term.tid blk) with
+      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+        Term.enum def_t blk |> Seq.to_list
+        |> Base.List.filter ~f:(fun d ->
+            match Term.get_attr d Disasm.insn with
+            | Some insn -> not (Insn.is Insn.call insn)
+            | None -> true)
+        |> Base.List.concat_map ~f:(fun d ->
+            let values =
+              match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+              | None -> [ Def.rhs d ]
+              | Some data -> (
+                match Hike_stack_model.addr_of_rhs (Def.rhs d) with
+                | Some (_, size) when Size.in_bits size > wb ->
+                  Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
+                      Bil.extract ~hi:(((k + 1) * wb) - 1) ~lo:(k * wb) data)
+                | _ -> [ data ])
+            in
+            Base.List.concat_map values ~f:(text ~pre ~post ~blk ~def:d))
+      | _ -> [])
+
 (* ---- the program ---- *)
 
 let create proj : t =
@@ -560,6 +606,7 @@ let create proj : t =
     symbols = Core.Hashtbl.create (module Tid);
     owner = Core.Hashtbl.create (module Tid);
     found = [];
+    refused = false;
     order = [];
     next_index = 0;
     stack = [];
@@ -714,10 +761,11 @@ let facts t : Hike_kb.facts =
     images = t.context.images;
     foreign_slots = t.context.linker_slots }
 
-(* The worklist's program: main's closure (or, on refusal, every BAP
-   subroutine's) as solved bodies with one jump per block, plus a
-   block-less declaration per external target (the emitter maps
-   intrinsic targets itself); and the solves' analysis facts. *)
+(* The worklist's program: main's closure (or, on refusal, that of
+   every BAP subroutine and every materialised code word) as solved
+   bodies with one jump per block, plus a block-less declaration per
+   external target (the emitter maps intrinsic targets itself); and the
+   solves' analysis facts. *)
 let run (proj : Project.t) : result =
   let t = create proj in
   let entry = Hike_image.entry_point proj in
@@ -748,6 +796,9 @@ let run (proj : Project.t) : result =
   then begin
     if Base.Option.is_none main then
       Hike_diag.warn "discover: no main; every BAP subroutine in the text is a root";
+    t.refused <- true;
+    t.found <-
+      Base.List.concat_map (functions t) ~f:(fun (_, f) -> materialised_words t f);
     solve_roots t
       (Term.enum sub_t (Project.program proj)
        |> Seq.filter_map ~f:(fun s ->
