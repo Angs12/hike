@@ -77,13 +77,21 @@ val vla_offsets : t -> Cbat_clp.t option
 (* Memory keys retain the carried origin's line; plain values stay absolute. *)
 val address_pieces : t -> (Origin.t * Cbat_clp.Pieces.t) option
 
+(* The verdict of one address-filter decision.  [`Keep`]/[`Drop`] apply
+   to the whole progression; [`Split`] hands it back to the bisection;
+   [`Parts parts`] replaces it by the listed pieces with their verdicts,
+   without recursion (elements no piece covers are dropped, so a bulk
+   decider lists what it keeps). *)
+type address_verdict =
+  [ `Keep | `Drop | `Split | `Parts of (Cbat_clp.t * [ `Keep | `Drop ]) list ]
+
 (* The elements [decide] keeps, bisected per progression on its memory
-   key line: [decide line p] keeps or drops a whole sub-progression, or
-   splits it (a singleton never splits).  The origin is kept; an
-   unbounded piece, a frame-relative VLA value and a mixed-origin value
-   are kept whole. *)
+   key line: [decide line p] keeps or drops a whole sub-progression,
+   splits it (a singleton never splits), or partitions it into pieces
+   with their own verdicts.  The origin is kept; an unbounded piece, a
+   frame-relative VLA value and a mixed-origin value are kept whole. *)
 val filter_addresses :
-  t -> decide:(Origin.t -> Cbat_clp.t -> [ `Keep | `Drop | `Split ]) -> t
+  t -> decide:(Origin.t -> Cbat_clp.t -> address_verdict) -> t
 
 (* Memory namespaces: Stack, Window and Vla share the stack line;
    Rip and Abs each retain their own line. *)

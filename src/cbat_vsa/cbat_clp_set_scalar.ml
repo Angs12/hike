@@ -1034,11 +1034,16 @@ let halves (p : clp) : (clp * clp) option =
 
 (* The elements of [t] [decide] keeps, bisected per progression on its
    memory key line: [decide line p] keeps or drops a whole
-   sub-progression [p], or splits it; a singleton never splits, and an
-   undecided one stays.  The origin is kept.  An unbounded piece, a
-   frame-relative VLA value and a mixed-origin value are kept whole. *)
+   sub-progression [p], splits it, or partitions it ([`Parts`] applies
+   the listed verdicts without recursion — the pieces replace [p]); a
+   singleton never splits, and an undecided one stays.  The origin is
+   kept.  An unbounded piece, a frame-relative VLA value and a
+   mixed-origin value are kept whole. *)
+type address_verdict =
+  [ `Keep | `Drop | `Split | `Parts of (clp * [ `Keep | `Drop ]) list ]
+
 let filter_addresses (t : t)
-    ~(decide : Origin.t -> clp -> [ `Keep | `Drop | `Split ]) : t =
+    ~(decide : Origin.t -> clp -> address_verdict) : t =
   let rec bisect line acc (p : clp) =
     match decide line p with
     | `Keep -> p :: acc
@@ -1046,7 +1051,10 @@ let filter_addresses (t : t)
     | `Split ->
       (match halves p with
        | Some (a, b) -> bisect line (bisect line acc a) b
-       | None -> p :: acc) in
+       | None -> p :: acc)
+    | `Parts parts ->
+      List.fold parts ~init:acc ~f:(fun acc (q, verdict) ->
+          match verdict with `Keep -> q :: acc | `Drop -> acc) in
   let filter line (ps : P.t) : P.t option =
     let progs = P.to_list ps in
     if List.exists progs ~f:Clp.is_infinite then None
@@ -1068,7 +1076,10 @@ let filter_addresses (t : t)
       (List.filter (Exact.iter s) ~f:(fun w ->
            match decide Origin.Abs (Clp.singleton w) with
            | `Drop -> false
-           | `Keep | `Split -> true))
+           | `Keep | `Split -> true
+           | `Parts parts ->
+             List.exists parts ~f:(fun (q, verdict) ->
+                 match verdict with `Keep -> Clp.elem w q | `Drop -> false)))
 
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)

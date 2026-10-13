@@ -16,6 +16,7 @@ module Origin = S.Origin
 type t = Scalar of S.t | Lanes of S.t list [@@deriving bin_io, sexp, compare]
 type word = Cbat_word.t
 type idx = int
+type address_verdict = S.address_verdict
 
 type kind = S.kind =
   | Range of int64 * int64

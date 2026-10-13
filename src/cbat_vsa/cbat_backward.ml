@@ -929,9 +929,9 @@ let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
 (* The load's address pre-image: the addresses whose read can produce a
    value in [produced].  Only known memory — a stored cell or a section
    image — excludes an address: a range covering neither reads top and
-   stays whole; a covered range halves down to single addresses, each
-   read by the forward load and dropped iff its value, on the
-   constraint's own origin, misses [produced].  [None] when nothing is
+   stays whole; a covered range is decided in bulk down to its covered
+   elements, each read by the forward load and dropped iff its value, on
+   the constraint's own origin, misses [produced].  [None] when nothing is
    excluded, or everything is (the leaf rule's identity). *)
 let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
     ~(endian : endian) ~(size : Size.t) (produced : wordset) : wordset option =
@@ -949,6 +949,131 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         (* The threaded images' read-start ranges: constant across this
            constraint's decisions (one read width). *)
         let image_fits = image_read_starts ~bytes:nb in
+        (* The singleton rule: the address value of the one-element
+           piece [p]; a known read whose value, on this constraint's own
+           origin, misses [produced], drops its address. *)
+        let singleton_keep line (p : Cbat_clp.t) : bool =
+          let one =
+            match line with
+            | Hike_origin.Stack -> WordSet.stack_word p
+            | _ -> WordSet.of_clp p in
+          let v = load_value ~addr:one ~endian ~bits mv in
+          not
+            (Option.equal Hike_origin.equal (WordSet.origin v)
+               (WordSet.origin produced)
+             && Cbat_word.is_zero
+                  (WordSet.cardinality (WordSet.meet v produced))) in
+        (* The read-start ranges a covered element's read can touch, as
+           the element-level tests build them: the same-line cell hulls
+           each shifted back by the read width (the span prefilter is
+           [has_cell_in]), and — on the Abs line — the images' read
+           starts.  A cell hull whose width does not match the piece's
+           cannot be intersected and keeps its addresses on the identity
+           path.
+
+           Each range carries whether its addresses may be kept
+           wholesale.  A cell whose own hull is too wide to enumerate
+           decides each address on its own read grid, repeated across
+           the whole hull; walking that hull would enumerate the grid
+           for no more knowledge than keeping it. *)
+        let cell_enum_bound = 65536 in
+        let covered_ranges (line : Hike_origin.t) ~(lo : Cbat_word.t)
+            ~(hi : Cbat_word.t) ~(last : Cbat_word.t) :
+            (Cbat_clp.t * bool) list =
+          let w = Cbat_word.bitwidth hi in
+          let back = Cbat_word.of_int ~width:w (nb - 1) in
+          let ranges = Stdlib.ref [] in
+          (match line with
+           | Hike_origin.Abs ->
+             List.iter image_fits ~f:(fun (fit_lo, fit_hi) ->
+                 let word (v : Stdlib.Int64.t) : Cbat_word.t =
+                   Cbat_word.of_word (Word.of_int64 ~width:w v) in
+                 ranges :=
+                   (Cbat_clp.interval ~width:w (word fit_lo) (word fit_hi), false)
+                   :: !ranges)
+           | _ -> ());
+          if Mem.has_cell_in mv ~origin:line ~lo ~hi:last then
+            List.iter (Mem.cells mv) ~f:(fun (k, _) ->
+                if Hike_origin.equal (Mem.Key.origin k) line then
+                  let cl, ch = Mem.Key.hull k in
+                  if Cbat_word.bitwidth cl = w && Cbat_word.bitwidth ch = w
+                  then begin
+                    let keep_whole =
+                      Cbat_word.gt_int
+                        (Cbat_word.succ_exact (Cbat_word.sub ch cl))
+                        cell_enum_bound in
+                    ranges :=
+                      (Cbat_clp.interval ~width:w (Cbat_word.sub cl back) ch,
+                       keep_whole)
+                      :: !ranges
+                  end);
+          List.rev !ranges in
+        (* [q] minus one covered run [h] of [q]'s elements: the elements
+           below [h]'s minimum and above its maximum.  [h] contains every
+           element between its extrema (it is [q]'s grid intersected with
+           an address interval, or that intersection hulled), so the
+           dropped middle is exactly [h]'s own enumeration and never
+           loses an element. *)
+        let subtract_run (q : Cbat_clp.t) (h : Cbat_clp.t) : Cbat_clp.t list =
+          match Cbat_clp.min_elem q, Cbat_clp.min_elem h, Cbat_clp.max_elem h with
+          | Some q_lo, Some h_lo, Some h_hi ->
+            let left, q =
+              if Cbat_word.(<) q_lo h_lo then
+                Cbat_clp.split_at_n q (Cbat_word.pred h_lo)
+              else (Cbat_clp.bottom (Cbat_clp.bitwidth q), q) in
+            let _mid, right =
+              match Cbat_clp.min_elem q with
+              | Some q_lo' when Cbat_word.(<=) q_lo' h_hi ->
+                Cbat_clp.split_at_n q h_hi
+              | _ -> (Cbat_clp.bottom (Cbat_clp.bitwidth q), q) in
+            [ left; right ]
+          | _ -> [ q ] in
+        (* The bulk partition: [hits] are the covered elements (each a
+           contiguous run of [p]'s grid), [rest] keeps everything outside
+           them wholesale.  Hits from a wholesale range (an oversized
+           cell hull) are not enumerated: their elements stay in [rest]
+           — keeping is always sound, and walking the hull would
+           enumerate its whole read grid.  The other hits are enumerated
+           and the singleton rule applies per element; one that exceeds
+           [enum_bound] falls back to the [Split] bisection.  A piece
+           whose coverage yields no ranges is kept whole ([`Keep`], the
+           sound identity). *)
+        let enum_bound = 4096 in
+        let partition (line : Hike_origin.t) (p : Cbat_clp.t)
+            ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) ~(last : Cbat_word.t) =
+          let hits =
+            List.filter_map (covered_ranges line ~lo ~hi ~last)
+              ~f:(fun (r, keep_whole) ->
+                let h = Cbat_clp.intersection p r in
+                if Cbat_clp.is_bottom h then None else Some (h, keep_whole)) in
+          let small =
+            List.filter_map hits ~f:(fun (h, keep_whole) ->
+                if keep_whole then None else Some h) in
+          match hits with
+          | [] -> `Keep
+          | _ when
+              List.exists small ~f:(fun h ->
+                  Cbat_clp.is_infinite h
+                  || Cbat_word.gt_int (Cbat_clp.cardinality h) enum_bound) ->
+            `Split
+          | _ ->
+            let rest =
+              List.fold small ~init:[ p ] ~f:(fun qs h ->
+                  List.concat_map qs ~f:(fun q ->
+                      if Cbat_clp.is_bottom (Cbat_clp.intersection q h) then [ q ]
+                      else subtract_run q h)) in
+            let kept =
+              List.concat_map small ~f:(fun h ->
+                  List.filter (Cbat_clp.iter h) ~f:(fun x ->
+                      singleton_keep line (Cbat_clp.singleton x))) in
+            let width = Cbat_word.bitwidth hi in
+            let kept_runs =
+              Cbat_clp.Exact.to_pieces (Cbat_clp.Exact.of_list ~width kept) in
+            let parts =
+              List.filter_map rest ~f:(fun q ->
+                  if Cbat_clp.is_bottom q then None else Some (q, `Keep))
+              @ List.map kept_runs ~f:(fun q -> (q, `Keep)) in
+            `Parts parts in
         let decide line p =
           match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
           | Some lo, Some hi ->
@@ -964,16 +1089,8 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                  || piece_touches_cell_bounds mv ~line ~bytes:nb ~lo ~hi p)
             then `Keep
             else if Cbat_word.is_one (Cbat_clp.cardinality p) then
-              let one =
-                match line with
-                | Hike_origin.Stack -> WordSet.stack_word p
-                | _ -> WordSet.of_clp p in
-              let v = load_value ~addr:one ~endian ~bits mv in
-              if Option.equal Hike_origin.equal (WordSet.origin v) (WordSet.origin produced)
-                 && Cbat_word.is_zero (WordSet.cardinality (WordSet.meet v produced))
-              then `Drop
-              else `Keep
-            else `Split
+              (if singleton_keep line p then `Keep else `Drop)
+            else partition line p ~lo ~hi ~last
           | _ -> `Keep in
         let kept = WordSet.filter_addresses aws ~decide in
         if WordSet.is_bottom kept || WordSet.equal kept aws then None else Some kept

@@ -1872,6 +1872,48 @@ let tests : unit Alcotest.test list =
               (not
                  (Vsa.Test_seam.piece_touches_image ~bytes:8
                     (dense 0x1000 0x1003)))));
+
+    pin "BK-107"
+      "T27 step 4b: a dense multi-element address run partitions in one \
+       decision — the image reads that miss the guard value drop on both \
+       sides of the kept address (8 kept; 0 and 15 dropped)"
+      (fun () ->
+        let m = memv "w107_m" in
+        let i = v64 "w107_i" in
+        let x = wr_v32 "w107_x" and zf = v1 "w107_zf" in
+        (* 32 bytes, zero except the one 20 at offset 8: every 4-byte read
+           is definite, and only the read at 0x4008 meets the guard. *)
+        let img_bytes = Bytes.make 32 '\000' in
+        Bytes.set img_bytes 8 (Char.chr 20);
+        let images =
+          [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x401FL; img_bytes;
+              img_slots = Core.Int64.Set.empty } ] in
+        let out =
+          Vsa.with_images images (fun () ->
+              wr_refine "w107" m zf
+                [ Def.create i
+                    (Bil.BinOp
+                       ( Bil.AND,
+                         Bil.Var (v64 "RDI"),
+                         Bil.Int (Cbat_word.to_word (w64 0xF)) ));
+                  Def.create x
+                    (Bil.Load
+                       ( Bil.Var m,
+                         Bil.BinOp
+                           ( Bil.PLUS,
+                             Bil.Int (Cbat_word.to_word (w64 0x4000)),
+                             Bil.Var i ),
+                         LittleEndian, `r32 ));
+                  Def.create zf
+                    (Bil.BinOp
+                       ( Bil.EQ,
+                         Bil.Var x,
+                         Bil.Int (Cbat_word.to_word (w32 20)) )) ])
+        in
+        let iv = AI.find_word 64 out (Var.base i) in
+        check "BK-107.kept" (Ws.elem (w64 8) iv);
+        check "BK-107.dropped-low" (not (Ws.elem (w64 0) iv));
+        check "BK-107.dropped-high" (not (Ws.elem (w64 15) iv)));
   ]
 
 let () = run "backward" tests

@@ -441,7 +441,41 @@ let tests : unit Alcotest.test list =
         check "WS-39 (growth) grown-has-hole" (not (Ws.elem five grown));
         let w = Ws.widen_join hole grown in
         check "WS-39 (growth) keeps-the-hole" (keeps_hole w);
-        check "WS-39 (growth) covers-grown" (Ws.precedes grown w))
+        check "WS-39 (growth) covers-grown" (Ws.precedes grown w));
+
+    pin "WS-46"
+      "T27 step 4b: a `Parts` verdict replaces a piece by its listed \
+       pieces without recursion — one decision covers a whole dense run, \
+       and the kept elements match the bisected reference"
+      (fun () ->
+        let dense = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 15)) in
+        let split = w32 7 in
+        let below p =
+          match Clp.min_elem p with
+          | Some lo -> Cbat_word.(<=) lo split
+          | None -> true in
+        let parts_calls = Stdlib.ref 0 in
+        let parts_decide _line p =
+          Stdlib.incr parts_calls;
+          if Cbat_word.gt_int (Clp.cardinality p) 1 then
+            (* The covered run [0,15]: keep its lower half, drop its
+               upper half; the verdicts apply as listed. *)
+            let a, b = Clp.split_at_n p split in
+            `Parts [ (a, `Keep); (b, `Drop) ]
+          else if below p then `Keep else `Drop in
+        let bisect_calls = Stdlib.ref 0 in
+        let bisect_decide _line p =
+          Stdlib.incr bisect_calls;
+          if Cbat_word.gt_int (Clp.cardinality p) 1 then `Split
+          else if below p then `Keep else `Drop in
+        let by_parts = Ws.filter_addresses dense ~decide:parts_decide in
+        let by_bisect = Ws.filter_addresses dense ~decide:bisect_decide in
+        check "WS-46.parts-one-decision" (!parts_calls = 1);
+        check "WS-46.split-bisects" (!bisect_calls > 1);
+        check "WS-46.equal"
+          (List.for_all
+             (fun x -> Ws.elem (w32 x) by_parts = Ws.elem (w32 x) by_bisect)
+             (List.init 16 Fun.id)))
   ]
 
 let () = run "ws" tests
