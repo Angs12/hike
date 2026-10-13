@@ -6,41 +6,6 @@ module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_ptr
 
-let create_concat ctx llvm_builder (llvm_var1, llvm_var2) =
-  let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
-  let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.integer_bitwidth in
-  let result_typ =
-    Llvm.integer_type ctx.llvm_ctx (llvm_var1_size + llvm_var2_size)
-  in
-  let llvm_var2_sizeof = Llvm.const_int result_typ llvm_var2_size in
-  let zext_var1 = Llvm.build_zext llvm_var1 result_typ "" llvm_builder in
-  let shl_var1 = Llvm.build_shl zext_var1 llvm_var2_sizeof "" llvm_builder in
-  let zext_var2 = Llvm.build_zext llvm_var2 result_typ "" llvm_builder in
-  Llvm.build_or shl_var1 zext_var2 "" llvm_builder
-
-let create_extract ctx llvm_builder (hi, lo, llvm_var) =
-  let width = Llvm.integer_bitwidth (Llvm.type_of llvm_var) in
-  let result_size = hi - lo + 1 in
-  if result_size <= 0 then
-    (* An empty extract names no bits; the value is zero. *)
-    Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 1) 0
-  else if lo >= width then
-    (* Out-of-range extracts yield zero. *)
-    Llvm.const_int (Llvm.integer_type ctx.llvm_ctx result_size) 0
-  else
-    let temp_var =
-      Llvm.build_lshr llvm_var
-        (Llvm.const_int (Llvm.type_of llvm_var) lo)
-        "" llvm_builder
-    in
-    if result_size >= width then
-      (* Wide extracts zero-extend. *)
-      Llvm.build_zext temp_var
-        (Llvm.integer_type ctx.llvm_ctx result_size) "" llvm_builder
-    else
-      Llvm.build_trunc temp_var
-        (Llvm.integer_type ctx.llvm_ctx result_size) "" llvm_builder
-
 (* PT_TLS owns its byte range; the TCB belongs to the native runtime. *)
 type tls_class =
   | Tls_block of int64           (* the block's byte index *)
@@ -76,56 +41,6 @@ let thread_pointer ctx llvm_builder =
   let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
   Llvm.build_call fty f [||] "hike_tp" llvm_builder
 
-let create_cast ctx llvm_builder (cast, i, llvm_val) =
-  (* A pointer coerces through its integer form; the caller re-types it
-     at a pointer use. *)
-  let llvm_val =
-    if Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
-    then
-      Llvm.build_ptrtoint llvm_val
-        (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
-        "" llvm_builder
-    else llvm_val
-  in
-  let width = Llvm.integer_bitwidth (Llvm.type_of llvm_val) in
-  if i <= 0 then
-    (* A zero-width cast names no bits; the value is zero. *)
-    Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 1) 0
-  else
-  let target = Llvm.integer_type ctx.llvm_ctx i in
-  let extend cast =
-    match cast with SIGNED -> Llvm.build_sext | _ -> Llvm.build_zext
-  in
-  let coerce cast v =
-    if i > width then extend cast v target "" llvm_builder
-    else if i < width then Llvm.build_trunc v target "" llvm_builder
-    else v
-  in
-  match cast with
-  | UNSIGNED -> coerce UNSIGNED llvm_val
-  | SIGNED -> coerce SIGNED llvm_val
-  | LOW -> coerce UNSIGNED llvm_val
-  | HIGH ->
-      let shift = max 0 (width - i) in
-      let shifted =
-        if shift > 0 then
-          Llvm.build_lshr llvm_val
-            (Llvm.const_int (Llvm.type_of llvm_val) shift) "" llvm_builder
-        else llvm_val
-      in
-      coerce UNSIGNED shifted
-
-(* Immediates keep their native bits; only the section initializers
-   remap words that name lifted addresses.  Widths to 64 bits take
-   the direct integer path; wider words go through the text form. *)
-let create_immediate ctx word =
-  let w = Word.bitwidth word in
-  let ty = Llvm.integer_type ctx.llvm_ctx w in
-  if w <= 64 then
-    Llvm.const_of_int64 ty (Word.to_int64_exn word) false
-  else
-    Llvm.const_int_of_string ty (Word.string_of_value word) 16
-
 (* The one memory node of an exp (a def's rhs holds at most one). *)
 type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
 
@@ -157,13 +72,25 @@ let rewrite_mem_node exp addr size marker =
 (* ---- The expression evaluator.  The pointer semantics live in
    [Bil2llvm_ptr]; this lane evaluates exps and asks it for values. ---- *)
 
-(* A load reads its BIR size; the def's inferred type names the loaded
-   value only when the widths agree. *)
-let load_type ?want ctx size =
-  let bits = Size.in_bits size in
-  match want with
-  | Some t when bits = ctx.addr_bits -> t
-  | _ -> Llvm.integer_type ctx.llvm_ctx bits
+(* A cell read: [ptr] reads a word cell as the pointer it holds (the
+   def's whole value is the load and the def is pointer-typed); any
+   other load reads its BIR size. *)
+let cell_is_ptr ctx ~ptr size = ptr && Size.in_bits size = ctx.addr_bits
+
+let cell_type ctx ~ptr size =
+  if cell_is_ptr ctx ~ptr size then ctx.ptr_ty
+  else Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
+
+let cell_value ctx ~ptr size v =
+  if cell_is_ptr ctx ~ptr size then Bil2llvm_value.Ptr v
+  else Bil2llvm_value.Int v
+
+let load_cell ctx llvm_builder ~ptr size p =
+  cell_value ctx ~ptr size
+    (Bil2llvm_memory.load_ptr llvm_builder (cell_type ctx ~ptr size) p)
+
+let as_int ctx b v = Bil2llvm_value.as_int ~addr_bits:ctx.addr_bits b v
+let as_ptr b v = Bil2llvm_value.as_ptr b v
 
 (* The entry-line offset of an expression, when structurally known: an
    arithmetic chain from the entry line / a slot.  A load, parameter,
@@ -186,110 +113,94 @@ let rec create_offset ctx scope llvm_builder blk_tid exp :
     else Llvm.build_sext v addr_ty "" llvm_builder
   in
   match exp with
-  | Bil.Int w -> Some (coerce (create_immediate ctx w))
+  | Bil.Int w -> Some (coerce (Bil2llvm_int.immediate ctx.llvm_ctx w))
   | Bil.Var v -> (
       match get_ptr_offset scope v with
       | Some off -> Some off
       | None ->
           if is_ptr_var scope v then None
           else
-            let x = create_exp ctx scope llvm_builder blk_tid exp in
-            if is_ptr_value x then None else Some x)
+            match create_exp ctx scope llvm_builder blk_tid exp with
+            | Bil2llvm_value.Int x -> Some x
+            | Bil2llvm_value.Ptr _ -> None)
   | BinOp (op, e1, e2) -> (
       match
         ( create_offset ctx scope llvm_builder blk_tid e1,
           create_offset ctx scope llvm_builder blk_tid e2 )
       with
       | Some a, Some b ->
-          Some (create_binop llvm_builder (op, coerce a, coerce b))
+          Some (Bil2llvm_int.binop llvm_builder op (coerce a) (coerce b))
       | _ -> None)
   | UnOp (op, e) ->
       Base.Option.map (create_offset ctx scope llvm_builder blk_tid e)
-        ~f:(fun v -> create_unop llvm_builder (op, v))
+        ~f:(fun v -> Bil2llvm_int.unop llvm_builder op v)
   | Ite (cond, t, f) -> (
       match
         ( create_offset ctx scope llvm_builder blk_tid t,
           create_offset ctx scope llvm_builder blk_tid f )
       with
       | Some tv, Some fv ->
-          let c = create_exp ctx scope llvm_builder blk_tid cond in
-          Some (select ctx llvm_builder c tv fv)
+          let c = as_int ctx llvm_builder
+              (create_exp ctx scope llvm_builder blk_tid cond) in
+          Some (Bil2llvm_int.select llvm_builder c tv fv)
       | _ -> None)
   | Load _ | Store _ | Unknown _ | Cast _ | Extract _ | Concat _ | Let _ ->
       None
 
-and create_exp ?want ctx scope llvm_builder blk_tid exp =
+and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
+  let addr_bits = ctx.addr_bits in
+  let eval e = create_exp ctx scope llvm_builder blk_tid e in
   match exp with
   | BinOp (op, e1, e2) ->
-      let v1 = create_exp ctx scope llvm_builder blk_tid e1 in
-      let v2 = create_exp ctx scope llvm_builder blk_tid e2 in
       let null e = match e with Bil.Int w -> Word.is_zero w | _ -> false in
-      binop ctx llvm_builder ~null1:(null e1) ~null2:(null e2) (op, v1, v2)
-  | UnOp (op, e) ->
-      let v =
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid e)
-      in
-      create_unop llvm_builder (op, v)
+      Bil2llvm_value.lift2 ~addr_bits llvm_builder ~null1:(null e1)
+        ~null2:(null e2) op (eval e1) (eval e2)
+  | UnOp (op, e) -> Bil2llvm_value.lift1 ~addr_bits llvm_builder op (eval e)
   | Var v when Var.same v ctx.abi.Abi.thread_pointer ->
-      Llvm.build_ptrtoint (thread_pointer ctx llvm_builder)
-        (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits) "hike_tp_value" llvm_builder
+      Bil2llvm_value.Int
+        (Llvm.build_ptrtoint (thread_pointer ctx llvm_builder)
+           (Llvm.integer_type ctx.llvm_ctx addr_bits) "hike_tp_value"
+           llvm_builder)
   | Var v -> synth_value ctx scope llvm_builder blk_tid v
-  | Int i -> create_immediate ctx i
+  | Int i -> Bil2llvm_value.Int (Bil2llvm_int.immediate ctx.llvm_ctx i)
   | Cast (cast, i, e) ->
-      let v = create_exp ctx scope llvm_builder blk_tid e in
-      create_cast ctx llvm_builder (cast, i, v)
+      Bil2llvm_value.cast ~addr_bits llvm_builder cast i (eval e)
   | Concat (e1, e2) ->
-      let v1 =
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid e1)
-      in
-      let v2 =
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid e2)
-      in
-      create_concat ctx llvm_builder (v1, v2)
+      Bil2llvm_value.concat ~addr_bits llvm_builder (eval e1) (eval e2)
   | Extract (hi, lo, e) ->
-      let v =
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid e)
-      in
-      create_extract ctx llvm_builder (hi, lo, v)
+      Bil2llvm_value.extract ~addr_bits llvm_builder hi lo (eval e)
   | Store (mem, addr, data, _, _) -> (
     match tls_classify ctx addr with
     | Not_tls -> tls_plain_store ctx scope llvm_builder blk_tid mem addr data
     | cls ->
         let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
-        let d = create_exp ctx scope llvm_builder blk_tid data in
-        Bil2llvm_memory.store_ptr llvm_builder d ptr)
+        let d = eval data in
+        ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) ptr);
+        d)
   | Load (mem, addr, _, size) -> (
     match tls_classify ctx addr with
-    | Not_tls ->
-        tls_plain_load ctx scope llvm_builder blk_tid ~want mem addr size
+    | Not_tls -> tls_plain_load ctx scope llvm_builder blk_tid mem addr size
     | cls ->
-        let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
-        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) ptr)
+        load_cell ctx llvm_builder ~ptr:false size
+          (tls_ptr ctx scope llvm_builder blk_tid cls))
   | Let (var, e, body) ->
       let unique_var = fresh_let_var ctx scope var in
-      let v = create_exp ctx scope llvm_builder blk_tid e in
-      insert_local scope blk_tid unique_var v;
-      let body = Exp.substitute (Var var) (Var unique_var) body in
-      create_exp ?want ctx scope llvm_builder blk_tid body
+      insert_local scope blk_tid unique_var (eval e);
+      eval (Exp.substitute (Var var) (Var unique_var) body)
   | Ite (cond, true_exp, false_exp) ->
-      let cond =
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid cond)
-      in
-      let tv = create_exp ?want ctx scope llvm_builder blk_tid true_exp in
-      let fv = create_exp ?want ctx scope llvm_builder blk_tid false_exp in
-      select ctx llvm_builder ?want cond tv fv
+      Bil2llvm_value.select ~addr_bits llvm_builder (eval cond)
+        (eval true_exp) (eval false_exp)
   | Unknown (_, typ) ->
-      let typ =
-        match want with Some t -> t | None -> typ_lltype ctx typ
-      in
-      Llvm.build_freeze (Llvm.undef typ) "hike_unknown" llvm_builder
+      let v = Llvm.build_freeze (Llvm.undef (typ_lltype ctx typ))
+          "hike_unknown" llvm_builder in
+      (match typ with
+       | Type.Imm _ -> Bil2llvm_value.Int v
+       | _ -> Bil2llvm_value.Ptr v)
 
-and tls_ptr ctx scope llvm_builder blk_tid = function
+and tls_ptr ctx scope llvm_builder blk_tid cls =
+  let addr_bits = ctx.addr_bits in
+  let i64 n = Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) n false in
+  match cls with
   | Tls_block idx ->
     let block, _ = Base.Option.value_exn !(ctx.tls) in
     let fty = Llvm.function_type ctx.ptr_ty [| ctx.ptr_ty |] in
@@ -297,16 +208,15 @@ and tls_ptr ctx scope llvm_builder blk_tid = function
       Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
     in
     let base = Llvm.build_call fty f [| block |] "tls_addr" llvm_builder in
-    Bil2llvm_ptr.gep_i8 ctx llvm_builder base
-      (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) idx false)
+    Bil2llvm_ptr.offset ~addr_bits llvm_builder base (i64 idx)
   | Tls_tp off ->
-    let tp = thread_pointer ctx llvm_builder in
-    Bil2llvm_ptr.gep_i8 ctx llvm_builder tp
-      (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) off false)
+    Bil2llvm_ptr.offset ~addr_bits llvm_builder
+      (thread_pointer ctx llvm_builder) (i64 off)
   | Tls_tp_exp e ->
-    let off = create_exp ctx scope llvm_builder blk_tid e in
-    let tp = thread_pointer ctx llvm_builder in
-    Bil2llvm_ptr.gep_i8 ctx llvm_builder tp (as_integer ctx llvm_builder off)
+    let off = as_int ctx llvm_builder
+        (create_exp ctx scope llvm_builder blk_tid e) in
+    Bil2llvm_ptr.offset ~addr_bits llvm_builder
+      (thread_pointer ctx llvm_builder) off
   | Not_tls -> assert false
 
 (* The generic memory arms an unclassified access keeps (split out of
@@ -314,38 +224,41 @@ and tls_ptr ctx scope llvm_builder blk_tid = function
 and tls_plain_store ctx scope llvm_builder blk_tid mem addr data =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let d = create_exp ctx scope llvm_builder blk_tid data in
+  let dv = Bil2llvm_value.ll d in
   (match mem with
    | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-     let idx = as_integer ctx llvm_builder a in
-     match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
-     | Some p -> Bil2llvm_memory.store_ptr llvm_builder d p
-     | None -> Bil2llvm_memory.store ctx llvm_builder (d, a))
-   | _ -> Bil2llvm_memory.store ctx llvm_builder (d, a))
+     match
+       Bil2llvm_memory.component_ptr ctx llvm_builder mv
+         (as_int ctx llvm_builder a)
+     with
+     | Some p -> ignore (Bil2llvm_memory.store_ptr llvm_builder dv p)
+     | None -> ignore (Bil2llvm_memory.store ctx llvm_builder dv a))
+   | _ -> ignore (Bil2llvm_memory.store ctx llvm_builder dv a));
+  d
 
-and tls_plain_load ctx scope llvm_builder blk_tid ~want:(want : Llvm.lltype option)
-    mem addr size =
+and tls_plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
+    addr size =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
+  let raw () =
+    cell_value ctx ~ptr:ptr_cell size
+      (Bil2llvm_memory.load ctx llvm_builder a
+         (cell_type ctx ~ptr:ptr_cell size))
+  in
   match mem with
   | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-    let idx = as_integer ctx llvm_builder a in
-    match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
-    | Some p ->
-        Bil2llvm_memory.load_ptr llvm_builder
-          (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)) p
-    | None -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
-  | _ -> (
-    match want with
-    | Some ty
-      when Size.in_bits size = ctx.addr_bits
-           && not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
-        Bil2llvm_memory.load_ptr llvm_builder ty
-          (as_pointer ctx llvm_builder a)
-    | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
+    match
+      Bil2llvm_memory.component_ptr ctx llvm_builder mv
+        (as_int ctx llvm_builder a)
+    with
+    | Some p -> load_cell ctx llvm_builder ~ptr:ptr_cell size p
+    | None -> raw ())
+  | _ -> raw ()
 
 (* One memory node: the address is a pointer (a stack/VLA value) or an
    integer (the raw/heap lane); the marker carries the loaded value
-   through the enclosing rhs. *)
-and storage_access ?want ?(is_window = false)
+   through the enclosing rhs.  [ptr_cell]: the cell is read as the
+   pointer it holds. *)
+and storage_access ?(ptr_cell = false) ?(is_window = false)
     ~(storage : Hike_stack_model.ptr_storage option) ctx scope llvm_builder
     blk_tid node exp =
   let rewrite addr size marker = rewrite_mem_node exp addr size marker in
@@ -356,77 +269,70 @@ and storage_access ?want ?(is_window = false)
     if is_window then
       match create_offset ctx scope llvm_builder blk_tid addr with
       | Some off ->
-          Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
+          Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
             Hike_stack_model.Ptr_window off
-      | None ->
-          as_pointer ctx llvm_builder
-            (create_exp ctx scope llvm_builder blk_tid addr)
+      | None -> as_ptr llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
     else
       (* The address value is the pointer: a rewritten def's value
          already points into its storage, and a reloaded base holds a
          real pointer.  No entry-line rebase. *)
-      as_pointer ctx llvm_builder
-        (create_exp ctx scope llvm_builder blk_tid addr)
+      as_ptr llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
   in
   match node with
   | `Load (addr, size) ->
-      let marker = marker_of_size size in
       let p = addr_ptr addr in
-
-      let emit () =
-        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) p
-      in
-      emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
+      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size)
+        ~emit:(fun () -> load_cell ctx llvm_builder ~ptr:ptr_cell size p)
         ~rewrite:(rewrite addr size)
   | `Store (addr, data, size) ->
-      let marker = marker_of_size size in
       let p = addr_ptr addr in
-
       let emit () =
         let d = create_exp ctx scope llvm_builder blk_tid data in
-        Bil2llvm_memory.store_ptr llvm_builder d p
+        ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p);
+        d
       in
-      emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
-        ~rewrite:(rewrite addr size)
+      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size)
+        ~emit ~rewrite:(rewrite addr size)
 
 (* Named-component routing: the mem var names storage and the address
    is its byte index, just as for a stack storage access.  The marker
    re-evaluation preserves the def's enclosing structure (a load inside
    a cast), exactly as the stack path does. *)
-and sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~(store : bool)
-    (mv : var) (addr : exp) ~(data : exp option) (size : Size.t) :
-    Llvm.llvalue =
-  let bits = Size.in_bits size in
-  let marker = marker_of_size size in
+and sec_comp_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid exp
+    ~(store : bool) (mv : var) (addr : exp) ~(data : exp option)
+    (size : Size.t) : Bil2llvm_value.t =
   let emit () =
-    let idx = as_integer ctx llvm_builder
+    let idx = as_int ctx llvm_builder
         (create_exp ctx scope llvm_builder blk_tid addr) in
+    let stored () =
+      match data with
+      | Some d -> create_exp ctx scope llvm_builder blk_tid d
+      | None -> assert false
+    in
     match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
     | Some p ->
-      if store then
-        (match data with
-         | Some d ->
-           let v = create_exp ctx scope llvm_builder blk_tid d in
-           Bil2llvm_memory.store_ptr llvm_builder v p
-         | None -> assert false)
-      else
-        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) p
+      if store then begin
+        let d = stored () in
+        ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p);
+        d
+      end
+      else load_cell ctx llvm_builder ~ptr:ptr_cell size p
     | None ->
       (* Unknown component: the generic memory path, unremapped. *)
-      if store then
-        (match data with
-         | Some d ->
-           let v = create_exp ctx scope llvm_builder blk_tid d in
-           Bil2llvm_memory.store ctx llvm_builder (v, idx)
-         | None -> assert false)
+      let a = Bil2llvm_value.Int idx in
+      if store then begin
+        let d = stored () in
+        ignore (Bil2llvm_memory.store ctx llvm_builder (Bil2llvm_value.ll d) a);
+        d
+      end
       else
-        Bil2llvm_memory.load ctx llvm_builder (idx, bits)
+        cell_value ctx ~ptr:ptr_cell size
+          (Bil2llvm_memory.load ctx llvm_builder a
+             (cell_type ctx ~ptr:ptr_cell size))
   in
-  emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
+  emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size) ~emit
     ~rewrite:(rewrite_mem_node exp addr size)
 
-and emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
-    ~rewrite =
-  let v = emit () in
-  insert_local scope blk_tid marker v;
-  create_exp ?want ctx scope llvm_builder blk_tid (rewrite marker)
+and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =
+  insert_local scope blk_tid marker (emit ());
+  create_exp ctx scope llvm_builder blk_tid (rewrite marker)

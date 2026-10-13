@@ -636,6 +636,7 @@ let tests : unit Alcotest.test list =
             sub
           |> Sm.set_layout
                { Sm.regions = []; window_param = false }
+          |> Sm.set_ptr_vars (Var.Set.of_list [ rsp; p1; p2 ])
         in
         let ir = emit_ir [ sub ] in
         let count sub_str =

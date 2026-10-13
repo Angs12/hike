@@ -78,20 +78,22 @@ let storage_origin ctx v : int64 option =
   Core.Map.find !(ctx.synth_origins) v
 
 (* The one resolution: the classification picks the home.  [None] is
-   the caller's undef arm. *)
-let value ctx scope llvm_builder blk_tid v : Llvm.llvalue option =
+   the caller's undef arm.  A module address is its integer word; a
+   storage's bytes are its base pointer. *)
+let value ctx scope llvm_builder blk_tid v : Bil2llvm_value.t option =
   let classified = Hike_synth.classify ctx.synth v in
   match classified with
   | Some (Hike_synth.Module_addr a) ->
     let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
     Some
-      (match Core.Map.find !(ctx.synth_vals) v with
-       | Some value -> value
-       | None ->
-         Base.Option.value
-           (Section.remap_native ctx ctx.llvm_ctx ctx.llvm_module a
-              ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
-           ~default:(Llvm.const_of_int64 ty a false))
+      (Bil2llvm_value.Int
+         (match Core.Map.find !(ctx.synth_vals) v with
+          | Some value -> value
+          | None ->
+            Base.Option.value
+              (Section.remap_native ctx ctx.llvm_ctx ctx.llvm_module a
+                 ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
+              ~default:(Llvm.const_of_int64 ty a false)))
   | _ -> (
     match
       Base.Option.first_some (get_ssaval scope v) (get_local scope blk_tid v)
@@ -100,9 +102,52 @@ let value ctx scope llvm_builder blk_tid v : Llvm.llvalue option =
     | None -> (
       match classified with
       | Some (Hike_synth.Env_register _) ->
-        Some (load_env_reg ctx llvm_builder v)
-      | Some (Hike_synth.Bytes _) -> (
-        match storage_base scope v with
-        | Some (base, _) -> Some base
-        | None -> memory_value ctx v)
+        Some (Bil2llvm_value.Int (load_env_reg ctx llvm_builder v))
+      | Some (Hike_synth.Bytes _) ->
+        Base.Option.map ~f:(fun p -> Bil2llvm_value.Ptr p)
+          (match storage_base scope v with
+           | Some (base, _) -> Some base
+           | None -> memory_value ctx v)
       | _ -> None))
+
+(* A ptr value's real address (D6/D7): the storage's base GEP'd at the
+   entry-line offset minus the storage's own base.  The window's base IS
+   the entry line ([rel = 0]). *)
+let materialize ctx scope llvm_builder blk_tid
+    (storage : Hike_stack_model.ptr_storage) (off : Llvm.llvalue) :
+    Llvm.llvalue =
+  let addr_bits = ctx.addr_bits in
+  let entry =
+    match !(scope.cur_frame) with
+    | Some fr -> fr.entry_line
+    | None ->
+        Llvm.const_of_int64 (ctx.i64_ty) Hike_stack_model.segment_base false
+  in
+  let entry_rel () = Llvm.build_sub off entry "entry_rel" llvm_builder in
+  let rel_off rel =
+    let d = entry_rel () in
+    if Stdlib.Int64.equal rel 0L then d
+    else
+      Llvm.build_sub d (Llvm.const_of_int64 (ctx.i64_ty) rel false) ""
+        llvm_builder
+  in
+  let off_ptr () = Bil2llvm_int.to_ptr llvm_builder off in
+  let region_ptr id =
+    match storage_base_of_id scope ~addr_bits id with
+    | Some (base, rel) ->
+      Bil2llvm_ptr.offset ~addr_bits llvm_builder base (rel_off rel)
+    | None -> off_ptr ()
+  in
+  match storage with
+  | Hike_stack_model.Ptr_region id -> region_ptr id
+  | Hike_stack_model.Ptr_residue -> region_ptr Hike_stack_model.residue_id
+  | Hike_stack_model.Ptr_window -> (
+      let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Hike_abi.word in
+      match
+        Base.Option.first_some (get_ssaval scope wv) (get_local scope blk_tid wv)
+      with
+      | Some wp ->
+          Bil2llvm_ptr.offset ~addr_bits llvm_builder
+            (Bil2llvm_value.as_ptr llvm_builder wp) (entry_rel ())
+      | None -> off_ptr ())
+  | Hike_stack_model.Ptr_vla -> off_ptr ()

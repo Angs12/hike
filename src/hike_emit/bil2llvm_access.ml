@@ -26,9 +26,7 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
   let new_off =
     match create_offset ctx scope llvm_builder blk_tid exp with
     | Some o -> o
-    | None ->
-        as_integer ctx llvm_builder
-          (create_exp ctx scope llvm_builder blk_tid exp)
+    | None -> as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)
   in
   let size = Llvm.build_sub old_off new_off "vla_size" llvm_builder in
   let vla =
@@ -40,26 +38,30 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
   let pv =
     Hike_stack_model.vla_ptr ~addr_bits:ctx.addr_bits (Term.tid def)
   in
+  let vla = Bil2llvm_value.Ptr vla in
   insert_local scope blk_tid pv vla;
   bind_ssaval scope pv vla;
   vla
 
 (* The access's value: a memory node's load/store, or an arithmetic
-   pointer rebased to its storage. *)
-let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
+   pointer rebased to its storage.  [ptr_cell]: the def's whole value is
+   a word cell read as the pointer it holds. *)
+let access_value ~ptr_cell ctx scope llvm_builder blk_tid sub_tid def exp =
   match Hike_stack_model.mem_node_of exp with
   | None -> (
-      match want with
-      | Some _ -> (
-          match Hike_def_slots.def_ptr_storage def with
-          | Some storage -> (
-              match create_offset ctx scope llvm_builder blk_tid exp with
-              | Some off ->
-                  insert_ptr_offset scope (Def.lhs def) off;
-                  Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
-                    storage off
-              | None -> create_exp ?want ctx scope llvm_builder blk_tid exp)
-          | None -> create_exp ?want ctx scope llvm_builder blk_tid exp)
+      let storage =
+        if is_ptr_var scope (Def.lhs def) then Hike_def_slots.def_ptr_storage def
+        else None
+      in
+      match storage with
+      | Some storage -> (
+          match create_offset ctx scope llvm_builder blk_tid exp with
+          | Some off ->
+              insert_ptr_offset scope (Def.lhs def) off;
+              Bil2llvm_value.Ptr
+                (Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
+                   storage off)
+          | None -> create_exp ctx scope llvm_builder blk_tid exp)
       | None -> create_exp ctx scope llvm_builder blk_tid exp)
   | Some node ->
       let mv =
@@ -109,20 +111,25 @@ let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
       in
       (match mv, sec_comp, region_or_window, node with
       | Some mv, true, _, `Load (_, addr, size) ->
-          sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~store:false
+          sec_comp_access ~ptr_cell ctx scope llvm_builder blk_tid exp ~store:false
             mv addr ~data:None size
       | Some mv, true, _, `Store (_, addr, data, size) ->
-          sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~store:true mv
+          sec_comp_access ctx scope llvm_builder blk_tid exp ~store:true mv
             addr ~data:(Some data) size
       | _, _, true, `Load (_, addr, size) ->
-          storage_access ?want ~is_window ~storage ctx scope llvm_builder
+          storage_access ~ptr_cell ~is_window ~storage ctx scope llvm_builder
             blk_tid (`Load (addr, size)) exp
       | _, _, true, `Store (_, addr, data, size) ->
-          storage_access ?want ~is_window ~storage ctx scope llvm_builder
+          storage_access ~is_window ~storage ctx scope llvm_builder
             blk_tid (`Store (addr, data, size)) exp
-      | _ -> create_exp ?want ctx scope llvm_builder blk_tid exp)
+      | _, _, _, `Load (mem, addr, size)
+        when ptr_cell
+             && (match tls_classify ctx addr with Not_tls -> true | _ -> false) ->
+          tls_plain_load ~ptr_cell ctx scope llvm_builder blk_tid mem addr size
+      | _ -> create_exp ctx scope llvm_builder blk_tid exp)
 
-let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
+let mem_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid sub_tid
+    def_tag def exp =
   match def_tag with
   | Some def_tag when Hike_stack_model.is_return_address_tag def_tag -> (
       match Hike_stack_model.mem_node_of exp with
@@ -131,12 +138,14 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
              && Base.Option.is_none
                   (Hike_stack_model.store_data_of_rhs (Def.rhs def)) ->
           let marker = marker_of_size size in
-          let emit () = Llvm.undef (load_type ?want ctx size) in
+          let emit () =
+            cell_value ctx ~ptr:ptr_cell size
+              (Llvm.undef (cell_type ctx ~ptr:ptr_cell size))
+          in
           let rewrite marker = rewrite_mem_node exp addr size marker in
-          emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
-            ~rewrite
-      | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp)
-  | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp
+          emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
+      | _ -> access_value ~ptr_cell ctx scope llvm_builder blk_tid sub_tid def exp)
+  | _ -> access_value ~ptr_cell ctx scope llvm_builder blk_tid sub_tid def exp
 
 (* The analytical accesses are generated by [Hike_atomic], with all inputs
    captured before the tagged load. Operation identity comes from BAP. *)
@@ -182,7 +191,7 @@ let rec atomic_ptr ctx scope llvm_builder blk_tid mem addr =
         | Some (Hike_synth.Global _) -> true
         | _ -> false) ->
       let index =
-        as_integer ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
+        as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
       in
       Bil2llvm_memory.component_ptr ctx llvm_builder mv index
     | _ -> None
@@ -197,20 +206,17 @@ let rec atomic_ptr ctx scope llvm_builder blk_tid mem addr =
     | cls -> tls_ptr ctx scope llvm_builder blk_tid cls)
 
 (* A raw address's pointer: a constant resolves through the sections,
-   anything else materializes and casts. *)
-and raw_addr_ptr ctx llvm_builder a =
-  match Llvm.int64_of_const a with
-    | Some ai ->
-      Bil2llvm_memory.const_addr_ptr ctx llvm_builder ai
-        ~fallback:(fun () ->
-          Llvm.const_inttoptr
-            (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) (Int64.to_int ai))
-            ctx.ptr_ty)
-    | None ->
-      Bil2llvm_section.create_addr_ptr ctx llvm_builder a
-      |> fun p ->
-      if Llvm.type_of p = ctx.ptr_ty then p
-      else Llvm.build_inttoptr p ctx.ptr_ty "" llvm_builder
+   anything else is the value's pointer. *)
+and raw_addr_ptr ctx llvm_builder (a : Bil2llvm_value.t) =
+  match a with
+  | Bil2llvm_value.Int i when Base.Option.is_some (Llvm.int64_of_const i) ->
+    let ai = Base.Option.value_exn (Llvm.int64_of_const i) in
+    Bil2llvm_memory.const_addr_ptr ctx llvm_builder ai
+      ~fallback:(fun () ->
+        Llvm.const_inttoptr
+          (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) (Int64.to_int ai))
+          ctx.ptr_ty)
+  | _ -> as_ptr llvm_builder a
 
 (* Coerces a value to the atomic op's width. *)
 let atomic_width ctx llvm_builder v bits =
@@ -221,13 +227,14 @@ let atomic_width ctx llvm_builder v bits =
   else
     Llvm.build_zext v (Llvm.integer_type ctx.llvm_ctx bits) "" llvm_builder
 
-let create_atomic ctx scope llvm_builder blk_tid action : Llvm.llvalue =
+let create_atomic ctx scope llvm_builder blk_tid action : Bil2llvm_value.t =
   match action with
   | Atomic_value rhs -> create_exp ctx scope llvm_builder blk_tid rhs
   | Atomic_begin { kind; mem; addr; size } ->
+    Bil2llvm_value.Int (
     let bits = Size.in_bits size in
     let value exp = atomic_width ctx llvm_builder
-        (as_integer ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)) bits in
+        (as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)) bits in
     let ptr = atomic_ptr ctx scope llvm_builder blk_tid mem addr in
     match kind with
     | Rmw (op, operand) ->
@@ -240,22 +247,29 @@ let create_atomic ctx scope llvm_builder blk_tid action : Llvm.llvalue =
       let result = Bil2llvm_atomic.cmpxchg ptr expected desired llvm_builder in
       Llvm.set_alignment 1 result;
       Llvm.build_extractvalue result 0 "xold" llvm_builder
-    | Negate -> Bil2llvm_atomic.negate ctx.llvm_module ptr bits llvm_builder
+    | Negate -> Bil2llvm_atomic.negate ctx.llvm_module ptr bits llvm_builder)
 
 let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
-  let want = if is_ptr_var scope var then Some ctx.ptr_ty else None in
+  let ptr = is_ptr_var scope var in
+  let ptr_cell = ptr && (match exp with Bil.Load _ -> true | _ -> false) in
   let res =
     match Core.Map.find !(scope.atomic_plan) (Term.tid def) with
-    | Some action ->
-      let value = create_atomic ctx scope llvm_builder blk_tid action in
-      if Option.is_some want then as_pointer ctx llvm_builder value else value
+    | Some action -> create_atomic ctx scope llvm_builder blk_tid action
     | None ->
         if Hike_def_slots.def_is_dyn_alloc def then
           create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
-        else mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp
+        else
+          mem_access ~ptr_cell ctx scope llvm_builder blk_tid sub_tid def_tag
+            def exp
+  in
+  (* The def's value takes the def's type.  A store's def binds the
+     memory state, which carries no value to type. *)
+  let res =
+    if Base.Option.is_some (Hike_stack_model.store_data_of_rhs exp) then res
+    else Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits llvm_builder ~ptr res
   in
   insert_local scope blk_tid var res;
   (* An SSA version has one def: its value is valid wherever the def
@@ -264,4 +278,6 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   (* An environment register's def also stores the process-global cell:
      the value must outlive the sub (its lane rides no signature). *)
   if Option.is_some (Hike_synth.env_of ctx.synth var) then
-    ignore (Llvm.build_store res (env_global ctx var) llvm_builder)
+    ignore
+      (Llvm.build_store (Bil2llvm_value.ll res) (env_global ctx var)
+         llvm_builder)

@@ -36,11 +36,9 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         match get_ptr_offset scope sp_ver with
         | Some off ->
           Some
-            (Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
+            (Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
                Hike_stack_model.Ptr_residue off)
-        | None ->
-          let sp = lane_value ctx scope blk_tid ctx.sp in
-          Some (Bil2llvm_ptr.as_pointer ctx llvm_builder sp))
+        | None -> Some (as_ptr llvm_builder (lane_value ctx scope blk_tid ctx.sp)))
     | None -> None
   in
   (* Slot parameter i binds the block's [call_arg i] def; both names
@@ -53,7 +51,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       get_local scope blk_tid
         (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
     with
-    | Some v -> Bil2llvm_ptr.as_pointer ctx llvm_builder v
+    | Some v -> as_ptr llvm_builder v
     | None -> (
         match window_ptr () with
         | None -> Llvm.undef (Llvm.pointer_type ctx.llvm_ctx)
@@ -86,7 +84,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         slot_ptr i
       else if extern && is_fp_param ctx (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
-        let v = create_exp ctx scope llvm_builder blk_tid exp in
+        let v = as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp) in
         let v =
           if Llvm.integer_bitwidth (Llvm.type_of v) = 256 then
             Llvm.build_trunc v (ctx.i64_ty) "" llvm_builder
@@ -99,12 +97,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
            own storage.  The kind is a callee-side may — a site whose
            value is not itself a stack address passes the register's
            bits, coerced to the lane's pointer type. *)
-        let v = create_exp ctx scope llvm_builder blk_tid exp in
-        if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Pointer then v
-        else Llvm.build_inttoptr v (lane_type ctx arg) "" llvm_builder
-      else
-        let v = create_exp ctx scope llvm_builder blk_tid exp in
-        Bil2llvm_ptr.as_integer ctx llvm_builder v)
+        as_ptr llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)
+      else as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp))
 
 let ret_type_of_rets ctx rets =
   match rets with
@@ -153,21 +147,15 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
               (Var.name (Arg.lhs arg))
               (Llvm.value_name param))
       in
+      (* A pointer lane is an address lane, so the body takes the pointer
+         itself: `is_ptr_var` holds for every kind lane, because the type
+         pass puts its parameter in the pointer environment.  A pointer
+         parameter nothing claimed enters as its integer. *)
+      let value = lane_value_of arg param in
       let value =
-        match Llvm.classify_type (Llvm.type_of param) with
-        (* A pointer-typed lane is an address lane, so the body wants the
-           pointer itself: `is_ptr_var` holds for every kind lane, because
-           the type pass puts its parameter in the pointer environment.  The conversion
-           below is therefore unreachable for a lane this tree produced —
-           it stays as the identity for a pointer parameter nothing
-           claimed. *)
-        | Llvm.TypeKind.Pointer
-          when not (Hike_stack_model.is_ptr_arg arg)
-               && not (is_ptr_var scope (Arg.lhs arg)) ->
-            Llvm.build_ptrtoint param
-              (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
-              "" llvm_builder
-        | _ -> param
+        if Hike_stack_model.is_ptr_arg arg || is_ptr_var scope (Arg.lhs arg)
+        then value
+        else Bil2llvm_value.Int (as_int ctx llvm_builder value)
       in
       insert_local scope blk_tid (Arg.lhs arg) value;
       (* A parameter dominates every reader: bind it sub-wide too. *)
@@ -242,9 +230,12 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   (* A vector return lane binds as the register's integer bits. *)
   let bind_call_ret ctx scope blk_tid ret v =
     let v =
-      if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Vector then
-        Llvm.build_bitcast v (sort_lltype ctx (Arg.lhs ret)) "" llvm_builder
-      else v
+      match lane_vector ctx ret with
+      | Some _ ->
+        Bil2llvm_value.Int
+          (Llvm.build_bitcast v (typ_lltype ctx (Var.typ (Arg.lhs ret))) ""
+             llvm_builder)
+      | None -> lane_value_of ret v
     in
     bind_call_ret ctx scope blk_tid ret v
   in
@@ -258,9 +249,8 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
       in
       (* A sub-register lane needs the extension promise; a full-width
          lane carries it vacuously. *)
-      (match Llvm.classify_type (Llvm.type_of ret_var) with
-       | Llvm.TypeKind.Integer when
-           Llvm.integer_bitwidth (Llvm.type_of ret_var) < ctx.addr_bits ->
+      (match Var.typ (Arg.lhs ret) with
+       | Type.Imm w when w < ctx.addr_bits && not (lane_is_ptr ret) ->
          Llvm.add_call_site_attr ret_var
            (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
            Llvm.AttrIndex.Return
@@ -298,7 +288,7 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
             Bil2llvm_memory.load_ptr llvm_builder
               (Llvm.integer_type ctx.llvm_ctx
                  (Hike_stack_model.word_bits word))
-              (Bil2llvm_ptr.as_pointer ctx llvm_builder value)
+              (as_ptr llvm_builder value)
           in
           slots (i + 1) (loaded :: acc)
       | None -> acc
@@ -333,11 +323,8 @@ let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
     |> Base.Option.value_exn ~message:"Create call: expected call got return"
     |> label_tid
   in
-  let target_exp = create_exp ctx scope llvm_builder blk_tid target in
   let func_ptr =
-    if Llvm.classify_type (Llvm.type_of target_exp) = Llvm.TypeKind.Pointer
-    then target_exp
-    else Bil2llvm_section.create_addr_ptr ctx llvm_builder target_exp
+    as_ptr llvm_builder (create_exp ctx scope llvm_builder blk_tid target)
   in
   let fn, fn_typ = get_func ctx icall_tid in
   let rets = get_rets ctx icall_tid in
@@ -444,15 +431,13 @@ let create_thunk ctx (sub_tid : tid) =
               ^ " is not in the twin's convention (sub "
               ^ Tid.name sub_tid ^ ")")
       in
-      (* A forwarded lane takes the callee's own lane type: the twin's
-         convention is integer-honest, and a callee lane the kind pass
-         typed ptr receives the register's bits as a pointer. *)
-      let forward (a : Arg.t) (v : Llvm.llvalue) : Llvm.llvalue =
-        let ty = lane_type ctx a in
-        if Llvm.type_of v = ty then v
-        else if Llvm.classify_type ty = Llvm.TypeKind.Pointer then
-          Llvm.build_inttoptr v ty "" builder
-        else Llvm.build_ptrtoint v ty "" builder
+      (* A forwarded value takes its lane's type: the twin's convention
+         is integer-honest, and a callee lane the kind pass typed ptr
+         receives the register's bits as a pointer. *)
+      let forward (a : Arg.t) (v : Bil2llvm_value.t) : Llvm.llvalue =
+        Bil2llvm_value.ll
+          (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits builder
+             ~ptr:(lane_is_ptr a) v)
       in
       let call_args =
         Base.List.map args ~f:(fun a ->
@@ -475,7 +460,7 @@ let create_thunk ctx (sub_tid : tid) =
                     ^ Int.to_string i
                     ^ " is outside the twin's slots"))
             else if Var.same v window_var then window
-            else forward a (param_named v))
+            else forward a (Bil2llvm_value.Int (param_named v)))
       in
       let callee_fn, callee_typ = get_func ctx sub_tid in
       let r =
@@ -485,11 +470,12 @@ let create_thunk ctx (sub_tid : tid) =
       let n_callee = Base.List.length rets in
       let lane_value (i : int) (a : Arg.t) : Llvm.llvalue =
         let v =
-          if i >= n_callee then Llvm.undef (lane_type ctx a)
+          if i >= n_callee then lane_value_of a (Llvm.undef (lane_type ctx a))
           else
-            match rets with
-            | [ _ ] -> r
-            | _ -> Llvm.build_extractvalue r i "" builder
+            lane_value_of (Base.List.nth_exn rets i)
+              (match rets with
+               | [ _ ] -> r
+               | _ -> Llvm.build_extractvalue r i "" builder)
         in
         (* The synthetic lane is integer-honest; a callee lane the kind
            pass typed ptr is re-coerced like a forwarded argument. *)
@@ -521,16 +507,15 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
           | Some x -> x
           | None -> lane_value ctx scope blk_tid lane
         in
-        (* The ret lane's LLVM type drives: pointer lanes return the
-           pointer, integer lanes the integer form. *)
-        let ty = lane_type ctx ret in
-        match Llvm.classify_type ty with
-        | Llvm.TypeKind.Pointer ->
-            Bil2llvm_ptr.as_pointer ctx llvm_builder v
-        | Llvm.TypeKind.Vector ->
-            Llvm.build_bitcast (Bil2llvm_ptr.as_integer ctx llvm_builder v) ty ""
-              llvm_builder
-        | _ -> Bil2llvm_ptr.as_integer ctx llvm_builder v)
+        (* The ret lane's type drives: pointer lanes return the pointer,
+           the vector carrier the integer bits as its vector, integer
+           lanes the integer form. *)
+        if lane_is_ptr ret then as_ptr llvm_builder v
+        else
+          match lane_vector ctx ret with
+          | Some ty ->
+            Llvm.build_bitcast (as_int ctx llvm_builder v) ty "" llvm_builder
+          | None -> as_int ctx llvm_builder v)
   in
   match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -589,12 +574,11 @@ let create_external_boundary ctx scope llvm_builder blk_tid sub name =
   let args =
     Base.List.map reg_args ~f:(fun a ->
         let exp = lane_exp scope blk_tid (Arg.rhs a) in
-        let v = create_exp ctx scope llvm_builder blk_tid exp in
-        Bil2llvm_ptr.as_integer ctx llvm_builder v)
+        as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp))
   in
   let r = Llvm.build_call fn_typ callee (Array.of_list args) "" llvm_builder in
   match get_rets ctx (Term.tid sub) with
-  | [ ret ] -> bind_call_ret ctx scope blk_tid ret r
+  | [ ret ] -> bind_call_ret ctx scope blk_tid ret (Bil2llvm_value.Int r)
   | _ -> ();
   create_return ctx scope blk_tid llvm_builder sub
 

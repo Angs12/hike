@@ -10,10 +10,12 @@
   bil2llvm_env
   bil2llvm_exp
   bil2llvm_fp
+  bil2llvm_int
   bil2llvm_memory
   bil2llvm_ptr
   bil2llvm_section
   bil2llvm_synth
+  bil2llvm_value
   hike_def_slots)
  (libraries
   bap

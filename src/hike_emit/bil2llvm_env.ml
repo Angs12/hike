@@ -9,56 +9,6 @@ module Abi = Hike_abi
 
 module EHashtbl = Core.Hashtbl
 
-(* The pure integer constructors, shared by the expression lane and the
-   pointer module (which must not depend on the expression lane). *)
-(* A shift's amount reads at the shifted value's width: LLVM requires
-   the two operands to share the type, while the BIL's shift amount
-   carries its own (the ISA's i8 encoding idiom). *)
-let shift_amount llvm_builder (llvm_val1, llvm_val2) =
-  let t1 = Llvm.type_of llvm_val1 in
-  if Llvm.type_of llvm_val2 = t1 then llvm_val2
-  else if
-    Llvm.integer_bitwidth (Llvm.type_of llvm_val2)
-    < Llvm.integer_bitwidth t1
-  then Llvm.build_zext llvm_val2 t1 "" llvm_builder
-  else Llvm.build_trunc llvm_val2 t1 "" llvm_builder
-
-let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
-  match op with
-  | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
-  | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 "" llvm_builder
-  | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 "" llvm_builder
-  | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 "" llvm_builder
-  | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 "" llvm_builder
-  | MOD -> Llvm.build_urem llvm_val1 llvm_val2 "" llvm_builder
-  | SMOD -> Llvm.build_srem llvm_val1 llvm_val2 "" llvm_builder
-  | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
-  | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
-  | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
-  | LSHIFT ->
-    Llvm.build_shl llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
-      "" llvm_builder
-  | RSHIFT ->
-    Llvm.build_lshr llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
-      "" llvm_builder
-  | ARSHIFT ->
-    Llvm.build_ashr llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
-      "" llvm_builder
-  | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
-  | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
-  | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
-  | SLT -> Llvm.build_icmp Llvm.Icmp.Slt llvm_val1 llvm_val2 "" llvm_builder
-  | LE -> Llvm.build_icmp Llvm.Icmp.Ule llvm_val1 llvm_val2 "" llvm_builder
-  | SLE -> Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 "" llvm_builder
-
-let create_unop llvm_builder (op, llvm_val) =
-  match op with
-  | NEG -> Llvm.build_neg llvm_val "" llvm_builder
-  | NOT -> Llvm.build_not llvm_val "" llvm_builder
-
-(* Vars are keyed by name; the retype changes a var's sort but not its
-   identity (`Var.compare` is the ident), so a binding written for one
-   sort is readable through the other. *)
 type wvar = Var.t
 
 let wvar_of (v : Var.t) : wvar = v
@@ -71,10 +21,11 @@ end
 module WVarMap = Map.Make (WVar)
 
 type llvalue_map = Llvm.llvalue WVarMap.t
-type blk_llvals = {
-  phis : llvalue_map ref;
-  locals : llvalue_map ref;
-}
+
+(* A var's bound value, typed. *)
+type value_map = Bil2llvm_value.t WVarMap.t
+
+type blk_llvals = { locals : value_map ref }
 
 (* One owner of a byte range of a section: a component or a gap
    run.  [own_id] is the component id ([None] for a gap run). *)
@@ -207,7 +158,7 @@ type sub_scope = {
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
-  undef_vals : llvalue_map ref;
+  undef_vals : value_map ref;
   (* The Let-temp counter: names need only sub-scoped uniqueness. *)
   let_counter : int ref;
   (* The lock-marker brackets' per-def plans, computed once per sub
@@ -215,7 +166,7 @@ type sub_scope = {
   atomic_plan : atomic_action Tid.Map.t ref;
   (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
      call ret — one var, one value, valid wherever the def dominates. *)
-  ssavals : llvalue_map ref;
+  ssavals : value_map ref;
   (* The BIR phi terms' own llvalues, per block. *)
   bir_phis : llvalue_map ref Tid.Map.t ref;
   (* The SSA version maps, read off the blocks' [hike-ssa-versions]
@@ -259,10 +210,15 @@ let sort_lltype ctx var =
   if Hike_stack_model.is_window_var var then ctx.ptr_ty
   else typ_lltype ctx (Var.typ var)
 
-(* A var's type in the sub: a pointer when the type pass says so. *)
+(* A var's value is a pointer in the sub: the type pass's pointers,
+   the caller window, and the BIR's memory sorts. *)
+let var_is_ptr scope var =
+  Hike_stack_model.is_window_var var
+  || Hike_stack_model.is_ptr_typed !(scope.ptr_env) var
+  || match Var.typ var with Type.Mem _ -> true | _ -> false
+
 let var_lltype ctx scope var =
-  if Hike_stack_model.is_ptr_typed !(scope.ptr_env) var then ctx.ptr_ty
-  else sort_lltype ctx var
+  if var_is_ptr scope var then ctx.ptr_ty else typ_lltype ctx (Var.typ var)
 
 (* An environment register's process-global cell: one internal module
    global per register, zero-initialized.  Reads load it, defs and phi
@@ -289,9 +245,7 @@ let is_ptr_var scope (v : Var.t) : bool =
   (match Hike_synth.classify Hike_synth.empty v with
    | Some (Hike_synth.Bytes _) -> false
    | _ -> true)
-  && (Hike_stack_model.is_window_var v
-     || Hike_stack_model.is_ptr_typed !(scope.ptr_env) v
-     || match Var.typ v with Type.Mem _ -> true | _ -> false)
+  && var_is_ptr scope v
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -369,15 +323,30 @@ let synthetic_rets ctx =
    pointers, a return lane wider than a word (the vector carrier) is a
    vector of words so the machine returns it in the vector register, the
    rest keep the BIR type. *)
+let lane_is_ptr (a : Arg.t) : bool =
+  Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a
+  || Hike_stack_model.is_window_var (Arg.lhs a)
+  || match Var.typ (Arg.lhs a) with Type.Mem _ -> true | _ -> false
+
+(* The vector carrier: a return lane wider than a word. *)
+let lane_vector ctx (a : Arg.t) : Llvm.lltype option =
+  match Arg.intent a, Var.typ (Arg.lhs a) with
+  | Some Out, Type.Imm w when w > ctx.addr_bits ->
+    Some
+      (Llvm.vector_type (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
+         (w / ctx.addr_bits))
+  | _ -> None
+
 let lane_type ctx (a : Arg.t) : Llvm.lltype =
-  if Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a then
-    ctx.ptr_ty
+  if lane_is_ptr a then ctx.ptr_ty
   else
-    match Arg.intent a, Var.typ (Arg.lhs a) with
-    | Some Out, Type.Imm w when w > ctx.addr_bits ->
-      Llvm.vector_type (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
-        (w / ctx.addr_bits)
-    | _ -> sort_lltype ctx (Arg.lhs a)
+    match lane_vector ctx a with
+    | Some t -> t
+    | None -> typ_lltype ctx (Var.typ (Arg.lhs a))
+
+(* A lane's LLVM value at its typed home. *)
+let lane_value_of (a : Arg.t) (v : Llvm.llvalue) : Bil2llvm_value.t =
+  if lane_is_ptr a then Bil2llvm_value.Ptr v else Bil2llvm_value.Int v
 
 let get_args ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
@@ -451,11 +420,9 @@ let get_bb scope tid = bb_find !(scope.ll_bbs) tid
 let get_bb_opt scope tid = Core.Map.find !(scope.ll_bbs) tid
 
 let init_blk_llvals scope blk_tid =
-  let phis = ref WVarMap.empty in
-  let locals = ref WVarMap.empty in
   scope.blk_llvals :=
     Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid
-      ~data:{ phis; locals }
+      ~data:{ locals = ref WVarMap.empty }
 
 let insert_local scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
@@ -531,7 +498,7 @@ let get_bir_phi scope blk_tid var =
   | None -> None
 
 let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
-    Llvm.llvalue =
+    Bil2llvm_value.t =
   match WVarMap.find_opt (wvar_of var) !(scope.undef_vals) with
   | Some v -> v
   | None ->
@@ -546,6 +513,10 @@ let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
              | None -> Llvm.builder_at_end ctx.llvm_ctx entry)
       in
       let v = Llvm.build_freeze (Llvm.undef typ) "hike_undef" b in
+      let v =
+        if var_is_ptr scope var then Bil2llvm_value.Ptr v
+        else Bil2llvm_value.Int v
+      in
       scope.undef_vals := WVarMap.add (wvar_of var) v !(scope.undef_vals);
       v
 

@@ -276,13 +276,6 @@ let resolve_addr_in ctx llvm_builder section addr =
   Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| offset |] ""
     llvm_builder
 
-let create_addr_ptr ctx llvm_builder llvm_val =
-  if Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
-  then llvm_val
-  else
-    Llvm.build_inttoptr llvm_val (Llvm.pointer_type ctx.llvm_ctx) ""
-      llvm_builder
-
 (* A global [n x elem_ty] array; [None] zero-initializes. *)
 let create_array_global llvm_ctx llvm_module name elem_ty n slots =
   let g = Llvm.declare_global (Llvm.array_type elem_ty n) name llvm_module in

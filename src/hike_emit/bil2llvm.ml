@@ -102,7 +102,8 @@ let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
             else Llvm.build_br (get_bb scope t1) llvm_builder |> ignore
           else
             let cond =
-              create_exp ctx scope llvm_builder blk_tid (Jmp.cond j1)
+              as_int ctx llvm_builder
+                (create_exp ctx scope llvm_builder blk_tid (Jmp.cond j1))
             in
             Llvm.build_cond_br cond (target_bb t1) (target_bb t2)
               llvm_builder |> ignore
@@ -156,11 +157,15 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
                    | Bil.Var v -> is_ptr_var scope v
                    | _ -> false)
           in
-          let typ =
-            if incoming_ptr then ctx.ptr_ty else var_lltype ctx scope var
+          let res =
+            if incoming_ptr || var_is_ptr scope var then
+              Bil2llvm_value.Ptr (Llvm.build_empty_phi ctx.ptr_ty "" llvm_builder)
+            else
+              Bil2llvm_value.Int
+                (Llvm.build_empty_phi (typ_lltype ctx (Var.typ var)) ""
+                   llvm_builder)
           in
-          let res = Llvm.build_empty_phi typ "" llvm_builder in
-          insert_bir_phi scope tid var res;
+          insert_bir_phi scope tid var (Bil2llvm_value.ll res);
           insert_local scope tid var res;
           bind_ssaval scope var res
       | `Jmp _ -> ())
@@ -200,22 +205,16 @@ let fill_bir_phis ctx scope blks =
                     Base.Option.value_exn (get_ssaval scope v)
                 | _ -> create_exp ctx scope src_b src exp
               in
-              (* The phi's type is its lhs's; an integer incoming at a
-                 pointer phi inttoptrs (D13's one sanctioned value
-                 conversion). *)
+              (* The incoming takes the phi's type. *)
               let phi_is_ptr =
-                Llvm.classify_type (Llvm.type_of phi_ll) = Llvm.TypeKind.Pointer
+                match get_ssaval scope (Phi.lhs phi) with
+                | Some (Bil2llvm_value.Ptr _) -> true
+                | _ -> false
               in
               let value =
-                if phi_is_ptr && not (Bil2llvm_ptr.is_ptr_value value) then
-                  Bil2llvm_ptr.as_pointer ctx src_b value
-                else if (not phi_is_ptr) && Bil2llvm_ptr.is_ptr_value value
-                then
-                  (* A pointer incoming at an integer phi materializes
-                     the address as an integer (the as_int boundary's
-                     value conversion). *)
-                  Llvm.build_ptrtoint value (Llvm.type_of phi_ll) "" src_b
-                else value
+                Bil2llvm_value.ll
+                  (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits src_b
+                     ~ptr:phi_is_ptr value)
               in
               (* An environment register's phi also stores each
                  incoming to the process-global cell at its own source
@@ -242,7 +241,9 @@ let build_entry_block ctx scope llvm_builder fr sub =
   (* The SP is the entry line: its offset is the model base, its pointer
      is the residue's entry position.  Every pre-def SP read sees it. *)
   let sp0 =
-    Base.Option.value fr.entry_ptr ~default:(frame_stack0 fr)
+    match fr.entry_ptr with
+    | Some p -> Bil2llvm_value.Ptr p
+    | None -> Bil2llvm_value.Int (frame_stack0 fr)
   in
   insert_local scope Graphs.Tid.start ctx.sp sp0;
   bind_ssaval scope ctx.sp sp0;
@@ -295,8 +296,8 @@ let create_sub ctx scope sub =
           Hike_stack_model.region_ptr ~addr_bits:ctx.addr_bits s.id
         in
         Bil2llvm_synth.bind_storage scope pv s.base s.rel;
-        insert_local scope Graphs.Tid.start pv s.base;
-        bind_ssaval scope pv s.base);
+        insert_local scope Graphs.Tid.start pv (Bil2llvm_value.Ptr s.base);
+        bind_ssaval scope pv (Bil2llvm_value.Ptr s.base));
     (* The entry line is the model's fixed stack base; its residue pointer
        is the storage's base GEP'd at the entry position. *)
     let entry_line =

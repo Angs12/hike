@@ -16,13 +16,10 @@ let component_ptr ctx llvm_builder v index =
       Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| index |] ""
         llvm_builder)
 
-let const_load_in ctx llvm_builder section addr size =
-  let base = resolve_addr_in ctx llvm_builder section addr in
-  load_ptr llvm_builder (Llvm.integer_type ctx.llvm_ctx size) base
-
-let const_load ctx llvm_builder addr size ~fallback =
+let const_load ctx llvm_builder addr ty ~fallback =
   match section_of_addr ctx.address addr with
-  | Some section -> const_load_in ctx llvm_builder section addr size
+  | Some section ->
+      load_ptr llvm_builder ty (resolve_addr_in ctx llvm_builder section addr)
   | None -> fallback ()
 
 (* The section-owner pointer of a constant address: the atomic path's
@@ -40,25 +37,27 @@ let const_store ctx llvm_builder addr ~data ~fallback =
       store_ptr llvm_builder (data ()) base
   | None -> fallback ()
 
-let load ctx llvm_builder (addr, size) =
-  match Llvm.int64_of_const addr with
-  | Some v ->
-      const_load ctx llvm_builder (Word.of_int64 ~width:64 v) size
-        ~fallback:(fun () ->
-          let ptr = create_addr_ptr ctx llvm_builder addr in
-          load_ptr llvm_builder (Llvm.integer_type ctx.llvm_ctx size) ptr)
-  | None ->
-      let ptr = create_addr_ptr ctx llvm_builder addr in
-      load_ptr llvm_builder (Llvm.integer_type ctx.llvm_ctx size) ptr
+(* A raw access: a pointer address is the cell; an integer address
+   resolves through the sections when constant, else is the cell's
+   pointer. *)
+let load ctx llvm_builder (addr : Bil2llvm_value.t) ty =
+  let raw () = load_ptr llvm_builder ty (Bil2llvm_value.as_ptr llvm_builder addr) in
+  match addr with
+  | Bil2llvm_value.Int a -> (
+    match Llvm.int64_of_const a with
+    | Some v ->
+      const_load ctx llvm_builder (Word.of_int64 ~width:64 v) ty
+        ~fallback:raw
+    | None -> raw ())
+  | Bil2llvm_value.Ptr _ -> raw ()
 
-let store ctx llvm_builder (value, addr) =
-  match Llvm.int64_of_const addr with
-  | Some v ->
+let store ctx llvm_builder (value : Llvm.llvalue) (addr : Bil2llvm_value.t) =
+  let raw () = store_ptr llvm_builder value (Bil2llvm_value.as_ptr llvm_builder addr) in
+  match addr with
+  | Bil2llvm_value.Int a -> (
+    match Llvm.int64_of_const a with
+    | Some v ->
       const_store ctx llvm_builder (Word.of_int64 ~width:64 v)
-        ~data:(fun () -> value)
-        ~fallback:(fun () ->
-          let ptr = create_addr_ptr ctx llvm_builder addr in
-          store_ptr llvm_builder value ptr)
-  | None ->
-      let ptr = create_addr_ptr ctx llvm_builder addr in
-      store_ptr llvm_builder value ptr
+        ~data:(fun () -> value) ~fallback:raw
+    | None -> raw ())
+  | Bil2llvm_value.Ptr _ -> raw ()
