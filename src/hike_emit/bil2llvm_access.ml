@@ -11,24 +11,21 @@ open Bil2llvm_section
 let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
   Hike_def_slots.sec_tag def
 
-(* Runtime-sized allocas: the def's value is the post-event SP; the
-   alloca size is (old SP − new SP) in the model offset world.  The
-   [%vla] pointer IS the post-VLA SP's value. *)
+(* Runtime-sized allocas: the size is the SP version the event
+   decrements minus the def's own value (a pointer difference is an
+   integer).  The [%vla] pointer IS the post-VLA SP's value. *)
 let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
-  let entry_off =
-    Llvm.const_of_int64 (ctx.i64_ty) Hike_stack_model.segment_base false
+  let sp_before =
+    match Hike_def_slots.def_sp_before def with
+    | Some v -> v
+    | None -> failwith "hike: dynamic allocation without its SSA SP version"
   in
-  let old_off =
-    match entry_version scope blk_tid ctx.sp with
-    | Some v -> Base.Option.value (get_ptr_offset scope v) ~default:entry_off
-    | None -> entry_off
+  let size =
+    as_int ctx llvm_builder
+      (create_exp ctx scope llvm_builder blk_tid
+         (Bil.BinOp (Bil.MINUS, Bil.Var sp_before, exp)))
   in
-  let new_off =
-    match create_offset ctx scope llvm_builder blk_tid exp with
-    | Some o -> o
-    | None -> as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)
-  in
-  let size = Llvm.build_sub old_off new_off "vla_size" llvm_builder in
+  Llvm.set_value_name "vla_size" size;
   let vla =
     Llvm.build_array_alloca (Llvm.i8_type ctx.llvm_ctx) size "vla" llvm_builder
   in

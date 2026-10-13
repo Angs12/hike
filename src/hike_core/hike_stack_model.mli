@@ -268,7 +268,6 @@ module Versions : sig
   type t = {
     args : (var * var) list;
     rets : (var * var) list;
-    entry : (var * var) list;
   }
 
   val compare : t -> t -> int

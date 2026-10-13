@@ -711,18 +711,16 @@ module Versions = struct
   type t =
     { args : (var * var) list
     ; rets : (var * var) list
-    ; entry : (var * var) list
     }
   [@@deriving bin_io, compare, sexp]
 
-  let pp ppf { args; rets; entry } =
+  let pp ppf { args; rets } =
     let one ppf (a, b) =
       Format.fprintf ppf "(%a, %a)" Var.pp a Var.pp b
     in
-    Format.fprintf ppf "args=[%a] rets=[%a] entry=[%a]"
+    Format.fprintf ppf "args=[%a] rets=[%a]"
       (Format.pp_print_list one) args
       (Format.pp_print_list one) rets
-      (Format.pp_print_list one) entry
 end
 
 let versions_tag : Versions.t Value.Tag.t =

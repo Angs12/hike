@@ -1,6 +1,6 @@
 # Pins — test_hike_ssa
 
-Module: `test/unit/test_hike_ssa.ml` (group `hike_ssa`, ids `SSA-01`…`SSA-04`).
+Module: `test/unit/test_hike_ssa.ml` (group `hike_ssa`, ids `SSA-01`…`SSA-05`).
 Production mechanism: `src/hike_ssa.ml` (the `hike-ssa` pass) plus the
 emitter's SSA reading (`bil2llvm_env.ml`'s version stamps and sub-wide
 bindings; `bil2llvm_calls.ml`'s `bind_call_ret`).
@@ -16,3 +16,4 @@ production chain runs: types → split → ssa → emit; the emitter pins
 | SSA-02 | A join where a var's two defs meet materializes a phi: versioned lhs, two incoming exps (one per source block), each naming the source's def version. | In `iterated_frontier`'s consumer, skip the `Term.append phi_t` (place no phi). | SSA-02 FAILs: the join block has no `sj_v` phi (or an unversioned lhs / wrong incoming count). |
 | SSA-03 | Under SSA the sub's input lanes are its index-0 reads (`free_regs_ssa`); `is_ssa` marks the sub. | In `free_regs_ssa`, drop the `Var.index v = 0` filter. | SSA-03 FAILs: the versioned def lhs joins the input set. |
 | SSA-04 | Call return mints are definition sites for iterated-frontier phi placement, so the call result and bypass value meet at their join. | In `hike_ssa.ml`, place phi sites only at blocks with BIR defs and phis, omitting call return mints. | SSA-04 FAILs: the join has no versioned `RAX` phi carrying the call's return version. |
+| SSA-05 | A dynamic-allocation def records the SP version live before it (`Def_slots.def_sp_before`), though its rhs reads no SP; the emitter sizes the alloca as that version minus the def's value. | In `hike_ssa.ml`'s walk, stamp `Def.lhs d` instead of `top (Def.lhs d)`. | SSA-05 FAILs: the stamp is the base `RSP`, not the version the preceding adjust defines. |

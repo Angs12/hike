@@ -452,13 +452,6 @@ let lane_version scope blk_tid v =
          Base.List.Assoc.find vs.Hike_stack_model.Versions.args v
            ~equal:Var.same)
 
-(* The block's entry versions: the tops before its defs. *)
-let entry_version scope blk_tid v =
-  Core.Map.find !(scope.ssa_versions) blk_tid
-  |> Base.Option.bind ~f:(fun vs ->
-         Base.List.Assoc.find vs.Hike_stack_model.Versions.entry v
-           ~equal:Var.same)
-
 (* The block's call-ret mints. *)
 let mint_version scope blk_tid v =
   Core.Map.find !(scope.ssa_versions) blk_tid

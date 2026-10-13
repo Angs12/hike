@@ -411,13 +411,10 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     let rec walk sub' tid =
       let minted = ref [] in
-      let entry_vers = ref [] in
       let sub' =
         match Term.find blk_t sub' tid with
         | None -> sub'
         | Some blk ->
-            (* The entry map reads BEFORE this block's own defs. *)
-            entry_vers := live_vers ();
             let blk =
               Term.map phi_t blk ~f:(fun phi ->
                   Phi.with_lhs phi (new_name (Phi.lhs phi)))
@@ -429,6 +426,11 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
                      window) keep their base name: readers find them
                      by name. *)
                   if renamable (Def.lhs d) then
+                    let d =
+                      if Hike_def_slots.def_is_dyn_alloc d then
+                        Hike_def_slots.set_sp_before (top (Def.lhs d)) d
+                      else d
+                    in
                     Def.with_lhs d (new_name (Def.lhs d))
                   else d)
             in
@@ -444,8 +446,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
               Core.Map.set !stamps ~key:tid
                 ~data:
                   { Versions.args = arg_vers;
-                    rets = !minted;
-                    entry = !entry_vers };
+                    rets = !minted };
             Term.update blk_t sub' blk
       in
       (* The successors' phis take this block's tops; the SP incoming

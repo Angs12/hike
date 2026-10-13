@@ -35,6 +35,26 @@ let def_dyn_alloc_d : bool D.t =
 
 let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc_d d
 
+(* The SP version a dynamic allocation decrements.  The event def need
+   not read SP, so the SSA rename records the version live before it. *)
+type KB.conflict += Sp_before_conflict
+
+let () =
+  KB.Conflict.register_printer (function
+    | Sp_before_conflict ->
+        Some "hike: sp-before conflict: two SP versions were stamped for one def"
+    | _ -> None)
+
+let def_sp_before_d : var option D.t =
+  D.optional ~name:"hike-sp-before" ~inspect:Var.sexp_of_t
+    ~join:(fun a b -> if Var.equal a b then Ok a else Error Sp_before_conflict)
+    ~equal:Var.equal ~get_bump:"sp_before.get" ~put_bump:"sp_before.put" ~bump
+
+let def_sp_before (d : def term) : var option = D.get def_sp_before_d d
+
+let set_sp_before (v : var) (d : def term) : def term =
+  D.put def_sp_before_d (Some v) d
+
 (* The def computes an address value at/above the entry line; its emitted
    integer re-bases to the hike_window parameter. *)
 let def_window_value_d : bool D.t =
