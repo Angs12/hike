@@ -509,6 +509,13 @@ and learn_dests t cfg (f : func) : bool =
     true
   end
 
+(* The words of a bounded value with the text origin. *)
+and text_words (ws : Vsa.WordSet.t) : int64 list =
+  match Vsa.WordSet.origin ws with
+  | Some (Vsa.WordSet.Origin.Rip Hike_section.Text) ->
+    Base.Option.value (bounded_words ws) ~default:[]
+  | _ -> []
+
 (* The code words that leave the body: every word of a bounded
    value with the text origin in an integer argument register at a
    call, or in an integer return register at a return.  A code value the
@@ -523,11 +530,7 @@ and code_words t (f : func) : int64 list =
   let rets = ints t.abi.Hike_abi.return_regs in
   let text ~blk post v =
     match Vsa.denote_exp_at ~pre:post ~post ~blk (Bil.Var v) with
-    | Ok ws -> (
-      match Vsa.WordSet.origin ws with
-      | Some (Vsa.WordSet.Origin.Rip Hike_section.Text) ->
-        Base.Option.value (bounded_words ws) ~default:[]
-      | _ -> [])
+    | Ok ws -> text_words ws
     | Error _ -> []
   in
   Term.enum blk_t f.solved |> Seq.to_list
@@ -555,11 +558,7 @@ and materialised_words t (f : func) : int64 list =
   let wb = Hike_abi.word_bits t.abi in
   let text ~pre ~post ~blk ~def e =
     match Vsa.denote_exp_at ~pre ~post ~blk ~def e with
-    | Ok ws -> (
-      match Vsa.WordSet.origin ws with
-      | Some (Vsa.WordSet.Origin.Rip Hike_section.Text) ->
-        Base.Option.value (bounded_words ws) ~default:[]
-      | _ -> [])
+    | Ok ws -> text_words ws
     | Error _ -> []
   in
   Term.enum blk_t f.solved |> Seq.to_list
