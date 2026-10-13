@@ -333,10 +333,35 @@ let op_add' ~(op : Val.t -> Val.t -> Val.t)
      pieces merge — the tree stays tight between joins. *)
   {itree = Some (coalesce itree); width}
 
+(* A write wider than the word (the address width) is one write per
+   word, each at its own address: a word access is then an exact cell
+   hit, and a word's origin stays with it.  A width the word does not
+   divide, or a key a lane cannot move to, writes whole. *)
+let word_writes (word : int) (key : Key.t) (d : Val.t) : (Key.t * Val.t) list =
+  let w, e = Val.get_idx d in
+  if w <= word || w mod word <> 0 then [ (key, d) ]
+  else
+    let n = w / word in
+    List.init n ~f:(fun i ->
+        let pos = match e with LittleEndian -> i | BigEndian -> n - 1 - i in
+        Option.map (Key.shift key ~bytes:(pos * word / addressable_width))
+          ~f:(fun k ->
+              ( k,
+                Val.create
+                  (WordSet.extract ~hi:(((i + 1) * word) - 1) ~lo:(i * word)
+                     (Val.data d))
+                  e )))
+    |> Option.all
+    |> Option.value ~default:[ (key, d) ]
+
 let op_add ~(op : Val.t -> Val.t -> Val.t) ~(op_demoted : Val.t -> Val.t -> Val.t)
     (m : t) : key:Key.t -> data:Val.t -> t = match m.itree with
   | None -> fun ~key:_ ~data:_ -> {itree=None; width=m.width}
-  | Some t -> op_add' ~op ~op_demoted t m.width
+  | Some _ -> fun ~key ~data ->
+    List.fold (word_writes m.width key data) ~init:m ~f:(fun m (key, data) ->
+        match m.itree with
+        | Some t -> op_add' ~op ~op_demoted t m.width ~key ~data
+        | None -> m)
 
 (* Join-add: a store's fact widens both sides everywhere. *)
 let join_add : t -> key:Key.t -> data:Val.t -> t =
@@ -451,7 +476,7 @@ let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
   Option.value_map ~default (Seq.next ints) ~f:(fun ((_, hd), tl) ->
       f hd ints tl)
 
-let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
+let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
     (ints : (Key.t * Val.t) list) : Val.t option =
   if List.length ints < 2 then None
   else
@@ -482,23 +507,14 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
         in
         match check_contiguous first_end (List.tl_exn sorted) with
         | Some last_end when Stdlib.Int64.equal last_end (Key.upper k).pvalue ->
-          let assemble_piece (cell_k, cell_v) =
-            let offset_bytes =
-              Stdlib.Int64.sub (Key.lower cell_k).pvalue (Key.lower k).pvalue in
-            let bit_offset =
-              Stdlib.Int64.to_int
-               (Stdlib.Int64.mul offset_bytes
-                  (Stdlib.Int64.of_int addressable_width)) in
-            let cell_w = WordSet.bitwidth (Val.data cell_v) in
-            let shift_amt = match endian with
-              | LittleEndian -> bit_offset
-              | BigEndian -> req_width - bit_offset - cell_w in
-            let sized = WordSet.cast Bil.UNSIGNED req_width (Val.data cell_v) in
-            WordSet.lshift sized
-              (WordSet.singleton (Cbat_word.of_int ~width:req_width shift_amt))
+          (* The cells concatenate in address order (little-endian: a
+             higher address is higher bits), so each keeps its lanes. *)
+          let datas = List.map sorted ~f:(fun (_, v) -> Val.data v) in
+          let assembled =
+            match endian with
+            | LittleEndian -> List.reduce datas ~f:(fun lo hi -> WordSet.concat hi lo)
+            | BigEndian -> List.reduce datas ~f:WordSet.concat
           in
-          let pieces = List.map sorted ~f:assemble_piece in
-          let assembled = List.reduce pieces ~f:WordSet.logor in
           Option.map assembled ~f:(fun data -> Val.create data endian)
         | _ -> None
 
@@ -529,8 +545,29 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
                  lo_key_start hi_key_start
           then Val.join_at i v v' else Val.top i))
 
+(* The most grid points a strided read reads one by one. *)
+let strided_read_cap = 64
+
+(* A read at a strided key is the join of the reads at its grid points
+   (each an exact cell hit, an assembly, or top); past the cap the
+   strided key reads whole. *)
 let find (i : Val.idx) (m : t) (k : Key.t) =
-  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
+  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t ->
+      let lo = Key.lower k and hi = Key.upper k in
+      let step = Stdlib.Int64.of_int (Key.step k) in
+      let count =
+        Stdlib.Int64.succ
+          (Stdlib.Int64.unsigned_div (Stdlib.Int64.sub hi.pvalue lo.pvalue) step) in
+      if Key.step k > 1
+         && Stdlib.Int64.unsigned_compare count (Stdlib.Int64.of_int strided_read_cap) <= 0
+      then
+        List.init (Stdlib.Int64.to_int count) ~f:(fun n ->
+            let p =
+              { lo with
+                pvalue = Stdlib.Int64.add lo.pvalue (Stdlib.Int64.mul (Stdlib.Int64.of_int n) step) } in
+            find' i t { k with Key.lo = p; hi = p; step = 1 })
+        |> List.reduce_exn ~f:Val.join
+      else find' i t k)
 
 (* Index of values at a key. *)
 let find_idx' (m : itree) (k : Key.t) : Val.idx =

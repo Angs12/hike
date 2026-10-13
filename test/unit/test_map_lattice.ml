@@ -163,6 +163,46 @@ let tests : unit Alcotest.test list =
           && Hike_origin.equal (key_origin k_abs) Hike_origin.Abs
           && not (Mem.Key.overlap k_stack k_abs)));
 
+    pin "MAP-27"
+      "a write wider than the word is one cell per word: a 128-bit stack store \
+       reads back exactly as two words (the code word keeps its origin) and as \
+       one 128-bit value"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Text, 0x1000L, 0x1fffL) ];
+        let fn = Ws.module_address 0x11F0L in
+        Hike_origin.Regions.install [];
+        let img = Ws.singleton (w64 0x11E0) in
+        let v = Ws.concat fn img in
+        let at off = key_of (Ws.stack_word_i64 off) in
+        let m =
+          Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
+            ~key:(at (-0x38L)) ~data:(Mem.Val.create v LittleEndian) in
+        let read bits off = Mem.Val.data (Mem.find (bits, LittleEndian) m (at off)) in
+        check "MAP-27 (low word)" (Ws.equal (read 64 (-0x38L)) img);
+        check "MAP-27 (high word, with its origin)"
+          (Ws.equal (read 64 (-0x30L)) fn
+           && Ws.origin (read 64 (-0x30L)) = Some (Ws.Origin.Rip Hike_section.Text));
+        check "MAP-27 (the 128-bit read)" (Ws.equal (read 128 (-0x38L)) v));
+
+    pin "MAP-28"
+      "a strided read is the join of its grid points: every point a word cell \
+       joins exactly; a point with no cell makes the read top"
+      (fun () ->
+        let at off = key_of (Ws.stack_word_i64 off) in
+        let word off n m =
+          Mem.add m ~key:(at off) ~data:(Mem.Val.create (Ws.singleton (w64 n)) LittleEndian) in
+        let m =
+          Mem.top { Mem.addr_width = 64; addressable_width = 8 }
+          |> word (-0x38L) 1 |> word (-0x30L) 2 |> word (-0x28L) 3 in
+        let grid lo n =
+          key_of
+            (Ws.add (Ws.stack_word_i64 lo)
+               (Ws.of_list ~width:64 (List.init n (fun i -> w64 (8 * i))))) in
+        let read k = Mem.Val.data (Mem.find (64, LittleEndian) m k) in
+        check "MAP-28 (three cells)"
+          (Ws.equal (read (grid (-0x38L) 3)) (Ws.of_list ~width:64 [ w64 1; w64 2; w64 3 ]));
+        check "MAP-28 (a missing cell)" (Ws.is_top (read (grid (-0x38L) 4))));
+
 
 
 

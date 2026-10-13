@@ -131,6 +131,17 @@ let covers (k : t) (p : t) : bool =
                   (Stdlib.Int64.sub p.lo.pvalue k.lo.pvalue)
                   (Stdlib.Int64.of_int k.step)) 0L)
 
+(* [k] moved [bytes] up its line, stride kept; None when the move would
+   wrap one bound past the other. *)
+let shift (k : t) ~(bytes : int) : t option =
+  let n = Stdlib.Int64.of_int bytes in
+  let mv (p : point) : point =
+    let v = Stdlib.Int64.add p.pvalue n in
+    { p with pvalue = (if p.pwidth >= 64 then v else Stdlib.Int64.logand v (mask p.pwidth)) }
+  in
+  let lo = mv k.lo and hi = mv k.hi in
+  if le lo hi then Some { k with lo; hi } else None
+
 (* Sub-range of one owner key: the owner's stride carries. *)
 let piece (k : t) ~lo ~hi : t = {origin = k.origin; lo; hi; step = k.step}
 

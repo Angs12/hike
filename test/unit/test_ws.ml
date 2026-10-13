@@ -300,6 +300,45 @@ let tests : unit Alcotest.test list =
             check "WS-38 (widen_join)" (stays_plain (Ws.widen_join a b)))
           [rel, plain; plain, rel]);
 
+    pin "WS-44" "a code word keeps its origin through pad, concat and low (movq/punpcklqdq)"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Text, 0x1000L, 0x1fffL) ];
+        let fn = Ws.module_address 0x11F0L in
+        Hike_origin.Regions.install [];
+        let img = Ws.singleton (q64 0x11E0L) in
+        let ymm1 = Ws.concat (Ws.top 128) (Ws.cast Bil.UNSIGNED 128 fn) in
+        let ymm0 =
+          Ws.concat (Ws.concat (Ws.top 128) (Ws.cast Bil.LOW 64 ymm1)) img in
+        let x = Ws.cast Bil.LOW 128 ymm0 in
+        check "WS-44 (width)" (Ws.bitwidth x = 128);
+        check "WS-44 (the high lane is the code word)"
+          (let hi = Ws.extract ~hi:127 ~lo:64 x in
+           Ws.equal hi fn && Ws.origin hi = Some (Ws.Origin.Rip Hike_section.Text));
+        check "WS-44 (the low lane is the plain word)"
+          (Ws.equal (Ws.extract ~hi:63 ~lo:0 x) img);
+        check "WS-44 (the lanes denote their concat)"
+          (Ws.max_elem x = Some (Cbat_word.concat (q64 0x11F0L) (q64 0x11E0L))));
+
+    pin "WS-45" "lane values join, widen and compare lane by lane"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Text, 0x1000L, 0x1fffL) ];
+        let f1 = Ws.module_address 0x11F0L and f2 = Ws.module_address 0x1210L in
+        Hike_origin.Regions.install [];
+        let img = Ws.singleton (q64 0x11E0L) in
+        let a = Ws.concat f1 img and b = Ws.concat f2 img in
+        let j = Ws.union a b in
+        check "WS-45 (the joined high lane keeps its section)"
+          (Ws.origin (Ws.extract ~hi:127 ~lo:64 j) = Some (Ws.Origin.Rip Hike_section.Text)
+           && Ws.equal (Ws.extract ~hi:127 ~lo:64 j) (Ws.union f1 f2));
+        check "WS-45 (the join covers both sides, not the reverse)"
+          (Ws.precedes a j && Ws.precedes b j && not (Ws.precedes j a));
+        check "WS-45 (bottom precedes a lane value)" (Ws.precedes (Ws.bottom 128) a);
+        check "WS-45 (bottom is the join identity)" (Ws.equal (Ws.union (Ws.bottom 128) a) a);
+        check "WS-45 (widening a lane value with itself is stable)"
+          (Ws.equal (Ws.widen_join a a) a);
+        check "WS-45 (a plain-only extract is the plain word)"
+          (Ws.equal (Ws.extract ~hi:63 ~lo:0 a) img && Ws.origin (Ws.extract ~hi:63 ~lo:0 a) = None));
+
     pin "WS-43" "landmark extrapolation keeps a shared module section"
       (fun () ->
         Hike_origin.Regions.install [ (Hike_section.Rodata, 0x2000L, 0x2fffL) ];

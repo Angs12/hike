@@ -33,12 +33,16 @@ type fset = FinSet.t
    flattens; a mixed-origin pool materialises to [Abs]).
    Extrema answer from the offsets; shape-losing ops degrade to that
    plain hull; ops keeping unknown base bits answer top — the base is
-   a tag except its certified low bits. *)
+   a tag except its certified low bits.
+   An origin rides a pointer-sized word: a wider value whose words carry
+   origins is [Lanes] (low lane first, at least one lane with an origin);
+   it denotes the concatenation of its lanes. *)
 type t =
   | Clp of P.t
   | FinSet of FinSet.t
   | Many of t list
   | Rel of Origin.t * P.t
+  | Lanes of t list
 [@@deriving bin_io, sexp, compare]
 type idx = int
 
@@ -60,12 +64,23 @@ let rec bitwidth (t : t) : int =
   | Clp ps -> P.bitwidth ps
   | FinSet s -> FinSet.bitwidth s
   | Many ps -> List.fold ps ~init:0 ~f:(fun a q -> Stdlib.max a (bitwidth q))
+  | Lanes ls -> List.fold ls ~init:0 ~f:(fun a q -> a + bitwidth q)
 
 let rec is_bottom (t : t) : bool =
   match t with
   | Clp ps | Rel (_, ps) -> P.is_bottom ps
   | FinSet s -> Cbat_word.is_zero (FinSet.cardinality s)
   | Many ps -> List.for_all ps ~f:is_bottom
+  | Lanes ls -> List.exists ls ~f:is_bottom
+
+(* Whether a lane carries an origin worth keeping: some leaf is relative
+   to an origin other than [Abs]. *)
+let rec carries_origin (t : t) : bool =
+  match t with
+  | Rel (o, _) -> not (Origin.equal o Origin.Abs)
+  | Many ps -> List.exists ps ~f:carries_origin
+  | Lanes _ -> true
+  | Clp _ | FinSet _ -> false
 
 (* |segment| * |offs| at width 65.  The product SATURATES: a wrapped
    product would under-report. *)
@@ -100,6 +115,22 @@ let clp_of_finset fs : clp =
   | [] -> Clp.bottom width
   | [ x ] -> Clp.singleton x
   | l -> Clp.of_list ~width l
+
+(* The concat of two plain leaves ([hi] the high bits), as the op table's
+   Concat row computes it: two finite sets exactly, else the hull of the
+   piece concat. *)
+let concat_leaf (hi : t) (lo : t) : t =
+  let pieces (q : t) : P.t =
+    match q with
+    | FinSet s -> pieces_of_finset s
+    | Clp ps -> ps
+    | Rel _ | Many _ | Lanes _ -> P.top (bitwidth q)
+  in
+  match hi, lo with
+  | FinSet a, FinSet b -> FinSet (FinSet.concat a b)
+  | _ ->
+    let ps = P.concat (pieces hi) (pieces lo) in
+    Clp (match hull_of_pieces ps with Some p -> P.of_progression p | None -> ps)
 
 (* ---------------- constructors ---------------- *)
 
@@ -208,9 +239,37 @@ let rec to_plain (t : t) : t =
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
-     | Clp _ | FinSet _ | Rel _ as q -> q
+     | Clp _ | FinSet _ | Rel _ | Lanes _ as q -> q
      | Many ps' -> Many ps')
+  | Lanes _ -> flatten t
   | Clp _ | FinSet _ -> t
+
+(* The plain value of a lane sequence: the lanes concatenate as [concat]
+   computes over plain operands — an absolute-line word is its offsets,
+   and a relative word makes the whole concat top. *)
+and flatten (t : t) : t =
+  match t with
+  | Lanes ls ->
+    let leaves_of q = match q with Many ps -> ps | q -> [ q ] in
+    let relative q =
+      List.exists (leaves_of q) ~f:(function
+        | Rel (o, _) -> not (absolute_line o)
+        | _ -> false)
+    in
+    if List.exists ls ~f:relative then canonical [ Clp (P.top (bitwidth t)) ]
+    else
+      let plain q =
+        canonical
+          (List.map (leaves_of q) ~f:(function Rel (_, offs) -> Clp offs | q -> q))
+      in
+      (match List.map ls ~f:plain with
+       | [] -> FinSet (FinSet.bottom 1)
+       | lo :: rest ->
+         List.fold rest ~init:lo ~f:(fun acc hi ->
+             canonical
+               (List.concat_map (leaves_of hi) ~f:(fun h ->
+                    List.map (leaves_of acc) ~f:(fun l -> concat_leaf h l)))))
+  | q -> q
 
 (* ---------------- canonicalization ---------------- *)
 
@@ -220,8 +279,13 @@ let rec to_plain (t : t) : t =
    an over-budget FinSet pool promotes to its exact piece runs; a lone
    small plain piece union keeps its exact FinSet twin (the tier).
    The relative pool groups by origin: a pool of two or more origins
-   is not a value — its members materialise into the plain pool. *)
+   is not a value — its members materialise into the plain pool.  A lane
+   member pools as its plain value. *)
 and canonical (ps : t list) : t =
+  let ps =
+    if List.exists ps ~f:(function Lanes _ -> true | _ -> false)
+    then List.map ps ~f:flatten else ps
+  in
   let alive = List.filter ps ~f:(fun q -> not (is_bottom q)) in
   let rels =
     List.filter_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
@@ -346,7 +410,7 @@ and canonical (ps : t list) : t =
 
 
 (* The plain twin: a symbolic piece materialized, a plain value as-is. *)
-let plain_view (t : t) : t = match t with Rel _ -> to_plain t | q -> q
+let plain_view (t : t) : t = match t with Rel _ | Lanes _ -> to_plain t | q -> q
 
 (* The value's runtime origin: [Some o] exactly when every piece of the
    value is relative to the one origin [o]; absolute, plain, and
@@ -354,7 +418,7 @@ let plain_view (t : t) : t = match t with Rel _ -> to_plain t | q -> q
 let rec origin (t : t) : Origin.t option =
   match t with
   | Rel (o, _) -> Some o
-  | Clp _ | FinSet _ -> None
+  | Clp _ | FinSet _ | Lanes _ -> None
   | Many ps ->
     (match List.map ps ~f:origin with
      | (Some o) :: rest ->
@@ -377,6 +441,7 @@ let rec plain_is_top (t : t) : bool =
   | FinSet _ -> false
   | Rel (_, offs) -> P.is_top offs
   | Many ps -> List.exists ps ~f:plain_is_top
+  | Lanes ls -> List.for_all ls ~f:plain_is_top
 
 (* The plain single-progression hull of the whole value. *)
 let as_clp (t : t) : clp =
@@ -391,8 +456,7 @@ let as_clp (t : t) : clp =
       List.filter_map ps ~f:(function
         | FinSet s -> Some (clp_of_finset s)
         | Clp hps -> hull_of_pieces hps
-        | Rel _ -> None
-        | Many _ -> None)
+        | Rel _ | Many _ | Lanes _ -> None)
     in
     (match hulls with
      | [] -> Clp.top 64
@@ -412,7 +476,7 @@ let bottom i = FinSet (FinSet.bottom i)
 let top i = canonical [ Clp (P.top i) ]
 
 (* One leaf, or the [Many] pieces. *)
-let leaves (t : t) : t list = match t with Many ps -> ps | q -> [ q ]
+let leaves (t : t) : t list = match flatten t with Many ps -> ps | q -> [ q ]
 
 (* The pairwise leaf fan-out: [f] per leaf pair, canonically merged. *)
 let pairwise (f : t -> t -> t list) (t1 : t) (t2 : t) : t =
@@ -425,23 +489,26 @@ let pairwise (f : t -> t -> t list) (t1 : t) (t2 : t) : t =
 (* The leaf of each kind: a canonical value carries at most one (the
    [canonical] fold collapses same-kind leaves), so the first match is
    the only one. *)
-let clp_leaf (t : t) : P.t option =
+let rec clp_leaf (t : t) : P.t option =
   match t with
   | Clp ps -> Some ps
   | Many ps -> List.find_map ps ~f:(function Clp x -> Some x | _ -> None)
+  | Lanes _ -> clp_leaf (flatten t)
   | FinSet _ | Rel _ -> None
 
-let fs_leaf (t : t) : fset option =
+let rec fs_leaf (t : t) : fset option =
   match t with
   | FinSet s -> Some s
   | Many ps -> List.find_map ps ~f:(function FinSet x -> Some x | _ -> None)
+  | Lanes _ -> fs_leaf (flatten t)
   | Clp _ | Rel _ -> None
 
-let rel_leaf (t : t) : (Origin.t * P.t) option =
+let rec rel_leaf (t : t) : (Origin.t * P.t) option =
   match t with
   | Rel (o, x) -> Some (o, x)
   | Many ps ->
     List.find_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
+  | Lanes _ -> rel_leaf (flatten t)
   | Clp _ | FinSet _ -> None
 
 (* The join pairing: every kind carried by EITHER side contributes — a
@@ -477,11 +544,12 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
        | None -> None)
     | Clp ps -> pair (P.min_elem ps) (P.max_elem ps)
     | FinSet s -> pair (FinSet.min_elem s) (FinSet.max_elem s)
-    | Many _ -> None
+    | Many _ | Lanes _ -> None
   in
   let rec go acc (t : t) =
     match t with
     | Many ps -> List.fold ps ~init:acc ~f:go
+    | Lanes _ -> go acc (flatten t)
     | q ->
       (match leaf q, acc with
        | None, acc -> acc
@@ -567,6 +635,7 @@ let rec cardinality (t : t) : word =
         let c = Cbat_word.cast Bil.UNSIGNED width (cardinality q) in
         let s = Cbat_word.add acc c in
         if Cbat_word.(<) s acc then Cbat_word.ones width else s)
+  | Lanes _ -> cardinality (flatten t)
 
 (* Fold the leaves' extrema left-to-right, [better] picking the winner
    (ties go to the accumulator, matching the historical order). *)
@@ -575,6 +644,7 @@ let extremum (leaf : t -> word option)
   let rec go acc (t : t) =
     match t with
     | Many ps -> List.fold ps ~init:acc ~f:go
+    | Lanes _ -> go acc (flatten t)
     | q ->
       (match leaf q, acc with
        | None, acc -> acc
@@ -592,7 +662,7 @@ let min_elem (t : t) : word option =
          Option.map (plain_bounds o offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
        | Clp ps -> P.min_elem ps
        | FinSet s -> FinSet.min_elem s
-       | Many _ -> None)
+       | Many _ | Lanes _ -> None)
     (fun m a -> if Cbat_word.compare m a < 0 then m else a)
     t
 
@@ -605,7 +675,7 @@ let max_elem (t : t) : word option =
          Option.map (plain_bounds o offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
        | Clp ps -> P.max_elem ps
        | FinSet s -> FinSet.max_elem s
-       | Many _ -> None)
+       | Many _ | Lanes _ -> None)
     (fun m a -> if Cbat_word.compare m a > 0 then m else a)
     t
 
@@ -685,7 +755,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
   | Clp ps -> via_pieces ps
   | FinSet s ->
     (if dir < 0 then FinSet.min_elem_signed s else FinSet.max_elem_signed s)
-  | Many _ -> None
+  | Many _ | Lanes _ -> None
 
 let extremum_signed ~(dir : int) (t : t) : word option =
   extremum (signed_leaf ~dir)
@@ -703,6 +773,7 @@ let rec splits_by (t : t) (w : Cbat_word.t) =
   | Clp offs | Rel (_, offs) -> P.splits_by offs w
   | FinSet s -> FinSet.splits_by s w
   | Many ps -> List.for_all ps ~f:(fun q -> splits_by q w)
+  | Lanes _ -> splits_by (flatten t) w
 
 (* Hull test: an over-approximation of membership in the projection. *)
 let rec elem w (t : t) =
@@ -720,6 +791,7 @@ let rec elem w (t : t) =
   | Clp ps -> P.elem w ps
   | FinSet s -> FinSet.elem w s
   | Many ps -> List.exists ps ~f:(fun q -> elem w q)
+  | Lanes _ -> elem w (flatten t)
 
 (* Materializes the base-0 slice only; the full projection is
    8 MiB of elements. *)
@@ -742,6 +814,7 @@ let rec iter (t : t) : word list =
   | Clp ps -> P.elements ps
   | FinSet s -> FinSet.iter s
   | Many ps -> List.concat_map ps ~f:iter
+  | Lanes _ -> iter (flatten t)
 
 (* The fixpoint's convergence check calls this on every var of every
    visit: the leaf arms avoid the derived compare's list machinery. *)
@@ -750,7 +823,7 @@ let rec equal (t1 : t) (t2 : t) : bool =
   | Clp a, Clp b -> P.equal a b
   | FinSet a, FinSet b -> FinSet.equal a b
   | Rel (o1, a), Rel (o2, b) -> Origin.equal o1 o2 && P.equal a b
-  | Many a, Many b ->
+  | Many a, Many b | Lanes a, Lanes b ->
     List.length a = List.length b
     && List.for_all2_exn a b ~f:equal
   | _ -> false
@@ -929,7 +1002,7 @@ let repr_of (q : t) : repr =
   match q with
   | FinSet s -> Fs s
   | Clp ps -> Ps ps
-  | Rel _ | Many _ -> Opaque
+  | Rel _ | Many _ | Lanes _ -> Opaque
 
 let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   let wide () = P.top (Stdlib.max (bitwidth q1) (bitwidth q2)) in
@@ -955,8 +1028,9 @@ let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
     (match to_plain q with
      | Clp ps -> canonical [ Clp (f_clp ps) ]
      | FinSet s -> canonical [ FinSet (f_fs s) ]
-     | Rel _ | Many _ -> t)
+     | Rel _ | Many _ | Lanes _ -> t)
   | Many ps -> canonical (List.map ps ~f:(fun q -> lift_unop f_clp f_fs q))
+  | Lanes _ -> lift_unop f_clp f_fs (flatten t)
 
 (* ---------------- stack queries ---------------- *)
 
@@ -1015,7 +1089,7 @@ let address_pieces (t : t) : (Origin.t * P.t) option =
   | Rel (o, offs) -> Some (key_line o, offs)
   | Clp ps -> Some (Origin.Abs, ps)
   | FinSet s -> Some (Origin.Abs, pieces_of_finset s)
-  | Many _ -> None
+  | Many _ | Lanes _ -> None
 
 (* A finite non-wrapped progression split at its value midpoint; a
    singleton has no halves. *)
@@ -1051,7 +1125,7 @@ let filter_addresses (t : t)
       Some (List.fold kept ~init:(P.bottom (P.bitwidth ps))
               ~f:(fun acc p -> P.join acc (P.of_progression p))) in
   match t with
-  | Rel (Origin.Vla _, _) | Many _ -> t
+  | Rel (Origin.Vla _, _) | Many _ | Lanes _ -> t
   | Rel (o, ps) ->
     Option.value_map (filter (key_line o) ps) ~default:t ~f:(fun ps -> Rel (o, ps))
   | Clp ps ->
@@ -1111,7 +1185,7 @@ let stride (t : t) : int =
                if v > 1 then Some v else Some 1
              | Error _ -> Some 1)
           | None -> Some 1))
-    | Many _ -> None
+    | Many _ | Lanes _ -> None
   in
   match t with
   | Many ps ->
@@ -1246,7 +1320,7 @@ let singleton_of (q : t) : word option =
     (match FinSet.min_elem s, FinSet.max_elem s with
      | Some a, Some b -> pair a b
      | _ -> None)
-  | Rel _ | Many _ -> None
+  | Rel _ | Many _ | Lanes _ -> None
 
 
 (* [f] over the offsets while enumerable; top past the budget. *)
@@ -1484,6 +1558,7 @@ let keep_section ~(old : t) ~(new_ : t) (r : t) : t =
 let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
   let top_w () = top (top_width op (bitwidth t1) (bitwidth t2)) in
   match t1, t2 with
+  | Lanes _, _ | _, Lanes _ -> lift2 op (flatten t1) (flatten t2)
   | Rel (Origin.Abs, offs), _ -> lift2 op (Clp offs) t2
   | _, Rel (Origin.Abs, offs) -> lift2 op t1 (Clp offs)
   | Rel (Origin.Rip p, a), Rel (Origin.Rip p', b)
@@ -1561,6 +1636,7 @@ let rec lift1 (op : unop) (t : t) : t =
     | _ -> top (Stdlib.max 1 (bitwidth t))
   in
   match t with
+  | Lanes _ -> lift1 op (flatten t)
   | Rel (Origin.Abs, offs) -> plain_unop op (Clp offs)
   | Rel (Origin.Rip _, _) as v when (match op with
       | Extract (Some 63, 0) | Cast (_, 64) -> true
@@ -1594,12 +1670,121 @@ and plain_unop (op : unop) (t : t) : t =
   | Lnot -> blind_unop P.lnot FinSet.lnot t
   | Neg -> blind_unop P.neg FinSet.neg t
 
-let union t1 t2 : t = lift2 Union t1 t2
+(* Degenerate cast keeps top. *)
+let extract_plain ?hi ?lo t =
+  let lo_v = Option.value ~default:0 lo in
+  if (match hi with Some h -> h < lo_v | None -> false)
+  then top (Stdlib.max 1 (bitwidth t))
+  else
+    match t with
+    | Rel _ | Lanes _ -> lift1 (Extract (hi, lo_v)) t
+    | _ -> lift_unop (P.extract ?hi ?lo) (FinSet.extract ?hi ?lo) t
+
+let cast_plain c sz t =
+  if sz <= 0 then top (Stdlib.max 1 (bitwidth t))
+  else
+    match t with
+    | Rel _ | Lanes _ -> lift1 (Cast (c, sz)) t
+    | _ -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
+
+(* ---------------- word lanes ---------------- *)
+
+let lanes_of (t : t) : t list = match t with Lanes ls -> ls | q -> [ q ]
+
+(* The canonical lane value of [ls] (low lane first, non-empty): nested
+   lanes splice, adjacent lanes without an origin merge into their plain
+   concat, and a sequence with no origin lane is its plain value. *)
+let make_lanes (ls : t list) : t =
+  let ls = List.concat_map ls ~f:lanes_of in
+  if List.exists ls ~f:is_bottom then
+    bottom (List.fold ls ~init:0 ~f:(fun a q -> a + bitwidth q))
+  else
+    let merged =
+      List.fold ls ~init:[] ~f:(fun acc q ->
+          match acc with
+          | prev :: rest when not (carries_origin prev || carries_origin q) ->
+            flatten (Lanes [ prev; q ]) :: rest
+          | _ -> q :: acc)
+    in
+    match List.rev merged with [ q ] -> q | ls -> Lanes ls
+
+(* Bits [lo..hi] of a lane value are the lanes they cover: an exactly
+   covered lane whole (its origin kept), a partly covered one extracted
+   plainly. *)
+let extract ?hi ?lo t =
+  match t with
+  | Lanes ls ->
+    let w = bitwidth t in
+    let lo_v = Option.value lo ~default:0 in
+    let hi_v = Option.value hi ~default:(w - 1) in
+    if lo_v < 0 || hi_v < lo_v || hi_v >= w then extract_plain ?hi ?lo t
+    else
+      List.fold ls ~init:(0, []) ~f:(fun (off, acc) q ->
+          let qw = bitwidth q in
+          let a = Stdlib.max lo_v off and b = Stdlib.min hi_v (off + qw - 1) in
+          let acc =
+            if a > b then acc
+            else if a = off && b = off + qw - 1 then q :: acc
+            else extract_plain ~hi:(b - off) ~lo:(a - off) q :: acc
+          in
+          (off + qw, acc))
+      |> snd |> List.rev |> make_lanes
+  | _ -> extract_plain ?hi ?lo t
+
+(* An unsigned widening of a value with an origin appends a zero lane; a
+   lane value narrows to its low lanes ([HIGH]: its high lanes). *)
+let cast c sz t =
+  let w = bitwidth t in
+  match c, t with
+  | Bil.UNSIGNED, _ when sz > w && carries_origin t ->
+    make_lanes [ t; singleton (Cbat_word.zero (sz - w)) ]
+  | Bil.HIGH, Lanes _ when sz > 0 && sz <= w -> extract ~hi:(w - 1) ~lo:(w - sz) t
+  | _, Lanes _ when sz > 0 && sz <= w -> extract ~hi:(sz - 1) ~lo:0 t
+  | _ -> cast_plain c sz t
+
+(* A concat with an origin operand keeps both operands' lanes. *)
+let concat t1 t2 =
+  if carries_origin t1 || carries_origin t2 then
+    make_lanes (lanes_of t2 @ lanes_of t1)
+  else lift2 Concat t1 t2
+
+(* The bit offsets that end [t]'s lanes, ascending. *)
+let lane_ends (t : t) : int list =
+  List.folding_map (lanes_of t) ~init:0 ~f:(fun off q ->
+      let e = off + bitwidth q in
+      (e, e))
+
+(* [t] cut at the lane [ends]. *)
+let segments (t : t) (ends : int list) : t list =
+  List.folding_map ends ~init:0 ~f:(fun lo e -> (e, extract ~hi:(e - 1) ~lo t))
+
+(* [op] lane by lane at the union of both sides' lane boundaries, when
+   a side has lanes and the widths agree.  A side without lanes takes
+   its segments: their product over-approximates it. *)
+let lanewise (op : t -> t -> t) (t1 : t) (t2 : t) : t option =
+  match t1, t2 with
+  | (Lanes _, _ | _, Lanes _) when bitwidth t1 = bitwidth t2 ->
+    let ends =
+      List.dedup_and_sort ~compare:Int.compare (lane_ends t1 @ lane_ends t2) in
+    Some (make_lanes (List.map2_exn (segments t1 ends) (segments t2 ends) ~f:op))
+  | _ -> None
+
+(* The join-like lane op: a bottom side is the identity. *)
+let lane_join (op : t -> t -> t) (t1 : t) (t2 : t) : t option =
+  match t1, t2 with
+  | (Lanes _, _ | _, Lanes _) when is_bottom t1 -> Some t2
+  | (Lanes _, _ | _, Lanes _) when is_bottom t2 -> Some t1
+  | _ -> lanewise op t1 t2
+
+let union t1 t2 : t =
+  match lane_join (lift2 Union) t1 t2 with
+  | Some u -> u
+  | None -> lift2 Union t1 t2
 
 (* Precise meet across representations: the width mismatch returns the
    wider operand; a top plain side makes the meet the relative operand
    itself. *)
-let intersection t1 t2 : t =
+let intersection_plain t1 t2 : t =
   if bitwidth t1 <> bitwidth t2 then
     (if bitwidth t1 > bitwidth t2 then t1 else t2)
   else
@@ -1608,11 +1793,17 @@ let intersection t1 t2 : t =
     | q1, Rel _ when plain_is_top q1 -> t2
     | _ -> lift2 Meet t1 t2
 
+let intersection t1 t2 : t =
+  match lanewise intersection_plain t1 t2 with
+  | Some m -> m
+  | None -> intersection_plain t1 t2
+
 (* Difference refines only a shared offset line or an exact plain
    constraint. Materializing the subtrahend could erase reachable values. *)
 let rec diff (t1 : t) (t2 : t) : t =
   if bitwidth t1 <> bitwidth t2 then t1 else
   match t1, t2 with
+  | Lanes _, _ | _, Lanes _ -> diff (flatten t1) (flatten t2)
   | Rel (Origin.Abs, offs), _ -> diff (Clp offs) t2
   | _, Rel (Origin.Abs, offs) -> diff t1 (Clp offs)
   | Rel (o1, a), Rel (o2, b)
@@ -1662,13 +1853,13 @@ let lnot t = match t with Rel _ -> lift1 Lnot t | _ -> blind_unop P.lnot FinSet.
 let neg t = match t with Rel _ -> lift1 Neg t | _ -> blind_unop P.neg FinSet.neg t
 
 
-let concat t1 t2 = lift2 Concat t1 t2
 
 (* ---------------- predicates ---------------- *)
 
-let is_top t =
+let rec is_top t =
   match t with
   | Clp ps | Rel (_, ps) -> P.is_top ps
+  | Lanes ls -> List.for_all ls ~f:is_top
   | FinSet _ -> false
   | Many ps ->
     List.for_all ps ~f:(function
@@ -1683,7 +1874,7 @@ let piece_is_infinite (q : t) =
   | Clp ps | Rel (_, ps) ->
     List.exists (P.to_list ps) ~f:Clp.is_infinite
   | FinSet _ -> false
-  | Many _ -> false
+  | Many _ | Lanes _ -> false
 
 let is_infinite t =
   match t with
@@ -1698,7 +1889,7 @@ let shape_pred (which : Clp.t -> bool) (t : t) : bool =
     match q with
     | Clp ps | Rel (_, ps) -> List.for_all (P.to_list ps) ~f:which
     | FinSet _ -> false
-    | Many _ -> false
+    | Many _ | Lanes _ -> false
   in
   match t with
   | Many ps ->
@@ -1711,8 +1902,14 @@ let is_ascending t = shape_pred Clp.is_ascending t
 let is_descending t = shape_pred Clp.is_descending t
 let is_circular t = shape_pred Clp.is_circular t
 
+(* Against a lane value, [t1] compares lane by lane through its segments
+   at the same boundaries (their product contains [t1]). *)
 let rec precedes t1 t2 : bool =
   match t1, t2 with
+  | _, Lanes l2 when bitwidth t1 = bitwidth t2 ->
+    List.for_all2_exn (segments t1 (lane_ends t2)) l2 ~f:precedes
+  | _, Lanes _ -> precedes t1 (flatten t2)
+  | Lanes _, _ -> precedes (flatten t1) t2
   | Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 -> P.precedes a b
   | _, Rel _ -> is_bottom t1
   | Rel _, _ -> precedes (to_plain t1) t2
@@ -1780,33 +1977,20 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
     canonical [ Rel (o1, fp a b) ]
   | _ -> plain_pair ()
 
-let widen_join t1 t2 : t = hull_join Clp.widen_join P.widen_join t1 t2
+let widen_join t1 t2 : t =
+  let w = hull_join Clp.widen_join P.widen_join in
+  match lane_join w t1 t2 with Some v -> v | None -> w t1 t2
 
 let extrapolate_steps ~steps t1 t2 : t =
-  hull_join
-    (Clp.extrapolate_steps ~steps)
-    (fun a b -> P.extrapolate_steps ~steps a b)
-    t1 t2
+  let x =
+    hull_join
+      (Clp.extrapolate_steps ~steps)
+      (fun a b -> P.extrapolate_steps ~steps a b)
+  in
+  match lane_join x t1 t2 with Some v -> v | None -> x t1 t2
 
 let join = union
 let meet = intersection
-
-(* Degenerate cast keeps top. *)
-let extract ?hi ?lo t =
-  let lo_v = Option.value ~default:0 lo in
-  if (match hi with Some h -> h < lo_v | None -> false)
-  then top (Stdlib.max 1 (bitwidth t))
-  else
-    match t with
-    | Rel _ -> lift1 (Extract (hi, lo_v)) t
-    | _ -> lift_unop (P.extract ?hi ?lo) (FinSet.extract ?hi ?lo) t
-
-let cast c sz t =
-  if sz <= 0 then top (Stdlib.max 1 (bitwidth t))
-  else
-    match t with
-    | Rel _ -> lift1 (Cast (c, sz)) t
-    | _ -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
 
 (* The shift count's width is incidental: a narrower count zero-extends
    to the shifted operand's width (the machine masks the count; the
@@ -1825,6 +2009,7 @@ let lshift t1 t2 = shift Lshift t1 t2
 let rec get_idx (t : t) : idx =
   match t with
   | Rel _ -> 64
+  | Lanes _ -> bitwidth t
   | Clp ps ->
     (match hull_of_pieces ps with
      | Some p -> Clp.get_idx p
@@ -1846,15 +2031,22 @@ let pp_leaf ppf (t : t) =
      | Some p -> Clp.pp ppf p
      | None -> Format.fprintf ppf "_|_")
   | FinSet s -> FinSet.pp ppf s
-  | Many _ -> ()
+  | Many _ | Lanes _ -> ()
 
-let pp ppf (t : t) =
+(* A lane value prints high lane first, as BIL writes a concat. *)
+let rec pp ppf (t : t) =
   match t with
   | Many ps ->
     Format.fprintf ppf "@[<1>(%a)@]"
       (fun ppf ts ->
         List.iter ts ~f:(fun q -> Format.fprintf ppf "@;%a" pp_leaf q))
       ps
+  | Lanes ls ->
+    Format.fprintf ppf "@[<1>[%a]@]"
+      (Format.pp_print_list
+         ~pp_sep:(fun ppf () -> Format.fprintf ppf ".@,")
+         pp)
+      (List.rev ls)
   | q -> pp_leaf ppf q
 
 
@@ -1950,7 +2142,8 @@ let enumerate ~(cap : int) (t : t) : word list option =
   if Cbat_word.gt_int (cardinality t) cap then begin
     let tag = match t with
       | Clp _ -> "Clp" | FinSet _ -> "FinSet" | Rel _ -> "Rel"
-      | Many ps -> sprintf "Many%d" (List.length ps) in
+      | Many ps -> sprintf "Many%d" (List.length ps)
+      | Lanes ls -> sprintf "Lanes%d" (List.length ls) in
     Printf.eprintf "hike-dbg-enum: cap=%d card=%s tag=%s\n%!"
       cap (Cbat_word.to_string (cardinality t)) tag;
     None
@@ -1968,4 +2161,5 @@ let tag (t : t) : string =
   | FinSet _ -> "FinSet"
   | Rel _ -> "Rel"
   | Many ps -> sprintf "Many%d" (List.length ps)
+  | Lanes ls -> sprintf "Lanes%d" (List.length ls)
 #endif
