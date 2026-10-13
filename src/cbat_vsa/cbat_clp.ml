@@ -268,41 +268,30 @@ module Pieces = struct
     in
     go 0 ps
 
-  (* Canonicalize and cap: split wrapped pieces into their arcs, sort,
-     merge, then hull the smallest-growth pair until the list fits.  No
-     piece in a canonical list wraps. *)
-  let rec normalize (ps : progression list) : t =
-    let ps =
-      match ps with
-      | [ p ] when not (C.is_bottom p) && not (C.is_wrapped p) -> [ p ]
-      | _ ->
-        List.filter
-          (List.concat_map ps ~f:C.split_wrapped)
-          ~f:(fun p -> not (C.is_bottom p)) in
-    (* A mixed-width union has no progression algebra (the word ops
-       demand equal widths): it is top at the widest — sound, and the
-       one choke point every piece constructor funnels through. *)
-    let ps =
-      match ps with
-      | [] | [ _ ] -> ps
-      | p :: rest ->
-        let w = C.bitwidth p in
-        if List.for_all rest ~f:(fun q -> Stdlib.Int.equal (C.bitwidth q) w)
-        then ps
-        else
-          [ C.top
-              (List.fold rest ~init:w
-                 ~f:(fun a q -> Stdlib.max a (C.bitwidth q))) ]
-    in
-    let ps = List.sort ps ~compare:compare_piece in
-    let ps = List.rev (List.fold ps ~init:[] ~f:insert) in
+  (* Two-way merge of two ascending [compare_piece] lists.  The left
+     operand wins ties, matching the stable sort it replaces. *)
+  let rec merge_sorted (xs : progression list) (ys : progression list)
+    : progression list =
+    match xs, ys with
+    | [], ys -> ys
+    | xs, [] -> xs
+    | x :: xt, y :: yt ->
+      if compare_piece x y <= 0 then x :: merge_sorted xt ys
+      else y :: merge_sorted xs yt
+
+  (* The cap repair over a merged list: hull the smallest-growth pair and
+     re-merge the hull, never re-sorting. *)
+  let rec cap (ps : t) : t =
     let ps =
       if List.length ps > max_pieces && not (within_exact_budget ps) then begin
 #ifdef VSA_DEBUG
         census_cap ();
 #endif
         match choose_pair ps with
-        | Some (hull, rest) -> normalize (hull :: rest)
+        | Some (hull, rest) ->
+          cap
+            (List.rev
+               (List.fold (merge_sorted [ hull ] rest) ~init:[] ~f:insert))
         | None -> ps
       end
       else ps
@@ -311,6 +300,54 @@ module Pieces = struct
     census_len (List.length ps);
 #endif
     ps
+
+  (* The insert fold and cap over an ascending list.  [normalize] is this
+     after [shape] and a sort; [union] feeds it a merge. *)
+  let canonical_of_sorted (ps : progression list) : t =
+    cap (List.rev (List.fold ps ~init:[] ~f:insert))
+
+  (* The shape phase: split wrapped pieces into their arcs, drop bottoms,
+     and collapse mixed widths to top at the widest.  A canonical value
+     never wraps and never mixes widths, so canonical inputs skip it. *)
+  let shape (ps : progression list) : progression list =
+    let ps =
+      match ps with
+      | [ p ] when not (C.is_bottom p) && not (C.is_wrapped p) -> [ p ]
+      | _ ->
+        List.filter
+          (List.concat_map ps ~f:C.split_wrapped)
+          ~f:(fun p -> not (C.is_bottom p)) in
+    match ps with
+    | [] | [ _ ] -> ps
+    | p :: rest ->
+      let w = C.bitwidth p in
+      if List.for_all rest ~f:(fun q -> Stdlib.Int.equal (C.bitwidth q) w)
+      then ps
+      else
+        [ C.top
+            (List.fold rest ~init:w
+               ~f:(fun a q -> Stdlib.max a (C.bitwidth q))) ]
+
+  (* The same canonicalization for an output list of unknown order:
+     bottom-up adjacent merges (stable), then the insert fold.  No
+     [List.sort]. *)
+  let canonical_of_list (ps : progression list) : t =
+    let rec merge_runs = function
+      | [] -> []
+      | [ x ] -> [ x ]
+      | x :: y :: rest -> merge_sorted x y :: merge_runs rest
+    in
+    let rec merge_sort = function
+      | [] | [ _ ] as l -> l
+      | l -> merge_sort (merge_runs l)
+    in
+    canonical_of_sorted
+      (List.concat (merge_sort (List.map (shape ps) ~f:(fun p -> [ p ]))))
+
+  (* Canonicalize and cap: [shape], sort, merge, then the cap repair.  No
+     piece in a canonical list wraps. *)
+  let normalize (ps : progression list) : t =
+    canonical_of_sorted (List.sort (shape ps) ~compare:compare_piece)
 
   let of_progression (p : progression) : t = normalize [ p ]
 
@@ -439,7 +476,17 @@ module Pieces = struct
             && List.for_all (C.iter pa) ~f:(fun x ->
                 List.exists b ~f:(fun pb -> C.elem x pb))))
 
-  let union (a : t) (b : t) : t = normalize (List.append a b)
+  (* Union of canonical values: one linear merge, then the insert fold
+     and cap.  The emitted order matches the stable sort this replaces;
+     a width mismatch (unreachable for canonical values) falls back to
+     the full canonicalization. *)
+  let union (a : t) (b : t) : t =
+    match a, b with
+    | [], _ -> b
+    | _, [] -> a
+    | _ when Stdlib.Int.equal (width_of a) (width_of b) ->
+      canonical_of_sorted (merge_sorted a b)
+    | _ -> normalize (List.append a b)
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -461,7 +508,7 @@ module Pieces = struct
         if C.is_bottom r then [] else [ r ]
 
   let intersection (a : t) (b : t) : t =
-    normalize
+    canonical_of_list
       (List.concat_map a ~f:(fun pa ->
            List.concat_map b ~f:(fun pb -> pair_intersection pa pb)))
 
@@ -601,7 +648,7 @@ module Pieces = struct
     else [ List.fold bs ~init:a ~f:C.diff ]
 
   let diff (a : t) (b : t) : t =
-    normalize (List.concat_map a ~f:(fun pa -> diff_piece pa b))
+    canonical_of_list (List.concat_map a ~f:(fun pa -> diff_piece pa b))
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =

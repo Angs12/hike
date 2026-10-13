@@ -209,6 +209,96 @@ let tests : unit Alcotest.test list =
 
 
 
+    pin "PCS-15"
+      "the canonical merge: union/intersection/diff stay sound and canonical \
+       over random progressions (the merge paths, no re-sort)"
+      (fun () ->
+        let st = Random.State.make [| 20261013 |] in
+        let width = 8 in
+        let size = 1 lsl width in
+        let w = Cbat_word.of_int ~width in
+        let rand_piece () =
+          let base = w (Random.State.int st size) in
+          let step = w (Random.State.int st 4) in
+          let cardn =
+            Cbat_word.of_int ~width:(width + 1) (1 + Random.State.int st 6)
+          in
+          P.of_progression (Clp.create ~width ~step ~cardn base) in
+        let make () =
+          List.fold_left
+            (fun acc _ -> P.union acc (rand_piece ()))
+            (P.bottom width)
+            (List.init (1 + Random.State.int st 4) Fun.id) in
+        let render p =
+          String.concat " | "
+            (List.map (Format.asprintf "%a" Clp.pp) (P.to_list p)) in
+        let why_canonical p =
+          let ls = P.to_list p in
+          let rec mono = function
+            | x :: (y :: _ as rest) -> (
+              match Clp.min_elem x, Clp.min_elem y with
+              | Some mx, Some my -> Cbat_word.compare mx my <= 0 && mono rest
+              | _ -> false)
+            | _ -> true in
+          if not (mono ls) then Some "min-order"
+          else if
+            not
+              (List.for_all
+                 (fun q -> (not (Clp.is_bottom q)) && not (Clp.is_wrapped q))
+                 ls)
+          then Some "shape"
+          else None in
+        let sound p req =
+          List.for_all
+            (fun x -> not (req x) || P.elem (w x) p)
+            (List.init size Fun.id) in
+        let fail = ref None in
+        let note what op a b r =
+          if !fail = None then
+            fail :=
+              Some
+                (Printf.sprintf "%s %s: a=%s b=%s r=%s" what op (render a)
+                   (render b) (render r)) in
+        for _ = 1 to 200 do
+          let a = make () and b = make () in
+          let va = Array.init size (fun x -> P.elem (w x) a) in
+          let vb = Array.init size (fun x -> P.elem (w x) b) in
+          let u = P.union a b
+          and i = P.intersection a b
+          and d = P.diff a b in
+          (match why_canonical u with
+          | Some w -> note ("canonical:" ^ w) "union" a b u
+          | None -> ());
+          (match why_canonical i with
+          | Some w -> note ("canonical:" ^ w) "intersection" a b i
+          | None -> ());
+          (match why_canonical d with
+          | Some w -> note ("canonical:" ^ w) "diff" a b d
+          | None -> ());
+          if not (sound u (fun x -> va.(x) || vb.(x))) then
+            note "sound" "union" a b u;
+          if not (sound i (fun x -> va.(x) && vb.(x))) then
+            note "sound" "intersection" a b i;
+          if not (sound d (fun x -> va.(x) && not vb.(x))) then
+            note "sound" "diff" a b d
+        done;
+        match !fail with
+        | None -> check "PCS-15" true
+        | Some m -> Alcotest.failf "PCS-15: %s" m);
+
+    pin "PCS-16"
+      "the union merge is a linear merge: disjoint spans keep every piece, \
+       operand order does not matter, and re-union is idempotent"
+      (fun () ->
+        let a = P.union (prog32 ~lo:0 ~hi:2) (prog32 ~lo:6 ~hi:8) in
+        let b = P.union (prog32 ~lo:10 ~hi:12) (prog32 ~lo:16 ~hi:18) in
+        let u = P.union a b in
+        check "PCS-16"
+          (P.equal u (P.union b a)
+          && List.length (P.to_list u) = 4
+          && P.equal u (P.union u a)
+          && P.equal u (P.union u b)));
+
   ]
 
 let () = run "pieces" tests
