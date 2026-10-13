@@ -123,10 +123,6 @@ let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
       | _ -> create_exp ?want ctx scope llvm_builder blk_tid exp)
 
 let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
-  let var = Def.lhs def in
-  let fallback_ty =
-    match want with Some t -> t | None -> typ_lltype ctx (Var.typ var)
-  in
   match def_tag with
   | Some def_tag when Hike_stack_model.is_return_address_tag def_tag -> (
       match Hike_stack_model.mem_node_of exp with
@@ -135,7 +131,7 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
              && Base.Option.is_none
                   (Hike_stack_model.store_data_of_rhs (Def.rhs def)) ->
           let marker = marker_of_size size in
-          let emit () = Llvm.undef fallback_ty in
+          let emit () = Llvm.undef (load_type ?want ctx size) in
           let rewrite marker = rewrite_mem_node exp addr size marker in
           emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
             ~rewrite

@@ -157,6 +157,14 @@ let rewrite_mem_node exp addr size marker =
 (* ---- The expression evaluator.  The pointer semantics live in
    [Bil2llvm_ptr]; this lane evaluates exps and asks it for values. ---- *)
 
+(* A load reads its BIR size; the def's inferred type names the loaded
+   value only when the widths agree. *)
+let load_type ?want ctx size =
+  let bits = Size.in_bits size in
+  match want with
+  | Some t when bits = ctx.addr_bits -> t
+  | _ -> Llvm.integer_type ctx.llvm_ctx bits
+
 (* The entry-line offset of an expression, when structurally known: an
    arithmetic chain from the entry line / a slot.  A load, parameter,
    phi, or cast has none. *)
@@ -260,12 +268,7 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
         tls_plain_load ctx scope llvm_builder blk_tid ~want mem addr size
     | cls ->
         let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
-        let ty =
-          match want with
-          | Some t -> t
-          | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
-        in
-        Bil2llvm_memory.load_ptr llvm_builder ty ptr)
+        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) ptr)
   | Let (var, e, body) ->
       let unique_var = fresh_let_var ctx scope var in
       let v = create_exp ctx scope llvm_builder blk_tid e in
@@ -332,7 +335,9 @@ and tls_plain_load ctx scope llvm_builder blk_tid ~want:(want : Llvm.lltype opti
     | None -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
   | _ -> (
     match want with
-    | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
+    | Some ty
+      when Size.in_bits size = ctx.addr_bits
+           && not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
         Bil2llvm_memory.load_ptr llvm_builder ty
           (as_pointer ctx llvm_builder a)
     | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
@@ -368,12 +373,9 @@ and storage_access ?want ?(is_window = false)
       let marker = marker_of_size size in
       let p = addr_ptr addr in
 
-      let ty =
-        match want with
-        | Some t -> t
-        | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
+      let emit () =
+        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) p
       in
-      let emit () = Bil2llvm_memory.load_ptr llvm_builder ty p in
       emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
         ~rewrite:(rewrite addr size)
   | `Store (addr, data, size) ->
@@ -408,12 +410,7 @@ and sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~(store : bool)
            Bil2llvm_memory.store_ptr llvm_builder v p
          | None -> assert false)
       else
-        let ty =
-          match want with
-          | Some t -> t
-          | None -> Llvm.integer_type ctx.llvm_ctx bits
-        in
-        Bil2llvm_memory.load_ptr llvm_builder ty p
+        Bil2llvm_memory.load_ptr llvm_builder (load_type ?want ctx size) p
     | None ->
       (* Unknown component: the generic memory path, unremapped. *)
       if store then
