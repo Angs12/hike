@@ -121,7 +121,7 @@ let tests : unit Alcotest.test list =
         let facts, a5 = fixture_facts_sub a5 in
         check "MOD-01"
           (Core.Set.is_empty
-             (Hike.Sections.dynamic_alloc_tids_of ~facts a5)));
+             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5))));
 
     pin "MOD-02"
       "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
@@ -133,7 +133,7 @@ let tests : unit Alcotest.test list =
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
         let facts, a5u = fixture_facts_sub a5u in
         let a5u_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts a5u
+          Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5u)
         in
         check "MOD-02"
           (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ])));
@@ -148,10 +148,10 @@ let tests : unit Alcotest.test list =
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
         let facts, a5u = fixture_facts_sub a5u in
         let a5u_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts a5u
+          Hike.Sections.dynamic_allocs_of ~facts a5u
         in
         let a5_stamped =
-          Ds.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u
+          Ds.stamp_dyn_allocs ~allocs:a5u_events a5u
         in
         check "MOD-03"
           (Ds.def_is_dyn_alloc
@@ -159,7 +159,7 @@ let tests : unit Alcotest.test list =
                 (def_of_tid a5_stamped (Term.tid a5_vla)))));
 
     pin "MOD-04"
-      "PR-A5c: a VLA spelled through TWO temps is still the event (the chain resolves through the sequential state)"
+      "PR-A5c: a VLA spelled through TWO temps is one allocation, named by the def computing its base"
       (fun () ->
         let a5_rcx = v64 "pr_a5_rcx" in
         let a5c_t1 = v64 "pr_a5c_t1" in
@@ -174,8 +174,8 @@ let tests : unit Alcotest.test list =
         let facts, a5c = fixture_facts_sub a5c in
         check "MOD-04"
           (Core.Set.equal
-             (Hike.Sections.dynamic_alloc_tids_of ~facts a5c)
-             (tid_set [ Term.tid a5c_sp ])));
+             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5c))
+             (tid_set [ Term.tid a5c_d1 ])));
 
     pin "MOD-05"
       "PR-A5d: the lea-computed adjustment (a negative size ADDED) is the event"
@@ -196,7 +196,7 @@ let tests : unit Alcotest.test list =
         let facts, a5d = fixture_facts_sub a5d in
         check "MOD-05"
           (Core.Set.equal
-             (Hike.Sections.dynamic_alloc_tids_of ~facts a5d)
+             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5d))
              (tid_set [ Term.tid a5d_sp ])));
 
     pin "MOD-06"
@@ -218,7 +218,7 @@ let tests : unit Alcotest.test list =
         let fa5e, a5e = fixture_facts_sub a5e in
         check "MOD-06"
           (Core.Set.is_empty
-             (Hike.Sections.dynamic_alloc_tids_of ~facts:fa5e a5e)));
+             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fa5e a5e))));
 
     pin "MOD-07"
       "PR-A5b: a VLA in a looping sub is the event — the widened loop does not hide it"
@@ -250,7 +250,7 @@ let tests : unit Alcotest.test list =
         in
         let facts, a5b = fixture_facts_sub a5b in
         let a5b_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts a5b
+          Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5b)
         in
         check "MOD-07"
           (Core.Set.equal a5b_events (tid_set [ a5b_body_sp ])));
@@ -673,6 +673,124 @@ let tests : unit Alcotest.test list =
         check "MOD-41 block uses respect local definitions"
           (Core.Set.equal (Model.blk_free_vars block)
              (Var.Set.singleton rax)));
+
+    (* The allocation is opened where its base is computed (ADR 0030). *)
+    pin "MOD-44"
+      "a candidate SP never enters is no allocation: its value reads as the stack positions it stands for"
+      (fun () ->
+        let c = v1 "vla44_c" and t = v64 "vla44_t" in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let d_t =
+          Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Ite (Bil.Var c, k 16, k 32)))
+        in
+        let sub = straight_sub "vla44_redzone" [ d_t ] in
+        let facts, sub = fixture_facts_sub sub in
+        let blk = Term.first blk_t sub |> Base.Option.value_exn in
+        check "MOD-44 no allocation"
+          (Core.Map.is_empty (Hike.Sections.dynamic_allocs_of ~facts sub));
+        check "MOD-44 the value is its stack positions"
+          (match facts.Hike.Kb.denote ~blk (Bil.Var t) with
+           | Ok ws ->
+             Option.equal Hike_origin.equal (Cbat_vsa.WordSet.origin ws)
+               (Some Hike_origin.Stack)
+             && not (Cbat_vsa.WordSet.is_top ws)
+           | Error _ -> false));
+
+    pin "MOD-45"
+      "a runtime descent below a pending frame is a nested allocation; SP reaching it confirms both"
+      (fun () ->
+        let rcx = v64 "vla45_rcx" and rdx = v64 "vla45_rdx" in
+        let t = v64 "vla45_t" and u = v64 "vla45_u" in
+        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
+        let d_u = Def.create u (Bil.BinOp (Bil.MINUS, Bil.Var t, Bil.Var rdx)) in
+        let sub =
+          straight_sub "vla45_nested" [ d_t; d_u; Def.create sp (Bil.Var u) ]
+        in
+        let facts, sub = fixture_facts_sub sub in
+        let allocs = Hike.Sections.dynamic_allocs_of ~facts sub in
+        check "MOD-45 two allocations"
+          (Core.Set.equal (Core.Map.key_set allocs)
+             (tid_set [ Term.tid d_t; Term.tid d_u ]));
+        check "MOD-45 the nested one is measured from its parent"
+          (match Core.Map.find allocs (Term.tid d_u),
+                 Core.Map.find allocs (Term.tid d_t) with
+           | Some a, Some b ->
+             Option.equal Tid.equal a.Hike.Def_slots.parent (Some (Term.tid d_t))
+             && Option.is_none b.Hike.Def_slots.parent
+           | _ -> false));
+
+    pin "MOD-46"
+      "two VLAs through copy chains are two top-level allocations"
+      (fun () ->
+        let rcx = v64 "vla46_rcx" and rdx = v64 "vla46_rdx" in
+        let t = v64 "vla46_t" and u = v64 "vla46_u" in
+        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
+        let d_u = Def.create u (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rdx)) in
+        let sub =
+          straight_sub "vla46_two"
+            [ d_t; Def.create sp (Bil.Var t); d_u; Def.create sp (Bil.Var u) ]
+        in
+        let facts, sub = fixture_facts_sub sub in
+        let allocs = Hike.Sections.dynamic_allocs_of ~facts sub in
+        check "MOD-46"
+          (Core.Set.equal (Core.Map.key_set allocs)
+             (tid_set [ Term.tid d_t; Term.tid d_u ])
+          && Core.Map.for_all allocs ~f:(fun a ->
+                 Option.is_none a.Hike.Def_slots.parent)));
+
+    pin "MOD-47"
+      "the frame's floor is where SP enters it (round-down slack); a later push is below the allocation"
+      (fun () ->
+        let rcx = v64 "vla47_rcx" and t = v64 "vla47_t" in
+        let w k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
+        let sub =
+          straight_sub "vla47_floor"
+            [ d_t;
+              Def.create sp (Bil.BinOp (Bil.AND, Bil.Var t, w (-16)));
+              Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, w 8)) ]
+        in
+        let facts, sub = fixture_facts_sub sub in
+        check "MOD-47"
+          (match
+             Core.Map.find (Hike.Sections.dynamic_allocs_of ~facts sub) (Term.tid d_t)
+           with
+           | Some a -> Int64.equal a.Hike.Def_slots.floor (-15L)
+           | None -> false));
+
+    pin "MOD-48"
+      "an access through the producer's register is addressed from its allocation base"
+      (fun () ->
+        let rcx = v64 "vla48_rcx" and t = v64 "vla48_t" in
+        let m = memv "vla48_m" in
+        let w k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let st =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var t, w 8),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
+                 LittleEndian, `r32 ))
+        in
+        let sub =
+          straight_sub "vla48_route"
+            [ Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx));
+              Def.create sp (Bil.Var t); st ]
+        in
+        let sub = rewrite_one sub in
+        let addr =
+          Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find_map ~f:(fun d ->
+                 match Def.rhs d with
+                 | Bil.Store (_, a, _, _, _) when Tid.equal (Term.tid d) (Term.tid st) -> Some a
+                 | _ -> None)
+        in
+        check "MOD-48"
+          (match addr with
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int k)) ->
+             Hike.Stack_model.is_vla_ptr b
+             && Base.Result.equal Int64.equal (fun _ _ -> false)
+                  (Cbat_word.to_int64 (Cbat_word.of_word k)) (Ok 8L)
+           | _ -> false));
   ]
 
 let () = run "model" tests

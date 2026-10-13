@@ -44,6 +44,7 @@ one failing fixture never hides the rest of the module.
 | EMIT-55 | Legacy lock/unlock markers require the paired producer and refuse. | Accept legacy markers. | The refusal assertion fails. |
 | EMIT-56 | NEG retries in a private helper, preserving the caller CFG at a phi join. | Inline the retry blocks into the caller. | The helper-call assertion fails. |
 | EMIT-57 | Unknown operation/width contracts refuse before analysis or emission. | Treat the name as an ordinary external call. | The refusal assertion fails. |
+| EMIT-59 | An allocation whose producer is not an SP def emits its alloca at the producer: `%vla_size` adds the floor's 15 bytes, `%vla_base` is `%vla + 15`, and the following `SP := t & −16` masks the base. | In `create_dynamic_alloc`, ignore `floor`. | EMIT-59: no `add` in the size, no `%vla_base`. |
 
 **Fixture note (2026-09-29).** `emit_ir` now runs
 `Hike.Cfg_complete.materialize_fallthroughs` before the split, as the

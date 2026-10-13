@@ -142,8 +142,8 @@ type vla_fix = {
   vla_m : var;
 }
 
-let vla_fixture ~(frame : int) ~(sizes : int64 list)
-    ~(after : var -> var -> var -> def term list) : vla_fix =
+let vla_fixture ?(copy = false) ~(frame : int) ~(sizes : int64 list)
+    ~(after : var -> var -> var -> def term list) () : vla_fix =
   let m = memv "vla_m" in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
@@ -154,8 +154,17 @@ let vla_fixture ~(frame : int) ~(sizes : int64 list)
   let cell =
     Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12)))
   in
-  let def_dec =
-    Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+  let dec = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax) in
+  (* [copy]: the decrement goes through a temporary, [RCX := RSP - RAX;
+     RSP := RCX]. *)
+  let chain, def_dec =
+    if copy then
+      let rcx = v64 "RCX" in
+      let d = Def.create rsp (Bil.Var rcx) in
+      ([ Def.create rcx dec; d ], d)
+    else
+      let d = Def.create rsp dec in
+      ([ d ], d)
   in
   let body =
     [ Def.create rbp (Bil.Var rsp);
@@ -168,8 +177,8 @@ let vla_fixture ~(frame : int) ~(sizes : int64 list)
              LittleEndian,
              `r32 ));
       Def.create rax
-        (Bil.Load (Bil.Var m, cell, LittleEndian, Size.of_int_exn 32));
-      def_dec ]
+        (Bil.Load (Bil.Var m, cell, LittleEndian, Size.of_int_exn 32)) ]
+    @ chain
     @ after rsp rbp m
   in
   (* Two guarded edges carry the size set into the merge block. *)
@@ -215,7 +224,9 @@ let post_word_named (fix : vla_fix) (name : string) : Ws.t option =
    (frame-relative 0) and the extent records the gate and the base's
    entry-line range. *)
 let ori_09 () =
-  let fix = vla_fixture ~frame:16 ~sizes:[ 16L; 32L ] ~after:(fun _ _ _ -> []) in
+  let fix =
+    vla_fixture ~frame:16 ~sizes:[ 16L; 32L ] ~after:(fun _ _ _ -> []) ()
+  in
   let tid = Term.tid fix.vla_dec in
   check "decrement def stamps its own Vla frame"
     (Base.Option.bind (Term.find blk_t fix.vla_stamped (Base.Option.value_exn (body_tid fix)))
@@ -408,6 +419,48 @@ let ori_24 () =
      && Ws.is_bottom
           (Ws.diff a (Ws.set_origin (Origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 42L))))
 
+(* ORI-25: the copy chain's producer opens the frame — the temporary
+   and the SP it reaches carry it, and an access through the temporary
+   routes into the allocation. *)
+let ori_25 () =
+  let rcx = v64 "RCX" in
+  let fix =
+    vla_fixture ~copy:true ~frame:16 ~sizes:[ 16L; 32L ]
+      ~after:(fun _ _ m ->
+        [ Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.PLUS, Bil.Var rcx, Bil.Int (Cbat_word.to_word (w64 8))),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
+                 LittleEndian,
+                 `r32 )) ])
+      ()
+  in
+  let producer =
+    Term.enum blk_t fix.vla_sub |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
+    |> Option.value_exn |> Term.tid
+  in
+  let frame ws = Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla producer)) in
+  check "the temporary and SP carry the producer's frame"
+    (Option.value_map (post_word_named fix "RCX") ~default:false ~f:frame
+     && Option.value_map (post_word_named fix "RSP") ~default:false ~f:frame);
+  check "the SP def confirms it; no second allocation opens"
+    (Core.Set.equal (Origin.Vla_seed.allocations ())
+       (Core.Set.singleton (module Tid) producer));
+  check "an access through the temporary routes into the allocation"
+    (Base.Option.bind
+       (Term.find blk_t fix.vla_stamped (Base.Option.value_exn (body_tid fix)))
+       ~f:(fun blk ->
+         Term.enum def_t blk
+         |> Seq.find ~f:(fun d ->
+                match Def.rhs d with
+                | Bil.Store (_, Bil.BinOp (Bil.PLUS, _, _), _, _, _) -> true
+                | _ -> false)
+         |> Base.Option.bind ~f:Vsa.Def_origin.def_origin)
+     |> fun o -> Option.equal Origin.equal o (Some (Origin.Vla producer)))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -433,4 +486,5 @@ let () =
       pin "ORI-21" "VLA operations require certified base bits" ori_21;
       pin "ORI-22" "all-origin memory round trips and alias namespaces" ori_22;
       pin "ORI-23" "rounding crosses base-residue block boundaries" ori_23;
-      pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24 ]
+      pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24;
+      pin "ORI-25" "the copy chain's producer opens the frame" ori_25 ]

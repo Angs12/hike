@@ -98,44 +98,89 @@ type vla_extent = {
   base_hi : int64 option;
 }
 
-(* The run's VLA extents, keyed by the SP-assigning def's tid — the seed
-   records; the boundary refinement, the materialiser and the call keep
-   read.
+(* The run's VLA allocations, keyed by the def that computes each
+   allocation's base — the seed records; the boundary refinement, the
+   materialiser and the call keep read.  A recorded allocation is a
+   candidate until SP takes a value in its frame (or in a frame nested
+   below it): an unconfirmed candidate is a pointer below SP, not an
+   allocation.  [floors] is the lowest offset SP or a round-down takes
+   in each frame; [parents] names the pending frame a nested allocation
+   descends from.
    The one mutable cell of the origin algebra; [take] drains at the
    facts boundary so nothing crosses a program run. *)
 module Vla_seed = struct
-  let empty : vla_extent Tid.Map.t = Tid.Map.empty
+  let extents : vla_extent Tid.Map.t ref = ref Tid.Map.empty
+  let floors : int64 Tid.Map.t ref = ref Tid.Map.empty
+  let parents : Tid.t Tid.Map.t ref = ref Tid.Map.empty
+  let confirmed : Tid.Set.t ref = ref Tid.Set.empty
 
-  let extents : vla_extent Tid.Map.t ref = ref empty
+  let floor_of (t : Tid.t) (lo : int64) : int64 =
+    match Core.Map.find !floors t with
+    | Some f when Stdlib.Int64.compare f lo < 0 -> f
+    | _ -> lo
 
-  let record (t : Tid.t) (ext : vla_extent) : unit =
-    extents := Core.Map.set !extents ~key:t ~data:ext
+  (* A re-record keeps the floor already seen for the allocation. *)
+  let record ?parent (t : Tid.t) (ext : vla_extent) : unit =
+    extents :=
+      Core.Map.set !extents ~key:t ~data:{ ext with off_lo = floor_of t ext.off_lo };
+    Base.Option.iter parent ~f:(fun p -> parents := Core.Map.set !parents ~key:t ~data:p)
 
   let extent (t : Tid.t) : vla_extent option = Core.Map.find !extents t
 
-  (* Widen the routable offset floor, e.g. when a round-down is seen on
-     an in-frame value. *)
+  let parent (t : Tid.t) : Tid.t option = Core.Map.find !parents t
+
+  (* Lower the frame's floor: a round-down's slack, or an SP position
+     below the base. *)
   let widen_off_lo (t : Tid.t) (lo : int64) : unit =
+    let lo = floor_of t lo in
+    floors := Core.Map.set !floors ~key:t ~data:lo;
     match Core.Map.find !extents t with
     | Some e when Stdlib.Int64.compare lo e.off_lo < 0 ->
       extents := Core.Map.set !extents ~key:t ~data:{ e with off_lo = lo }
     | _ -> ()
 
-  (* Keep only the allocations [keep] accepts — the post-solve
-     re-validation against the final denotations. *)
+  let confirm (t : Tid.t) : unit = confirmed := Core.Set.add !confirmed t
+
+  (* The allocations: the confirmed frames and every frame they nest
+     below. *)
+  let allocations () : Tid.Set.t =
+    let rec up acc t =
+      if Core.Set.mem acc t then acc
+      else
+        let acc = Core.Set.add acc t in
+        match parent t with Some p -> up acc p | None -> acc
+    in
+    Core.Set.fold !confirmed ~init:Tid.Set.empty ~f:up
+    |> Core.Set.filter ~f:(Core.Map.mem !extents)
+
+  (* Keep only the frames [keep] accepts — the boundary sweep clears a
+     sub's own before its authoritative replay. *)
   let filter (keep : Tid.t -> bool) : unit =
-    extents := Core.Map.filter_keys !extents ~f:keep
+    extents := Core.Map.filter_keys !extents ~f:keep;
+    floors := Core.Map.filter_keys !floors ~f:keep;
+    parents := Core.Map.filter_keys !parents ~f:keep;
+    confirmed := Core.Set.filter !confirmed ~f:keep
 
   let keys () : Tid.Set.t = Core.Map.key_set !extents
 
-  (* Drop the whole table; a sub's final replay clears only its own
-     allocations through [filter]. *)
-  let reset () : unit = extents := empty
+  let reset () : unit =
+    extents := Tid.Map.empty;
+    floors := Tid.Map.empty;
+    parents := Tid.Map.empty;
+    confirmed := Tid.Set.empty
 
-  let take () : vla_extent Tid.Map.t =
-    let e = !extents in
-    extents := empty;
-    e
+  (* The run's allocations and their parents, and every candidate's
+     extent (a frame that is no allocation still names its stack
+     positions); the table is drained. *)
+  let take () :
+      vla_extent Tid.Map.t * Tid.t Tid.Map.t * vla_extent Tid.Map.t =
+    let allocs = allocations () in
+    let keep t = Core.Set.mem allocs t in
+    let all = !extents in
+    let e = Core.Map.filter_keys all ~f:keep in
+    let p = Core.Map.filter_keys !parents ~f:keep in
+    reset ();
+    (e, p, all)
 end
 
 (* The program's section map: the section each module address lies in.

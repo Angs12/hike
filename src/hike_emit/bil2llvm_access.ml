@@ -11,34 +11,57 @@ open Bil2llvm_section
 let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
   Hike_def_slots.sec_tag def
 
-(* Runtime-sized allocas: the size is the SP version the event
-   decrements minus the def's own value (a pointer difference is an
-   integer).  The [%vla] pointer IS the post-VLA SP's value. *)
+(* Runtime-sized allocas: the size is the runtime amount the def
+   descends from its parent — the SP version live before it, or a
+   nested allocation's parent frame base — plus the frame's floor (the
+   SP positions and round-down slack below the base).  The base, and
+   the def's value, is [%vla] past the floor. *)
 let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
-  let sp_before =
-    match Hike_def_slots.def_sp_before def with
-    | Some v -> v
-    | None -> failwith "hike: dynamic allocation without its SSA SP version"
+  let alloc =
+    match Hike_def_slots.def_dyn_alloc def with
+    | Some a -> a
+    | None -> failwith "hike: dynamic allocation without its stamp"
   in
-  let size =
+  let parent =
+    match alloc.Hike_def_slots.parent with
+    | Some p -> Hike_stack_model.vla_ptr ~addr_bits:ctx.addr_bits p
+    | None -> (
+      match Hike_def_slots.def_sp_before def with
+      | Some v -> v
+      | None -> failwith "hike: dynamic allocation without its SSA SP version")
+  in
+  let below = Int64.neg alloc.Hike_def_slots.floor in
+  let amount =
     as_int ctx llvm_builder
       (create_exp ctx scope llvm_builder blk_tid
-         (Bil.BinOp (Bil.MINUS, Bil.Var sp_before, exp)))
+         (Bil.BinOp (Bil.MINUS, Bil.Var parent, exp)))
+  in
+  let size =
+    if Int64.equal below 0L then amount
+    else
+      Llvm.build_add amount
+        (Llvm.const_of_int64 (Llvm.type_of amount) below false) "" llvm_builder
   in
   Llvm.set_value_name "vla_size" size;
   let vla =
     Llvm.build_array_alloca (Llvm.i8_type ctx.llvm_ctx) size "vla" llvm_builder
   in
   Llvm.set_alignment Hike_abi.stack_align vla;
-  (* The allocation's storage base var binds to its %vla pointer; a
+  let base =
+    if Int64.equal below 0L then vla
+    else
+      Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) vla
+        [| Llvm.const_of_int64 ctx.i64_ty below false |] "vla_base" llvm_builder
+  in
+  (* The allocation's storage base var binds to its frame base; a
      rewritten VLA address def's value GEPs it directly. *)
   let pv =
     Hike_stack_model.vla_ptr ~addr_bits:ctx.addr_bits (Term.tid def)
   in
-  let vla = Bil2llvm_value.Ptr vla in
-  insert_local scope blk_tid pv vla;
-  bind_ssaval scope pv vla;
-  vla
+  let base = Bil2llvm_value.Ptr base in
+  insert_local scope blk_tid pv base;
+  bind_ssaval scope pv base;
+  base
 
 (* The access's value: a memory node's load/store, or an arithmetic
    pointer rebased to its storage.  [ptr_cell]: the def's whole value is

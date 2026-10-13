@@ -291,9 +291,10 @@ let repoint_mapper ?(addr : exp option) (mem_var : var) =
           super#map_exp exp, rest, s )
   end
 
-(* A slot access keeps its memory node and takes [addr] as its address:
-   the load/store is real, through the caller's slot pointer. *)
-let slot_addr_mapper (addr : exp) =
+(* An access that keeps its memory node and takes [addr] as its address:
+   a slot access through the caller's slot pointer, a VLA access through
+   its allocation's base. *)
+let addr_mapper (addr : exp) =
   object
     inherit Exp.mapper as super
     method! map_load ~mem ~addr:_ endian size =
@@ -304,11 +305,14 @@ let slot_addr_mapper (addr : exp) =
 
 (* One def's rewrite: re-point to the owning storage's mem var at the
    storage-relative address, or address its memory node at the caller's
-   slot. *)
+   slot or at [addr]. *)
 let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
     ?(addr : exp option) (d : def term) : def term =
   match conv with
-  | Keep -> d
+  | Keep -> (
+      match addr with
+      | Some a -> Def.map_exp d ~f:(fun e -> (addr_mapper a)#map_exp e)
+      | None -> d)
   | Conv_region id ->
       let mem_var = Model.region_mem ~addr_bits:bits id in
 
@@ -338,7 +342,7 @@ let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
                 (Cbat_word.of_int64 ~width:addr_bits
                    (Stdlib.Int64.of_int byte_offset))))
       in
-      Def.map_exp d ~f:(fun e -> (slot_addr_mapper addr)#map_exp e)
+      Def.map_exp d ~f:(fun e -> (addr_mapper addr)#map_exp e)
 
 (* The folded storage form: a storage span's base var plus an
    already-folded displacement. *)

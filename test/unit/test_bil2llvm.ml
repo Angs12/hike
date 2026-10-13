@@ -646,8 +646,10 @@ let tests : unit Alcotest.test list =
         in
         let sub =
           Ds.stamp_dyn_allocs
-            ~dynamic_alloc_tids:
-              (Core.Set.of_list (module Tid) [ Term.tid d_dec1; Term.tid d_dec2 ])
+            ~allocs:
+              (Core.Map.of_key_set
+                 (Core.Set.of_list (module Tid) [ Term.tid d_dec1; Term.tid d_dec2 ])
+                 ~f:(fun _ -> { Ds.floor = 0L; parent = None }))
             sub
           |> Sm.set_layout
                { Sm.regions = []; window_param = false }
@@ -663,6 +665,34 @@ let tests : unit Alcotest.test list =
           (contains_substring ir "getelementptr i8, ptr %vla, i64 4"
           && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
           && count " = alloca i8, i64 " = 2));
+
+    pin "EMIT-59"
+      "an allocation computed off SP emits its alloca at the producer: the size \
+       adds the floor, the base is past it, and SP's copy is the base"
+      (fun () ->
+        let rsp = v64 "RSP" and rax = v64 "RAX" and t = v64 "emit_vla_t" in
+        let m = memv "emit_vla59_m" in
+        let w (x : int) = Cbat_word.to_word (w64 x) in
+        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax)) in
+        let sub =
+          straight_sub "emit_vla_producer"
+            [ d_t;
+              Def.create rsp (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int (w (-16))));
+              Def.create m
+                (Bil.Store
+                   ( Bil.Var m, Bil.Var rsp,
+                     Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
+                     LittleEndian, `r32 )) ]
+          |> Ds.stamp_dyn_allocs
+               ~allocs:(Tid.Map.singleton (Term.tid d_t) { Ds.floor = -15L; parent = None })
+          |> Sm.set_layout { Sm.regions = []; window_param = false }
+        in
+        let ir = emit_ir ~types:(retype_versions [ rsp; t ]) [ sub ] in
+        check "EMIT-59"
+          (contains_substring ir "%vla_size = add i64"
+          && contains_substring ir ", 15"
+          && contains_substring ir "%vla_base = getelementptr i8, ptr %vla, i64 15"
+          && contains_substring ir "@llvm.ptrmask.p0.i64(ptr %vla_base"));
 
     pin "EMIT-58"
       "a pointer masked by an integer stays a pointer (ptrmask); a pointer \
@@ -682,7 +712,8 @@ let tests : unit Alcotest.test list =
               Def.create m
                 (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Var rax, LittleEndian, `r64)) ]
           |> Ds.stamp_dyn_allocs
-               ~dynamic_alloc_tids:(Core.Set.singleton (module Tid) (Term.tid d_dec))
+               ~allocs:
+                 (Tid.Map.singleton (Term.tid d_dec) { Ds.floor = 0L; parent = None })
           |> Sm.set_layout { Sm.regions = []; window_param = false }
         in
         let ir = emit_ir ~types:(retype_versions [ rsp; rbp ]) [ sub ] in

@@ -36,9 +36,12 @@ type facts = {
      built at the discover boundary beside the other facts. *)
   lookup : int64 -> Tid.t option;
   (* Each VLA allocation's frame fact (its frame-relative offset band and
-     the base's entry-line range), keyed by its SP-assigning def's tid —
-     the seed's own fact, drained here so nothing crosses a program run. *)
+     the base's entry-line range), keyed by the def computing its base —
+     the seed's confirmed allocations, drained here so nothing crosses a
+     program run.  [vla_parents] names the frame a nested allocation
+     descends from. *)
   vla_extents : Hike_origin.vla_extent Tid.Map.t;
+  vla_parents : Tid.t Tid.Map.t;
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
@@ -61,6 +64,32 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     | Some pair -> pair
     | None -> (Cbat_vsa.AI.top, Cbat_vsa.AI.top)
   in
+  let vla_extents, vla_parents, candidates = Hike_origin.Vla_seed.take () in
+  (* A frame SP never entered is no allocation: its value reads as the
+     stack positions it stands for — the base range plus its offsets —
+     and an unknown base as the stack top. *)
+  let on_stack_line ws =
+    match Cbat_vsa.WordSet.origin ws with
+    | Some (Hike_origin.Vla t) when not (Core.Map.mem vla_extents t) -> (
+        let module Ws = Cbat_vsa.WordSet in
+        let k_int w = Base.Result.ok (Cbat_word.to_int64 w) in
+        let range =
+          match Core.Map.find candidates t, Ws.vla_offsets ws with
+          | Some { Hike_origin.base_lo = Some blo; base_hi = Some bhi; _ }, Some offs
+            when not (Ws.is_top ws || Ws.is_infinite ws) -> (
+              match Base.Option.bind (Ws.Clp.min_elem_signed offs) ~f:k_int,
+                    Base.Option.bind (Ws.Clp.max_elem_signed offs) ~f:k_int with
+              | Some klo, Some khi -> Some (Int64.add blo klo, Int64.add bhi khi)
+              | _ -> None)
+          | _ -> None
+        in
+        let width = 8 * (Hike_abi.of_target target).Hike_abi.word in
+        let word v = Cbat_word.of_int64 ~width v in
+        match range with
+        | Some (lo, hi) -> Ws.stack_word (Ws.Clp.interval ~width (word lo) (word hi))
+        | None -> Ws.sub (Ws.stack_word_i64 0L) (Ws.top width))
+    | _ -> ws
+  in
   { envs = block_envs;
     block_addrs;
     sub_addrs = Addr.Map.empty;
@@ -69,11 +98,13 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     target;
     abi = Hike_abi.of_target target;
     lookup;
-    vla_extents = Hike_origin.Vla_seed.take ();
+    vla_extents;
+    vla_parents;
     denote =
       (fun ~blk ?def e ->
         let pre, post = blk_envs blk in
-        Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e);
+        Base.Result.map ~f:on_stack_line
+          (Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e));
     spec = None;
     escape_roots = Tid.Map.empty;
     synth = Hike_synth.empty }

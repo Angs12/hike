@@ -428,7 +428,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
                   if renamable (Def.lhs d) then
                     let d =
                       if Hike_def_slots.def_is_dyn_alloc d then
-                        Hike_def_slots.set_sp_before (top (Def.lhs d)) d
+                        Hike_def_slots.set_sp_before (top sp) d
                       else d
                     in
                     Def.with_lhs d (new_name (Def.lhs d))

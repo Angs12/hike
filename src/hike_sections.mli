@@ -200,9 +200,10 @@ val attribute :
   program term ->
   ctx
 
-(** The dynamic-allocation events: the defs that move SP by a runtime
-    size — a non-fixed size and a strictly-below-SP value. *)
-val dynamic_alloc_tids_of : facts:Hike_kb.facts -> sub term -> Tid.Set.t
+(** The sub's dynamic allocations: the seed's confirmed frames, keyed by
+    the def computing each base. *)
+val dynamic_allocs_of :
+  facts:Hike_kb.facts -> sub term -> Hike_def_slots.dyn_alloc Tid.Map.t
 
 (** The ownership query: the finalized binding owning [r]. *)
 val storage_of_range : range_storage Tree.t -> range -> range_storage option

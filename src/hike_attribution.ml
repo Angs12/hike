@@ -24,15 +24,15 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       Term.enum sub_t program
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun map sub ->
              Core.Map.set map ~key:(Term.tid sub)
-               ~data:(Hike_sections.dynamic_alloc_tids_of ~facts sub))
+               ~data:(Hike_sections.dynamic_allocs_of ~facts sub))
     in
     let program =
       Term.map sub_t program ~f:(fun sub ->
-          let tids =
+          let allocs =
             Core.Map.find dynamic_allocs (Term.tid sub)
-            |> Option.value ~default:Tid.Set.empty
+            |> Option.value ~default:Tid.Map.empty
           in
-          Hike_def_slots.stamp_dyn_allocs ~dynamic_alloc_tids:tids sub)
+          Hike_def_slots.stamp_dyn_allocs ~allocs sub)
     in
     let sections =
       Hike_sections.attribute ~facts ~word ~entry ~spans program

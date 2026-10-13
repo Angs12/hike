@@ -26,17 +26,40 @@ let bump : string -> unit =
 
 let bool_inspect (b : bool) : Sexp.t = Sexp.Atom (string_of_bool b)
 
-(* The def is a runtime-sized SP decrement and emits a real runtime-sized
-   alloca; the storage fact rides the def's value beside the kind. *)
-let def_dyn_alloc_d : bool D.t =
-  D.flat ~name:"hike-dyn-alloc" ~empty:false ~equal:Bool.equal
-    ~inspect:bool_inspect ~get_bump:"dyn_alloc.get" ~put_bump:"dyn_alloc.put"
+(* The def computes a VLA allocation's base and emits a real
+   runtime-sized alloca.  [floor] is the frame's lowest routable offset
+   (<= 0: SP positions and round-down slack below the base); [parent] is
+   the frame a nested allocation descends from — its size is measured
+   from that frame's base instead of SP. *)
+type dyn_alloc = { floor : int64; parent : Tid.t option }
+
+type KB.conflict += Dyn_alloc_conflict
+
+let () =
+  KB.Conflict.register_printer (function
+    | Dyn_alloc_conflict ->
+        Some "hike: dyn-alloc conflict: two allocations were stamped for one def"
+    | _ -> None)
+
+let equal_dyn_alloc a b =
+  Int64.equal a.floor b.floor && Option.equal Tid.equal a.parent b.parent
+
+let def_dyn_alloc_d : dyn_alloc option D.t =
+  D.optional ~name:"hike-dyn-alloc"
+    ~inspect:(fun a ->
+      Sexp.List
+        [ Sexp.Atom (Int64.to_string a.floor);
+          Sexp.Atom (Option.value_map a.parent ~default:"-" ~f:Tid.to_string) ])
+    ~join:(fun a b -> if equal_dyn_alloc a b then Ok a else Error Dyn_alloc_conflict)
+    ~equal:equal_dyn_alloc ~get_bump:"dyn_alloc.get" ~put_bump:"dyn_alloc.put"
     ~bump
 
-let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc_d d
+let def_dyn_alloc (d : def term) : dyn_alloc option = D.get def_dyn_alloc_d d
 
-(* The SP version a dynamic allocation decrements.  The event def need
-   not read SP, so the SSA rename records the version live before it. *)
+let def_is_dyn_alloc (d : def term) : bool = Option.is_some (def_dyn_alloc d)
+
+(* The SP version live before a dynamic allocation's def.  The def need
+   not read SP, so the SSA rename records it. *)
 type KB.conflict += Sp_before_conflict
 
 let () =
@@ -86,11 +109,11 @@ let stamp_window_values ~(window_values : Tid.Set.t)
   stamp_tids ~tids:window_values
     sub ~stamp:(fun d -> D.put def_window_value_d true d)
 
-(* Stamps the dynamic-allocation fact onto the event defs. *)
-let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
-    (sub : sub term) : sub term =
-  stamp_tids ~tids:dynamic_alloc_tids
-    sub ~stamp:(fun d -> D.put def_dyn_alloc_d true d)
+(* Stamps each allocation onto the def computing its base. *)
+let stamp_dyn_allocs ~(allocs : dyn_alloc Tid.Map.t) (sub : sub term) :
+    sub term =
+  stamp_tids ~tids:(Core.Map.key_set allocs) sub ~stamp:(fun d ->
+      D.put def_dyn_alloc_d (Core.Map.find allocs (Term.tid d)) d)
 
 let stamp_ptr_kinds ~(ptr_tids : Tid.Set.t) (sub : sub term) : sub term =
   stamp_tids ~tids:ptr_tids sub ~stamp:(fun d -> D.put def_ptr_kind_d true d)

@@ -20,7 +20,7 @@ let plus_addr sp (off : int64) : exp =
 let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   let sub =
     Ds.stamp_dyn_allocs
-      ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts sub) sub
+      ~allocs:(Hike.Sections.dynamic_allocs_of ~facts:top_facts sub) sub
   in
   Hike.Promote.promote_sub ~addr_bits:64 facts sub
 
@@ -476,7 +476,7 @@ let rw_sec () : sub term =
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
         Hike.Def_slots.stamp_dyn_allocs
-          ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts sub)
+          ~allocs:(Hike.Sections.dynamic_allocs_of ~facts sub)
           sub)
   in
   let ctx =
@@ -600,7 +600,7 @@ let tests : unit Alcotest.test list =
         let keep_sub0 = straight_sub "t10_keep" [ keep; keep_st ] in
         let keep_ctx = fixture_ctx [ keep_sub0 ] in
         let keep_sub = Hike.Sections.stamp_tags keep_ctx keep_sub0 in
-        let keep' = Ds.stamp_dyn_allocs ~dynamic_alloc_tids:Tid.Set.empty keep_sub in
+        let keep' = Ds.stamp_dyn_allocs ~allocs:Tid.Map.empty keep_sub in
         let keep_def = Base.Option.value_exn (t10_find_def keep' (Term.tid keep)) in
         check "PR-12" (Ds.sec_tag keep_def <> None));
 

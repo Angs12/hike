@@ -997,29 +997,19 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   { sub_trees; data_tree; tags = collected.tags;
     projections = collected.projections; conversions; whole }
 
-(* The dynamic-allocation set is the seed's own, re-validated against
-   the final denotations: the event predicate over the def's SP-before
-   and SP-after words.  An alloca without an origin and an origin
-   without an alloca are the same set. *)
-let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
-    (sub : sub term) : Tid.Set.t =
-  let sp = facts.abi.Hike_abi.sp in
-  let def_at =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-        Term.enum def_t blk
-        |> Seq.fold ~init:m ~f:(fun m d ->
-            Core.Map.set m ~key:(Term.tid d) ~data:(d, blk)))
+(* The sub's dynamic allocations: the seed's confirmed frames whose
+   base-computing def lies in the sub.  The solve's boundary sweep is
+   their validation against the final denotations. *)
+let dynamic_allocs_of ~(facts : Hike_kb.facts) (sub : sub term) :
+    Hike_def_slots.dyn_alloc Tid.Map.t =
+  let own =
+    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.map ~f:Term.tid |> Seq.to_list |> Tid.Set.of_list
   in
-  Core.Map.filter_keys facts.Hike_kb.vla_extents ~f:(fun tid ->
-      match Core.Map.find def_at tid with
-      | None -> false
-      | Some (d, blk) -> (
-        match facts.denote ~blk ~def:d (Bil.Var sp),
-              facts.denote ~blk ~def:d (Def.rhs d) with
-        | Ok before, Ok after -> Option.is_some (Vsa.vla_event ~before ~after)
-        | _ -> false))
-  |> Core.Map.key_set
+  Core.Map.filter_keys facts.Hike_kb.vla_extents ~f:(Core.Set.mem own)
+  |> Core.Map.mapi ~f:(fun ~key ~data ->
+      { Hike_def_slots.floor = data.Hike_origin.off_lo;
+        parent = Core.Map.find facts.Hike_kb.vla_parents key })
 
 (* The storages an expression names: a storage base leaf itself, or a
    var the map proved to hold one.  Only address arithmetic carries the
@@ -1471,6 +1461,25 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                           census "rw.access.section";
                           Core.Map.set acc ~key:(Term.tid d)
                             ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
+                      | Keep -> (
+                          (* A routable VLA access lands in its allocation:
+                             the frame-relative offset from that alloca's
+                             base, whichever register carries the address. *)
+                          let vla_addr =
+                            match Vsa.Def_origin.def_origin d with
+                            | Some (Hike_origin.Vla tid)
+                              when Core.Set.mem vla_tids tid ->
+                                Base.Option.map
+                                  (Hike_synth_addr.offset_of ~leaves addr)
+                                  ~f:(Hike_synth_addr.base_plus
+                                        (Model.vla_ptr ~addr_bits tid) ~rel:0L)
+                            | _ -> None
+                          in
+                          census
+                            (if Base.Option.is_some vla_addr then "rw.access.vla"
+                             else "rw.access.keep");
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:{ fact with fr_addr = vla_addr; fr_bits = 8 * w })
                       | _ ->
                           census "rw.access.keep";
                           Core.Map.set acc ~key:(Term.tid d)

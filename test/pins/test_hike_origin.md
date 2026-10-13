@@ -27,3 +27,4 @@ fails under that inversion.
 | ORI-23 | alignment images count rounded blocks rather than the original span | count blocks from the unrounded endpoints | a boundary-crossing interval loses its second result |
 
 | ORI-24 | relative difference uses exact shared offsets; a module-address subtrahend removes exactly its link-time words | subtract materialized relative hulls | disjoint Rip/VLA offsets or a plain value incorrectly become bottom |
+| ORI-25 | the copy chain (`RCX := RSP − RAX; RSP := RCX`): the producer opens the frame, so RCX and RSP both carry `Vla T_producer`; the SP def confirms it without opening a second allocation; an access through RCX is stamped `Vla T_producer` | in `vla_seed`, seed only defs whose lhs is SP | pin FAILs: RCX keeps a Stack value and the allocation is the SP def |

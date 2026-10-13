@@ -1140,11 +1140,11 @@ let tests : unit Alcotest.test list =
         check
           "T5-3 (T12 ruling): a bounded runtime SP adjustment is NOT a VLA — no allocation event"
           (Core.Set.is_empty
-             (Hike.Sections.dynamic_alloc_tids_of ~facts:fb bounded));
+             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fb bounded)));
         check "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation event"
           (not
              (Core.Set.is_empty
-                (Hike.Sections.dynamic_alloc_tids_of ~facts:fu unbounded))));
+                (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fu unbounded)))));
 
     (* T5-4 (head extrapolation): a cell widens strictly by its OWN
        entries — no own entries plain-widen; own entries translate by
