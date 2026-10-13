@@ -179,8 +179,6 @@ type sub_scope = {
   (* The per-sub storages: each storage var binds its alloca and
      entry-line base — the lane's per-sub storage bindings. *)
   storages : (Llvm.llvalue * int64) WVarMap.t ref;
-  (* The type pass's pointer environment for this sub. *)
-  ptr_env : Var.Set.t ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -195,30 +193,22 @@ let fresh_scope () : sub_scope =
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;
     ptr_offsets = ref WVarMap.empty;
-    storages = ref WVarMap.empty;
-    ptr_env = ref Var.Set.empty }
+    storages = ref WVarMap.empty }
 
 let typ_lltype ctx typ =
   match typ with
   | Imm n -> Llvm.integer_type ctx.llvm_ctx n
   | _ -> ctx.ptr_ty
 
-(* A var's type outside any sub's environment: the caller-window base
-   and the model's storage handles are pointers; every other var keeps
-   its BIR type. *)
-let sort_lltype ctx var =
-  if Hike_stack_model.is_window_var var then ctx.ptr_ty
-  else typ_lltype ctx (Var.typ var)
-
-(* A var's value is a pointer in the sub: the type pass's pointers,
-   the caller window, and the BIR's memory sorts. *)
-let var_is_ptr scope var =
+(* A var's value is a pointer when its sort is [Mem] (the type pass's
+   pointer versions and the model's storage) or it is the caller
+   window. *)
+let var_is_ptr var =
   Hike_stack_model.is_window_var var
-  || Hike_stack_model.is_ptr_typed !(scope.ptr_env) var
   || match Var.typ var with Type.Mem _ -> true | _ -> false
 
-let var_lltype ctx scope var =
-  if var_is_ptr scope var then ctx.ptr_ty else typ_lltype ctx (Var.typ var)
+let var_lltype ctx var =
+  if var_is_ptr var then ctx.ptr_ty else typ_lltype ctx (Var.typ var)
 
 (* An environment register's process-global cell: one internal module
    global per register, zero-initialized.  Reads load it, defs and phi
@@ -230,22 +220,22 @@ let env_global ctx (v : var) =
   | None ->
     let g =
       Llvm.define_global name
-        (Llvm.const_int (sort_lltype ctx v) 0)
+        (Llvm.const_int (var_lltype ctx v) 0)
         ctx.llvm_module
     in
     Llvm.set_linkage Llvm.Linkage.Internal g;
     g
 
 let load_env_reg ctx llvm_builder (v : var) =
-  Llvm.build_load (sort_lltype ctx v) (env_global ctx v) "" llvm_builder
+  Llvm.build_load (var_lltype ctx v) (env_global ctx v) "" llvm_builder
 
 (* A var whose value is a stack/VLA address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
-let is_ptr_var scope (v : Var.t) : bool =
+let is_ptr_var (v : Var.t) : bool =
   (match Hike_synth.classify Hike_synth.empty v with
    | Some (Hike_synth.Bytes _) -> false
    | _ -> true)
-  && var_is_ptr scope v
+  && var_is_ptr v
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -325,8 +315,7 @@ let synthetic_rets ctx =
    rest keep the BIR type. *)
 let lane_is_ptr (a : Arg.t) : bool =
   Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a
-  || Hike_stack_model.is_window_var (Arg.lhs a)
-  || match Var.typ (Arg.lhs a) with Type.Mem _ -> true | _ -> false
+  || var_is_ptr (Arg.lhs a)
 
 (* The vector carrier: a return lane wider than a word. *)
 let lane_vector ctx (a : Arg.t) : Llvm.lltype option =
@@ -502,7 +491,7 @@ let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
   match WVarMap.find_opt (wvar_of var) !(scope.undef_vals) with
   | Some v -> v
   | None ->
-      let typ = var_lltype ctx scope var in
+      let typ = var_lltype ctx var in
       let b =
         match builder with
         | Some b -> b
@@ -514,7 +503,7 @@ let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
       in
       let v = Llvm.build_freeze (Llvm.undef typ) "hike_undef" b in
       let v =
-        if var_is_ptr scope var then Bil2llvm_value.Ptr v
+        if var_is_ptr var then Bil2llvm_value.Ptr v
         else Bil2llvm_value.Int v
       in
       scope.undef_vals := WVarMap.add (wvar_of var) v !(scope.undef_vals);

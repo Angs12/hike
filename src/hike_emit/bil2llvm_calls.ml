@@ -73,7 +73,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       then
         (match window_ptr () with
          | Some w -> w
-         | None -> Llvm.undef (sort_lltype ctx (Arg.lhs arg)))
+         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let i =
           Base.Option.value ~default:0
@@ -153,7 +153,7 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
          parameter nothing claimed enters as its integer. *)
       let value = lane_value_of arg param in
       let value =
-        if Hike_stack_model.is_ptr_arg arg || is_ptr_var scope (Arg.lhs arg)
+        if Hike_stack_model.is_ptr_arg arg || is_ptr_var (Arg.lhs arg)
         then value
         else Bil2llvm_value.Int (as_int ctx llvm_builder value)
       in

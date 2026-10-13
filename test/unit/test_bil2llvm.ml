@@ -636,9 +636,25 @@ let tests : unit Alcotest.test list =
             sub
           |> Sm.set_layout
                { Sm.regions = []; window_param = false }
-          |> Sm.set_ptr_vars (Var.Set.of_list [ rsp; p1; p2 ])
         in
-        let ir = emit_ir [ sub ] in
+        (* The types pass's retype: every version of SP and of the two
+           VLA pointers is a pointer. *)
+        let types =
+          Term.map sub_t ~f:(fun s ->
+              let env =
+                Term.enum blk_t s
+                |> Seq.concat_map ~f:(Term.enum def_t)
+                |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+                       Core.Set.union acc
+                         (Core.Set.add (Exp.free_vars (Def.rhs d)) (Def.lhs d)))
+                |> Core.Set.filter ~f:(fun v ->
+                       List.exists (Var.same v) [ rsp; p1; p2 ])
+              in
+              Hike.Types.retype_sub
+                ~mem_typ:(Type.Mem (`r64, `r8)) ~ptr_vars:env
+                ~ptr_rets:Var.Set.empty s)
+        in
+        let ir = emit_ir ~types [ sub ] in
         let count sub_str =
           String.split_on_char '\n' ir
           |> List.filter (fun l -> contains_substring l sub_str)

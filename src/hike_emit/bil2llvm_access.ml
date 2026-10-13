@@ -50,7 +50,7 @@ let access_value ~ptr_cell ctx scope llvm_builder blk_tid sub_tid def exp =
   match Hike_stack_model.mem_node_of exp with
   | None -> (
       let storage =
-        if is_ptr_var scope (Def.lhs def) then Hike_def_slots.def_ptr_storage def
+        if is_ptr_var (Def.lhs def) then Hike_def_slots.def_ptr_storage def
         else None
       in
       match storage with
@@ -253,7 +253,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
-  let ptr = is_ptr_var scope var in
+  let ptr = is_ptr_var var in
   let ptr_cell = ptr && (match exp with Bil.Load _ -> true | _ -> false) in
   let res =
     match Core.Map.find !(scope.atomic_plan) (Term.tid def) with

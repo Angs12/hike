@@ -1020,7 +1020,8 @@ let empty_spec : B2l.section_spec =
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
+let emit_ir_spec ?(types = fun prog -> prog) (spec : B2l.section_spec)
+    (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
   (* The completion names each block's successors, as the pipeline does
@@ -1037,6 +1038,8 @@ let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
   let prog = Hike.Split_blocks.normalize prog in
   let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+  (* The types pass runs on the SSA program; a fixture stamps its own. *)
+  let prog = types prog in
   B2l.emit_program llvm_ctx llvm_module
     ~target:Theory.Target.unknown ~addr_bits:64
     ~symtab:None ~synth:(Hike_synth.table_of_program prog) spec prog;
@@ -1045,7 +1048,8 @@ let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   Llvm.dispose_context llvm_ctx;
   s
 
-let emit_ir (subs : sub term list) : string = emit_ir_spec empty_spec subs
+let emit_ir ?types (subs : sub term list) : string =
+  emit_ir_spec ?types empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

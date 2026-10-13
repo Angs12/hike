@@ -118,7 +118,7 @@ let rec create_offset ctx scope llvm_builder blk_tid exp :
       match get_ptr_offset scope v with
       | Some off -> Some off
       | None ->
-          if is_ptr_var scope v then None
+          if is_ptr_var v then None
           else
             match create_exp ctx scope llvm_builder blk_tid exp with
             | Bil2llvm_value.Int x -> Some x

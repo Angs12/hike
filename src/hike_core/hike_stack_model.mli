@@ -279,10 +279,6 @@ module Versions : sig
 end
 
 val versions_tag : Versions.t Value.Tag.t
-(* The type pass's pointer environment, stamped on the sub. *)
-val ptr_vars : sub term -> Var.Set.t
-val set_ptr_vars : Var.Set.t -> sub term -> sub term
-val is_ptr_typed : Var.Set.t -> var -> bool
 val ssa_tag : unit Value.Tag.t
 val is_ssa : sub term -> bool
 val set_layout : sub_layout -> sub term -> sub term

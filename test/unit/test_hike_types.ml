@@ -223,6 +223,28 @@ let tests : unit Alcotest.test list =
 
 
 
+    pin "KIND-05"
+      "an integer SSA version of a pointer register stays an integer" (fun () ->
+        let rdi = v64 "RDI" in
+        let rdi1 = Var.with_index rdi 1 in
+        let rbx1 = Var.with_index (v64 "RBX") 1 in
+        let rcx1 = Var.with_index (v64 "RCX") 1 in
+        let eight = Bil.Int (Cbat_word.to_word (w64 8)) in
+        let sub =
+          straight_sub "k05"
+            [ Def.create rcx1 (Bil.BinOp (Bil.PLUS, Bil.Var rdi, eight));
+              Def.create rdi1 (Bil.Int (Cbat_word.to_word (w64 48)));
+              Def.create rbx1 (Bil.BinOp (Bil.PLUS, Bil.Var rdi1, eight)) ]
+        in
+        let facts, stamped = fixture_facts_sub sub in
+        let pf =
+          Types.ptr_defs ~extra:(Var.Set.singleton rdi) ~facts stamped
+        in
+        check "KIND-05"
+          (Core.Set.mem pf.Types.vars rcx1
+           && not (Core.Set.mem pf.Types.vars rdi1)
+           && not (Core.Set.mem pf.Types.vars rbx1)));
+
     pin "KIND-04"
       "a callee parameter passed a stack address is ptr-kind" (fun () ->
         let rdi = v64 "RDI" in
@@ -246,15 +268,15 @@ let tests : unit Alcotest.test list =
         let prog = Program.create ~subs:stamped () in
         let sub_of_m = Types.sub_of_program prog in
         let pks, _ = Types.ptr_kinds ~facts ~sub_of:sub_of_m prog in
+        let mem_typ = Types.mem_type_of_target facts.Hike.Kb.target in
         let prog =
           Term.map sub_t prog ~f:(fun sub ->
               let ptr_vars =
                 Core.Map.find pks (Term.tid sub)
                 |> Base.Option.value ~default:Var.Set.empty
               in
-              Model.set_ptr_vars ptr_vars sub)
+              Types.retype_sub ~mem_typ ~ptr_vars ~ptr_rets:Var.Set.empty sub)
           |> Types.stamp_arg_kinds ~param_kinds:pks
-          |> Types.stamp_lane_types
         in
         let callee =
           Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
@@ -269,7 +291,7 @@ let tests : unit Alcotest.test list =
           (match Core.Map.find pks (Term.tid callee) with
            | Some s ->
              Core.Set.mem s rdi
-             && Model.is_ptr_arg arg
+             && Var.typ (Arg.lhs arg) = mem_typ
              && Model.is_arg_ptr_kind arg
            | None -> false));
 
