@@ -10,16 +10,37 @@ let offset ~addr_bits b p idx =
   Llvm.build_gep (Llvm.i8_type ctx) p
     [| Bil2llvm_int.to_width b ~bits:addr_bits idx |] "" b
 
-(* The comparisons a pointer pair keeps; any other op materialises. *)
+(* A pointer comparison: [op] is one of the BIL comparisons. *)
 let cmp b op p q =
-  match op with
-  | EQ -> Some (Llvm.build_icmp Llvm.Icmp.Eq p q "" b)
-  | NEQ -> Some (Llvm.build_icmp Llvm.Icmp.Ne p q "" b)
-  | LT -> Some (Llvm.build_icmp Llvm.Icmp.Ult p q "" b)
-  | LE -> Some (Llvm.build_icmp Llvm.Icmp.Ule p q "" b)
-  | _ -> None
+  let pred =
+    match op with
+    | EQ -> Llvm.Icmp.Eq
+    | NEQ -> Llvm.Icmp.Ne
+    | LT -> Llvm.Icmp.Ult
+    | LE -> Llvm.Icmp.Ule
+    | SLT -> Llvm.Icmp.Slt
+    | SLE -> Llvm.Icmp.Sle
+    | _ -> invalid_arg "Bil2llvm_ptr.cmp: not a comparison"
+  in
+  Llvm.build_icmp pred p q "" b
 
-let null p = Llvm.const_null (Llvm.type_of p)
+(* The pointer with its address masked (an alignment): [llvm.ptrmask]
+   keeps the pointer's provenance. *)
+let mask ~addr_bits b p m =
+  let ctx = Llvm.type_context (Llvm.type_of p) in
+  let ity = Llvm.integer_type ctx addr_bits in
+  let md = Llvm.global_parent (Llvm.block_parent (Llvm.insertion_block b)) in
+  let name = Printf.sprintf "llvm.ptrmask.p0.i%d" addr_bits in
+  let fty = Llvm.function_type (Llvm.type_of p) [| Llvm.type_of p; ity |] in
+  let f = Llvm.declare_function name fty md in
+  Llvm.build_call fty f [| p; Bil2llvm_int.to_width b ~bits:addr_bits m |] "" b
+
+(* The distance between two pointers, in bytes. *)
+let diff ~addr_bits b p q =
+  let ctx = Llvm.type_context (Llvm.type_of p) in
+  let ity = Llvm.integer_type ctx addr_bits in
+  Llvm.build_sub (Llvm.build_ptrtoint p ity "" b) (Llvm.build_ptrtoint q ity "" b)
+    "" b
 
 let select b cond p q = Llvm.build_select cond p q "" b
 

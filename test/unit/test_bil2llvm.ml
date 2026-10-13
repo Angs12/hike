@@ -29,6 +29,21 @@ let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
   Hike.Promote.promote_sub ~addr_bits:64 (mk_facts ()) sub
 
 (* Phi lines with exactly two incomings. *)
+(* The types pass's retype for a fixture: every SSA version of [ptrs]
+   is a pointer. *)
+let retype_versions (ptrs : var list) : program term -> program term =
+  Term.map sub_t ~f:(fun s ->
+      let env =
+        Term.enum blk_t s
+        |> Seq.concat_map ~f:(Term.enum def_t)
+        |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+               Core.Set.union acc
+                 (Core.Set.add (Exp.free_vars (Def.rhs d)) (Def.lhs d)))
+        |> Core.Set.filter ~f:(fun v -> List.exists (Var.same v) ptrs)
+      in
+      Hike.Types.retype_sub ~mem_typ:(Type.Mem (`r64, `r8)) ~ptr_vars:env
+        ~ptr_rets:Var.Set.empty s)
+
 let count_two_incoming_phis (ir : string) : int =
   String.split_on_char '\n' ir
   |> List.filter (fun l -> contains_substring l " = phi i64 ")
@@ -637,23 +652,7 @@ let tests : unit Alcotest.test list =
           |> Sm.set_layout
                { Sm.regions = []; window_param = false }
         in
-        (* The types pass's retype: every version of SP and of the two
-           VLA pointers is a pointer. *)
-        let types =
-          Term.map sub_t ~f:(fun s ->
-              let env =
-                Term.enum blk_t s
-                |> Seq.concat_map ~f:(Term.enum def_t)
-                |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
-                       Core.Set.union acc
-                         (Core.Set.add (Exp.free_vars (Def.rhs d)) (Def.lhs d)))
-                |> Core.Set.filter ~f:(fun v ->
-                       List.exists (Var.same v) [ rsp; p1; p2 ])
-              in
-              Hike.Types.retype_sub
-                ~mem_typ:(Type.Mem (`r64, `r8)) ~ptr_vars:env
-                ~ptr_rets:Var.Set.empty s)
-        in
+        let types = retype_versions [ rsp; p1; p2 ] in
         let ir = emit_ir ~types [ sub ] in
         let count sub_str =
           String.split_on_char '\n' ir
@@ -664,6 +663,33 @@ let tests : unit Alcotest.test list =
           (contains_substring ir "getelementptr i8, ptr %vla, i64 4"
           && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
           && count " = alloca i8, i64 " = 2));
+
+    pin "EMIT-58"
+      "a pointer masked by an integer stays a pointer (ptrmask); a pointer \
+       difference is an integer"
+      (fun () ->
+        let rsp = v64 "RSP" and rbp = v64 "RBP" in
+        let rax = v64 "RAX" and rbx = v64 "RBX" in
+        let m = memv "emit_mask_m" in
+        let w (x : int) = Cbat_word.to_word (w64 x) in
+        let d_dec = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rbx)) in
+        let sub =
+          straight_sub "emit_ptrmask"
+            [ d_dec;
+              Def.create rbp (Bil.Var rsp);
+              Def.create rsp (Bil.BinOp (Bil.AND, Bil.Var rsp, Bil.Int (w (-16))));
+              Def.create rax (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Var rsp));
+              Def.create m
+                (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Var rax, LittleEndian, `r64)) ]
+          |> Ds.stamp_dyn_allocs
+               ~dynamic_alloc_tids:(Core.Set.singleton (module Tid) (Term.tid d_dec))
+          |> Sm.set_layout { Sm.regions = []; window_param = false }
+        in
+        let ir = emit_ir ~types:(retype_versions [ rsp; rbp ]) [ sub ] in
+        check "EMIT-58"
+          (contains_substring ir "call ptr @llvm.ptrmask.p0.i64(ptr %vla"
+           && contains_substring ir "store i64"
+           && not (contains_substring ir "inttoptr")));
 
     pin "EMIT-47" "explicit atomic operations emit one effect at every width"
       (fun () ->

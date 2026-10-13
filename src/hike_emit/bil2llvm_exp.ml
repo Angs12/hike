@@ -152,9 +152,7 @@ and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
   let eval e = create_exp ctx scope llvm_builder blk_tid e in
   match exp with
   | BinOp (op, e1, e2) ->
-      let null e = match e with Bil.Int w -> Word.is_zero w | _ -> false in
-      Bil2llvm_value.lift2 ~addr_bits llvm_builder ~null1:(null e1)
-        ~null2:(null e2) op (eval e1) (eval e2)
+      Bil2llvm_value.lift2 ~addr_bits llvm_builder op (eval e1) (eval e2)
   | UnOp (op, e) -> Bil2llvm_value.lift1 ~addr_bits llvm_builder op (eval e)
   | Var v when Var.same v ctx.abi.Abi.thread_pointer ->
       Bil2llvm_value.Int

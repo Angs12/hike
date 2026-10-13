@@ -304,8 +304,6 @@ end
 val is_ptr_arg : Arg.t -> bool
 val set_ptr_arg : Arg.t -> Arg.t
 
-val is_arg_ptr_kind : Arg.t -> bool
-val set_arg_ptr_kind : Arg.t -> Arg.t
 
 (* The PLT-trampoline stamp. *)
 val is_plt_trampoline_sub : sub term -> bool

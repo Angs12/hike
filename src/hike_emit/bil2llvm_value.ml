@@ -1,8 +1,7 @@
 (* An emitted value with the type the type pass gave it: an integer at
    its BIR width, or a pointer.  Every operator lifts over the
-   constructors and dispatches to [Bil2llvm_int] or [Bil2llvm_ptr];
-   a mixed operation materialises its pointers to integers.  The only
-   conversions are [as_int] and [as_ptr]. *)
+   constructors and dispatches to [Bil2llvm_int] or [Bil2llvm_ptr].
+   The only conversions are [as_int] and [as_ptr]. *)
 
 open Bap.Std.Bil.Types
 
@@ -22,18 +21,18 @@ let as_ptr b = function
 let coerce ~addr_bits b ~ptr v =
   if ptr then Ptr (as_ptr b v) else Int (as_int ~addr_bits b v)
 
-(* An operand of a mixed operation: a pointer's address bits, and the
-   integer at the address width beside it. *)
-let as_addr ~addr_bits b v =
-  Bil2llvm_int.to_width b ~bits:addr_bits (as_int ~addr_bits b v)
-
 let lift1 ~addr_bits b op v = Int (Bil2llvm_int.unop b op (as_int ~addr_bits b v))
 
-(* [null1]/[null2]: the operand is the literal zero, so a pointer
-   compares against null rather than materialising. *)
-let lift2 ~addr_bits b ?(null1 = false) ?(null2 = false) op a c =
-  let materialise () =
-    Int (Bil2llvm_int.binop b op (as_addr ~addr_bits b a) (as_addr ~addr_bits b c))
+(* An operation with a pointer operand: an offset or a mask keeps the
+   pointer, a comparison compares addresses, a pointer difference is an
+   integer.  The arithmetic and bit operations with no address meaning
+   compute on the address bits. *)
+let lift2 ~addr_bits b op a c =
+  let on_bits () =
+    let bits v =
+      Bil2llvm_int.to_width b ~bits:addr_bits (as_int ~addr_bits b v)
+    in
+    Int (Bil2llvm_int.binop b op (bits a) (bits c))
   in
   match op, a, c with
   | _, Int x, Int y -> Int (Bil2llvm_int.binop b op x y)
@@ -41,19 +40,14 @@ let lift2 ~addr_bits b ?(null1 = false) ?(null2 = false) op a c =
       Ptr (Bil2llvm_ptr.offset ~addr_bits b p i)
   | MINUS, Ptr p, Int i ->
       Ptr (Bil2llvm_ptr.offset ~addr_bits b p (Bil2llvm_int.unop b NEG i))
-  | _, Ptr p, Ptr q -> (
-      match Bil2llvm_ptr.cmp b op p q with
-      | Some r -> Int r
-      | None -> materialise ())
-  | (EQ | NEQ), Ptr p, Int _ when null2 -> (
-      match Bil2llvm_ptr.cmp b op p (Bil2llvm_ptr.null p) with
-      | Some r -> Int r
-      | None -> materialise ())
-  | (EQ | NEQ), Int _, Ptr q when null1 -> (
-      match Bil2llvm_ptr.cmp b op q (Bil2llvm_ptr.null q) with
-      | Some r -> Int r
-      | None -> materialise ())
-  | _ -> materialise ()
+  | MINUS, Ptr p, Ptr q -> Int (Bil2llvm_ptr.diff ~addr_bits b p q)
+  | AND, Ptr p, Int m | AND, Int m, Ptr p ->
+      Ptr (Bil2llvm_ptr.mask ~addr_bits b p m)
+  | (EQ | NEQ | LT | LE | SLT | SLE), _, _ ->
+      Int (Bil2llvm_ptr.cmp b op (as_ptr b a) (as_ptr b c))
+  | (PLUS | MINUS | AND | OR | XOR | TIMES | DIVIDE | SDIVIDE | MOD | SMOD
+    | LSHIFT | RSHIFT | ARSHIFT), _, _ ->
+      on_bits ()
 
 let cast ~addr_bits b c i v =
   Int (Bil2llvm_int.cast b (c, i) (as_int ~addr_bits b v))

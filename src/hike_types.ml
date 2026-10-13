@@ -562,24 +562,6 @@ let ptr_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
   in
   fix Tid.Map.empty Tid.Map.empty
 
-(* Stamps each In lane's kind: the mem/window lanes are pointers by
-   construction; a value lane is a pointer when its parameter is. *)
-let stamp_arg_kinds ~(param_kinds : Var.Set.t Tid.Map.t)
-    (prog : program term) : program term =
-  Term.map sub_t prog ~f:(fun sub ->
-      let kinds =
-        Core.Map.find param_kinds (Term.tid sub)
-        |> Base.Option.value ~default:Var.Set.empty
-      in
-      Term.map arg_t sub ~f:(fun a ->
-          if Hike_stack_model.is_ret a then a
-          else if
-            Hike_stack_model.is_ptr_arg a
-            || Hike_stack_model.is_window_var (Arg.lhs a)
-            || Core.Set.mem kinds (Arg.lhs a)
-          then Hike_stack_model.set_arg_ptr_kind a
-          else a))
-
 #ifdef VSA_DEBUG
 let kind_census (prog : program term) : unit =
   let defs = ref 0 and ptrs = ref 0 and wins = ref 0 in
@@ -605,7 +587,8 @@ let mem_type_of_target (target : Bap_core_theory.Theory.Target.t) : Type.t =
 
 (* Types each pointer SSA version [Mem]: a version has one def, so its
    sort is its type at every occurrence.  An input lane takes its entry
-   version's type, an output lane the type of the version it returns.
+   version's type (a by-reference lane is a pointer), an output lane the
+   type of the version it returns.
    Only the sort changes; the ident (name and version) is preserved. *)
 let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
     ~(ptr_rets : Var.Set.t) (sub : sub term) : sub term =
@@ -632,7 +615,8 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
        let a = super#map_arg a in
        let lhs = Arg.lhs a in
        let ptr =
-         Core.Set.mem (if Model.is_ret a then ptr_rets else ptr_vars) lhs
+         if Model.is_ret a then Core.Set.mem ptr_rets lhs
+         else Core.Set.mem ptr_vars lhs || Model.is_ptr_arg a
        in
        if not ptr then a
        else
@@ -689,7 +673,6 @@ let run (proj : Project.t) : Project.t =
                 let ptr_rets = ptr_returns ~facts sub ptr_vars in
                 retype_sub ~mem_typ ~ptr_vars ~ptr_rets sub)
           in
-          let prog = stamp_arg_kinds ~param_kinds:pks prog in
 #ifdef VSA_DEBUG
           kind_census prog;
 #endif

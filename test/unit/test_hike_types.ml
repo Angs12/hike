@@ -276,7 +276,6 @@ let tests : unit Alcotest.test list =
                 |> Base.Option.value ~default:Var.Set.empty
               in
               Types.retype_sub ~mem_typ ~ptr_vars ~ptr_rets:Var.Set.empty sub)
-          |> Types.stamp_arg_kinds ~param_kinds:pks
         in
         let callee =
           Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
@@ -292,7 +291,6 @@ let tests : unit Alcotest.test list =
            | Some s ->
              Core.Set.mem s rdi
              && Var.typ (Arg.lhs arg) = mem_typ
-             && Model.is_arg_ptr_kind arg
            | None -> false));
 
     (* The PLT-trampoline stamp: hike-sign computes it from the same

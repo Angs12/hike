@@ -791,20 +791,6 @@ let is_ptr_arg (a : Arg.t) : bool =
 
 let set_ptr_arg (a : Arg.t) : Arg.t = Term.set_attr a arg_ptr_tag true
 
-(* The lane's value KIND: the lane carries a stack/VLA address.  Distinct
-   from [arg_ptr_tag] (the LLVM type of an existing ptr lane); the kind
-   pass sets it and the emitter's ptr discipline reads it. *)
-let arg_ptr_kind_tag : Flag.t Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-arg-ptr-kind"
-    ~uuid:"3e5a7c19-8b24-4d6f-a0c1-2f9b8e7d6a33"
-    (module Flag)
-
-let is_arg_ptr_kind (a : Arg.t) : bool =
-  Base.Option.value (Term.get_attr a arg_ptr_kind_tag) ~default:false
-
-let set_arg_ptr_kind (a : Arg.t) : Arg.t =
-  Term.set_attr a arg_ptr_kind_tag true
-
 (* The PLT-trampoline stamp: a self-call stub that reads no non-return,
    non-SP register.  hike-sign computes it from the liveness its
    signature computation already ran, and the emitter reads the stamp.

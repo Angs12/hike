@@ -313,9 +313,7 @@ let synthetic_rets ctx =
    pointers, a return lane wider than a word (the vector carrier) is a
    vector of words so the machine returns it in the vector register, the
    rest keep the BIR type. *)
-let lane_is_ptr (a : Arg.t) : bool =
-  Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a
-  || var_is_ptr (Arg.lhs a)
+let lane_is_ptr (a : Arg.t) : bool = var_is_ptr (Arg.lhs a)
 
 (* The vector carrier: a return lane wider than a word. *)
 let lane_vector ctx (a : Arg.t) : Llvm.lltype option =

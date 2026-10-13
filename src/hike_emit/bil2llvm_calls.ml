@@ -92,7 +92,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         in
         Llvm.build_bitcast v (Llvm.double_type ctx.llvm_ctx) ""
           llvm_builder
-      else if Hike_stack_model.is_arg_ptr_kind arg then
+      else if lane_is_ptr arg then
         (* A stack/VLA address is passed as a pointer into the caller's
            own storage.  The kind is a callee-side may — a site whose
            value is not itself a stack address passes the register's
@@ -147,16 +147,7 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
               (Var.name (Arg.lhs arg))
               (Llvm.value_name param))
       in
-      (* A pointer lane is an address lane, so the body takes the pointer
-         itself: `is_ptr_var` holds for every kind lane, because the type
-         pass puts its parameter in the pointer environment.  A pointer
-         parameter nothing claimed enters as its integer. *)
       let value = lane_value_of arg param in
-      let value =
-        if Hike_stack_model.is_ptr_arg arg || is_ptr_var (Arg.lhs arg)
-        then value
-        else Bil2llvm_value.Int (as_int ctx llvm_builder value)
-      in
       insert_local scope blk_tid (Arg.lhs arg) value;
       (* A parameter dominates every reader: bind it sub-wide too. *)
       bind_ssaval scope (Arg.lhs arg) value)

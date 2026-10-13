@@ -147,18 +147,11 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
           (* A BIR phi renders as the LLVM phi of its own lhs; the
              incomings fill after every body (a compound incoming
              builds before its source block's terminator).  The type is
-             the lhs's, OR a pointer when any incoming is a pointer
-             value (D13). *)
+             the lhs's: the type pass makes a phi with a pointer incoming a
+             pointer. *)
           let var = Phi.lhs phi in
-          let incoming_ptr =
-            Phi.values phi
-            |> Seq.exists ~f:(fun (_, e) ->
-                   match e with
-                   | Bil.Var v -> is_ptr_var v
-                   | _ -> false)
-          in
           let res =
-            if incoming_ptr || var_is_ptr var then
+            if var_is_ptr var then
               Bil2llvm_value.Ptr (Llvm.build_empty_phi ctx.ptr_ty "" llvm_builder)
             else
               Bil2llvm_value.Int
