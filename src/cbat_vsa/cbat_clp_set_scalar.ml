@@ -94,12 +94,6 @@ let pieces_of_words ~width (l : word list) : P.t = P.of_list ~width l
 let pieces_of_finset (s : fset) : P.t =
   pieces_of_words ~width:(Exact.bitwidth s) (Exact.iter s)
 
-(* The exact run list as its piece union: the runs are already canonical,
-   so this rebuilds the union without the element-level conversion. *)
-let pieces_of_exact (s : fset) : P.t =
-  List.fold (Exact.to_pieces s) ~init:(P.bottom (Exact.bitwidth s))
-    ~f:(fun acc p -> P.union acc (P.of_progression p))
-
 let clp_of_finset fs : clp =
   let width = Exact.bitwidth fs in
   match Exact.iter fs with
@@ -920,8 +914,9 @@ module Fs_binop = Binop (Fs_repr)
 let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   Fs_binop.binop op s1 s2
 
-(* One op over one leaf pair; mixed kinds take the exact run list of the
-   Exact's elements, the operands in their own order. *)
+(* One op over one leaf pair; mixed kinds take the piece union of the
+   Exact's elements at the declared width, the operands in their own
+   order. *)
 (* The operand's representation decides the path: the exact finite set
    is the fast path, the piece union is the general one, and Rel/Many
    are opaque to the generic lift (the stack-aware ops route around
@@ -942,8 +937,8 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   match repr_of q1, repr_of q2 with
   | Fs s1, Fs s2 -> [ Exact (binop_fs op s1 s2) ]
   | Ps a, Ps b -> [ Clp (binop_pieces op a b) ]
-  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_exact s)) ]
-  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_exact s) ps) ]
+  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
+  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_finset s) ps) ]
   | Opaque, _ | _, Opaque -> [ Clp (wide ()) ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =

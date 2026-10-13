@@ -909,6 +909,7 @@ let piece_touches_image_bounds ~(fits : (Stdlib.Int64.t * Stdlib.Int64.t) list)
            Stdlib.Int64.unsigned_compare l fit_hi <= 0
            && Stdlib.Int64.unsigned_compare fit_lo h <= 0)
      | _ -> true)
+  (* Non-64-bit: the int64-based reader cannot decide; sound identity. *)
   else if w <> 64 then true
   else
     let qp = Cbat_clp.Pieces.of_progression p in

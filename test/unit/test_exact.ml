@@ -74,8 +74,6 @@ let tests : unit Alcotest.test list =
 
 
 
-    (* The Exact->Clp->Exact loop: one pin, aggregate over the sampled sets. *)
-
   ]
 
 let () = run "exact" tests

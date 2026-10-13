@@ -768,18 +768,28 @@ module Exact = struct
   (* The exact runs of an element list.  Elements are grouped by their own
      width (a run's width is the words'), deduplicated and kept in the set
      order, so mixed-width operands keep the finite tier's semantics. *)
-  let of_elements ~(width : int) (els : W.t list) : progression list =
+  let of_elements (els : W.t list) : progression list =
     let els = List.dedup_and_sort els ~compare:W.compare in
     let groups =
       List.group els ~break:(fun a b -> W.bitwidth a <> W.bitwidth b) in
-    List.sort
-      (List.concat_map groups ~f:(fun g ->
-           Pieces.runs_from_sorted_elements
-             ~width:(W.bitwidth (List.hd_exn g)) g))
-      ~compare:Pieces.compare_piece
+    let runs g =
+      Pieces.runs_from_sorted_elements
+        ~width:(W.bitwidth (List.hd_exn g)) g in
+    match groups with
+    | [] | [ _ ] ->
+      (* One width: the runs come back in descending element order, so
+         reversing them is the ascending [compare_piece] order. *)
+      List.rev (List.concat_map groups ~f:runs)
+    | _ ->
+      (* Mixed widths: the groups' run lists interleave under
+         [compare_piece], so only this fallback sorts.  Production
+         unifies widths before the finite tier; the sort keeps the
+         constructor's own semantics for mixed inputs. *)
+      List.sort (List.concat_map groups ~f:runs)
+        ~compare:Pieces.compare_piece
 
   let make ~(width : int) (els : W.t list) : t =
-    { width; pieces = of_elements ~width els }
+    { width; pieces = of_elements els }
 
   (* The finite tier's element equality: distinct words, width included. *)
   let word_mem (w : W.t) (els : W.t list) : bool =

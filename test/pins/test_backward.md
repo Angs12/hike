@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-104`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-108`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -94,3 +94,8 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-102 | a store's cell takes its data's constraint: the replayed store writes the output-refined x, so clang -O0's spilled switch index is bounded at the edge. | Drop the output facts from the replay (replay from the inputs only). | BK-102 (the edge cell is unbounded). |
 | BK-103 | a cell overwritten later takes nothing from the earlier store's data: the replayed later store decides the edge cell. | Meet each store's refined data into the edge memory regardless of later stores. | BK-103 (the edge cell loses 50). |
 | BK-104 | a load's address narrows to the slots whose contents can produce the guarded value: `load_address_constraint` bisects the address set over known memory (image words here) and the address inverse bounds i by the surviving slots' hull. | Return `None` from `load_address_constraint`. | BK-104.dropped (i keeps 3). |
+
+| BK-105 | T27 step 4: cell coverage is element-level — a strided piece whose span crosses a cell but whose elements never read it is not covered; an element on the cell's bytes (or a read reaching in from below) is. | Use `Mem.has_cell_in` as the decision (restore the span rule) instead of the element-level `piece_touches_cell_bounds`. | by review: the span rule re-splits an uncovered piece, inverting the pinned shape (2026-10-14). |
+| BK-106 | T27 step 4: image coverage is element-level — the whole read must fit (a dense piece starting past the fit range is not covered), and a strided piece is tested on its own grid, not its span. | Restore the span `image_overlaps` test in `piece_touches_image_bounds`. | by review: the span test claims coverage for a piece whose elements miss the fit range (2026-10-14). |
+| BK-107 | T27 step 4b: a dense multi-element address run partitions in one decision (`Parts`) — the image reads that miss the guard value drop on both sides of the kept address (8 kept; 0 and 15 dropped). | Make the partition return `Split` instead of `Parts`. | by review: the bisection re-splits the run and the one-decision shape inverts (2026-10-14). |
+| BK-108 | T27 step 4: a same-line cell whose hull starts below nb-1 keeps the wrapped read-start range `[cl-(nb-1), ch]` semantics — the bulk (Clp) result restricted to the small set equals the per-singleton (Exact-tier) result. | Drop the `-(nb-1)` back-shift in `piece_touches_cell_bounds`. | observed FAIL at `BK-108.read-reaches-in` (expected true, got false) under that inversion (2026-10-14). |

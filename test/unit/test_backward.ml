@@ -1914,6 +1914,71 @@ let tests : unit Alcotest.test list =
         check "BK-107.kept" (Ws.elem (w64 8) iv);
         check "BK-107.dropped-low" (not (Ws.elem (w64 0) iv));
         check "BK-107.dropped-high" (not (Ws.elem (w64 15) iv)));
+
+    pin "BK-108"
+      "T27 step 4: a same-line cell whose hull starts below nb-1 — the \
+       bulk read-start range [cl-(nb-1), ch] wraps.  The wrapped range's \
+       elements below the hull and the cell's own read start go through \
+       the singleton rule, so the Clp bulk result restricted to the \
+       small set is exactly the per-singleton (Exact-tier) result"
+      (fun () ->
+        let mm = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+        let m = memv "w108_m" in
+        let i = v64 "w108_i" in
+        let st0 = mk_seed_state t_rsp t_rbp () in
+        (* The cell [1, 4] (cl = 1 < nb-1 = 3, so its read-start range
+           [cl-3, ch] = [-2, 4] wraps) holds 32-bit 0x33333333; the
+           produced guard value 0x99999999 misses it. *)
+        let k =
+          t_key_of (Ws.of_clp (Clp.interval ~width:64 (w64 1) (w64 4))) in
+        let mv0 = AI.find_memory mm st0 m in
+        let mv' =
+          Mem.meet_add mv0 ~key:k
+            ~data:
+              (Mem.Val.create (Ws.singleton (w32 0x33333333)) LittleEndian)
+        in
+        let st0 = AI.add_memory st0 ~key:m ~data:mv' in
+        let line = Mem.Key.origin k in
+        let produced = Ws.singleton (w32 0x99999999) in
+        let run els =
+          let st = AI.add_word st0 ~key:i ~data:(Ws.of_list ~width:64 els) in
+          let out =
+            Vsa.Test_seam.constrain_operands
+              ~landmarks:(Cbat_landmarks.create ()) ~env:st
+              (Bil.Load (Bil.Var m, Bil.Var i, LittleEndian, `r32))
+              produced
+          in
+          AI.find_word 64 out (Var.base i)
+        in
+        (* The per-singleton reference: six elements stay on the exact
+           tier, so the filter decides each one alone. *)
+        let s = [ w64 0; w64 1; w64 2; w64 3; w64 4; w64 5 ] in
+        (* Eight far elements push the same set over the budget, so the
+           filter takes the bulk partition with the wrapped range. *)
+        let pad = List.init 8 (fun k -> w64 (0x1000 + (4 * k))) in
+        let exact = run s in
+        let clp = run (List.append s pad) in
+        let elem ws x = Ws.elem (w64 x) ws in
+        (* The wrap: the read at 0 (below the hull's start) reaches the
+           cell only through the back-shifted range. *)
+        check "BK-108.read-reaches-in"
+          (Vsa.Test_seam.piece_touches_cell mv' ~line ~bytes:4
+             (Clp.singleton (w64 0)));
+        (* The old per-singleton result: the read at 1 is the cell's
+           value and misses the guard (drop); every other read is top. *)
+        check "BK-108.singleton-kept"
+          (elem exact 0 && elem exact 2 && elem exact 3 && elem exact 4
+          && elem exact 5);
+        check "BK-108.singleton-dropped" (not (elem exact 1));
+        (* The bulk result is exactly the per-singleton result on the
+           common elements, and the padding survives whole. *)
+        check "BK-108.elementwise"
+          (List.for_all
+             (fun x -> elem exact x = elem clp x)
+             [ 0; 1; 2; 3; 4; 5 ]);
+        check "BK-108.padding" (List.for_all (fun w -> Ws.elem w clp) pad);
+        check "BK-108.cardinality"
+          (Cbat_word.to_int_exn (Ws.cardinality clp) = 13));
   ]
 
 let () = run "backward" tests
