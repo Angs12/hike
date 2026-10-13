@@ -55,7 +55,6 @@ val shift : t -> bytes:int -> t option
 val of_wordset : Cbat_clp_set_composite.t -> t list
 val union : t -> t -> t
 val intersection : t -> t -> t
-val read_aligned : bits:int -> step:int -> point -> point -> bool
 
 type side = Left | Right | Both_sides
 val seq_product : t seq -> t seq -> (side * t) seq

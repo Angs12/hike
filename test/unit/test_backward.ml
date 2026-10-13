@@ -1019,8 +1019,7 @@ let tests : unit Alcotest.test list =
     pin "BK-59"
       "the ranged meet's overlap boundary — the stored [0,64] cell splits: the \
        overlapping part [8,24] meets; the parts [0,8) and (24,64] keep the \
-       original (the reads at the split's aligned points — the find' alignment \
-       semantics: an unaligned sub-region read returns top)"
+       original (each read at a start of its part's width grid)"
       (fun () ->
         let st3 =
           t_add_cell (mk_seed_state t_rsp t_rbp ()) (bk_sv64 ~lo:0 ~hi:64)
@@ -1036,10 +1035,12 @@ let tests : unit Alcotest.test list =
           (let v8 = t_cell_at env3 (Ws.stack_word_i64 8L) in
            let v0 = t_cell_at env3 (Ws.stack_word_i64 0L) in
            let v24 = t_cell_at env3 (Ws.stack_word_i64 24L) in
+           let v25 = t_cell_at env3 (Ws.stack_word_i64 25L) in
            Ws.elem (w64 9) v8
            && (not (Ws.elem (w64 15) v8))
+           && (not (Ws.elem (w64 15) v24))
            && Ws.elem (w64 15) v0
-           && Ws.elem (w64 15) v24));
+           && Ws.elem (w64 15) v25));
 
     pin "BK-60"
       "the exit-side cells survive — the iterate range [0,32] meets; the \

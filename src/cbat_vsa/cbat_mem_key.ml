@@ -66,11 +66,6 @@ let of_word (w : Cbat_word.t) : point option =
       | Error _ -> None
     else None
 
-(* Alignment check for [find']. *)
-let aligned_mod (lo : point) (hi : point) (m : int) : bool =
-    Stdlib.Int64.equal
-      (Stdlib.Int64.logand (Stdlib.Int64.sub hi.pvalue lo.pvalue) (mask m)) 0L
-
 (* Last writable byte. *)
 let upper (k : t) : point = k.hi
 
@@ -201,15 +196,6 @@ let intersection (k1 : t) (k2 : t) : t =
      lo = max (lower k1) (lower k2);
      hi = min (upper k1) (upper k2);
      step = combined_step k1 k2}
-
-(* A read anchored at [q] may join a cell anchored at [c]: a hull
-     cell by the width grid, a strided cell by its own stride grid. *)
-let read_aligned ~(bits : int) ~(step : int) (c : point) (q : point) : bool =
-    if step > 1 then
-      Stdlib.Int64.equal
-        (Stdlib.Int64.rem (Stdlib.Int64.sub q.pvalue c.pvalue)
-           (Stdlib.Int64.of_int step)) 0L
-    else aligned_mod c q bits
 
 
 (* Results may be unordered.  A key of another origin is disjoint. *)

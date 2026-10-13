@@ -518,7 +518,66 @@ let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
           Option.map assembled ~f:(fun data -> Val.create data endian)
         | _ -> None
 
-(* Values stored at a key. *)
+(* The starts a key claims, as a grid step (0: the one start [lo]): a
+   strided key its grid, a hull key the width grid of its [bytes]-wide
+   values from its low end. *)
+let grid_step (k : Key.t) ~(bytes : int) : int64 =
+  if Key.equal (Key.lower k) (Key.upper k) then 0L
+  else if Key.step k > 1 then Stdlib.Int64.of_int (Key.step k)
+  else Stdlib.Int64.of_int (Int.max 1 bytes)
+
+(* A read of [i] at [k] over the cells intersecting it: the join of the
+   cells' values when every cell's starts lie on the read's grid and
+   every read start is a cell's start; top otherwise.  A cell wider than
+   the read gives the bytes at its start (cells are keyed by start). *)
+let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
+    (cells : (Key.t * Val.t) list) : Val.t =
+  let open Stdlib.Int64 in
+  let qlo = (Key.lower k).pvalue and qhi = (Key.upper k).pvalue in
+  let qs = grid_step k ~bytes:(bits / addressable_width) in
+  let divides s d = equal s 0L || equal (rem d s) 0L in
+  (* The cell's value at its starts and how many read starts it claims;
+     None when it is not on the read's grid. *)
+  let claim ((c, v) : Key.t * Val.t) : (Val.t * int64) option =
+    let cbits, cendian = Val.get_idx v in
+    let value =
+      if Int.equal cbits bits && Val.idx_equal (cbits, cendian) i then Some v
+      else if cbits > bits && Bitvector.compare_endian cendian endian = 0 then
+        let lo = match endian with LittleEndian -> 0 | BigEndian -> cbits - bits in
+        Some (Val.create (WordSet.extract ~hi:(lo + bits - 1) ~lo (Val.data v)) endian)
+      else None
+    in
+    let clo = (Key.lower c).pvalue and chi = (Key.upper c).pvalue in
+    let cs = grid_step c ~bytes:(cbits / addressable_width) in
+    Option.bind value ~f:(fun v ->
+        if equal qs 0L then
+          (* A point read: the cell must claim the read's start. *)
+          Option.some_if (if equal cs 0L then equal clo qlo else divides cs (sub qlo clo)) (v, 1L)
+        else if divides qs cs && divides qs (sub clo qlo) then
+          let first =
+            if unsigned_compare clo qlo >= 0 || equal cs 0L then clo
+            else add clo (mul cs (unsigned_div (add (sub qlo clo) (pred cs)) cs))
+          in
+          let last = if unsigned_compare chi qhi <= 0 then chi else qhi in
+          let n =
+            if unsigned_compare first qlo < 0 || unsigned_compare first last > 0 then 0L
+            else if equal cs 0L then 1L
+            else succ (unsigned_div (sub last first) cs)
+          in
+          Some (v, n)
+        else None)
+  in
+  let total = if equal qs 0L then 1L else succ (unsigned_div (sub qhi qlo) qs) in
+  match Option.all (List.map cells ~f:claim) with
+  | Some claims
+    when equal total (List.fold claims ~init:0L ~f:(fun a (_, n) -> add a n)) ->
+    List.filter_map claims ~f:(fun (v, n) -> Option.some_if (compare n 0L > 0) v)
+    |> List.reduce ~f:Val.join
+    |> Option.value ~default:(Val.top i)
+  | _ -> Val.top i
+
+(* Values stored at a key: an assembly of narrower cells covering a
+   point read exactly, else the cells read on the key's grid. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
   let req_bytes = fst i / addressable_width in
@@ -534,40 +593,10 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   let ints_list = Seq.to_list (it_intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
-  | None ->
-    fold_intersections ~default:(Val.top i) m k ~f:(fun hd ints _ ->
-      (* Join each cell so the width is exact; a strided cell joins
-         only on its own stride grid. *)
-      Seq.fold ints ~init:hd ~f:(fun v (k',v') ->
-          let lo_key_start = Key.min (Key.lower k) (Key.lower k') in
-          let hi_key_start = Key.max (Key.lower k) (Key.lower k') in
-          if Key.read_aligned ~bits:(fst i) ~step:(Key.step k')
-                 lo_key_start hi_key_start
-          then Val.join_at i v v' else Val.top i))
+  | None -> read_cells i k (Seq.to_list (it_intersections m k))
 
-(* The most grid points a strided read reads one by one. *)
-let strided_read_cap = 64
-
-(* A read at a strided key is the join of the reads at its grid points
-   (each an exact cell hit, an assembly, or top); past the cap the
-   strided key reads whole. *)
 let find (i : Val.idx) (m : t) (k : Key.t) =
-  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t ->
-      let lo = Key.lower k and hi = Key.upper k in
-      let step = Stdlib.Int64.of_int (Key.step k) in
-      let count =
-        Stdlib.Int64.succ
-          (Stdlib.Int64.unsigned_div (Stdlib.Int64.sub hi.pvalue lo.pvalue) step) in
-      if Key.step k > 1
-         && Stdlib.Int64.unsigned_compare count (Stdlib.Int64.of_int strided_read_cap) <= 0
-      then
-        List.init (Stdlib.Int64.to_int count) ~f:(fun n ->
-            let p =
-              { lo with
-                pvalue = Stdlib.Int64.add lo.pvalue (Stdlib.Int64.mul (Stdlib.Int64.of_int n) step) } in
-            find' i t { k with Key.lo = p; hi = p; step = 1 })
-        |> List.reduce_exn ~f:Val.join
-      else find' i t k)
+  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
 
 (* Index of values at a key. *)
 let find_idx' (m : itree) (k : Key.t) : Val.idx =

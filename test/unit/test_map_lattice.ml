@@ -203,6 +203,15 @@ let tests : unit Alcotest.test list =
           (Ws.equal (read (grid (-0x38L) 3)) (Ws.of_list ~width:64 [ w64 1; w64 2; w64 3 ]));
         check "MAP-28 (a missing cell)" (Ws.is_top (read (grid (-0x38L) 4))));
 
+    pin "MAP-29" "a read narrower than its cell is the bytes at the cell's start"
+      (fun () ->
+        let k = key_of (Ws.stack_word_i64 (-8L)) in
+        let m =
+          Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 }) ~key:k
+            ~data:(Mem.Val.create (Ws.singleton (w64 0x1_0000_0002)) LittleEndian) in
+        check "MAP-29"
+          (Ws.equal (Mem.Val.data (Mem.find (32, LittleEndian) m k)) (Ws.singleton (w32 2))));
+
 
 
 

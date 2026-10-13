@@ -375,10 +375,7 @@ let ori_22 () =
           (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
           ~key:cell ~data:(Mem.Val.create data LittleEndian) in
       let loaded = Mem.Val.data (Mem.find (64, LittleEndian) mem cell) in
-      check ("full-width memory preserves " ^ Origin.name a)
-        (if Origin.equal a Origin.Abs then
-           Ws.equal loaded (Ws.singleton (i2w 0L))
-         else Ws.equal data loaded);
+      check ("full-width memory preserves " ^ Origin.name a) (Ws.equal data loaded);
       List.iter origins ~f:(fun b ->
           check "memory aliases only the explicit shared coordinate line"
             (Bool.equal (Mem.Key.overlap (key data) (key (value b)))
