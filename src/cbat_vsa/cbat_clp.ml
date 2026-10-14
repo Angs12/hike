@@ -516,10 +516,12 @@ module Pieces = struct
     List.exists ps ~f:(fun p -> C.elem w p)
 
   let equal (a : t) (b : t) : bool =
-    match a, b with
-    | [ x ], [ y ] -> C.equal x y
-    | _ ->
-      List.length a = List.length b && List.for_all2_exn a b ~f:C.equal
+    phys_equal a b
+    ||
+    (match a, b with
+     | [ x ], [ y ] -> C.equal x y
+     | _ ->
+       List.length a = List.length b && List.for_all2_exn a b ~f:C.equal)
 
   let overlap (a : t) (b : t) : bool =
     List.exists a ~f:(fun pa -> List.exists b ~f:(fun pb -> overlap_exact pa pb))
@@ -550,6 +552,7 @@ module Pieces = struct
     match a, b with
     | [], _ -> b
     | _, [] -> a
+    | _ when equal a b -> a
     | _ when not (Stdlib.Int.equal (width_of a) (width_of b)) ->
       finish (collapse_width (List.append a b))
     | _ ->
@@ -600,10 +603,13 @@ module Pieces = struct
         if C.is_bottom r then [] else [ r ]
 
   let intersection (a : t) (b : t) : t =
-    finish
-      (collapse_width
-         (List.concat_map a ~f:(fun pa ->
-              List.concat_map b ~f:(fun pb -> pair_intersection pa pb))))
+    if is_bottom a || is_bottom b then []
+    else if equal a b then a
+    else
+      finish
+        (collapse_width
+           (List.concat_map a ~f:(fun pa ->
+                List.concat_map b ~f:(fun pb -> pair_intersection pa pb))))
 
   (* The survivors of one finite non-wrapping grid after removing [es]
      (sorted ascending, all on the grid). *)
@@ -739,7 +745,9 @@ module Pieces = struct
     else [ List.fold bs ~init:a ~f:C.diff ]
 
   let diff (a : t) (b : t) : t =
-    finish (List.concat_map a ~f:(fun pa -> diff_piece pa b))
+    if is_bottom a || equal a b then []
+    else if is_bottom b then a
+    else finish (List.concat_map a ~f:(fun pa -> diff_piece pa b))
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
@@ -786,19 +794,28 @@ module Pieces = struct
   let neg = map A.neg
 
   let extract ?hi ?lo (ps : t) : t =
-    finish
-      (List.concat_map ps ~f:(fun p ->
-           List.concat_map (C.split_wrapped p) ~f:(fun q ->
-               A.extract_parts ?hi ?lo q)))
+    let w = bitwidth ps in
+    let full =
+      (match hi with None -> true | Some h -> Stdlib.Int.equal h (w - 1))
+      && (match lo with None | Some 0 -> true | Some _ -> false) in
+    if full then ps
+    else
+      finish
+        (List.concat_map ps ~f:(fun p ->
+             List.concat_map (C.split_wrapped p) ~f:(fun q ->
+                 A.extract_parts ?hi ?lo q)))
 
   let cast c sz (ps : t) : t =
-    finish
-      (List.concat_map ps ~f:(fun p ->
-           List.concat_map (C.split_wrapped p) ~f:(fun q ->
-               A.cast_parts c sz q)))
+    if Stdlib.Int.equal sz (bitwidth ps) then ps
+    else
+      finish
+        (List.concat_map ps ~f:(fun p ->
+             List.concat_map (C.split_wrapped p) ~f:(fun q ->
+                 A.cast_parts c sz q)))
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
-    finish (List.map ps ~f:(fun p -> C.translate p delta))
+    if Cbat_word.is_zero delta then ps
+    else finish (List.map ps ~f:(fun p -> C.translate p delta))
 
   (* The widening pairing: the two sorted atom lists merge with an origin
      tag, then one pass pairs the corresponding atoms.  An overlapping
