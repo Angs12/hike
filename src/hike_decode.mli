@@ -11,8 +11,10 @@ val terminators : Graphs.Cfg.t -> (Addr.t * Addr.t) list
 (** Provides [dest] as a destination fact on the instruction at [site]. *)
 val provide_dest : file:string -> site:int64 -> int64 -> unit
 
-(** A fresh decode of every code region, with [roots] as subroutine
-    facts and every provided destination fact. *)
+(** A fresh decode of every code region in which every root in [roots]
+    answers [is_subroutine] through the entry promise (address-keyed, so
+    the full set is needed on each scan), plus every provided destination
+    fact. *)
 val scan : Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state
 
 (** One function's candidate graph from the decoded state: the blocks

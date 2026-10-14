@@ -1,9 +1,10 @@
 (* The BAP decoder adapter.  One decode context — the program's own
    package, unit, and theory instance — re-drives BAP's scan with the
-   worklist's discoveries: an [is_subroutine] fact per discovered entry,
-   and the resolved dispatch destinations provided on the instruction
-   labels' [Insn.Slot.dests] facts so the driver keeps decoding at them.
-   Each scan starts fresh; a function's body is explored from it. *)
+   worklist's discoveries: an [is_subroutine] answer per discovered
+   entry, and the resolved dispatch destinations provided on the
+   instruction labels' [Insn.Slot.dests] facts so the driver keeps
+   decoding at them.  Each scan starts fresh; a function's body is
+   explored from it. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -161,8 +162,11 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
        (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
   Toplevel.get run
 
-(* A fresh decode of every code region with [roots] as subroutine
-   facts and every provided destination fact. *)
+(* A fresh decode of every code region in which every root in [roots]
+   answers [is_subroutine] through the entry promise, plus every provided
+   destination fact.  The driver classifies each code address through a
+   scoped label, so the address-keyed promise — not a stored fact — marks
+   a root; [roots] must carry every entry on each scan. *)
 let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.state =
 #ifdef VSA_DEBUG
   Printf.eprintf "hike-dbg-roots: [%s]\n%!"
@@ -193,13 +197,6 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
      Theory.with_current theory @@ fun () ->
      Theory.Unit.for_file file >>= fun unit ->
      Kb.Symbol.in_package file @@ fun () ->
-     kb_fold
-       (fun () a ->
-         Theory.Label.for_addr (Word.to_bitvec (Addr.of_int64 a))
-         >>= fun l ->
-         Kb.provide Theory.Label.is_subroutine l (Some true))
-       () roots
-     >>= fun () ->
      Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) @@ fun () ->
      Kb.promising Theory.Label.is_subroutine ~promise:entry_promise @@ fun () ->
      let mems = code_mems proj |> List.rev in
