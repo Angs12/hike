@@ -41,6 +41,65 @@ type entry = {
 (* A solve in progress: the lowest stack index it read. *)
 type frame = { mutable reach : int }
 
+(* The discovery frontier: one place records what every address is for
+   the decode.  The symtab's entries are decode entries from the start; a
+   discovered root becomes one when it is solved; the code words a body
+   materialises and the resolved jumps are candidate roots the closure
+   drains.  A jump destination is never a root of its own. *)
+type origin = Symtab | Discovered
+
+type frontier = {
+  (* Every address's first decode role. *)
+  seen : (int64, origin) Core.Hashtbl.t;
+  (* The symtab's entries, in their own order. *)
+  symtab : int64 list;
+  (* Decode entries: the symtab's entries, then the discovered roots. *)
+  mutable roots : int64 list;
+  (* Code words a solve materialised, newest first. *)
+  mutable found : int64 list;
+  (* Resolved jump destinations: never roots of their own. *)
+  mutable jumps : Core.Int64.Set.t;
+}
+
+let frontier_create ~(subroutines : int64 list) : frontier =
+  let symtab = Base.List.stable_dedup subroutines ~compare:Int64.compare in
+  let seen = Core.Hashtbl.create (module Core.Int64) in
+  Base.List.iter symtab ~f:(fun a ->
+      Core.Hashtbl.set seen ~key:a ~data:Symtab);
+  { seen; symtab; roots = symtab; found = []; jumps = Core.Int64.Set.empty }
+
+(* Appends the addresses not yet decode entries; the first role wins, so
+   a symtab entry never re-enters as a discovered root. *)
+let frontier_add_roots f (addrs : int64 list) : unit =
+  let fresh =
+    Base.List.filter addrs ~f:(fun a -> not (Core.Hashtbl.mem f.seen a))
+  in
+  if not (Base.List.is_empty fresh) then begin
+    Base.List.iter fresh ~f:(fun a ->
+        Core.Hashtbl.set f.seen ~key:a ~data:Discovered);
+    f.roots <- f.roots @ fresh
+  end
+
+(* Prepends the code words a solve just materialised (newest first). *)
+let frontier_add_found f (ws : int64 list) : unit =
+  f.found <- Base.List.rev_append ws f.found
+
+let frontier_set_found f (ws : int64 list) : unit = f.found <- ws
+
+let frontier_add_jump f (w : int64) : unit =
+  f.jumps <- Core.Set.add f.jumps w
+
+(* Drains the candidate roots: resolved jumps and repeats removed, oldest
+   discovery first. *)
+let frontier_take_found f : int64 list =
+  let words =
+    Base.List.rev f.found
+    |> Base.List.filter ~f:(fun w -> not (Core.Set.mem f.jumps w))
+    |> Base.List.stable_dedup ~compare:Int64.compare
+  in
+  f.found <- [];
+  words
+
 type t = {
   proj : Project.t;
   file : string;
@@ -48,22 +107,17 @@ type t = {
   abi : Hike_abi.t;
   slot_names : string Core.Int64.Map.t;
   mutable state : Disasm.Driver.state;
-  (* BAP's subroutine entries in the initial decode: every scan carries
-     them, and the refusal path takes them as roots. *)
-  subroutines : int64 list;
-  (* The subroutine facts every scan carries, in discovery order. *)
-  mutable roots : int64 list;
+  (* The symtab entries, discovered roots, materialised code words and
+     resolved jump destinations, with each address's decode role. *)
+  frontier : frontier;
   (* The provided destinations, by dispatch instruction. *)
   mutable dests : Core.Int64.Set.t Core.Int64.Map.t;
-  mutable jump_dests : Core.Int64.Set.t;
   entries : (int64, entry) Core.Hashtbl.t;
   by_tid : (Tid.t, entry) Core.Hashtbl.t;
   (* External and intrinsic targets: name and summary. *)
   symbols : (Tid.t, string * S.t) Core.Hashtbl.t;
   (* Each lifted term tid's owner. *)
   owner : (Tid.t, int64) Core.Hashtbl.t;
-  (* Code words found in solved bodies, newest first. *)
-  mutable found : int64 list;
   (* Whether a reached call is unresolved: every code word a body
      materialises is then a root. *)
   mutable refused : bool;
@@ -89,14 +143,10 @@ let is_entry t (a : int64) : bool =
   Core.Hashtbl.mem t.entries a
   || Disasm.Driver.is_subroutine t.state (Addr.of_int64 a)
 
-(* The subroutine entries keep the scan's decode from treating their
-   blocks as reached from a discovered root. *)
+(* The frontier's decode entries are the symtab's entries and every
+   discovered root; the scan's promise must carry all of them. *)
 let rescan t =
-  let fresh =
-    Base.List.filter t.roots ~f:(fun w ->
-        not (Base.List.mem t.subroutines w ~equal:Int64.equal))
-  in
-  t.state <- D.scan t.proj ~file:t.file ~roots:(t.subroutines @ fresh)
+  t.state <- D.scan t.proj ~file:t.file ~roots:t.frontier.roots
 
 (* ---- targets ---- *)
 
@@ -279,9 +329,9 @@ and body t frame e cfg blk : final =
   let f = solve t frame raw in
   if learn_dests t cfg f then build t frame e
   else begin
-    t.found <- Base.List.rev_append (code_words t f) t.found;
+    frontier_add_found t.frontier (code_words t f);
     if t.refused then
-      t.found <- Base.List.rev_append (materialised_words t f) t.found;
+      frontier_add_found t.frontier (materialised_words t f);
     Function f
   end
 
@@ -499,7 +549,7 @@ and learn_dests t cfg (f : func) : bool =
                 | Ok ws ->
                   Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
                     ~f:(fun w ->
-                        if jump then t.jump_dests <- Core.Set.add t.jump_dests w;
+                        if jump then frontier_add_jump t.frontier w;
                         (insn, w))
                 | Error _ -> []))
         | _ -> [])
@@ -607,15 +657,12 @@ let create proj ~file ~state ~subroutines : t =
       Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
         (Hike_image.external_references proj);
     state;
-    subroutines;
-    roots = [];
+    frontier = frontier_create ~subroutines;
     dests = Core.Int64.Map.empty;
-    jump_dests = Core.Int64.Set.empty;
     entries = Core.Hashtbl.create (module Core.Int64);
     by_tid = Core.Hashtbl.create (module Tid);
     symbols = Core.Hashtbl.create (module Tid);
     owner = Core.Hashtbl.create (module Tid);
-    found = [];
     refused = false;
     order = [];
     next_index = 0;
@@ -640,7 +687,7 @@ let solve_roots t (addrs : int64 list) : unit =
       (Base.List.filter addrs ~f:(fun a -> not (is_entry t a)))
   in
   if not (Base.List.is_empty fresh) then begin
-    t.roots <- t.roots @ fresh;
+    frontier_add_roots t.frontier fresh;
     rescan t
   end;
   Base.List.iter addrs ~f:(fun a -> ignore (summary t { reach = max_int } (entry_of t a)))
@@ -657,12 +704,7 @@ let functions t : (int64 * func) list =
    resolved jump destination is not one.  They are solved as roots until
    none is left. *)
 let rec close t : unit =
-  let words =
-    Base.List.rev t.found
-    |> Base.List.filter ~f:(fun w -> not (Core.Set.mem t.jump_dests w))
-    |> Base.List.stable_dedup ~compare:Int64.compare
-  in
-  t.found <- [];
+  let words = frontier_take_found t.frontier in
   if not (Base.List.is_empty words) then begin
     solve_roots t words;
     close t
@@ -798,7 +840,7 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
             Int64.compare slot lo >= 0 && Int64.compare slot hi <= 0)))
     |> Base.List.map ~f:snd
   in
-  t.found <- Base.List.rev_append relocated t.found;
+  frontier_add_found t.frontier relocated;
   Base.Option.iter main ~f:(fun a -> solve_roots t [ a ]);
   close t;
   if Base.Option.is_none main
@@ -807,9 +849,9 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
     if Base.Option.is_none main then
       Hike_diag.warn "discover: no main; every BAP subroutine in the text is a root";
     t.refused <- true;
-    t.found <-
-      Base.List.concat_map (functions t) ~f:(fun (_, f) -> materialised_words t f);
-    solve_roots t (Base.List.filter t.subroutines ~f:(in_text t));
+    frontier_set_found t.frontier
+      (Base.List.concat_map (functions t) ~f:(fun (_, f) -> materialised_words t f));
+    solve_roots t (Base.List.filter t.frontier.symtab ~f:(in_text t));
     close t
   end;
   let lifted =
