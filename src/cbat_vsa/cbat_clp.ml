@@ -358,12 +358,42 @@ module Pieces = struct
     end
     else ps
 
-  (* The producer finish: place the raw output (split arcs, order, combine
-     tail-only) and cap it, so no value carries an unbounded piece list.
-     `max_pieces` is the fixpoint bound; the budget rule keeps a small
-     exact union uncapped. *)
+  (* The producer finish: order the raw output and combine it tail-only,
+     capping the accumulator the moment it exceeds [max_pieces] so
+     `choose_pair` only ever sees [max_pieces + 1] pieces.  The accumulator
+     is descending, so the cap step re-assembles the hull (ascending) and
+     flips it back.  A wrapped hull falls back to the general placement. *)
   let finish (ps : progression list) : t =
-    let r = cap_to U.max_pieces (assemble ps) in
+    let ordered =
+      List.sort (List.concat_map ps ~f:split_arcs) ~compare:compare_piece in
+    let cap_desc acc =
+      if List.length acc <= U.max_pieces || within_exact_budget (List.rev acc)
+      then acc
+      else
+        match choose_pair (List.rev acc) with
+        | Some (hull, rest) -> List.rev (assemble (hull :: rest))
+        | None -> acc
+    in
+    let r =
+      let rec go acc = function
+        | [] -> `Done (List.rev acc)
+        | p :: rest -> (
+          match acc with
+          | [] -> go (cap_desc [ p ]) rest
+          | q :: tl ->
+            if overlap_exact p q then begin
+              let r = C.union p q in
+              if C.is_wrapped r then `Wrap else go (cap_desc (r :: tl)) rest
+            end
+            else (
+              match adjacent_merge q p with
+              | Some r -> go (cap_desc (r :: tl)) rest
+              | None -> go (cap_desc (p :: acc)) rest))
+      in
+      match go [] ordered with
+      | `Done ps -> ps
+      | `Wrap -> cap_to U.max_pieces (assemble ordered)
+    in
 #ifdef VSA_DEBUG
     census_len (List.length r);
 #endif
