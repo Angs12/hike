@@ -42,8 +42,22 @@ let concat = Cbat_clp_arith.concat
 (* The progression type, named for the [Pieces] signature. *)
 type progression = t [@@deriving bin_io, sexp, compare]
 
-(* The piece-union census lives at the tier (cbat_clp_set_scalar), where
-   the cap is applied. *)
+(* The VSA_DEBUG census of the piece unions: canonical list lengths and
+   cap events, dumped at exit. *)
+#ifdef VSA_DEBUG
+let census_len_counts = Stdlib.Array.make (Cbat_vsa_utils.max_pieces + 2) 0
+let census_cap_hits = Stdlib.ref 0
+let census_len (n : int) : unit =
+  if n < Stdlib.Array.length census_len_counts then
+    census_len_counts.(n) <- census_len_counts.(n) + 1
+let census_cap () : unit = Stdlib.incr census_cap_hits
+let () =
+  Stdlib.at_exit (fun () ->
+      Stdlib.Array.iteri
+        (fun i n -> Printf.eprintf "hike-pieces-census: len.%d=%d\n%!" i n)
+        census_len_counts;
+      Printf.eprintf "hike-pieces-census: cap=%d\n%!" !census_cap_hits)
+#endif
 
 (* ====================== Pieces: the canonical progression union ======== *)
 
@@ -127,11 +141,22 @@ module Pieces = struct
     (not (C.is_infinite p))
     && not (Cbat_word.gt_int (C.cardinality p) U.fin_set_size)
 
+  (* The unsigned ranges are disjoint: no shared element is possible.
+     A cheap pre-check that spares the exact machinery below. *)
+  let range_disjoint (p : progression) (q : progression) : bool =
+    match C.max_elem p, C.min_elem q with
+    | Some pmax, Some qmin when Cbat_word.(<) pmax qmin -> true
+    | _ -> (
+      match C.max_elem q, C.min_elem p with
+      | Some qmax, Some pmin -> Cbat_word.(<) qmax pmin
+      | _ -> false)
+
   (* Exact shared-element test: enumeration when a side is small,
      same-step range arithmetic, else the conservative may-test (merging
      a non-overlapping pair is sound, only imprecise). *)
   let overlap_exact (p : progression) (q : progression) : bool =
     if C.is_bottom p || C.is_bottom q then false
+    else if range_disjoint p q then false
     else if Cbat_word.is_one (C.cardn_of p) then C.elem (C.base_of p) q
     else if Cbat_word.is_one (C.cardn_of q) then C.elem (C.base_of q) p
     else if small_card p then List.exists (C.iter p) ~f:(fun x -> C.elem x q)
@@ -304,13 +329,28 @@ module Pieces = struct
      [bound] or is within the exact budget.  A tier-boundary operation;
      producers never cap. *)
   let rec cap_to (bound : int) (ps : t) : t =
-    if List.length ps > bound && not (within_exact_budget ps) then
+    if List.length ps > bound && not (within_exact_budget ps) then begin
+#ifdef VSA_DEBUG
+      census_cap ();
+#endif
       match choose_pair ps with
       | Some (hull, rest) -> cap_to bound (heal (hull :: rest))
       | None -> ps
+    end
     else ps
 
-  let of_progression (p : progression) : t = heal [ p ]
+  (* The producer finish: every operation's raw output is placed by
+     [heal] and then capped, so no value carries an unbounded piece list.
+     `max_pieces` is the fixpoint bound; the budget rule keeps a small
+     exact union uncapped. *)
+  let finish (ps : progression list) : t =
+    let r = cap_to U.max_pieces (heal ps) in
+#ifdef VSA_DEBUG
+    census_len (List.length r);
+#endif
+    r
+
+  let of_progression (p : progression) : t = finish [ p ]
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
@@ -361,7 +401,7 @@ module Pieces = struct
     if width <= 0 then []
     else
       let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
-      heal (runs_from_sorted_elements ~width l)
+      finish (runs_from_sorted_elements ~width l)
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
@@ -461,9 +501,10 @@ module Pieces = struct
     | _, [] -> a
     | _ when Stdlib.Int.equal (width_of a) (width_of b) ->
       (* [b] ascends, so each produced piece can only meet the tail. *)
-      List.fold b ~init:a ~f:(fun acc p ->
-          List.fold (split_arcs p) ~init:acc ~f:merge_arc)
-    | _ -> collapse_width (List.append a b)
+      finish
+        (List.fold b ~init:a ~f:(fun acc p ->
+             List.fold (split_arcs p) ~init:acc ~f:merge_arc))
+    | _ -> finish (collapse_width (List.append a b))
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -485,7 +526,7 @@ module Pieces = struct
         if C.is_bottom r then [] else [ r ]
 
   let intersection (a : t) (b : t) : t =
-    heal
+    finish
       (collapse_width
          (List.concat_map a ~f:(fun pa ->
               List.concat_map b ~f:(fun pb -> pair_intersection pa pb))))
@@ -624,17 +665,17 @@ module Pieces = struct
     else [ List.fold bs ~init:a ~f:C.diff ]
 
   let diff (a : t) (b : t) : t =
-    heal (List.concat_map a ~f:(fun pa -> diff_piece pa b))
+    finish (List.concat_map a ~f:(fun pa -> diff_piece pa b))
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
-    heal (List.map ps ~f)
+    finish (List.map ps ~f)
 
   (* Cross product with empty pair results dropped; the results are
      placed by construction (their order is the grid's, not sorted). *)
   let lift2 (f : progression -> progression -> progression) (a : t) (b : t)
     : t =
-    heal
+    finish
       (List.concat_map a ~f:(fun pa ->
            List.filter_map b ~f:(fun pb ->
                let r = f pa pb in
@@ -645,7 +686,7 @@ module Pieces = struct
      progression-level). *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
-    heal
+    finish
       (List.concat_map a ~f:(fun pa ->
            List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
                List.concat_map b ~f:(fun pb ->
@@ -671,19 +712,19 @@ module Pieces = struct
   let neg = map A.neg
 
   let extract ?hi ?lo (ps : t) : t =
-    heal
+    finish
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.extract_parts ?hi ?lo q)))
 
   let cast c sz (ps : t) : t =
-    heal
+    finish
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.cast_parts c sz q)))
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
-    heal (List.map ps ~f:(fun p -> C.translate p delta))
+    finish (List.map ps ~f:(fun p -> C.translate p delta))
 
   (* The widening pairing: the two sorted atom lists merge with an origin
      tag, then one pass pairs the corresponding atoms.  An overlapping
@@ -752,7 +793,7 @@ module Pieces = struct
         else pass (r :: acc) rest
       in
       let pieces = pass [] merged in
-      if !top_hit then [ C.top (width_of b) ] else heal pieces
+      if !top_hit then [ C.top (width_of b) ] else finish pieces
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
@@ -785,19 +826,8 @@ module Exact = struct
   let elements (t : t) : W.t list = List.concat_map t.pieces ~f:C.iter
   let iter = elements
 
-  (* Ascending, deduped by construction: an insertion build (exact values
-     are small, and no bulk sort runs). *)
-  let order (els : W.t list) : W.t list =
-    let rec ins acc w =
-      match acc with
-      | [] -> [ w ]
-      | x :: xs ->
-        let c = W.compare w x in
-        if c = 0 then acc else if c < 0 then w :: acc else x :: ins xs w
-    in
-    List.fold els ~init:[] ~f:ins
-
-  (* The exact runs of an ordered element list. *)
+  (* The exact runs of an ascending, deduped element list — a precondition,
+     not a step: order is a property of the producer. *)
   let of_elements (els : W.t list) : progression list =
     let groups =
       List.group els ~break:(fun a b -> W.bitwidth a <> W.bitwidth b) in
@@ -809,14 +839,20 @@ module Exact = struct
     List.rev (List.concat_map groups ~f:runs)
 
   let make ~(width : int) (els : W.t list) : t =
-    { width; pieces = of_elements (order els) }
+    { width; pieces = of_elements els }
+
+  (* The cartesian/map producers break the order, so they order their own
+     output — the one place an ordering pass belongs (op-dependent). *)
+  let make_ordered ~(width : int) (els : W.t list) : t =
+    { width; pieces = of_elements (List.dedup_and_sort els ~compare:W.compare) }
 
   (* The finite tier's element equality: distinct words, width included. *)
   let word_mem (w : W.t) (els : W.t list) : bool =
     List.exists els ~f:(fun x -> W.equal x w)
 
   let bottom (width : int) : t = { width; pieces = [] }
-  let of_list ~(width : int) (l : W.t list) : t = make ~width l
+  (* [of_list] takes an arbitrary element list; it orders its own input. *)
+  let of_list ~(width : int) (l : W.t list) : t = make_ordered ~width l
 
   let singleton (w : W.t) : t =
     { width = W.bitwidth w; pieces = [ C.singleton w ] }
@@ -851,8 +887,19 @@ module Exact = struct
      wider side and the elements keep their own width; [diff] keeps the
      left set. *)
   let union (a : t) (b : t) : t =
-    make ~width:(Stdlib.max a.width b.width)
-      (List.append (elements a) (elements b))
+    (* Both element lists ascend; a linear merge keeps the result ordered
+       by construction. *)
+    let rec merge xs ys =
+      match xs, ys with
+      | [], ys -> ys
+      | xs, [] -> xs
+      | x :: xt, y :: yt ->
+        let c = W.compare x y in
+        if c < 0 then x :: merge xt ys
+        else if c > 0 then y :: merge xs yt
+        else x :: merge xt yt
+    in
+    make ~width:(Stdlib.max a.width b.width) (merge (elements a) (elements b))
 
   let intersection (a : t) (b : t) : t =
     let eb = elements b in
@@ -866,16 +913,18 @@ module Exact = struct
       make ~width:a.width
         (List.filter (elements a) ~f:(fun w -> not (word_mem w eb)))
 
-  (* The pointwise element map, at the same width. *)
+  (* The pointwise element map, at the same width.  [f] breaks the order,
+     so the producer orders its own output. *)
   let lift (f : W.t -> W.t) (a : t) : t =
-    make ~width:a.width (List.map (elements a) ~f)
+    make_ordered ~width:a.width (List.map (elements a) ~f)
 
   (* The Cartesian element image; [width] is the finite tier's per-op width
-     rule: the wider side, or the left side for the shifts. *)
+     rule: the wider side, or the left side for the shifts.  The product
+     breaks the order, so the producer orders its own output. *)
   let lift2 ?(width = fun w1 w2 -> Stdlib.max w1 w2)
       (f : W.t -> W.t -> W.t) (a : t) (b : t) : t =
     let eb = elements b in
-    make ~width:(width a.width b.width)
+    make_ordered ~width:(width a.width b.width)
       (List.concat_map (elements a) ~f:(fun w1 ->
            List.map eb ~f:(fun w2 -> f w1 w2)))
 
@@ -903,11 +952,11 @@ module Exact = struct
       let hi = Option.value ~default:(t.width - 1) hi in
       hi - lo + 1 in
     if new_bw <= 0 then t
-    else make ~width:new_bw (List.map (elements t) ~f:(W.extract_exn ?hi ~lo))
+    else make_ordered ~width:new_bw (List.map (elements t) ~f:(W.extract_exn ?hi ~lo))
 
   let cast (c : Bil.cast) (sz : int) (t : t) : t =
     if sz <= 0 then t
-    else make ~width:sz (List.map (elements t) ~f:(W.cast c sz))
+    else make_ordered ~width:sz (List.map (elements t) ~f:(W.cast c sz))
 
   let concat = lift2 ~width:(fun w1 w2 -> w1 + w2) W.concat
 

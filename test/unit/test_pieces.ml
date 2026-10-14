@@ -47,7 +47,7 @@ let tests : unit Alcotest.test list =
 
 
     pin "PCS-04"
-      "the tier cap: five pieces hull to four by the smallest growth, sound"
+      "the cap: five pieces hull to four by the smallest growth, sound"
       (fun () ->
         let a = P.singleton (w32 0) in
         let b = P.of_progression (int32 ~lo:10 ~hi:20) in
@@ -55,14 +55,11 @@ let tests : unit Alcotest.test list =
         let d = P.of_progression (int32 ~lo:1000 ~hi:1010) in
         let e = P.of_progression (int32 ~lo:10000 ~hi:10100) in
         let u = P.union (P.union (P.union (P.union a b) c) d) e in
-        let capped = P.cap_to 4 u in
         check "PCS-04"
-          (List.length (P.to_list u) = 5
-          && List.length (P.to_list capped) = 4
-          && mem_all capped
-               (List.map w32 [ 0; 10; 20; 100; 110; 1000; 1010; 10000; 10100 ])
-          && P.elem (w32 5) capped
-          && not_mem_all capped (List.map w32 [ 50; 500; 5000 ])));
+          (List.length (P.to_list u) = 4
+          && mem_all u (List.map w32 [ 0; 10; 20; 100; 110; 1000; 1010; 10000; 10100 ])
+          && P.elem (w32 5) u
+          && not_mem_all u (List.map w32 [ 50; 500; 5000 ])));
 
     pin "PCS-05"
       "the widening pairing: the overlapping couple widens, an unmatched \

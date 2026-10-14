@@ -196,42 +196,12 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
 
 (* ---------------- the tier census ---------------- *)
 
-(* The VSA_DEBUG census at the tier: the capped piece/run count and the
-   cap events, dumped at exit. *)
-#ifdef VSA_DEBUG
-let census_len_counts = Stdlib.Array.make (Utils.max_pieces + 2) 0
-let census_cap_hits = Stdlib.ref 0
-let census_len (n : int) : unit =
-  if n < Stdlib.Array.length census_len_counts then
-    census_len_counts.(n) <- census_len_counts.(n) + 1
-let census_cap () : unit = Stdlib.incr census_cap_hits
-let () =
-  Stdlib.at_exit (fun () ->
-      Stdlib.Array.iteri
-        (fun i n -> Printf.eprintf "hike-pieces-census: len.%d=%d\n%!" i n)
-        census_len_counts;
-      Printf.eprintf "hike-pieces-census: cap=%d\n%!" !census_cap_hits)
-#endif
-
-(* The tier's cap: a plain piece union hulls to [max_pieces] unless it is
-   top or within the exact budget (the budget rule promotes a within-budget
-   union to Exact, so a surviving Clp is over budget).  The census reads
-   the capped length and counts a cap event when a hull was needed. *)
-let cap_pieces (x : P.t) : P.t =
-  let need = not (P.is_top x) && P.card_exceeds Utils.fin_set_size x in
-  let x' = if need then P.cap_to Utils.max_pieces x else x in
-#ifdef VSA_DEBUG
-  if need && List.length (P.to_list x') < List.length (P.to_list x) then
-    census_cap ();
-  census_len (List.length (P.to_list x'));
-#endif
-  x'
-
 (* A live plain piece union under the small tier: kept unless it is
-   small enough to become its exact twin. *)
+   small enough to become its exact twin.  [Pieces] already caps its
+   results (the budget rule keeps a small exact union uncapped), so no
+   tier cap is needed here. *)
 let small_tier (cps : P.t) : t =
-  if P.is_top cps || P.card_exceeds Utils.fin_set_size cps then
-    Clp (cap_pieces cps)
+  if P.is_top cps || P.card_exceeds Utils.fin_set_size cps then Clp cps
   else Exact (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
 
 (* A relative value's plain twin: the exact hull as a step-1 piece. *)
@@ -267,10 +237,9 @@ and canonical (ps : t list) : t =
      itself; a live Clp stays unless the small tier takes it; a live
      Exact stays unless it promotes to its pieces. *)
   match ps with
-  | [ Rel (o, offs) ] -> Rel (o, cap_pieces offs)
-  | [ Clp x ] when not (P.is_bottom x) ->
-    if P.is_top x || P.card_exceeds budget x then Clp (cap_pieces x)
-    else small_tier x
+  | [ (Rel _ as q) ] -> q
+  | [ (Clp x as q) ] when not (P.is_bottom x) ->
+    if P.is_top x || P.card_exceeds budget x then q else small_tier x
   | [ (Exact s as q) ] when not (Exact.is_bottom s) ->
     if Exact.card_exceeds budget s then small_tier (pieces_of_finset s) else q
   | _ -> canonical_pool ps
@@ -306,7 +275,7 @@ and canonical_pool (ps : t list) : t =
   | [], Some (o, offs) ->
     (* The symbolic bottom keeps its origin: an empty offset set is
        still a relative value (its consumers span the full key line). *)
-    Rel (o, cap_pieces offs)
+    Rel (o, offs)
   | [], None ->
     (match ps with
      | [] -> Exact (Exact.bottom 1)
@@ -377,13 +346,10 @@ and canonical_pool (ps : t list) : t =
         -> None, Some (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
       | c, f -> c, f
     in
-    (* The tier's cap lands on the surviving plain piece union. *)
-    let clp_piece = Option.map clp_piece ~f:cap_pieces in
     (* A bottom relative pool drops against live plain pieces. *)
     let so_piece =
       match so_pool with
-      | Some (o, offs) when not (P.is_bottom offs) ->
-        Some (o, cap_pieces offs)
+      | Some (o, offs) when not (P.is_bottom offs) -> Some (o, offs)
       | _ -> None
     in
     let leaves =
