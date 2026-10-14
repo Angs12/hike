@@ -430,7 +430,8 @@ let tests : unit Alcotest.test list =
         check "WS-39 (stable)" (keeps_hole stable);
         (* Growth: the two-piece value widens against a distinct
            two-piece value whose upper piece is shorter.  The pieces
-           pair by position, so the hole survives the growing widen. *)
+           pair by overlap/nearest, so the hole survives the growing
+           widen. *)
         let grown =
           Ws.diff
             (Ws.of_clp

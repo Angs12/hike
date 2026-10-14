@@ -62,8 +62,8 @@ let tests : unit Alcotest.test list =
           && not_mem_all u (List.map w32 [ 50; 500; 5000 ])));
 
     pin "PCS-05"
-      "the positional widen: stable pairs widen, excess hulls into the last, \
-       a top pair collapses"
+      "the widening pairing: the overlapping couple widens, an unmatched \
+       piece stays its own atom, a top couple collapses"
       (fun () ->
         let a = p32 [ 0; 2; 4 ] in
         let b = p32 [ 0; 2; 4; 6; 8 ] in
@@ -73,8 +73,8 @@ let tests : unit Alcotest.test list =
         let t = P.widen_join (P.top 32) (p32 [ 0; 1; 2 ]) in
         check "PCS-05"
           (P.elem (w32 6) w && P.elem (w32 100) w && P.is_ascending w
-          && List.length (P.to_list l) = 1
-          && P.elem (w32 5) l && P.elem (w32 12) l
+          && List.length (P.to_list l) = 2
+          && (not (P.elem (w32 5) l)) && P.elem (w32 12) l
           && P.is_top t));
 
     pin "PCS-06"
@@ -90,14 +90,18 @@ let tests : unit Alcotest.test list =
           && not (P.precedes whole (P.bottom 32))));
 
     pin "PCS-09"
-      "excess pieces join the last pair before widening or landmark extrapolation"
+      "the overlap pairing: the old grid pairs with the first overlapping \
+       incoming piece and the disjoint excess is its own atom (no hull \
+       into the pair)"
       (fun () ->
         let old = prog32 ~lo:10 ~hi:100 in
         let incoming = P.union (prog32 ~lo:10 ~hi:20) (prog32 ~lo:40 ~hi:110) in
         let widened = P.widen_join old incoming in
-        check "PCS-09.widen" (P.max_elem widened = Some (Cbat_word.ones 32));
+        check "PCS-09.widen"
+          (P.max_elem widened = Some (w32 110)
+          && not (P.elem (w32 1000) widened));
         let extrapolated = P.extrapolate_steps ~steps:2 old incoming in
-        check "PCS-09.extrapolate" (P.max_elem extrapolated = Some (w32 130)));
+        check "PCS-09.extrapolate" (P.max_elem extrapolated = Some (w32 110)));
 
     pin "PCS-10" "large strided meets retain their shared grid"
       (fun () ->
@@ -372,6 +376,34 @@ let tests : unit Alcotest.test list =
             (List.length concrete) card (List.length r_els) (List.length missing)
             (List.length extra);
         check "PCS-18" true);
+
+    pin "PCS-19"
+      "the nearest pairing: correspondences pair by overlap and by the \
+       smaller gap, and atoms without a counterpart stay their own pieces \
+       (rank pairing would hull across the shift)"
+      (fun () ->
+        (* A one-piece shift: rank pairs (0..10, 20..30) and (20..30,
+           40..50); the sweep pairs the equal middle pieces and carries
+           the shifted ends. *)
+        let shifted =
+          P.widen_join
+            (P.union (prog32 ~lo:0 ~hi:10) (prog32 ~lo:20 ~hi:30))
+            (P.union (prog32 ~lo:20 ~hi:30) (prog32 ~lo:40 ~hi:50)) in
+        check "PCS-19.shift"
+          (List.length (P.to_list shifted) = 3
+          && (not (P.elem (w32 15) shifted))
+          && P.elem (w32 5) shifted && P.elem (w32 25) shifted
+          && P.elem (w32 45) shifted);
+        (* The nearer couple wins: {20..30} is closer to {35..45} than
+           {0..10} is, so {0..10} carries. *)
+        let nearest =
+          P.widen_join
+            (P.union (prog32 ~lo:0 ~hi:10) (prog32 ~lo:35 ~hi:45))
+            (prog32 ~lo:20 ~hi:30) in
+        check "PCS-19.nearest"
+          (List.length (P.to_list nearest) = 2
+          && P.elem (w32 5) nearest && P.elem (w32 40) nearest
+          && not (P.elem (w32 15) nearest)));
 
   ]
 

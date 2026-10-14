@@ -708,8 +708,13 @@ module Pieces = struct
   let translate (ps : t) (delta : Cbat_word.t) : t =
     canonical_of_list (List.map ps ~f:(fun p -> C.translate p delta))
 
-  (* Hull excess pieces into their side's last pair before widening, so
-     growth in an excess piece is extrapolated too. *)
+  (* The widening pairing: the two sorted atom lists merge with an origin
+     tag, then one pass pairs the corresponding atoms.  An overlapping
+     couple is a pair; otherwise the nearer couple pairs (a strictly
+     smaller gap to the next opposite-side atom holds the left atom for
+     it), ties keeping the lower minimum.  An atom without a counterpart
+     stays its own atom — no excess hull, no growth attribution.  A top
+     couple collapses the whole value (the studied termination escape). *)
   let positional (f : progression -> progression -> progression) (a : t)
       (b : t) : t =
     match a, b with
@@ -717,23 +722,60 @@ module Pieces = struct
     | [], _ -> [ C.top (width_of b) ]
     | _, [] -> a
     | _ ->
-      let n = Stdlib.min (List.length a) (List.length b) in
-      let aa = Stdlib.Array.of_list a and ba = Stdlib.Array.of_list b in
+      (* The origin tag: [true] is the old iterate [a]. *)
+      let rec merge xs ys =
+        match xs, ys with
+        | [], ys -> ys
+        | xs, [] -> xs
+        | ((_, p) as xp) :: xt, ((_, q) as yp) :: yt ->
+          if compare_piece p q <= 0 then xp :: merge xt ys
+          else yp :: merge xs yt
+      in
+      let merged =
+        merge
+          (List.map a ~f:(fun p -> (true, p)))
+          (List.map b ~f:(fun p -> (false, p)))
+      in
+      (* The unsigned distance from [p]'s upper end to [q]'s lower end,
+         zero when the spans meet, unbounded when [p] has no maximum. *)
+      let gap (p : progression) (q : progression) : Cbat_word.t =
+        let w1 = Stdlib.max (C.bitwidth p) (C.bitwidth q) + 1 in
+        match C.max_elem p, C.min_elem q with
+        | Some hi, Some lo ->
+          if Cbat_word.(<=) lo hi then Cbat_word.zero w1
+          else Cbat_word.sub lo hi
+        | _ -> Cbat_word.ones w1
+      in
       let top_hit = Stdlib.ref false in
-      let out = Stdlib.ref [] in
-      for i = 0 to n - 1 do
-        let tail arr =
-          let p = Stdlib.ref arr.(i) in
-          if i = n - 1 then
-            for j = n to Stdlib.Array.length arr - 1 do
-              p := coalesce !p arr.(j)
-            done;
-          !p in
-        let w = f (tail aa) (tail ba) in
-        if C.is_top w then top_hit := true else out := w :: !out
-      done;
-      if !top_hit then [ C.top (width_of b) ]
-      else canonical_of_list (List.rev !out)
+      let rec pass acc = function
+        | [] -> List.rev acc
+        | [ (_, p) ] -> List.rev (p :: acc)
+        | (s1, p1) :: ((s2, p2) :: rest as tl) ->
+          if s1 = s2 then pass (p1 :: acc) tl
+          else begin
+            (* [f] is directional: the old iterate is the left operand. *)
+            let old, new_ = if s1 then p1, p2 else p2, p1 in
+            if overlap_exact p1 p2 then emit acc old new_ rest
+            else
+              let nearer =
+                List.find_map rest ~f:(fun (s, q) ->
+                    if s <> s2 then Some q else None)
+              in
+              match nearer with
+              | Some q when Cbat_word.(<) (gap p2 q) (gap p1 p2) ->
+                pass (p1 :: acc) tl
+              | _ -> emit acc old new_ rest
+          end
+      and emit acc old new_ rest =
+        let r = f old new_ in
+        if C.is_top r then begin
+          top_hit := true;
+          pass acc rest
+        end
+        else pass (r :: acc) rest
+      in
+      let pieces = pass [] merged in
+      if !top_hit then [ C.top (width_of b) ] else canonical_of_list pieces
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
