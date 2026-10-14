@@ -72,9 +72,9 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-55 | M5-5 signed-division rule `{−6,−5}`. | Drop the SDIVIDE arm. | BK-55. |
 | BK-56 | M5-6 Var-identity row propagates through the copy (`≤ [0,9]`, not `[0,10]`). | Drop the `Bil.Var` identity propagation in the walk. | BK-56 (`bounded_above … 9` false). |
 | BK-57 | T1 the RSP-based same-block cell meet (`constrain_cell_on_trace` meets `[RSP-8]` into the offset key). | Make `constrain_cell_on_trace` the identity. | BK-57 (cell unchanged; `15 ∈`). |
-| BK-58 | T2 the dynamic-index meet: the index's iterate range confines the key hull. | Skip the index constraint in `constrain_cell_on_trace` (meet all keys). | BK-58 (cell at 40 refined too). |
-| BK-59 | T3 the ranged meet's overlap boundary (the `[0,64]` cell splits at `[8,24]`). | Make `Mem.meet_range` meet the whole cell (no split). | BK-59 (offset 0 narrowed). |
-| BK-60 | T4 the exit-side cells survive the iterate-range meet. | As BK-58 (meet everything). | BK-60 (offset 40/80 narrowed). |
+| BK-58 | S6: a dynamic-index read spans several cells, so the read's value constraint is not met into each — the cells keep their stored values (the join ruling is a join law, not a meet law; ADR 0025's amendment) | drop the S6 gate in `cbat_backward.ml`'s `backward_cell_keys` (meet every `bounded_cell_key`) | the cell at 0 narrows (15 ∉), inverting the pin |
+| BK-59 | S6: a ranged read that only partly overlaps a stored cell is not met into it — the cell keeps its stored value | as BK-58 (meet every key) | the cell at 0 narrows (15 ∉) |
+| BK-60 | S6: the dynamic-index read meets no cell — the cells at 0, 40 and 80 all keep their stored values | as BK-58 (meet every key) | the cells at 0/40/80 narrow (15 ∉) |
 | BK-71 | S11 the NEG row (`neg` of the produced window). | Drop the `Bil.NEG` arm. | BK-71. |
 | BK-74 | S15b the SIGNED-ext pre-image `[0,0xFF]`; the empty meet keeps the env value (identity). | Make the empty meet narrow/pick the constraint. | BK-74 (`Ws.equal` false). |
 | BK-75 | S16a `complete_cond` negates each of the six comparisons structurally (both orders). | As BK-70. | BK-75. |

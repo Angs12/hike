@@ -874,26 +874,23 @@ let tests : unit Alcotest.test list =
           in
           (refined, forward, ha, hb, hmem, hka, hkb)
         in
-        (* Positive: the store at rbp-8 sits inside the hull [rbp-8, rbp]. *)
-        let refined_p, _, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
+        (* S6: the store at rbp-8 sits inside the hull [rbp-8, rbp], but the
+           read's set spans past the store's cell, so the read does not read
+           the store on every path — the delivery is the identity. *)
+        let refined_p, forward_p, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
         let cell_p addr =
           Result.fold
             (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_p, addr, LittleEndian, `r32)) refined_p)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         check
-          "T5-2 (Store row, hull): the consuming load's set-valued address still meets the \
-           store's key cell to {6}"
-          (Ws.equal (cell_p hkb_p) (Ws.singleton (w32 6)));
+          "T5-2 (Store row, hull): S6 — a set-valued load address spanning past the store's \
+           cell delivers nothing; the store's key cell keeps its wide value"
+          (Ws.equal (cell_p hkb_p) (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))));
         check
-          "T5-2 (Store row, hull): the delivery reaches the store's data producers — the \
-           producing load's cell meets {6}"
-          (Ws.equal (cell_p hka_p) (Ws.singleton (w32 6)));
-        check
-          "T5-2 (Store row, hull): the narrowed word var reaches the predecessor env — the \
-           store's data var and its producing load refines to {6}"
-          (Ws.equal (AI.find_word 32 refined_p hb_p) (Ws.singleton (w32 6))
-          && Ws.equal (AI.find_word 32 refined_p ha_p) (Ws.singleton (w32 6)));
+          "T5-2 (Store row, hull): S6 — the store's data producers keep their forward values"
+          (Ws.equal (AI.find_word 32 refined_p hb_p) (AI.find_word 32 forward_p hb_p)
+          && Ws.equal (AI.find_word 32 refined_p ha_p) (AI.find_word 32 forward_p ha_p));
         (* Negative: the store at rbp-16 is outside the hull [rbp-8, rbp]. *)
         let refined_n, forward_n, ha_n, hb_n, hmem_n, _hka_n, hkb_n =
           hull_case ~store_off:16 in

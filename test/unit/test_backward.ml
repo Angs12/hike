@@ -16,13 +16,6 @@ let bk_iv64 ~lo ~hi =
     (Clp.create ~width:64 ~step:(w64 1)
        ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
 
-(* The same interval on the stack line: the fixture's offsets are stack
-   offsets, so the cell key carries the [Stack] origin. *)
-let bk_sv64 ~lo ~hi =
-  Ws.stack_word
-    (Clp.create ~width:64 ~step:(w64 1)
-       ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
-
 let s_r32 = Cbat_word.of_int ~width:32
 
 let bk_iv32 ~lo ~hi =
@@ -991,8 +984,8 @@ let tests : unit Alcotest.test list =
            Ws.elem (w64 9) v && not (Ws.elem (w64 15) v)));
 
     pin "BK-58"
-      "the dynamic-index meet — the index's iterate constraint [0,4] confines the \
-       meet to the cells {0..32}; the cell at 40 (the exit-side) is untouched"
+      "S6: a dynamic-index read spans several cells, so the read's value \
+       constraint is not met into each — the cells keep their stored values"
       (fun () ->
         let st2 =
           let s =
@@ -1014,37 +1007,29 @@ let tests : unit Alcotest.test list =
         check "BK-58"
           (let v0 = t_cell_at env2 (Ws.stack_word_i64 0L) in
            let v40 = t_cell_at env2 (Ws.stack_word_i64 40L) in
-           Ws.elem (w64 9) v0 && (not (Ws.elem (w64 15) v0)) && Ws.elem (w64 15) v40));
+           Ws.elem (w64 15) v0 && Ws.elem (w64 15) v40));
 
     pin "BK-59"
-      "the ranged meet's overlap boundary — the stored [0,64] cell splits: the \
-       overlapping part [8,24] meets; the parts [0,8) and (24,64] keep the \
-       original (each read at a start of its part's width grid)"
+      "S6: a ranged read that only partly overlaps the stored cell is not met \
+       into it — the cell keeps its stored value"
       (fun () ->
         let st3 =
-          t_add_cell (mk_seed_state t_rsp t_rbp ()) (bk_sv64 ~lo:0 ~hi:64)
+          t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.stack_word_i64 0L)
             (bk_iv64 ~lo:0 ~hi:20)
         in
-        let st3 = AI.add_word st3 ~key:t_idx ~data:(bk_iv64 ~lo:8 ~hi:24) in
+        let st3 = AI.add_word st3 ~key:t_idx ~data:(bk_iv64 ~lo:4 ~hi:12) in
         let env3 =
           Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:st3
             (t_load_exp (Bil.BinOp (Bil.PLUS, Bil.Var t_rbp, Bil.Var t_idx)))
             (bk_iv64 ~lo:0 ~hi:9)
         in
         check "BK-59"
-          (let v8 = t_cell_at env3 (Ws.stack_word_i64 8L) in
-           let v0 = t_cell_at env3 (Ws.stack_word_i64 0L) in
-           let v24 = t_cell_at env3 (Ws.stack_word_i64 24L) in
-           let v25 = t_cell_at env3 (Ws.stack_word_i64 25L) in
-           Ws.elem (w64 9) v8
-           && (not (Ws.elem (w64 15) v8))
-           && (not (Ws.elem (w64 15) v24))
-           && Ws.elem (w64 15) v0
-           && Ws.elem (w64 15) v25));
+          (let v0 = t_cell_at env3 (Ws.stack_word_i64 0L) in
+           Ws.elem (w64 15) v0));
 
     pin "BK-60"
-      "the exit-side cells survive — the iterate range [0,32] meets; the \
-       exit-side offsets 40 and 80 (the ¬iterate values) are untouched"
+      "S6: the dynamic-index read meets no cell — the cells at 0, 40 and 80 all \
+       keep their stored values"
       (fun () ->
         let st4 =
           let s =
@@ -1068,14 +1053,10 @@ let tests : unit Alcotest.test list =
           (let v0 = t_cell_at env4 (Ws.stack_word_i64 0L) in
            let v40 = t_cell_at env4 (Ws.stack_word_i64 40L) in
            let v80 = t_cell_at env4 (Ws.stack_word_i64 80L) in
-           Ws.elem (w64 9) v0
-           && (not (Ws.elem (w64 15) v0))
-           && Ws.elem (w64 15) v40
-           && Ws.elem (w64 15) v80));
+           Ws.elem (w64 15) v0 && Ws.elem (w64 15) v40 && Ws.elem (w64 15) v80));
 
     (* The guard's operand windows observed through the inverse denote: on a
        TOP env the leaf meet preserves the raw row. *)
-
 
 
 

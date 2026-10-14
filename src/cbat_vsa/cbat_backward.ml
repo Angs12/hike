@@ -842,6 +842,51 @@ let bounded_cell_key (ws : wordset) : Mem.Key.t list =
   if WordSet.is_top ws || WordSet.is_infinite ws then []
   else Mem.Key.of_wordset ws
 
+(* The backward cell meet is sound only when every path reads the SAME
+   cell: a single-point address, or a wider address set whose read bytes
+   all lie inside one stored cell.  A read that can land on two cells
+   reads a different one per path, so the read's value constraint is
+   path-local — meeting it into each cell would apply that constraint to
+   paths that never read the cell.  ADR 0025's join argument covers the
+   join (a load's value contains every contributing cell); it does not
+   license the meet back into each cell. *)
+
+(* A single-point key names one address (and so one cell on every path). *)
+let key_is_point (k : Mem.Key.t) : bool =
+  Mem.Key.step k = 1
+  && (let lo, hi = Mem.Key.hull k in Cbat_word.equal lo hi)
+
+(* The byte span a stored cell occupies: its key hull grown by its
+   value's own width. *)
+let cell_span ((k, v) : Mem.Key.t * Mem.Val.t) : Cbat_word.t * Cbat_word.t =
+  Mem.Key.hull (Mem.Key.expand k ~bytes:(fst (Mem.Val.get_idx v) / 8))
+
+(* The one stored cell the read's touched bytes all lie inside, when
+   exactly one cell covers the read. *)
+let covering_cell (mv : Mem.t) (key : Mem.Key.t) ~(bytes : int)
+    : Mem.Key.t option =
+  let origin = Mem.Key.origin key in
+  let r_lo, r_hi = Mem.Key.hull (Mem.Key.expand key ~bytes) in
+  let covers (c, v) =
+    Hike_origin.equal (Mem.Key.origin c) origin
+    && (let c_lo, c_hi = cell_span (c, v) in
+        Cbat_word.(<=) c_lo r_lo && Cbat_word.(<=) r_hi c_hi)
+  in
+  match List.filter (Mem.cells mv) ~f:covers with
+  | [ (c, _) ] -> Some c
+  | _ -> None
+
+(* The cell keys a backward meet may narrow: the read's own key when the
+   read touches one cell on every path; [] otherwise (the meet stays the
+   identity, and the address pre-image carries the sound narrowing). *)
+let backward_cell_keys (mv : Mem.t) (addr_ws : wordset) ~(bytes : int)
+    : Mem.Key.t list =
+  match bounded_cell_key addr_ws with
+  | [ k ] when key_is_point k -> [ k ]
+  | [ k ] ->
+    (match covering_cell mv k ~bytes with Some _ -> [ k ] | None -> [])
+  | _ -> []
+
 (* Whether a piece's elements fill its hull: its element count equals
    the hull's.  Every piece the address filter decides is finite and
    non-wrapped, so its min/max are its elements' bounds.  A step-1
@@ -1192,9 +1237,10 @@ let rec constrain_operands ~(env : AI.t)
     let env = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       (match denote_imm_exp a env with
-        | Ok aws ->
-          List.iter (bounded_cell_key aws)
+       (match Var.typ mv, denote_imm_exp a env with
+        | Type.Mem (ai, asz), Ok aws ->
+          let mv_mem = AI.find_memory (mem_idx ai asz) env mv in
+          List.iter (backward_cell_keys mv_mem aws ~bytes:(Size.in_bytes s))
             ~f:(fun k ->
                cells := PC { pm = mv;
                              prange = Mem.Key.expand k ~bytes:(Size.in_bytes s);
@@ -1202,7 +1248,7 @@ let rec constrain_operands ~(env : AI.t)
                              pbits = Size.in_bits s;
                              pendian = en }
                      :: !cells)
-        | Error _ -> ())
+        | _ -> ())
      | _ -> ());
     Option.value_map addr_cstr ~default:env
       ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
@@ -1213,8 +1259,10 @@ let rec constrain_operands ~(env : AI.t)
        endianness) delivers into the written value, met against the
        stored data's denotation; a shape-mismatched one is dropped —
        the written bytes reassembled under another shape bound no
-       value.  The overlap match (no equality) is sound by the join
-       ruling: docs/adr/0025-the-join-ruling.md. *)
+       value.  The entry exists only for a read that touches one cell
+       on every path (S6), so on the paths it speaks about the read
+       reads exactly this store's bytes.  See
+       docs/adr/0025-the-join-ruling.md. *)
     (match m with
      | Bil.Var mv ->
        (match !cells with
@@ -1348,17 +1396,17 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
        (match denote_imm_exp addr env with
         | Error _ -> env
         | Ok addr_ws ->
-          (match bounded_cell_key addr_ws with
-           | [] -> env
-           | keys ->
-             let res_size = Size.in_bits size in
-             (* The cell world is byte-addressed: a sub-byte read's
-                meet is unrepresentable — the identity (no meet) keeps
-                the cell's pre. *)
-             if res_size mod 8 <> 0 then env
-             else if WordSet.bitwidth produced <> res_size then env
-             else
-               let mv = AI.find_memory k env m in
+          let res_size = Size.in_bits size in
+          (* The cell world is byte-addressed: a sub-byte read's
+             meet is unrepresentable — the identity (no meet) keeps
+             the cell's pre. *)
+          if res_size mod 8 <> 0 then env
+          else if WordSet.bitwidth produced <> res_size then env
+          else
+            let mv = AI.find_memory k env m in
+            (match backward_cell_keys mv addr_ws ~bytes:(Size.in_bytes size) with
+             | [] -> env
+             | keys ->
                List.fold keys ~init:env ~f:(fun env key ->
                    let cur = Mem.Val.data (Mem.find (res_size, endian) mv key) in
 #ifdef VSA_DEBUG
@@ -1380,7 +1428,7 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
                            ~data:(Mem.meet_range_keep mvk ~key
                                     ~data:(Mem.Val.create mval endian)))
                      produced env)))
-       | Type.Imm _ | Type.Unk -> env)
+     | Type.Imm _ | Type.Unk -> env)
   | _ -> env
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}
