@@ -216,12 +216,31 @@ module Pieces = struct
     in
     scan [] acc
 
-  (* The canonical union of a raw producer output: each produced piece is
-     placed by [merge_arc], so order and disjointness are established by
-     construction and no sort or repair pass runs. *)
-  let heal (ps : progression list) : t =
-    List.fold ps ~init:[] ~f:(fun acc p ->
-        List.fold (split_arcs p) ~init:acc ~f:merge_arc)
+  (* Place a producer's raw output: split the arcs, order them, then
+     combine the ascending stream tail-only — the placed prefix is
+     ascending, so a piece can only meet the tail, never a hidden
+     neighbour.  A wrapped hull falls back to the general placement. *)
+  let assemble (ps : progression list) : t =
+    let ordered =
+      List.sort (List.concat_map ps ~f:split_arcs) ~compare:compare_piece in
+    let rec go acc = function
+      | [] -> `Done (List.rev acc)
+      | p :: rest -> (
+        match acc with
+        | [] -> go [ p ] rest
+        | q :: tl ->
+          if overlap_exact p q then begin
+            let r = C.union p q in
+            if C.is_wrapped r then `Wrap else go (r :: tl) rest
+          end
+          else (
+            match adjacent_merge q p with
+            | Some r -> go (r :: tl) rest
+            | None -> go (p :: acc) rest))
+    in
+    match go [] ordered with
+    | `Done ps -> ps
+    | `Wrap -> List.fold ordered ~init:[] ~f:merge_arc
 
   (* Mixed widths collapse to top at the widest — a producer's rule; a
      canonical value is single width. *)
@@ -334,17 +353,17 @@ module Pieces = struct
       census_cap ();
 #endif
       match choose_pair ps with
-      | Some (hull, rest) -> cap_to bound (heal (hull :: rest))
+      | Some (hull, rest) -> cap_to bound (assemble (hull :: rest))
       | None -> ps
     end
     else ps
 
   (* The producer finish: every operation's raw output is placed by
-     [heal] and then capped, so no value carries an unbounded piece list.
+     [assemble] and then capped, so no value carries an unbounded piece list.
      `max_pieces` is the fixpoint bound; the budget rule keeps a small
      exact union uncapped. *)
   let finish (ps : progression list) : t =
-    let r = cap_to U.max_pieces (heal ps) in
+    let r = cap_to U.max_pieces (assemble ps) in
 #ifdef VSA_DEBUG
     census_len (List.length r);
 #endif
@@ -492,19 +511,44 @@ module Pieces = struct
             && List.for_all (C.iter pa) ~f:(fun x ->
                 List.exists b ~f:(fun pb -> C.elem x pb))))
 
-  (* Union of canonical values: a merge sweep that maintains order and
-     disjointness by construction.  A width mismatch (a producer's rule)
-     collapses to top at the widest. *)
+  (* Union's own construction: both operands are ascending and disjoint,
+     so a two-way merge by minimum gives an ascending stream each of whose
+     pieces can only meet the placed tail — combine tail-only, in order,
+     with no scan and no sort.  A width mismatch (a producer's rule)
+     collapses to top at the widest; only a wrapped hull falls back. *)
   let union (a : t) (b : t) : t =
     match a, b with
     | [], _ -> b
     | _, [] -> a
-    | _ when Stdlib.Int.equal (width_of a) (width_of b) ->
-      (* [b] ascends, so each produced piece can only meet the tail. *)
-      finish
-        (List.fold b ~init:a ~f:(fun acc p ->
-             List.fold (split_arcs p) ~init:acc ~f:merge_arc))
-    | _ -> finish (collapse_width (List.append a b))
+    | _ when not (Stdlib.Int.equal (width_of a) (width_of b)) ->
+      finish (collapse_width (List.append a b))
+    | _ ->
+      let rec merge xs ys =
+        match xs, ys with
+        | [], ys -> ys
+        | xs, [] -> xs
+        | x :: xt, y :: yt ->
+          if compare_piece x y <= 0 then x :: merge xt ys
+          else y :: merge xs yt
+      in
+      (* [acc] is descending; its head is the largest minimum placed. *)
+      let rec go acc = function
+        | [] -> `Done (List.rev acc)
+        | p :: rest -> (
+          match acc with
+          | [] -> go [ p ] rest
+          | q :: tl ->
+            if overlap_exact p q then
+              let r = C.union p q in
+              if C.is_wrapped r then `Wrap else go (r :: tl) rest
+            else (
+              match adjacent_merge q p with
+              | Some r -> go (r :: tl) rest
+              | None -> go (p :: acc) rest))
+      in
+      (match go [] (merge a b) with
+       | `Done ps -> cap_to U.max_pieces ps
+       | `Wrap -> finish (merge a b))
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
