@@ -86,6 +86,8 @@ module Pieces : sig
   val min_elem_signed : t -> Cbat_word.t option
   val max_elem_signed : t -> Cbat_word.t option
   val cardinality : t -> Cbat_word.t
+  (* [gt_int (cardinality t) n], without building the sum. *)
+  val card_exceeds : int -> t -> bool
   val elem : Cbat_word.t -> t -> bool
   val equal : t -> t -> bool
   val precedes : t -> t -> bool
@@ -139,6 +141,8 @@ module Exact : sig
 
   val bitwidth : t -> int
   val cardinality : t -> Cbat_word.t
+  (* [gt_int (cardinality t) n], without building the sum. *)
+  val card_exceeds : int -> t -> bool
   val elem : Cbat_word.t -> t -> bool
   val iter : t -> Cbat_word.t list
   val elements : t -> Cbat_word.t list

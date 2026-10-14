@@ -97,13 +97,29 @@ let of_z (z : Z.t) (w : int) : t = mkzw z w false
 let[@inline] lane64 (w : int) (b : t) : bool =
   w <= 64 && (match b with Big _ -> false | Small _ | W64 _ -> true)
 
-let zero (w : int) : t = Small (0, w, false)
-let one (w : int) : t = if w <= 0 then Small (0, w, false) else Small (1, w, false)
-
-let ones (w : int) : t =
+let make_ones (w : int) : t =
   if w <= 62 then Small (mask w, w, false)
   else if w <= 64 then W64 (mask64 w, w, false)
   else mkz (zmax w) w
+
+(* The per-width constants, shared below [const_widths] so the [==] fast
+   paths hit; values are immutable, so sharing is unobservable. *)
+let const_widths = 257
+let zeros_tbl : t array = Array.init const_widths (fun w -> Small (0, w, false))
+let ones_tbl : t array = Array.init const_widths make_ones
+let one_tbl : t array =
+  Array.init const_widths (fun w -> Small ((if w <= 0 then 0 else 1), w, false))
+
+let[@inline] zero (w : int) : t =
+  if w >= 0 && w < const_widths then Array.unsafe_get zeros_tbl w else Small (0, w, false)
+
+let[@inline] one (w : int) : t =
+  if w >= 0 && w < const_widths then Array.unsafe_get one_tbl w
+  else if w <= 0 then Small (0, w, false)
+  else Small (1, w, false)
+
+let[@inline] ones (w : int) : t =
+  if w >= 0 && w < const_widths then Array.unsafe_get ones_tbl w else make_ones w
 
 let b0 : t = zero 1
 let b1 : t = one 1
@@ -485,6 +501,9 @@ let to_int_exn (t : t) : int =
   | W64 (x, _, _) when Int64.compare x 0L >= 0 -> Int64.to_int x
   | Big (z, _, _) when Z.numbits z <= Sys.int_size -> Z.to_int (Z.signed_extract z 0 Sys.int_size)
   | _ -> failwith (Printf.sprintf "%s doesn't fit the int type" (to_string t))
+
+let to_int_sat (t : t) : int =
+  match t with Small (v, _, _) -> v | W64 _ | Big _ -> max_int
 
 let to_int (t : t) : int Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int_exn t)
 

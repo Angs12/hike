@@ -64,7 +64,7 @@ let rec bitwidth (t : t) : int =
 let rec is_bottom (t : t) : bool =
   match t with
   | Clp ps | Rel (_, ps) -> P.is_bottom ps
-  | Exact s -> Cbat_word.is_zero (Exact.cardinality s)
+  | Exact s -> Exact.is_bottom s
   | Many ps -> List.for_all ps ~f:is_bottom
 
 (* |segment| * |offs| at width 65.  The product SATURATES: a wrapped
@@ -194,6 +194,12 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
     | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
     | _ -> None
 
+(* A live plain piece union under the small tier: kept unless it is
+   small enough to become its exact twin. *)
+let small_tier (cps : P.t) : t =
+  if P.is_top cps || P.card_exceeds Utils.fin_set_size cps then Clp cps
+  else Exact (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
+
 (* A relative value's plain twin: the exact hull as a step-1 piece. *)
 let rec to_plain (t : t) : t =
   match t with
@@ -222,6 +228,19 @@ let rec to_plain (t : t) : t =
    The relative pool groups by origin: a pool of two or more origins
    is not a value — its members materialise into the plain pool. *)
 and canonical (ps : t list) : t =
+  let budget = Utils.fin_set_size in
+  (* A lone leaf takes the pool rules' answer directly: a relative leaf is
+     itself; a live Clp stays unless the small tier takes it; a live
+     Exact stays unless it promotes to its pieces. *)
+  match ps with
+  | [ (Rel _ as q) ] -> q
+  | [ (Clp x as q) ] when not (P.is_bottom x) ->
+    if P.is_top x || P.card_exceeds budget x then q else small_tier x
+  | [ (Exact s as q) ] when not (Exact.is_bottom s) ->
+    if Exact.card_exceeds budget s then small_tier (pieces_of_finset s) else q
+  | _ -> canonical_pool ps
+
+and canonical_pool (ps : t list) : t =
   let alive = List.filter ps ~f:(fun q -> not (is_bottom q)) in
   let rels =
     List.filter_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
@@ -267,14 +286,16 @@ and canonical (ps : t list) : t =
     in
     let fss =
       List.filter_map ps ~f:(function Exact x -> Some x | _ -> None) in
-    let fs_total =
-      List.fold fss ~init:0 ~f:(fun a s ->
-          a
-          + (match Cbat_word.to_int (Exact.cardinality s) with
-             | Ok n -> n
-             | Error _ -> Stdlib.max_int))
+    let promote =
+      match fss with
+      | [] -> false
+      | [ s ] -> Exact.card_exceeds Utils.fin_set_size s
+      | _ ->
+        List.fold fss ~init:0 ~f:(fun a s ->
+            let c = Cbat_word.to_int_sat (Exact.cardinality s) in
+            if c > Stdlib.max_int - a then Stdlib.max_int else a + c)
+        > Utils.fin_set_size
     in
-    let promote = fs_total > Utils.fin_set_size in
     let clp_sources =
       List.append clps
         (if promote then List.map fss ~f:pieces_of_finset else [])
@@ -308,7 +329,7 @@ and canonical (ps : t list) : t =
         (Some cps, None)
       | Some cps, Some fss
         when (not (P.is_top cps))
-             && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
+             && not (P.card_exceeds Utils.fin_set_size cps)
              && List.for_all (P.elements cps) ~f:(fun w -> Exact.elem w fss)
         -> (None, Some fss)
       | c, f -> c, f
@@ -317,7 +338,7 @@ and canonical (ps : t list) : t =
       match clp_piece, fs_piece with
       | Some cps, None
         when (not (P.is_bottom cps)) && not (P.is_top cps)
-             && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
+             && not (P.card_exceeds Utils.fin_set_size cps)
         -> None, Some (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
       | c, f -> c, f
     in
@@ -882,9 +903,13 @@ module Piece_binop = Binop (Piece_repr)
    policy. *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   let collapse (ps : P.t) : P.t =
-    match hull_of_pieces ps with
-    | Some p -> P.of_progression p
-    | None -> ps
+    match P.to_list ps with
+    (* [of_progression] returns a live unwrapped piece as itself. *)
+    | [ p ] when not (Clp.is_bottom p) && not (Clp.is_wrapped p) -> ps
+    | _ ->
+      match hull_of_pieces ps with
+      | Some p -> P.of_progression p
+      | None -> ps
   in
   collapse (Piece_binop.binop op a b)
 

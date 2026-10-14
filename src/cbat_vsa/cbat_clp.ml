@@ -87,7 +87,11 @@ module Pieces = struct
   let is_top (ps : t) : bool = List.exists ps ~f:C.is_top
   let bitwidth = width_of
 
-  let top (i : int) : t = [ C.top i ]
+  (* Cached per width, as [C.top] is. *)
+  let top_cache : t array = Stdlib.Array.init 257 (fun i -> if i > 0 then [ C.top i ] else [])
+
+  let top (i : int) : t =
+    if i > 0 && i < Stdlib.Array.length top_cache then top_cache.(i) else [ C.top i ]
   let bottom (_ : int) : t = []
 
   (* The unsigned piece order: minimum, maximum, step, then the record. *)
@@ -446,6 +450,16 @@ module Pieces = struct
           let c = Cbat_word.cast Bil.UNSIGNED w1 (C.cardinality p) in
           let s = Cbat_word.add acc c in
           if Cbat_word.(<) s acc then Cbat_word.ones w1 else s)
+
+  (* [gt_int (cardinality ps) n] without building the sum. *)
+  let card_exceeds (n : int) (ps : t) : bool =
+    let rec go (left : int) = function
+      | [] -> false
+      | p :: rest ->
+        let c = Cbat_word.to_int_sat (C.cardinality p) in
+        c > left || go (left - c) rest
+    in
+    go n ps
 
   let elem (w : Cbat_word.t) (ps : t) : bool =
     List.exists ps ~f:(fun p -> C.elem w p)
@@ -846,8 +860,13 @@ module Exact = struct
   let bitwidth (t : t) : int = t.width
   let get_idx (t : t) : int = t.width
 
+  (* The runs are disjoint and each enumerates its [cardn] elements, so
+     the count is their sum. *)
   let cardinality (t : t) : W.t =
-    List.length (elements t) |> W.of_int ~width:(t.width + 1)
+    List.fold t.pieces ~init:0 ~f:(fun a p -> a + W.to_int_exn (C.cardinality p))
+    |> W.of_int ~width:(t.width + 1)
+
+  let card_exceeds (n : int) (t : t) : bool = Pieces.card_exceeds n t.pieces
 
   let elem (w : W.t) (t : t) : bool =
     (* The bitwidth gates membership; the piece guard keeps [C.elem]'s

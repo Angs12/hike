@@ -85,6 +85,8 @@ val lcm_exn : t -> t -> t
 
 val to_int_exn : t -> int
 val to_int : t -> int Core.Or_error.t
+(* The payload, saturating at [max_int]; never allocates. *)
+val to_int_sat : t -> int
 val to_int64_exn : t -> int64
 val to_int64 : t -> int64 Core.Or_error.t
 val to_int64_opt : t -> int64 option
