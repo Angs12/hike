@@ -905,17 +905,20 @@ module Piece_binop = Binop (Piece_repr)
    here, not at the join; the widening's per-pair hull is where it is
    lost for fixpoint values.  The collapse is the piece representation's
    policy. *)
+(* Collapse a piece-union result to one progression (the distributed
+   arithmetic policy: multi-piece results churn the fixpoint -- the cap is
+   not associative under repeated joins). *)
+let piece_collapse (ps : P.t) : P.t =
+  match P.to_list ps with
+  (* [of_progression] returns a live unwrapped piece as itself. *)
+  | [ p ] when not (Clp.is_bottom p) && not (Clp.is_wrapped p) -> ps
+  | _ ->
+    match hull_of_pieces ps with
+    | Some p -> P.of_progression p
+    | None -> ps
+
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
-  let collapse (ps : P.t) : P.t =
-    match P.to_list ps with
-    (* [of_progression] returns a live unwrapped piece as itself. *)
-    | [ p ] when not (Clp.is_bottom p) && not (Clp.is_wrapped p) -> ps
-    | _ ->
-      match hull_of_pieces ps with
-      | Some p -> P.of_progression p
-      | None -> ps
-  in
-  collapse (Piece_binop.binop op a b)
+  piece_collapse (Piece_binop.binop op a b)
 
 module Fs_repr = struct
   type t = fset
@@ -943,13 +946,8 @@ module Fs_binop = Binop (Fs_repr)
 let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   Fs_binop.binop op s1 s2
 
-(* One op over one leaf pair; mixed kinds take the piece union of the
-   Exact's elements at the declared width, the operands in their own
-   order. *)
-(* The operand's representation decides the path: the exact finite set
-   is the fast path, the piece union is the general one, and Rel/Many
-   are opaque to the generic lift (the stack-aware ops route around
-   it) — top. *)
+(* One op over one leaf pair.  The representation pair decides the path;
+   the paths are named so the dispatcher reads as a table. *)
 type repr =
   | Fs of fset
   | Ps of P.t
@@ -961,19 +959,39 @@ let repr_of (q : t) : repr =
   | Clp ps -> Ps ps
   | Rel _ | Many _ -> Opaque
 
+(* Both leaves exact: the element product. *)
+let op_fs_fs (op : binop) (s1 : fset) (s2 : fset) : t =
+  Exact (binop_fs op s1 s2)
+
+(* Both leaves plain: the piece union on each side. *)
+let op_ps_ps (op : binop) (a : P.t) (b : P.t) : t =
+  Clp (binop_pieces op a b)
+
+(* Mixed: the exact side becomes the piece union of its elements at the
+   declared width, the operands in their own order. *)
+let op_ps_fs (op : binop) (a : P.t) (s : fset) : t =
+  Clp (binop_pieces op a (pieces_of_finset s))
+
+let op_fs_ps (op : binop) (s : fset) (b : P.t) : t =
+  Clp (binop_pieces op (pieces_of_finset s) b)
+
+(* A relative/opaque leaf is top at the wider width. *)
+let op_wide (op : binop) (q1 : t) (q2 : t) : t =
+  ignore op;
+  Clp (P.top (Stdlib.max (bitwidth q1) (bitwidth q2)))
+
+(* The dispatcher: one row per representation pair. *)
 let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
-  let wide () = P.top (Stdlib.max (bitwidth q1) (bitwidth q2)) in
   match repr_of q1, repr_of q2 with
-  | Fs s1, Fs s2 -> [ Exact (binop_fs op s1 s2) ]
-  | Ps a, Ps b -> [ Clp (binop_pieces op a b) ]
-  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
-  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_finset s) ps) ]
-  | Opaque, _ | _, Opaque -> [ Clp (wide ()) ]
+  | Fs s1, Fs s2 -> [ op_fs_fs op s1 s2 ]
+  | Ps a, Ps b -> [ op_ps_ps op a b ]
+  | Ps a, Fs s -> [ op_ps_fs op a s ]
+  | Fs s, Ps b -> [ op_fs_ps op s b ]
+  | Opaque, _ | _, Opaque -> [ op_wide op q1 q2 ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with
-  | ((Clp _ | Exact _ | Rel _) as q1),
-    ((Clp _ | Exact _ | Rel _) as q2) ->
+  | ((Clp _ | Exact _ | Rel _) as q1), ((Clp _ | Exact _ | Rel _) as q2) ->
     canonical (op_pair op q1 q2)
   | p1, p2 -> pairwise (op_pair op) p1 p2
 
