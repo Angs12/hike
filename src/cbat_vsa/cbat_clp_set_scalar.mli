@@ -99,7 +99,7 @@ type address_verdict =
 val filter_addresses :
   t -> decide:(Origin.t -> Cbat_clp.t -> address_verdict) -> t
 
-(* Memory namespaces: Stack, Window and Vla share the stack line;
+(* Memory namespaces: Stack and Vla share the stack line;
    Rip and Abs each retain their own line. *)
 val key_line : Origin.t -> Origin.t
 
@@ -107,7 +107,7 @@ val key_line : Origin.t -> Origin.t
    stack-offset progression; 1 otherwise. *)
 val stride : t -> int
 
-(* Stack identity requires a Stack, Window or Vla runtime origin. *)
+(* Stack identity requires a Stack or Vla runtime origin. *)
 val in_stack_segment : t -> bool
 
 (* The offset set's extrema of a stack-symbolic value; None for a
@@ -116,11 +116,6 @@ val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
 
 (* The singleton word of a plain operand, if it is one. *)
 val singleton_of : t -> Cbat_word.t option
-
-(* The solve-boundary refinement: a wholly window-side relative value
-   (every offset at/above the ABI word) names the caller's frame
-   origin. *)
-val refine_origin : word:int -> t -> t
 
 (* Segment-relative bounds of a stack value; None when not stack. *)
 val stack_bounds : t -> (int64 * int64) option

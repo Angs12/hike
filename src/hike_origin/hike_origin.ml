@@ -6,9 +6,8 @@ open Bap.Std
 
 type t =
   | Abs  (* no origin: the absolute piece union *)
-  | Stack  (* the sub's entry SP *)
+  | Stack  (* the sub's entry SP — the caller's frame is Stack at/above the entry word *)
   | Vla of Tid.t  (* the SP after that def's dynamic decrement *)
-  | Window  (* the caller's frame (the call boundary) *)
   | Rip of Hike_section.t
   (* a module address into that section: offsets are link-time words *)
 [@@deriving bin_io, sexp, compare]
@@ -44,11 +43,6 @@ let segment_base = Stdlib.Int64.add (Stdlib.Int64.shift_left 1L 62) 8L
 (* The symbolic stack segment spans 8 MiB around the base. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
-(* The window side of the entry line: every positive offset is the
-   caller's world; the model layer's args band (which knows the target
-   word) starts above the return-address slot. *)
-let window_floor = 1L
-
 (* VLA bases have no unconditional alignment fact. Their clamps stay
    on the stack line; allocation-specific facts live in Vla_seed. *)
 let facts (t : t) : facts =
@@ -62,11 +56,6 @@ let facts (t : t) : facts =
   | Vla _ ->
     { base = segment_base; certified = 0;
       lo = Stdlib.Int64.neg stack_span; hi = stack_span }
-  | Window ->
-    { base = segment_base;
-      certified = 4;
-      lo = window_floor;
-      hi = Stdlib.Int64.max_int }
   | Rip _ -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
 
 let name (t : t) : string =
@@ -74,15 +63,14 @@ let name (t : t) : string =
   | Abs -> "abs"
   | Stack -> "stack"
   | Vla _ -> "vla"
-  | Window -> "window"
   | Rip _ -> "rip"
 
 (* The D10 namespace test: does an origin name the model's stack line.
-   [Stack], [Window] and a [Vla] frame share the entry-relative line; an
-   absolute or module-relative origin names no stack cell. *)
+   [Stack] and a [Vla] frame share the entry-relative line; an absolute
+   or module-relative origin names no stack cell. *)
 let names_stack_line (t : t) : bool =
   match t with
-  | Stack | Window | Vla _ -> true
+  | Stack | Vla _ -> true
   | Abs | Rip _ -> false
 
 (* A VLA allocation's fact in the allocation's own frame: the routable

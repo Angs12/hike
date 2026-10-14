@@ -406,7 +406,7 @@ let tests : unit Alcotest.test list =
             check "WS-40 (stack-family identity)"
               (Ws.in_stack_segment v
                && Option.is_some (Ws.stack_offsets v)))
-          [base; Ws.set_origin Ws.Origin.Window base];
+          [base; Ws.stack_word_i64 8L];
         let tid = Tid.create () in
         check "WS-40 (VLA identity)"
           (Ws.in_stack_segment (Ws.vla_frame tid)));

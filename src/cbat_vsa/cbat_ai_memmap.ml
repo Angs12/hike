@@ -395,7 +395,7 @@ let meet_range_keep (m : t) ~key ~data : t =
 (* Keep the caller's frame across a call: all inputs are OFFSET-space
    (the segment-relative line the Stack cells key by).  A called
    function writes only its own frame below its entry SP and the
-   escape ranges — so Stack/Window cells keep at/above [keep_lo]
+   escape ranges — so Stack cells keep at/above [keep_lo]
    outside [escape]; a VLA cell belongs to the caller's own allocation,
    which the callee cannot reach (it keeps); a plain (absolute) or rip
    cell names no stack line and the callee may clobber any non-stack

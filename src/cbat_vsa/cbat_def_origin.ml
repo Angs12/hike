@@ -91,9 +91,7 @@ let stamp_origin ~(before : AI.t) (d : def term) (after : AI.t) : def term =
   | Some addr ->
     let o =
       match denote_imm_exp addr before with
-      | Ok ws ->
-        origin_of_def_value
-          (WordSet.refine_origin ~word:(Cbat_transfer.word_bytes ()) ws)
+      | Ok ws -> origin_of_def_value ws
       | Error _ -> Origin.Abs
     in
     Hike_def_slot.put def_origin_d (Some o) d

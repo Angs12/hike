@@ -24,7 +24,7 @@ let tests : unit Alcotest.test list =
         check "PROBE-01 (the plain in-segment value lost it)"
           (Rows.classify_shape lost = `Lost);
         check "PROBE-01 (window)"
-          (Rows.classify_shape (Ws.set_origin Ws.Origin.Window base) = `Window);
+          (Rows.classify_shape (Ws.stack_word_i64 8L) = `Window);
         check "PROBE-01 (vla)"
           (Rows.classify_shape (Ws.vla_frame tid) = `Vla);
         check "PROBE-01 (rip -> other)"

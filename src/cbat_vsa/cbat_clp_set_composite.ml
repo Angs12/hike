@@ -217,7 +217,6 @@ let on_scalar f t = match t with Scalar s -> Scalar (f s) | Lanes _ -> t
 
 let origin t = match t with Scalar s -> S.origin s | Lanes _ -> None
 let set_origin o = on_scalar (S.set_origin o)
-let refine_origin ~word = on_scalar (S.refine_origin ~word)
 let keep_section ~old ~new_ = on_scalar (S.keep_section ~old:(plain old) ~new_:(plain new_))
 let filter_addresses t ~decide = on_scalar (S.filter_addresses ~decide) t
 

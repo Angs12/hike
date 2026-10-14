@@ -152,7 +152,7 @@ let base_facts (o : Origin.t) : Origin.facts =
 let absolute_line (o : Origin.t) : bool =
   match o with
   | Origin.Abs | Origin.Rip _ -> true
-  | Origin.Stack | Origin.Window | Origin.Vla _ -> false
+  | Origin.Stack | Origin.Vla _ -> false
 
 (* The exact hull [base + offs_lo, base + offs_hi]; a missing
    direction clamps to the origin's materialisation bound — a
@@ -229,9 +229,8 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
   | _ -> None
 
 (* A stack-line value's offsets on the entry line, the Stack key line
-   every stack-line origin shares: a Window offset is an entry-line
-   offset; a VLA frame shifts by its allocation base's range, and an
-   unknown base spans the whole line. *)
+   every stack-line origin shares: a VLA frame shifts by its allocation
+   base's range, and an unknown base spans the whole line. *)
 let line_offsets (o : Origin.t) (offs : P.t) : P.t =
   match o with
   | Origin.Vla tid -> (
@@ -239,7 +238,7 @@ let line_offsets (o : Origin.t) (offs : P.t) : P.t =
     | Some (lo, hi) ->
       P.of_progression (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))
     | None -> P.top 64)
-  | Origin.Stack | Origin.Window | Origin.Rip _ | Origin.Abs -> offs
+  | Origin.Stack | Origin.Rip _ | Origin.Abs -> offs
 
 (* ---------------- the tier census ---------------- *)
 
@@ -297,17 +296,11 @@ and canonical_pool (ps : t list) : t =
     List.filter_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
   in
   (* One relative leaf per origin, in origin order: a union keeps every
-     origin it was built from.  Two merges are lossless and keep the
-     form canonical: a Window leaf beside a Stack leaf is the same line
-     at the same base (the def refines the tag back), and an absolute
-     leaf's offsets are its words (the plain pool). *)
-  let has_stack = List.exists rels ~f:(fun (o, _) -> Origin.equal o Origin.Stack) in
+     origin it was built from.  One merge is lossless and keeps the form
+     canonical: an absolute leaf's offsets are its words (the plain
+     pool). *)
   let abs_rels, keep_rels =
     List.partition_tf rels ~f:(fun (o, _) -> Origin.equal o Origin.Abs) in
-  let keep_rels =
-    List.map keep_rels ~f:(fun (o, x) ->
-        if has_stack && Origin.equal o Origin.Window then (Origin.Stack, x) else (o, x))
-  in
   let so_pool =
     List.sort_and_group keep_rels ~compare:(fun (a, _) (b, _) -> Origin.compare a b)
     |> List.map ~f:(fun grp ->
@@ -561,26 +554,6 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
 let in_stack_segment (t : t) : bool =
   Option.exists (origin t) ~f:Origin.names_stack_line
 
-(* The solve-boundary refinement: a wholly window-side relative value
-   (every offset at/above the ABI word) names the caller's frame
-   origin.  A VLA frame keeps its origin; the routing gate refuses an
-   out-of-frame offset at the stamp, not here. *)
-let refine_origin ~(word : int) (t : t) : t =
-  let extrema_i64 offs =
-    Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok lo, Ok hi -> Some (lo, hi)
-        | _ -> None)
-  in
-  match t with
-  | Rel (Origin.Stack, offs) when word > 0 ->
-    let w = Stdlib.Int64.of_int word in
-    (match extrema_i64 offs with
-     | Some (lo, _) when Stdlib.Int64.compare lo w >= 0 ->
-       Rel (Origin.Window, offs)
-     | _ -> t)
-  | q -> q
-
 let rec cardinality (t : t) : word =
   match t with
   | Clp ps -> P.cardinality ps
@@ -590,7 +563,7 @@ let rec cardinality (t : t) : word =
   (* An absolute-origin value's offsets ARE its absolute words: the
      base is the fixed 0, no segment multiplies. *)
   | Rel ((Origin.Abs | Origin.Rip _), offs) -> P.cardinality offs
-  | Rel ((Origin.Stack | Origin.Window), offs) -> stack_cardinality offs
+  | Rel (Origin.Stack, offs) -> stack_cardinality offs
   | Many ps ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
     List.fold ps ~init:(Cbat_word.zero width) ~f:(fun acc q ->
@@ -1047,13 +1020,13 @@ let vla_offsets (t : t) : Clp.t option =
   | _ -> None
 
 (* The memory-key coordinate line.  A stack access can land inside a
-   VLA region (the allocation lives on the stack line), so [Stack],
-   [Window], and [Vla] share one namespace; a module address names the
-   same bytes as its absolute word, so [Rip] keys on the [Abs] line.
-   The origin still rides the value; only the key line is coarsened. *)
+   VLA region (the allocation lives on the stack line), so [Stack] and
+   [Vla] share one namespace; a module address names the same bytes as
+   its absolute word, so [Rip] keys on the [Abs] line.  The origin still
+   rides the value; only the key line is coarsened. *)
 let key_line (o : Origin.t) : Origin.t =
   match o with
-  | Origin.Stack | Origin.Window | Origin.Vla _ -> Origin.Stack
+  | Origin.Stack | Origin.Vla _ -> Origin.Stack
   | Origin.Rip _ | Origin.Abs -> Origin.Abs
 
 (* Memory keys retain the carried origin's line; plain values stay
@@ -1216,32 +1189,22 @@ let stride (t : t) : int =
    bases do not survive — both hulls, the plain op; [Top] = the op
    keeps unknown base bits: top.  THE table is the one home of "what
    type dominates"; a new origin lands by extending [Origin.t], a new
-   op by one row here.  The two entry-line origins absorb onto
-   [Stack]; a VLA frame never merges — its offsets are frame-relative,
-   so a cross-origin op materialises through the base range (or tops). *)
+   op by one row here.  A VLA frame never merges with [Stack] — its
+   offsets are frame-relative, so a cross-origin op materialises through
+   the base range (or tops). *)
 let origin_is_relative x = not (absolute_line x)
 
 let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     Hike_origin.rel_row =
   let rel x = origin_is_relative x in
-  let cross_line =
-    rel o1 && rel o2 && not (Origin.equal o1 o2)
-    && (match o1, o2 with
-        | Origin.Vla _, _ | _, Origin.Vla _ -> false
-        | _ -> Origin.names_stack_line o1 && Origin.names_stack_line o2)
-  in
   match op with
   (* [lift2] answers a union before the table (the join keeps one leaf
-     per origin); its row is the same-line one. *)
+     per origin); its row is the same-origin one. *)
   | Union ->
-    if rel o1 && rel o2 && (Origin.equal o1 o2 || cross_line) then
-      Wrap (if Origin.equal o1 o2 then o1 else Origin.Stack)
-    else Materialise
+    if rel o1 && rel o2 && Origin.equal o1 o2 then Wrap o1 else Materialise
   | Meet ->
     if rel o1 && rel o2 then
-      if Origin.equal o1 o2 then Wrap o1
-      else if cross_line then Wrap Origin.Stack
-      else Materialise
+      if Origin.equal o1 o2 then Wrap o1 else Materialise
     else if rel o1 then Wrap o1
     else if rel o2 then Wrap o2
     else Materialise
@@ -1449,7 +1412,7 @@ let generic (op : binop) (t1 : t) (t2 : t) : t =
    mask with the absolute one, and the result wraps at the operand's
    origin. *)
 let has_fixed_base = function
-  | Origin.Abs | Origin.Rip _ | Origin.Stack | Origin.Window -> true
+  | Origin.Abs | Origin.Rip _ | Origin.Stack -> true
   | Origin.Vla _ -> false
 
 (* A relative value met with a plain constraint: the constraint's words
@@ -1879,17 +1842,8 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
   (* The relative leaves widen per origin, each against the pair's
      union: a leaf's next iterate need not contain the old one (a frame
      walked from its seed loses offset 0), and a widen of incomparable
-     iterates only joins.  A leaf only one side carries is kept.  A Window leaf pairs with a Stack leaf (one line, one base —
-     the pool's own merge): the solve-boundary re-tag turns a widened
-     Stack value's next iterate into Window, and an unpaired couple
-     would union without ever widening. *)
+     iterates only joins.  A leaf only one side carries is kept. *)
   let rel_widen r1 r2 : t list =
-    let has_stack = List.exists (r1 @ r2) ~f:(fun (o, _) -> Origin.equal o Origin.Stack) in
-    let norm =
-      List.map ~f:(fun (o, x) ->
-          if has_stack && Origin.equal o Origin.Window then (Origin.Stack, x) else (o, x))
-    in
-    let r1 = norm r1 and r2 = norm r2 in
     List.sort_and_group (List.map r1 ~f:fst @ List.map r2 ~f:fst) ~compare:Origin.compare
     |> List.filter_map ~f:(fun grp ->
         let o = List.hd_exn grp in

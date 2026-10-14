@@ -18,7 +18,6 @@ let abi = Hike_abi.x86_64_sysv
 let ori_01 () =
   let st = Origin.facts Origin.Stack in
   let vl = Origin.facts (Origin.Vla (Tid.create ())) in
-  let wn = Origin.facts Origin.Window in
   check "stack base is the segment base"
     (Stdlib.Int64.equal st.Origin.base Origin.segment_base);
   check "entry nibble certified" (st.Origin.certified = 4);
@@ -28,8 +27,7 @@ let ori_01 () =
   check "vla frame rides the segment span"
     (Stdlib.Int64.equal vl.Origin.base st.Origin.base
     && Stdlib.Int64.equal vl.Origin.lo st.Origin.lo
-    && Stdlib.Int64.equal vl.Origin.hi st.Origin.hi);
-  check "window is the positive side" (Stdlib.Int64.compare wn.Origin.lo 0L > 0)
+    && Stdlib.Int64.equal vl.Origin.hi st.Origin.hi)
 
 (* ORI-02: the ADT is total and names every origin. *)
 let ori_02 () =
@@ -37,13 +35,12 @@ let ori_02 () =
     [ Origin.Abs;
       Origin.Stack;
       Origin.Vla (Tid.create ());
-      Origin.Window;
       Origin.Rip Hike_section.Rodata ]
   in
   List.iter all ~f:(fun o ->
       let n = Origin.name o in
       check (sprintf "name %s nonempty" n) (String.length n > 0));
-  check "five origins" (List.length all = 5);
+  check "four origins" (List.length all = 4);
   check "distinct tids are distinct origins"
     (not
        (Origin.equal (Origin.Vla (Tid.create ()))
@@ -67,42 +64,8 @@ let ori_03 () =
   let clpv = Ws.of_clp (Clp.interval ~width:64 (i2w 0L) (i2w 16L)) in
   check "absolute clp reads None" (Option.is_none (Ws.origin clpv))
 
-(* ORI-04: same-origin unions keep the origin. *)
-let ori_05 () =
-  let window_side = Ws.stack_word_i64 16L in
-  let refined = Ws.refine_origin ~word:8 window_side in
-  check "window-side value refines to Window"
-    (Option.equal Origin.equal (Ws.origin refined) (Some Origin.Window));
-  let frame = Ws.stack_word_i64 (-8L) in
-  check "below-entry value keeps Stack"
-    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 frame)) (Some Origin.Stack));
-  let tid = Tid.create () in
-  Origin.Vla_seed.record tid
-    { Origin.off_lo = 0L; off_hi = Some 32L;
-      base_lo = Some (-48L); base_hi = Some (-32L) };
-  let inside =
-    Ws.set_origin (Origin.Vla tid) (Ws.stack_word_i64 16L)
-    |> Ws.refine_origin ~word:8
-  in
-  check "in-extent vla value keeps its frame"
-    (Option.equal Origin.equal (Ws.origin inside) (Some (Origin.Vla tid)));
-  let below =
-    Ws.set_origin (Origin.Vla tid) (Ws.stack_word_i64 (-8L))
-    |> Ws.refine_origin ~word:8
-  in
-  check "an out-of-frame vla value keeps its frame"
-    (Option.equal Origin.equal (Ws.origin below) (Some (Origin.Vla tid)));
-  let crossing =
-    Ws.union (Ws.stack_word_i64 0L) (Ws.stack_word_i64 16L)
-  in
-  check "value spanning the entry line keeps Stack"
-    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 crossing)) (Some Origin.Stack));
-  let plain = Ws.singleton (i2w 5L) in
-  check "plain values pass through unchanged"
-    (Option.is_none (Ws.origin (Ws.refine_origin ~word:8 plain)))
-
 (* ORI-06: the per-def origin slot, stamped at the solve boundary — a
-   window-side address def reads Window through the seam. *)
+   caller-frame address def reads Stack through the seam. *)
 let round_trip (offs : int64) : Origin.t option =
   let m = memv "rt_m" in
   let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
@@ -131,7 +94,8 @@ let ori_07 () =
   check "stored frame pointer reads back Stack"
     (Option.equal Origin.equal (round_trip (-8L)) (Some Origin.Stack))
 
-(* ORI-08: a caller-window pointer stored to a cell reads back Window. *)
+(* ORI-08: a caller-frame pointer (a Stack value at/above the word)
+   stored to a cell reads back Stack. *)
 type vla_fix = {
   vla_sub : sub term;
   vla_stamped : sub term;
@@ -278,11 +242,10 @@ let ori_17 () =
      | Some e -> Option.is_none e.Hike_origin.off_hi
      | None -> false)
 
-(* ORI-18: the D10 namespace test — the three stack-line origins answer
+(* ORI-18: the D10 namespace test — the stack-line origins answer
    true; a plain or module-relative origin answers false. *)
 let ori_18 () =
   check "Stack names the stack line" (Origin.names_stack_line Origin.Stack);
-  check "Window names the stack line" (Origin.names_stack_line Origin.Window);
   check "a VLA frame names the stack line"
     (Origin.names_stack_line (Origin.Vla (Tid.create ())));
   check "an absolute origin names no stack line"
@@ -292,7 +255,7 @@ let ori_18 () =
 
 let ori_19 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata;
+    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata;
       Origin.Rip Hike_section.Data; Origin.Vla (Tid.create ()); Origin.Vla (Tid.create ()) ]
   in
   let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
@@ -335,7 +298,7 @@ let ori_19 () =
      Ws.equal u (Ws.union data rip)
      && Ws.equal (Ws.diff u (plain 5L)) rip
      && Ws.equal (Ws.diff u (plain 3L)) data);
-  List.iter [ Origin.Abs; region; Origin.Stack; Origin.Window ] ~f:(fun o ->
+  List.iter [ Origin.Abs; region; Origin.Stack; Origin.Vla (Tid.create ()) ] ~f:(fun o ->
       check "memory namespace follows the carried origin"
         (match Ws.address_groups (value o) with
          | [ (key, _) ] -> Origin.equal key (Ws.key_line o)
@@ -381,7 +344,7 @@ let ori_22 () =
     { Origin.off_lo = 0L; off_hi = Some 32L;
       base_lo = Some 0L; base_hi = Some 0L };
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata; Origin.Vla tid ] in
+    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata; Origin.Vla tid ] in
   let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
   let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
   let cell = key (Ws.singleton (i2w 0x1000L)) in
@@ -399,7 +362,7 @@ let ori_22 () =
   Origin.Vla_seed.reset ()
 
 let ori_23 () =
-  List.iter [ Origin.Stack; Origin.Window ] ~f:(fun o ->
+  List.iter [ Origin.Stack ] ~f:(fun o ->
       let value = Ws.set_origin o
           (Ws.stack_word (Clp.interval ~width:64 (i2w 7L) (i2w 9L))) in
       let rounded = Ws.logand value (Ws.singleton (i2w (-16L))) in
@@ -410,7 +373,7 @@ let ori_23 () =
 
 let ori_24 () =
   let origins =
-    [ Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata; Origin.Vla (Tid.create ()) ] in
+    [ Origin.Stack; Origin.Rip Hike_section.Rodata; Origin.Vla (Tid.create ()) ] in
   List.iter origins ~f:(fun o ->
       let a = Ws.set_origin o (Ws.stack_word_i64 0L) in
       let b = Ws.set_origin o (Ws.stack_word_i64 1L) in
@@ -471,8 +434,6 @@ let () =
     [ pin "ORI-01" "the facts table" ori_01;
       pin "ORI-02" "the ADT is total" ori_02;
       pin "ORI-03" "the one-origin accessor" ori_03;
-
-      pin "ORI-05" "the boundary refinement" ori_05;
 
       pin "ORI-07" "store-to-load round-trip (frame)" ori_07;
 

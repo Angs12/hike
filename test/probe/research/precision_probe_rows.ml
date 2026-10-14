@@ -19,14 +19,30 @@ type ld_bucket =
 type win_bucket = [ `W_b64 | `W_4k | `W_2m | `W_big ]
 
 (* The address's shape: the symbolic arm carries its runtime origin; a
-   plain value that lands in the segment has lost it. *)
+   plain value that lands in the segment has lost it.  The caller frame
+   is no longer a distinct origin: a [Stack] value whose offsets all lie
+   at/above the ABI word is the window side of the entry line. *)
 type shape = [ `Stack | `Vla | `Window | `Other | `Lost ]
+
+(* The x86-64 ABI word: the entry boundary the removed [Origin.Window]
+   refinement used. *)
+let window_floor : int64 = 8L
+
+let caller_frame (ws : Ws.t) : bool =
+  match Ws.origin ws with
+  | Some Origin.Stack -> (
+    match Ws.offset_extrema ws with
+    | Some (lo, _) -> (
+      match Cbat_word.to_int64 lo with
+      | Ok v -> Int64.compare v window_floor >= 0
+      | Error _ -> false)
+    | None -> false)
+  | _ -> false
 
 let classify_shape (ws : Ws.t) : shape =
   match Ws.origin ws with
-  | Some Origin.Stack -> `Stack
+  | Some Origin.Stack -> if caller_frame ws then `Window else `Stack
   | Some (Origin.Vla _) -> `Vla
-  | Some Origin.Window -> `Window
   | Some (Origin.Abs | Origin.Rip _) -> `Other
   | None -> `Lost
 
