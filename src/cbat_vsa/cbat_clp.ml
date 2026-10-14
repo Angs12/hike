@@ -42,22 +42,8 @@ let concat = Cbat_clp_arith.concat
 (* The progression type, named for the [Pieces] signature. *)
 type progression = t [@@deriving bin_io, sexp, compare]
 
-(* The VSA_DEBUG census of the piece unions: canonical list lengths and
-   cap events, dumped at exit. *)
-#ifdef VSA_DEBUG
-let census_len_counts = Stdlib.Array.make (Cbat_vsa_utils.max_pieces + 2) 0
-let census_cap_hits = Stdlib.ref 0
-let census_len (n : int) : unit =
-  if n < Stdlib.Array.length census_len_counts then
-    census_len_counts.(n) <- census_len_counts.(n) + 1
-let census_cap () : unit = Stdlib.incr census_cap_hits
-let () =
-  Stdlib.at_exit (fun () ->
-      Stdlib.Array.iteri
-        (fun i n -> Printf.eprintf "hike-pieces-census: len.%d=%d\n%!" i n)
-        census_len_counts;
-      Printf.eprintf "hike-pieces-census: cap=%d\n%!" !census_cap_hits)
-#endif
+(* The piece-union census lives at the tier (cbat_clp_set_scalar), where
+   the cap is applied. *)
 
 (* ====================== Pieces: the canonical progression union ======== *)
 
@@ -318,21 +304,11 @@ module Pieces = struct
      [bound] or is within the exact budget.  A tier-boundary operation;
      producers never cap. *)
   let rec cap_to (bound : int) (ps : t) : t =
-    let ps =
-      if List.length ps > bound && not (within_exact_budget ps) then begin
-#ifdef VSA_DEBUG
-        census_cap ();
-#endif
-        match choose_pair ps with
-        | Some (hull, rest) -> cap_to bound (heal (hull :: rest))
-        | None -> ps
-      end
-      else ps
-    in
-#ifdef VSA_DEBUG
-    census_len (List.length ps);
-#endif
-    ps
+    if List.length ps > bound && not (within_exact_budget ps) then
+      match choose_pair ps with
+      | Some (hull, rest) -> cap_to bound (heal (hull :: rest))
+      | None -> ps
+    else ps
 
   let of_progression (p : progression) : t = heal [ p ]
 
