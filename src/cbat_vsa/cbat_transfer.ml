@@ -266,7 +266,9 @@ let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
                        (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
                        ~endian ~bits)
                     ~f:(fun w -> w :: ws))))
-  |> Option.map ~f:(fun words -> WordSet.of_list ~width:bits words)
+  |> Option.map ~f:(fun words ->
+         WordSet.of_list ~width:bits
+           (Base.List.dedup_and_sort words ~compare:Cbat_word.compare))
 
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     (mv : Mem.t) : wordset option =
