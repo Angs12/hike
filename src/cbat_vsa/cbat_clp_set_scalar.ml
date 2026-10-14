@@ -1603,6 +1603,9 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
      the wider operand; a top plain side makes the meet the relative
      operand itself. *)
   | Meet when bitwidth t1 <> bitwidth t2 -> if bitwidth t1 > bitwidth t2 then t1 else t2
+  (* A union across widths is a producer's collapse: top at the widest,
+     so no mixed width reaches the single-width `Pieces` operations. *)
+  | Union when bitwidth t1 <> bitwidth t2 -> top_w ()
   | Meet when (match t1 with Rel _ -> plain_is_top t2 | _ -> false) -> t1
   | Meet when (match t2 with Rel _ -> plain_is_top t1 | _ -> false) -> t2
   (* The shift count's width is incidental: a narrower plain count

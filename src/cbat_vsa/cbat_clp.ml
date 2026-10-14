@@ -72,8 +72,7 @@ module Pieces = struct
   module A = Cbat_clp_arith
   module U = Cbat_vsa_utils
 
-  let max_pieces : int = U.max_pieces
-
+  (* Max progressions in a canonical piece union (the tier's cap bound). *)
   let width_of (ps : t) : int =
     match ps with [] -> 0 | p :: _ -> C.bitwidth p
 
@@ -171,18 +170,61 @@ module Pieces = struct
       end
       else not (C.is_bottom (C.intersection p q))
 
-  (* Insert one piece into the reverse-sorted accumulator. *)
-  let rec insert (acc : progression list) (p : progression) : progression list =
-    match acc with
-    | [] -> [ p ]
-    | q :: rest ->
-      if C.subset p q then acc
-      else if C.subset q p then insert rest p
-      else if overlap_exact p q then insert rest (C.union q p)
+  (* The non-bottom, non-wrapping arcs of a produced piece.  Splitting at
+     the producer is [shape]'s arc rule, kept where wrapping can arise. *)
+  let split_arcs (p : progression) : progression list =
+    if C.is_bottom p then []
+    else List.filter (C.split_wrapped p) ~f:(fun a -> not (C.is_bottom a))
+
+  (* [merge_arc acc a] is the canonical union of a canonical ascending
+     disjoint list [acc] and one non-wrapping piece [a].  Overlaps hull,
+     adjacent same-step runs join, contained pieces drop; a hull that
+     wraps is split into its arcs and re-placed.  The accumulator stays
+     ascending, disjoint, non-wrapping, single width. *)
+  let rec merge_arc (acc : progression list) (a : progression)
+    : progression list =
+    let rec scan left = function
+      | [] -> List.rev (a :: left)
+      | q :: rest ->
+        if C.subset a q then List.rev_append left (q :: rest)
+        else if C.subset q a then scan left rest
+        else
+          let hull =
+            if overlap_exact a q then Some (C.union a q)
+            else
+              (if compare_piece a q < 0 then adjacent_merge a q
+               else adjacent_merge q a)
+          in
+          (match hull with
+           | None ->
+             if compare_piece a q < 0 then List.rev_append left (a :: q :: rest)
+             else scan (q :: left) rest
+           | Some r ->
+             List.fold (split_arcs r)
+               ~init:(List.rev_append left rest) ~f:merge_arc)
+    in
+    scan [] acc
+
+  (* The canonical union of a raw producer output: each produced piece is
+     placed by [merge_arc], so order and disjointness are established by
+     construction and no sort or repair pass runs. *)
+  let heal (ps : progression list) : t =
+    List.fold ps ~init:[] ~f:(fun acc p ->
+        List.fold (split_arcs p) ~init:acc ~f:merge_arc)
+
+  (* Mixed widths collapse to top at the widest — a producer's rule; a
+     canonical value is single width. *)
+  let collapse_width (ps : progression list) : progression list =
+    match ps with
+    | [] | [ _ ] -> ps
+    | p :: rest ->
+      let w = C.bitwidth p in
+      if List.for_all rest ~f:(fun q -> Stdlib.Int.equal (C.bitwidth q) w)
+      then ps
       else
-        (match adjacent_merge q p with
-         | Some merged -> insert rest merged
-         | None -> p :: acc)
+        [ C.top
+            (List.fold rest ~init:w
+               ~f:(fun a q -> Stdlib.max a (C.bitwidth q))) ]
 
   (* Two pieces interleave when each sits below the other across the
      wrap: their exact union is two arcs, which the cap cannot use (it
@@ -272,30 +314,17 @@ module Pieces = struct
     in
     go 0 ps
 
-  (* Two-way merge of two ascending [compare_piece] lists.  The left
-     operand wins ties, matching the stable sort it replaces. *)
-  let rec merge_sorted (xs : progression list) (ys : progression list)
-    : progression list =
-    match xs, ys with
-    | [], ys -> ys
-    | xs, [] -> xs
-    | x :: xt, y :: yt ->
-      if compare_piece x y <= 0 then x :: merge_sorted xt ys
-      else y :: merge_sorted xs yt
-
-  (* The cap repair over a merged list: hull the smallest-growth pair and
-     re-merge the hull, never re-sorting. *)
-  let rec cap (ps : t) : t =
+  (* The cap repair: hull the smallest-growth pair until the list fits
+     [bound] or is within the exact budget.  A tier-boundary operation;
+     producers never cap. *)
+  let rec cap_to (bound : int) (ps : t) : t =
     let ps =
-      if List.length ps > max_pieces && not (within_exact_budget ps) then begin
+      if List.length ps > bound && not (within_exact_budget ps) then begin
 #ifdef VSA_DEBUG
         census_cap ();
 #endif
         match choose_pair ps with
-        | Some (hull, rest) ->
-          cap
-            (List.rev
-               (List.fold (merge_sorted [ hull ] rest) ~init:[] ~f:insert))
+        | Some (hull, rest) -> cap_to bound (heal (hull :: rest))
         | None -> ps
       end
       else ps
@@ -305,56 +334,16 @@ module Pieces = struct
 #endif
     ps
 
-  (* The insert fold and cap over an ascending list.  [canonical_of_list] is this
-     after [shape] and its merges; [union] feeds it a merge. *)
-  let canonical_of_sorted (ps : progression list) : t =
-    cap (List.rev (List.fold ps ~init:[] ~f:insert))
-
-  (* The shape phase: split wrapped pieces into their arcs, drop bottoms,
-     and collapse mixed widths to top at the widest.  A canonical value
-     never wraps and never mixes widths, so canonical inputs skip it. *)
-  let shape (ps : progression list) : progression list =
-    let ps =
-      match ps with
-      | [ p ] when not (C.is_bottom p) && not (C.is_wrapped p) -> [ p ]
-      | _ ->
-        List.filter
-          (List.concat_map ps ~f:C.split_wrapped)
-          ~f:(fun p -> not (C.is_bottom p)) in
-    match ps with
-    | [] | [ _ ] -> ps
-    | p :: rest ->
-      let w = C.bitwidth p in
-      if List.for_all rest ~f:(fun q -> Stdlib.Int.equal (C.bitwidth q) w)
-      then ps
-      else
-        [ C.top
-            (List.fold rest ~init:w
-               ~f:(fun a q -> Stdlib.max a (C.bitwidth q))) ]
-
-  (* The same canonicalization for an output list of unknown order:
-     bottom-up adjacent merges (stable), then the insert fold.  No
-     [List.sort]. *)
-  let canonical_of_list (ps : progression list) : t =
-    let rec merge_runs = function
-      | [] -> []
-      | [ x ] -> [ x ]
-      | x :: y :: rest -> merge_sorted x y :: merge_runs rest
-    in
-    let rec merge_sort = function
-      | [] | [ _ ] as l -> l
-      | l -> merge_sort (merge_runs l)
-    in
-    canonical_of_sorted
-      (List.concat (merge_sort (List.map (shape ps) ~f:(fun p -> [ p ]))))
-
-  let of_progression (p : progression) : t = canonical_of_list [ p ]
+  let of_progression (p : progression) : t = heal [ p ]
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
   (* The runs of an already ascending element list. *)
   let runs_from_sorted_elements ~(width : int) (els : Cbat_word.t list)
     : progression list =
+#ifdef VSA_DEBUG
+    let () = assert (List.is_sorted els ~compare:Cbat_word.compare) in
+#endif
     (* One run as a progression when the progression is exactly the run
        (the cardinality check rejects a wrapped over-approximation), else
        as its singletons. *)
@@ -390,16 +379,13 @@ module Pieces = struct
     | [] -> []
     | x :: rest -> go [] x x None 1 [ x ] rest
 
-  let runs_from_elements ~(width : int) (els : Cbat_word.t list)
-    : progression list =
-    runs_from_sorted_elements ~width
-      (List.sort els ~compare:Cbat_word.compare)
-
+  (* [of_list] requires an ascending, deduped word list — a precondition,
+     not a sort.  The run builder consumes it directly. *)
   let of_list ~(width : int) (l : Cbat_word.t list) : t =
     if width <= 0 then []
     else
       let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
-      canonical_of_list (runs_from_elements ~width l)
+      heal (runs_from_sorted_elements ~width l)
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
@@ -490,17 +476,18 @@ module Pieces = struct
             && List.for_all (C.iter pa) ~f:(fun x ->
                 List.exists b ~f:(fun pb -> C.elem x pb))))
 
-  (* Union of canonical values: one linear merge, then the insert fold
-     and cap.  The emitted order matches the stable sort this replaces;
-     a width mismatch (unreachable for canonical values) falls back to
-     the full canonicalization. *)
+  (* Union of canonical values: a merge sweep that maintains order and
+     disjointness by construction.  A width mismatch (a producer's rule)
+     collapses to top at the widest. *)
   let union (a : t) (b : t) : t =
     match a, b with
     | [], _ -> b
     | _, [] -> a
     | _ when Stdlib.Int.equal (width_of a) (width_of b) ->
-      canonical_of_sorted (merge_sorted a b)
-    | _ -> canonical_of_list (List.append a b)
+      (* [b] ascends, so each produced piece can only meet the tail. *)
+      List.fold b ~init:a ~f:(fun acc p ->
+          List.fold (split_arcs p) ~init:acc ~f:merge_arc)
+    | _ -> collapse_width (List.append a b)
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -515,16 +502,17 @@ module Pieces = struct
       if small pa || small pb then begin
         let small_p, big_p = if small pa then pa, pb else pb, pa in
         let els = List.filter (C.iter small_p) ~f:(fun x -> C.elem x big_p) in
-        runs_from_elements ~width:(C.bitwidth small_p) els
+        runs_from_sorted_elements ~width:(C.bitwidth small_p) els
       end
       else
         let r = C.intersection pa pb in
         if C.is_bottom r then [] else [ r ]
 
   let intersection (a : t) (b : t) : t =
-    canonical_of_list
-      (List.concat_map a ~f:(fun pa ->
-           List.concat_map b ~f:(fun pb -> pair_intersection pa pb)))
+    heal
+      (collapse_width
+         (List.concat_map a ~f:(fun pa ->
+              List.concat_map b ~f:(fun pb -> pair_intersection pa pb))))
 
   (* The survivors of one finite non-wrapping grid after removing [es]
      (sorted ascending, all on the grid). *)
@@ -592,7 +580,7 @@ module Pieces = struct
     : progression list =
     let width = C.bitwidth a in
     let step = C.step_of a in
-    let es = List.sort es ~compare:(fun x y -> Cbat_word.compare y x) in
+    let es = List.rev es in
     let seg lo hi =
       if Cbat_word.(>) lo hi then None
       else
@@ -640,13 +628,11 @@ module Pieces = struct
         List.filter (C.iter a) ~f:(fun x ->
             not (List.exists bs ~f:(fun b -> C.elem x b)))
       in
-      runs_from_elements ~width:(C.bitwidth a) survivors
+      runs_from_sorted_elements ~width:(C.bitwidth a) survivors
     else if small_total bs then begin
       let es =
-        List.sort
-          (List.filter (List.concat_map bs ~f:C.iter)
-             ~f:(fun x -> C.elem x a))
-          ~compare:Cbat_word.compare
+        List.filter (List.concat_map bs ~f:C.iter)
+          ~f:(fun x -> C.elem x a)
       in
       if Cbat_word.is_one (C.cardn_of a) then (if es = [] then [ a ] else [])
       else if C.is_ascending a then ascending_survivors a es
@@ -662,16 +648,17 @@ module Pieces = struct
     else [ List.fold bs ~init:a ~f:C.diff ]
 
   let diff (a : t) (b : t) : t =
-    canonical_of_list (List.concat_map a ~f:(fun pa -> diff_piece pa b))
+    heal (List.concat_map a ~f:(fun pa -> diff_piece pa b))
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
-    canonical_of_list (List.map ps ~f)
+    heal (List.map ps ~f)
 
-  (* Cross product with empty pair results dropped. *)
+  (* Cross product with empty pair results dropped; the results are
+     placed by construction (their order is the grid's, not sorted). *)
   let lift2 (f : progression -> progression -> progression) (a : t) (b : t)
     : t =
-    canonical_of_list
+    heal
       (List.concat_map a ~f:(fun pa ->
            List.filter_map b ~f:(fun pb ->
                let r = f pa pb in
@@ -682,7 +669,7 @@ module Pieces = struct
      progression-level). *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
-    canonical_of_list
+    heal
       (List.concat_map a ~f:(fun pa ->
            List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
                List.concat_map b ~f:(fun pb ->
@@ -708,19 +695,19 @@ module Pieces = struct
   let neg = map A.neg
 
   let extract ?hi ?lo (ps : t) : t =
-    canonical_of_list
+    heal
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.extract_parts ?hi ?lo q)))
 
   let cast c sz (ps : t) : t =
-    canonical_of_list
+    heal
       (List.concat_map ps ~f:(fun p ->
            List.concat_map (C.split_wrapped p) ~f:(fun q ->
                A.cast_parts c sz q)))
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
-    canonical_of_list (List.map ps ~f:(fun p -> C.translate p delta))
+    heal (List.map ps ~f:(fun p -> C.translate p delta))
 
   (* The widening pairing: the two sorted atom lists merge with an origin
      tag, then one pass pairs the corresponding atoms.  An overlapping
@@ -789,7 +776,7 @@ module Pieces = struct
         else pass (r :: acc) rest
       in
       let pieces = pass [] merged in
-      if !top_hit then [ C.top (width_of b) ] else canonical_of_list pieces
+      if !top_hit then [ C.top (width_of b) ] else heal pieces
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
@@ -800,12 +787,13 @@ end
 (* ==================== Exact: the uncapped exact run list =============== *)
 
 (* The exact finite tier as a [progression] run list: the small-set
-   tier's element set, carried as the runs [Pieces.runs_from_elements] builds.
-   Unlike [Pieces], the list is uncapped and unbudgeted; the caller's
-   canonical promotion applies [fin_set_size].  Every constructor rebuilds
-   the runs, so the list is canonical: sorted by [compare_piece], disjoint,
-   non-wrapping, exactly the element set.  [] is bottom; the width survives
-   in the record. *)
+   tier's element set, carried as the runs [Pieces.runs_from_sorted_elements]
+   builds.  Unlike [Pieces], the list is uncapped and unbudgeted; the
+   caller's canonical promotion applies [fin_set_size].  Every constructor
+   rebuilds the runs from an ascending, deduped element list, so the list
+   is canonical: sorted by [compare_piece], disjoint, non-wrapping,
+   exactly the element set.  [] is bottom; the width survives in the
+   record. *)
 module Exact = struct
   module C = Cbat_clp_core
   module W = Cbat_word
@@ -821,31 +809,31 @@ module Exact = struct
   let elements (t : t) : W.t list = List.concat_map t.pieces ~f:C.iter
   let iter = elements
 
-  (* The exact runs of an element list.  Elements are grouped by their own
-     width (a run's width is the words'), deduplicated and kept in the set
-     order, so mixed-width operands keep the finite tier's semantics. *)
+  (* Ascending, deduped by construction: an insertion build (exact values
+     are small, and no bulk sort runs). *)
+  let order (els : W.t list) : W.t list =
+    let rec ins acc w =
+      match acc with
+      | [] -> [ w ]
+      | x :: xs ->
+        let c = W.compare w x in
+        if c = 0 then acc else if c < 0 then w :: acc else x :: ins xs w
+    in
+    List.fold els ~init:[] ~f:ins
+
+  (* The exact runs of an ordered element list. *)
   let of_elements (els : W.t list) : progression list =
-    let els = List.dedup_and_sort els ~compare:W.compare in
     let groups =
       List.group els ~break:(fun a b -> W.bitwidth a <> W.bitwidth b) in
     let runs g =
       Pieces.runs_from_sorted_elements
         ~width:(W.bitwidth (List.hd_exn g)) g in
-    match groups with
-    | [] | [ _ ] ->
-      (* One width: the runs come back in descending element order, so
-         reversing them is the ascending [compare_piece] order. *)
-      List.rev (List.concat_map groups ~f:runs)
-    | _ ->
-      (* Mixed widths: the groups' run lists interleave under
-         [compare_piece], so only this fallback sorts.  Production
-         unifies widths before the finite tier; the sort keeps the
-         constructor's own semantics for mixed inputs. *)
-      List.sort (List.concat_map groups ~f:runs)
-        ~compare:Pieces.compare_piece
+    (* The runs come back in descending element order, so reversing them
+       is the ascending [compare_piece] order. *)
+    List.rev (List.concat_map groups ~f:runs)
 
   let make ~(width : int) (els : W.t list) : t =
-    { width; pieces = of_elements els }
+    { width; pieces = of_elements (order els) }
 
   (* The finite tier's element equality: distinct words, width included. *)
   let word_mem (w : W.t) (els : W.t list) : bool =

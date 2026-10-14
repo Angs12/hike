@@ -240,7 +240,7 @@ let iter (p : t) : W.t list =
     if W.is_zero n then acc
     else let n' = W.pred n in
       iter_acc (W.add b s) s n' (b :: acc) in
-  iter_acc (base_of p) (step_of p) (cardn_of p) []
+  List.rev (iter_acc (base_of p) (step_of p) (cardn_of p) [])
 
 (* Closest element at or below i. *)
 let nearest_pred (i : W.t) (p : t) : W.t option =

@@ -100,6 +100,9 @@ module Pieces : sig
   val union : t -> t -> t
   val intersection : t -> t -> t
   val diff : t -> t -> t
+  (* The tier's cap: hull to <= [bound] pieces.  A tier-boundary
+     operation; producers never cap. *)
+  val cap_to : int -> t -> t
   val join : t -> t -> t
   val meet : t -> t -> t
   val widen_join : t -> t -> t
