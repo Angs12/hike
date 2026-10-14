@@ -175,13 +175,15 @@ let interval ~(width : int) (lo : W.t) (hi : W.t) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
 
-(* Sound hull of a list. *)
+(* Sound hull of an ascending, deduped list (a precondition — no sort). *)
 let of_list ~width l : t =
   assert (width > 0);
   let open Monads.Std.Monad.Option.Syntax in
   (match begin
     let l = List.map l ~f:(W.extract_exn ~hi:(width - 1) ~lo:0) in
-    let l = List.sort ~compare:W.compare l in
+#ifdef VSA_DEBUG
+    let () = assert (List.is_sorted l ~compare:W.compare) in
+#endif
     let diff_list = List.map2_exn l (rotate_list l) ~f:W.sub in
     let idx, _, step = List.foldi diff_list ~init:(0, W.zero width, W.zero width)
         ~f:(fun i (idx, diff, step) d ->

@@ -556,7 +556,8 @@ let tests : unit Alcotest.test list =
                let n = 1 + Random.int 40 in
                let mk () = rand_word w in
                let l = replicate n mk in
-               let l = if Random.int 10 = 0 then match l with h :: _ -> h :: l | [] -> l else l in
+               (* The ascending contract: of_list consumes an ordered list. *)
+               let l = List.sort (fun a b -> W.compare a b) l in
                let r = Clp.of_list ~width:w l in
                List.iter
                  (fun x ->
