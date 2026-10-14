@@ -216,13 +216,18 @@ module Pieces = struct
     in
     scan [] acc
 
-  (* Place a producer's raw output: split the arcs, order them, then
-     combine the ascending stream tail-only — the placed prefix is
-     ascending, so a piece can only meet the tail, never a hidden
-     neighbour.  A wrapped hull falls back to the general placement. *)
+  (* The order-breaking producers (cartesian/map/parts) hand their raw
+     pieces through this: split the wrapped arcs away and sort into the
+     canonical order — the op that breaks order does the ordering, the
+     combine step ([assemble]/[finish]) never sorts. *)
+  let ordered (ps : progression list) : progression list =
+    List.sort (List.concat_map ps ~f:split_arcs) ~compare:compare_piece
+
+  (* [assemble] combines an already-ascending, non-wrapping stream
+     tail-only — the placed prefix is ascending, so a piece can only meet
+     the tail, never a hidden neighbour; no sort runs here.  A wrapped
+     hull falls back to the general placement. *)
   let assemble (ps : progression list) : t =
-    let ordered =
-      List.sort (List.concat_map ps ~f:split_arcs) ~compare:compare_piece in
     let rec go acc = function
       | [] -> `Done (List.rev acc)
       | p :: rest -> (
@@ -238,9 +243,9 @@ module Pieces = struct
             | Some r -> go (r :: tl) rest
             | None -> go (p :: acc) rest))
     in
-    match go [] ordered with
+    match go [] ps with
     | `Done ps -> ps
-    | `Wrap -> List.fold ordered ~init:[] ~f:merge_arc
+    | `Wrap -> List.fold ps ~init:[] ~f:merge_arc
 
   (* Mixed widths collapse to top at the widest — a producer's rule; a
      canonical value is single width. *)
@@ -353,25 +358,24 @@ module Pieces = struct
       census_cap ();
 #endif
       match choose_pair ps with
-      | Some (hull, rest) -> cap_to bound (assemble (hull :: rest))
+      | Some (hull, rest) -> cap_to bound (merge_arc rest hull)
       | None -> ps
     end
     else ps
 
-  (* The producer finish: order the raw output and combine it tail-only,
+  (* The producer finish: combine the already-ordered stream tail-only,
      capping the accumulator the moment it exceeds [max_pieces] so
      `choose_pair` only ever sees [max_pieces + 1] pieces.  The accumulator
      is descending, so the cap step re-assembles the hull (ascending) and
-     flips it back.  A wrapped hull falls back to the general placement. *)
+     flips it back.  A wrapped hull falls back to the general placement.
+     No sort: the caller ordered its own output. *)
   let finish (ps : progression list) : t =
-    let ordered =
-      List.sort (List.concat_map ps ~f:split_arcs) ~compare:compare_piece in
     let cap_desc acc =
       if List.length acc <= U.max_pieces || within_exact_budget (List.rev acc)
       then acc
       else
         match choose_pair (List.rev acc) with
-        | Some (hull, rest) -> List.rev (assemble (hull :: rest))
+        | Some (hull, rest) -> List.rev (merge_arc rest hull)
         | None -> acc
     in
     let r =
@@ -390,16 +394,16 @@ module Pieces = struct
               | Some r -> go (cap_desc (r :: tl)) rest
               | None -> go (cap_desc (p :: acc)) rest))
       in
-      match go [] ordered with
+      match go [] ps with
       | `Done ps -> ps
-      | `Wrap -> cap_to U.max_pieces (assemble ordered)
+      | `Wrap -> cap_to U.max_pieces (assemble ps)
     in
 #ifdef VSA_DEBUG
     census_len (List.length r);
 #endif
     r
 
-  let of_progression (p : progression) : t = finish [ p ]
+  let of_progression (p : progression) : t = finish (ordered [ p ])
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
@@ -450,7 +454,7 @@ module Pieces = struct
     if width <= 0 then []
     else
       let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
-      finish (runs_from_sorted_elements ~width l)
+      finish (ordered (runs_from_sorted_elements ~width l))
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
@@ -607,9 +611,10 @@ module Pieces = struct
     else if equal a b then a
     else
       finish
-        (collapse_width
-           (List.concat_map a ~f:(fun pa ->
-                List.concat_map b ~f:(fun pb -> pair_intersection pa pb))))
+        (ordered
+           (collapse_width
+              (List.concat_map a ~f:(fun pa ->
+                   List.concat_map b ~f:(fun pb -> pair_intersection pa pb)))))
 
   (* The survivors of one finite non-wrapping grid after removing [es]
      (sorted ascending, all on the grid). *)
@@ -747,29 +752,29 @@ module Pieces = struct
   let diff (a : t) (b : t) : t =
     if is_bottom a || equal a b then []
     else if is_bottom b then a
-    else finish (List.concat_map a ~f:(fun pa -> diff_piece pa b))
+    else finish (ordered (List.concat_map a ~f:(fun pa -> diff_piece pa b)))
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
     match ps with
-    | [ p ] -> finish [ f p ]
-    | _ -> finish (List.map ps ~f)
+    | [ p ] -> finish (ordered [ f p ])
+    | _ -> finish (ordered (List.map ps ~f))
 
-  (* Cross product with empty pair results dropped; the results are
-     placed by construction (their order is the grid's, not sorted).  A
-     single piece on either side is the common case: build it directly. *)
+  (* Cross product with empty pair results dropped.  A single piece on
+     either side is the common case: build it directly. *)
   let lift2 (f : progression -> progression -> progression) (a : t) (b : t)
     : t =
     match a, b with
     | [ pa ], [ pb ] ->
       let r = f pa pb in
-      if C.is_bottom r then [] else finish [ r ]
+      if C.is_bottom r then [] else finish (ordered [ r ])
     | _ ->
       finish
-        (List.concat_map a ~f:(fun pa ->
-             List.filter_map b ~f:(fun pb ->
-                 let r = f pa pb in
-                 if C.is_bottom r then None else Some r)))
+        (ordered
+           (List.concat_map a ~f:(fun pa ->
+                List.filter_map b ~f:(fun pb ->
+                    let r = f pa pb in
+                    if C.is_bottom r then None else Some r))))
 
   (* Cross product where a pair yields several pieces; a wrapped operand
      is split into its arcs first (the parts producers are
@@ -779,15 +784,17 @@ module Pieces = struct
     match a, b with
     | [ pa ], [ pb ] ->
       finish
-        (List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
-             List.concat_map (C.split_wrapped pb) ~f:(fun qb -> f qa qb)))
+        (ordered
+           (List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
+                List.concat_map (C.split_wrapped pb) ~f:(fun qb -> f qa qb))))
     | _ ->
-    finish
-      (List.concat_map a ~f:(fun pa ->
-           List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
-               List.concat_map b ~f:(fun pb ->
-                   List.concat_map (C.split_wrapped pb) ~f:(fun qb ->
-                       f qa qb)))))
+      finish
+        (ordered
+           (List.concat_map a ~f:(fun pa ->
+                List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
+                    List.concat_map b ~f:(fun pb ->
+                        List.concat_map (C.split_wrapped pb) ~f:(fun qb ->
+                            f qa qb))))))
 
   let add = lift2 A.add
   let sub = lift2 A.sub
@@ -815,21 +822,23 @@ module Pieces = struct
     if full then ps
     else
       finish
-        (List.concat_map ps ~f:(fun p ->
-             List.concat_map (C.split_wrapped p) ~f:(fun q ->
-                 A.extract_parts ?hi ?lo q)))
+        (ordered
+           (List.concat_map ps ~f:(fun p ->
+                List.concat_map (C.split_wrapped p) ~f:(fun q ->
+                    A.extract_parts ?hi ?lo q))))
 
   let cast c sz (ps : t) : t =
     if Stdlib.Int.equal sz (bitwidth ps) then ps
     else
       finish
-        (List.concat_map ps ~f:(fun p ->
-             List.concat_map (C.split_wrapped p) ~f:(fun q ->
-                 A.cast_parts c sz q)))
+        (ordered
+           (List.concat_map ps ~f:(fun p ->
+                List.concat_map (C.split_wrapped p) ~f:(fun q ->
+                    A.cast_parts c sz q))))
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
     if Cbat_word.is_zero delta then ps
-    else finish (List.map ps ~f:(fun p -> C.translate p delta))
+    else finish (ordered (List.map ps ~f:(fun p -> C.translate p delta)))
 
   (* The widening pairing: the two sorted atom lists merge with an origin
      tag, then one pass pairs the corresponding atoms.  An overlapping
@@ -898,7 +907,7 @@ module Pieces = struct
         else pass (r :: acc) rest
       in
       let pieces = pass [] merged in
-      if !top_hit then [ C.top (width_of b) ] else finish pieces
+      if !top_hit then [ C.top (width_of b) ] else finish (ordered pieces)
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
