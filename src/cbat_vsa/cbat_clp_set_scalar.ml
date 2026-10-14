@@ -194,6 +194,53 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
     | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
     | _ -> None
 
+(* The offsets' SIGNED extrema of a stack value (the offset line is
+   signed: negative below the entry).  Exact over the arcs of every
+   progression — a wrapped SP piece measures instead of failing. *)
+let offsets_signed_extrema (offs : P.t)
+    : (Cbat_word.t * Cbat_word.t) option =
+  let fold (acc : (Cbat_word.t * Cbat_word.t) option)
+      (p : Clp.t) : (Cbat_word.t * Cbat_word.t) option =
+    match Clp.min_elem_signed p, Clp.max_elem_signed p with
+    | Some lo, Some hi ->
+      (match acc with
+       | None -> Some (lo, hi)
+       | Some (alo, ahi) ->
+         Some
+           ((if Cbat_word.compare (Cbat_word.signed lo) (Cbat_word.signed alo)
+                < 0 then lo else alo),
+            (if Cbat_word.compare (Cbat_word.signed hi) (Cbat_word.signed ahi)
+                > 0 then hi else ahi)))
+    | _ -> acc
+  in
+  List.fold (P.to_list offs) ~init:None ~f:fold
+
+(* The VLA value's entry-line hull: its frame-relative offsets shifted
+   by the allocation base's range.  None when the base is unknown. *)
+let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
+  match vla_base_range tid, offsets_signed_extrema offs with
+  | Some (blo, bhi), Some (lo, hi) -> (
+    match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+    | Ok klo, Ok khi -> (
+      match checked_add3 blo 0L klo, checked_add3 bhi 0L khi with
+      | Some l, Some h when Stdlib.Int64.compare h l >= 0 -> Some (l, h)
+      | _ -> None)
+    | _ -> None)
+  | _ -> None
+
+(* A stack-line value's offsets on the entry line, the Stack key line
+   every stack-line origin shares: a Window offset is an entry-line
+   offset; a VLA frame shifts by its allocation base's range, and an
+   unknown base spans the whole line. *)
+let line_offsets (o : Origin.t) (offs : P.t) : P.t =
+  match o with
+  | Origin.Vla tid -> (
+    match vla_entry_hull tid offs with
+    | Some (lo, hi) ->
+      P.of_progression (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))
+    | None -> P.top 64)
+  | Origin.Stack | Origin.Window | Origin.Rip _ | Origin.Abs -> offs
+
 (* ---------------- the tier census ---------------- *)
 
 (* A live plain piece union under the small tier: kept unless it is
@@ -249,34 +296,32 @@ and canonical_pool (ps : t list) : t =
   let rels =
     List.filter_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
   in
-  let rel_origins =
-    List.fold rels ~init:[] ~f:(fun acc (o, _) ->
-        if List.exists acc ~f:(Origin.equal o) then acc else acc @ [ o ])
+  (* One relative leaf per origin, in origin order: a union keeps every
+     origin it was built from.  Two merges are lossless and keep the
+     form canonical: a Window leaf beside a Stack leaf is the same line
+     at the same base (the def refines the tag back), and an absolute
+     leaf's offsets are its words (the plain pool). *)
+  let has_stack = List.exists rels ~f:(fun (o, _) -> Origin.equal o Origin.Stack) in
+  let abs_rels, keep_rels =
+    List.partition_tf rels ~f:(fun (o, _) -> Origin.equal o Origin.Abs) in
+  let keep_rels =
+    List.map keep_rels ~f:(fun (o, x) ->
+        if has_stack && Origin.equal o Origin.Window then (Origin.Stack, x) else (o, x))
   in
-  let so_pool, mixed_pool =
-    match rel_origins with
-    | [] -> (None, [])
-    | [ o ] ->
-      let offs =
-        List.filter_map rels
-          ~f:(fun (o', x) -> if Origin.equal o' o then Some x else None)
-      in
-      (match offs with
-       | [] -> (None, [])
-       | x :: rest -> (Some (o, List.fold rest ~init:x ~f:P.union), []))
-    | _ ->
-      ( None,
-        List.filter_map rels ~f:(fun (o, x) ->
-            match to_plain (Rel (o, x)) with
-            | Clp p -> Some p
-            | _ -> None) )
+  let so_pool =
+    List.sort_and_group keep_rels ~compare:(fun (a, _) (b, _) -> Origin.compare a b)
+    |> List.map ~f:(fun grp ->
+        match grp with
+        | (o, x) :: rest -> (o, List.fold rest ~init:x ~f:(fun acc (_, y) -> P.union acc y))
+        | [] -> assert false)
   in
+  let mixed_pool = List.map abs_rels ~f:snd in
   (match alive, so_pool with
-  | [], Some (o, offs) ->
+  | [], (o, offs) :: _ ->
     (* The symbolic bottom keeps its origin: an empty offset set is
        still a relative value (its consumers span the full key line). *)
     Rel (o, offs)
-  | [], None ->
+  | [], [] ->
     (match ps with
      | [] -> Exact (Exact.bottom 1)
      | _ ->
@@ -286,10 +331,10 @@ and canonical_pool (ps : t list) : t =
   | _ ->
     let clps =
       List.append mixed_pool
-        (List.filter_map ps ~f:(function Clp x -> Some x | _ -> None))
+        (List.filter_map alive ~f:(function Clp x -> Some x | _ -> None))
     in
     let fss =
-      List.filter_map ps ~f:(function Exact x -> Some x | _ -> None) in
+      List.filter_map alive ~f:(function Exact x -> Some x | _ -> None) in
     let promote =
       match fss with
       | [] -> false
@@ -346,18 +391,17 @@ and canonical_pool (ps : t list) : t =
         -> None, Some (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
       | c, f -> c, f
     in
-    (* A bottom relative pool drops against live plain pieces. *)
-    let so_piece =
-      match so_pool with
-      | Some (o, offs) when not (P.is_bottom offs) -> Some (o, offs)
-      | _ -> None
+    (* A bottom relative leaf drops against live pieces. *)
+    let rel_pieces =
+      List.filter_map so_pool ~f:(fun (o, offs) ->
+          if P.is_bottom offs then None else Some (Rel (o, offs)))
     in
     let leaves =
       List.filter_map
         [ Option.map clp_piece ~f:(fun x -> Clp x);
-          Option.map fs_piece ~f:(fun x -> Exact x);
-          Option.map so_piece ~f:(fun x -> Rel (fst x, snd x)) ]
+          Option.map fs_piece ~f:(fun x -> Exact x) ]
         ~f:(fun q -> q)
+      @ rel_pieces
     in
     (match leaves with
      | [ q ] -> q
@@ -447,9 +491,9 @@ let pairwise (f : t -> t -> t list) (t1 : t) (t2 : t) : t =
 
 (* ---------------- the kind-aligned leaf pairing ---------------- *)
 
-(* The leaf of each kind: a canonical value carries at most one (the
-   [canonical] fold collapses same-kind leaves), so the first match is
-   the only one. *)
+(* The leaf of each plain kind: a canonical value carries at most one
+   (the [canonical] fold collapses same-kind leaves), so the first match
+   is the only one; it carries one relative leaf per origin. *)
 let clp_leaf (t : t) : P.t option =
   match t with
   | Clp ps -> Some ps
@@ -462,19 +506,15 @@ let fs_leaf (t : t) : fset option =
   | Many ps -> List.find_map ps ~f:(function Exact x -> Some x | _ -> None)
   | Clp _ | Rel _ -> None
 
-let rel_leaf (t : t) : (Origin.t * P.t) option =
-  match t with
-  | Rel (o, x) -> Some (o, x)
-  | Many ps ->
-    List.find_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
-  | Clp _ | Exact _ -> None
+let rel_leaves (t : t) : (Origin.t * P.t) list =
+  List.filter_map (leaves t) ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
 
 (* The join pairing: every kind carried by EITHER side contributes — a
    shared kind takes its own join, a one-sided kind is carried (the join
    includes it).  Exact for the lattice join, which is why the join may
    carry where a widening may not. *)
 let pair_join ~(clp_op : P.t -> P.t -> P.t) ~(fs_op : fset -> fset -> fset)
-    ~(rel_op : Origin.t -> P.t -> Origin.t -> P.t -> t) (t1 : t) (t2 : t) : t =
+    (t1 : t) (t2 : t) : t =
   let parts =
     (match clp_leaf t1, clp_leaf t2 with
      | Some a, Some b -> [ Clp (clp_op a b) ]
@@ -484,10 +524,9 @@ let pair_join ~(clp_op : P.t -> P.t -> P.t) ~(fs_op : fset -> fset -> fset)
        | Some a, Some b -> [ Exact (fs_op a b) ]
        | Some a, None | None, Some a -> [ Exact a ]
        | None, None -> [])
-    @ (match rel_leaf t1, rel_leaf t2 with
-       | Some (o1, a), Some (o2, b) -> [ rel_op o1 a o2 b ]
-       | Some (o, a), None | None, Some (o, a) -> [ Rel (o, a) ]
-       | None, None -> [])
+    (* Every relative leaf of either side: the pool unions one origin's
+       offsets and keeps the origins apart. *)
+    @ List.map (rel_leaves t1 @ rel_leaves t2) ~f:(fun (o, x) -> Rel (o, x))
   in
   canonical parts
 
@@ -522,27 +561,6 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
 let in_stack_segment (t : t) : bool =
   Option.exists (origin t) ~f:Origin.names_stack_line
 
-(* The offsets' SIGNED extrema of a stack value (the offset line is
-   signed: negative below the entry).  Exact over the arcs of every
-   progression — a wrapped SP piece measures instead of failing. *)
-let offsets_signed_extrema (offs : P.t)
-    : (Cbat_word.t * Cbat_word.t) option =
-  let fold (acc : (Cbat_word.t * Cbat_word.t) option)
-      (p : Clp.t) : (Cbat_word.t * Cbat_word.t) option =
-    match Clp.min_elem_signed p, Clp.max_elem_signed p with
-    | Some lo, Some hi ->
-      (match acc with
-       | None -> Some (lo, hi)
-       | Some (alo, ahi) ->
-         Some
-           ((if Cbat_word.compare (Cbat_word.signed lo) (Cbat_word.signed alo)
-                < 0 then lo else alo),
-            (if Cbat_word.compare (Cbat_word.signed hi) (Cbat_word.signed ahi)
-                > 0 then hi else ahi)))
-    | _ -> acc
-  in
-  List.fold (P.to_list offs) ~init:None ~f:fold
-
 (* The solve-boundary refinement: a wholly window-side relative value
    (every offset at/above the ABI word) names the caller's frame
    origin.  A VLA frame keeps its origin; the routing gate refuses an
@@ -562,19 +580,6 @@ let refine_origin ~(word : int) (t : t) : t =
        Rel (Origin.Window, offs)
      | _ -> t)
   | q -> q
-
-(* The VLA value's entry-line hull: its frame-relative offsets shifted
-   by the allocation base's range.  None when the base is unknown. *)
-let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
-  match vla_base_range tid, offsets_signed_extrema offs with
-  | Some (blo, bhi), Some (lo, hi) -> (
-    match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-    | Ok klo, Ok khi -> (
-      match checked_add3 blo 0L klo, checked_add3 bhi 0L khi with
-      | Some l, Some h when Stdlib.Int64.compare h l >= 0 -> Some (l, h)
-      | _ -> None)
-    | _ -> None)
-  | _ -> None
 
 let rec cardinality (t : t) : word =
   match t with
@@ -1026,6 +1031,11 @@ let stack_offsets (t : t) : Clp.t option =
      | None -> Some (Clp.bottom 64))
   | _ -> None
 
+(* The stack-line leaves of a value (itself when it is one): the stack
+   addresses the value may hold, one leaf per stack-line origin. *)
+let stack_leaves (t : t) : t list =
+  List.filter (leaves t) ~f:(function Rel (o, _) -> Origin.names_stack_line o | _ -> false)
+
 (* The frame-relative offsets of a VLA value (0 = the allocation base) —
    [Some] only for the [Vla] origin. *)
 let vla_offsets (t : t) : Clp.t option =
@@ -1046,8 +1056,10 @@ let key_line (o : Origin.t) : Origin.t =
   | Origin.Stack | Origin.Window | Origin.Vla _ -> Origin.Stack
   | Origin.Rip _ | Origin.Abs -> Origin.Abs
 
-(* Memory keys retain the carried origin's line; plain values stay absolute. *)
-let address_pieces (t : t) : (Origin.t * P.t) option =
+(* Memory keys retain the carried origin's line; plain values stay
+   absolute.  A mixed value names each leaf's line: its addresses are
+   the union of its leaves'. *)
+let rec address_groups (t : t) : (Origin.t * P.t) list =
   match t with
   | Rel (Origin.Vla tid, offs) -> (
     (* The memory key is the entry-line address: the frame-relative
@@ -1055,15 +1067,14 @@ let address_pieces (t : t) : (Origin.t * P.t) option =
        keys the whole stack line (a stack access can land in the VLA). *)
     match vla_entry_hull tid offs with
     | Some (lo, hi) ->
-      Some
-        (Origin.Stack,
+      [ (Origin.Stack,
          P.of_progression
-           (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi)))
-    | None -> Some (Origin.Stack, P.top 64))
-  | Rel (o, offs) -> Some (key_line o, offs)
-  | Clp ps -> Some (Origin.Abs, ps)
-  | Exact s -> Some (Origin.Abs, pieces_of_finset s)
-  | Many _ -> None
+           (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))) ]
+    | None -> [ (Origin.Stack, P.top 64) ])
+  | Rel (o, offs) -> [ (key_line o, offs) ]
+  | Clp ps -> [ (Origin.Abs, ps) ]
+  | Exact s -> [ (Origin.Abs, pieces_of_finset s) ]
+  | Many ps -> List.concat_map ps ~f:address_groups
 
 (* A finite non-wrapped progression split at its value midpoint; a
    singleton has no halves. *)
@@ -1220,11 +1231,11 @@ let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
         | _ -> Origin.names_stack_line o1 && Origin.names_stack_line o2)
   in
   match op with
+  (* [lift2] answers a union before the table (the join keeps one leaf
+     per origin); its row is the same-line one. *)
   | Union ->
-    if rel o1 && rel o2 then
-      if Origin.equal o1 o2 then Wrap o1
-      else if cross_line then Wrap Origin.Stack
-      else Materialise
+    if rel o1 && rel o2 && (Origin.equal o1 o2 || cross_line) then
+      Wrap (if Origin.equal o1 o2 then o1 else Origin.Stack)
     else Materialise
   | Meet ->
     if rel o1 && rel o2 then
@@ -1262,15 +1273,6 @@ let rel_rel (op : binop) (a : P.t) (b : P.t) : P.t =
   | Union -> P.union a b
   | Meet -> P.intersection a b
   | _ -> binop_pieces op a b
-
-(* The [Materialise] payload: both hulls, the plain op; [Sub]'s
-   relative-relative row keeps the exact offset difference (the base
-   cancels — no collapse). *)
-let materialise2 (op : binop) (t1 : t) (t2 : t) : t =
-  match op, t1, t2 with
-  | Sub, Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
-    canonical [ Clp (P.sub a b) ]
-  | _ -> lift_binop op (to_plain t1) (to_plain t2)
 
 let has_relative (t : t) : bool =
   match t with
@@ -1419,15 +1421,21 @@ let meet_plain (t1 : t) (t2 : t) : t =
    piece union, two Exact leaves the exact union, a one-sided kind its
    own leaf — so the join never hulls. *)
 let join_plain (t1 : t) (t2 : t) : t =
-  let rel_op o1 a o2 b =
-    if Origin.equal o1 o2 then Rel (o1, P.union a b)
-    else
-      Clp
-        (P.union
-           (P.of_progression (as_clp (Rel (o1, a))))
-           (P.of_progression (as_clp (Rel (o2, b)))))
-  in
-  pair_join ~clp_op:P.union ~fs_op:Exact.union ~rel_op t1 t2
+  pair_join ~clp_op:P.union ~fs_op:Exact.union t1 t2
+
+(* The [Materialise] payload: both hulls, the plain op; [Sub]'s
+   relative-relative row keeps the exact offset difference (the base
+   cancels — no collapse).  Two stack-line origins meet on the Stack
+   line: materialising a stack address would move it off the stack key
+   line. *)
+let materialise2 (op : binop) (t1 : t) (t2 : t) : t =
+  match op, t1, t2 with
+  | Sub, Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
+    canonical [ Clp (P.sub a b) ]
+  | Meet, Rel (o1, a), Rel (o2, b)
+    when Origin.names_stack_line o1 && Origin.names_stack_line o2 ->
+    canonical [ Rel (Origin.Stack, P.intersection (line_offsets o1 a) (line_offsets o2 b)) ]
+  | _ -> lift_binop op (to_plain t1) (to_plain t2)
 
 (* The plain-plain payload: the lattice ops pair by kind; every other op
    lifts through the common plain machinery. *)
@@ -1444,16 +1452,21 @@ let has_fixed_base = function
   | Origin.Abs | Origin.Rip _ | Origin.Stack | Origin.Window -> true
   | Origin.Vla _ -> false
 
+(* A relative value met with a plain constraint: the constraint's words
+   translate into the offsets on a fixed base; a frame-relative (VLA)
+   value has no fixed base, and the value itself over-approximates the
+   meet — materialising it would move it off its key line. *)
 let meet_rel (t1 : t) (t2 : t) : t =
+  let meet_offs o a plain rel =
+    if has_fixed_base o then
+      match plain_offsets o plain with
+      | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
+      | None -> canonical [ Rel (o, P.bottom 64) ]
+    else rel
+  in
   match t1, t2 with
-  | Rel (o, a), (Clp _ | Exact _ as plain) when has_fixed_base o ->
-    (match plain_offsets o plain with
-     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
-     | None -> meet_plain (to_plain t1) (to_plain plain))
-  | (Clp _ | Exact _ as plain), Rel (o, a) when has_fixed_base o ->
-    (match plain_offsets o plain with
-     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
-     | None -> meet_plain (to_plain plain) (to_plain t2))
+  | Rel (o, a), (Clp _ | Exact _ as plain) -> meet_offs o a plain t1
+  | (Clp _ | Exact _ as plain), Rel (o, a) -> meet_offs o a plain t2
   | _ -> meet_plain (to_plain t1) (to_plain t2)
 
 let logand_rel (o : Origin.t) (offs : P.t) (plain : t) : t =
@@ -1503,7 +1516,6 @@ let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
       | Rel (o, offs), plain -> logand_rel o offs plain
       | plain, Rel (o, offs) -> logand_rel o offs plain
       | _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2)))
-  | Union -> materialise2 op t1 t2
   | _ -> lift_binop op t1 t2
 
 (* A module address keeps its region through pointer arithmetic: an
@@ -1587,6 +1599,7 @@ let rec lift1 (op : unop) (t : t) : t =
       | Extract (Some 63, 0) | Cast (_, 64) -> true
       | _ -> false) -> v
   | Rel (Origin.Rip _, offs) -> plain_unop op (rip_plain offs)
+  | Many ps -> canonical (List.concat_map ps ~f:(fun q -> leaves (lift1 op q)))
   | Rel (o, offs) as v -> (
       let image () =
         match op with
@@ -1628,6 +1641,10 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
   (* A union across widths is a producer's collapse: top at the widest,
      so no mixed width reaches the single-width `Pieces` operations. *)
   | Union when bitwidth t1 <> bitwidth t2 -> top_w ()
+  (* The union keeps one leaf per kind and per origin: a stack address
+     joined with a plain value, a module address or another frame stays
+     each of them. *)
+  | Union -> join_plain t1 t2
   | Meet when (match t1 with Rel _ -> plain_is_top t2 | _ -> false) -> t1
   | Meet when (match t2 with Rel _ -> plain_is_top t1 | _ -> false) -> t2
   (* The shift count's width is incidental: a narrower plain count
@@ -1637,12 +1654,19 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
     when bitwidth t2 < bitwidth t1
          && (match t2 with Rel _ | Many _ -> false | _ -> true) ->
     lift2 op t1 (lift1 (Cast (Bil.UNSIGNED, bitwidth t1)) t2)
+  (* A mixed value is the union of its leaves: every other op
+     distributes over them, so each relative leaf takes its own origin's
+     row. *)
+  | _ when (match t1, t2 with Many _, _ | _, Many _ -> true | _ -> false) ->
+    canonical
+      (List.concat_map (leaves t1) ~f:(fun q1 ->
+           List.concat_map (leaves t2) ~f:(fun q2 -> leaves (lift2 op q1 q2))))
   | _ ->
   match t1, t2 with
   | Rel (Origin.Abs, offs), _ -> lift2 op (Clp offs) t2
   | _, Rel (Origin.Abs, offs) -> lift2 op t1 (Clp offs)
   | Rel (Origin.Rip p, a), Rel (Origin.Rip p', b)
-    when Hike_section.equal p p' && (match op with Union | Meet -> true | _ -> false) ->
+    when Hike_section.equal p p' && (match op with Meet -> true | _ -> false) ->
     rip_wrap p (lift2 op (rip_plain a) (rip_plain b))
   | Rel (Origin.Rip p, a), (Clp _ | Exact _) when rip_keeps op ~left:true ->
     rip_wrap p (lift2 op (rip_plain a) t2)
@@ -1685,6 +1709,10 @@ let intersection t1 t2 : t = lift2 Meet t1 t2
 let rec diff (t1 : t) (t2 : t) : t =
   if bitwidth t1 <> bitwidth t2 then t1 else
   match t1, t2 with
+  (* A mixed value is the union of its leaves: each leaf loses the
+     subtrahend, and a mixed subtrahend is removed leaf by leaf. *)
+  | Many ps, _ -> canonical (List.concat_map ps ~f:(fun q -> leaves (diff q t2)))
+  | _, Many qs -> List.fold qs ~init:t1 ~f:diff
   | Rel (Origin.Abs, offs), _ -> diff (Clp offs) t2
   | _, Rel (Origin.Abs, offs) -> diff t1 (Clp offs)
   | Rel (o1, a), Rel (o2, b)
@@ -1786,6 +1814,11 @@ let is_circular t = shape_pred Clp.is_circular t
 let rec precedes t1 t2 : bool =
   match t1, t2 with
   | Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 -> P.precedes a b
+  (* A mixed value is the union of its leaves: each leaf precedes the
+     other side; a relative leaf precedes the same origin's leaf. *)
+  | Many ps, _ -> List.for_all ps ~f:(fun q -> precedes q t2)
+  | Rel (o, a), Many _ ->
+    List.exists (rel_leaves t2) ~f:(fun (o', b) -> Origin.equal o o' && P.precedes a b)
   | _, Rel _ -> is_bottom t1
   | Rel _, _ -> precedes (to_plain t1) t2
   | Clp p1, Clp p2 -> P.precedes p1 p2
@@ -1796,23 +1829,15 @@ let rec precedes t1 t2 : bool =
 
 (* Values with the same origin widen in its offsets.
    A plain pair widens BY KIND — two Clp leaves via [fp] (the positional
-   piece widen), two Exact leaves via the tier's own widen, two
-   relative leaves via the offsets widen — so a multi-piece value keeps
-   its pieces through a growing widen (the interior exclusion survives).
-   A kind carried by one side only (the excess) hulls the whole pair —
-   a widening must extrapolate, and the hull is the sound
-   extrapolation. *)
+   piece widen), two Exact leaves via the tier's own widen — so a
+   multi-piece value keeps its pieces through a growing widen (the
+   interior exclusion survives).  A kind carried by one side only (the
+   excess) hulls the plain pair — a widening must extrapolate, and the
+   hull is the sound extrapolation.  The relative leaves widen apart
+   from the plain ones, each origin in its own offsets: a relative leaf
+   is never hulled into a plain value (a stack address would leave the
+   stack key line).  A relative leaf only one side carries is kept. *)
 let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
-  (* The absolute hull of two relative leaves: different origins have no
-     shared offset line, so both materialise. *)
-  let rel_cross (o1 : Origin.t) (a : P.t) (o2 : Origin.t) (b : P.t) : t =
-    if Origin.equal o1 o2 then Rel (o1, fp a b)
-    else
-      Clp (P.of_progression (f (as_clp (Rel (o1, a))) (as_clp (Rel (o2, b)))))
-  in
-  let plain_hull () =
-    canonical [ Clp (P.of_progression (f (as_clp t1) (as_clp t2))) ]
-  in
   (* The Exact tier widens by its own union while the union stays put;
      a union that grew has left the exact-small tier, so it escapes to
      the piece widen (the tier promotion the spec's Risks names) and the
@@ -1822,35 +1847,74 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
     if Exact.equal u s1 then Exact u
     else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
   in
-  (* Both sides plain: every kind carried by BOTH sides pairs with its
+  let plain_hull p1 p2 =
+    canonical [ Clp (P.of_progression (f (as_clp p1) (as_clp p2))) ]
+  in
+  (* Two plain values: every kind carried by BOTH sides pairs with its
      own widen; a kind carried by one side only (the excess) hulls the
      whole pair — a one-sided piece has no partner to widen against, and
      a piece-preserving fold of it is the fixpoint's churn source. *)
-  let plain_pair () =
-    let c1 = clp_leaf t1 and c2 = clp_leaf t2 in
-    let s1 = fs_leaf t1 and s2 = fs_leaf t2 in
-    let r1 = rel_leaf t1 and r2 = rel_leaf t2 in
+  let plain_widen (p1 : t) (p2 : t) : t =
+    let c1 = clp_leaf p1 and c2 = clp_leaf p2 in
+    let s1 = fs_leaf p1 and s2 = fs_leaf p2 in
     let has o = Option.is_some o in
     if
-      Stdlib.Int.equal (bitwidth t1) (bitwidth t2)
+      Stdlib.Int.equal (bitwidth p1) (bitwidth p2)
       && Bool.equal (has c1) (has c2)
       && Bool.equal (has s1) (has s2)
-      && Bool.equal (has r1) (has r2)
     then
       let parts =
         (match c1, c2 with Some a, Some b -> [ Clp (fp a b) ] | _ -> [])
         @ (match s1, s2 with Some a, Some b -> [ fs_widen a b ] | _ -> [])
-        @ (match r1, r2 with
-           | Some (o1, a), Some (o2, b) -> [ rel_cross o1 a o2 b ]
-           | _ -> [])
       in
-      if List.is_empty parts then plain_hull () else canonical parts
-    else plain_hull ()
+      if List.is_empty parts then plain_hull p1 p2 else canonical parts
+    else plain_hull p1 p2
+  in
+  (* The plain leaves of a value, as one value. *)
+  let plain_part (t : t) : t option =
+    match List.filter (leaves t) ~f:(function Rel _ -> false | _ -> true) with
+    | [] -> None
+    | ps -> Some (canonical ps)
+  in
+  (* The relative leaves widen per origin, each against the pair's
+     union: a leaf's next iterate need not contain the old one (a frame
+     walked from its seed loses offset 0), and a widen of incomparable
+     iterates only joins.  A leaf only one side carries is kept.  A Window leaf pairs with a Stack leaf (one line, one base —
+     the pool's own merge): the solve-boundary re-tag turns a widened
+     Stack value's next iterate into Window, and an unpaired couple
+     would union without ever widening. *)
+  let rel_widen r1 r2 : t list =
+    let has_stack = List.exists (r1 @ r2) ~f:(fun (o, _) -> Origin.equal o Origin.Stack) in
+    let norm =
+      List.map ~f:(fun (o, x) ->
+          if has_stack && Origin.equal o Origin.Window then (Origin.Stack, x) else (o, x))
+    in
+    let r1 = norm r1 and r2 = norm r2 in
+    List.sort_and_group (List.map r1 ~f:fst @ List.map r2 ~f:fst) ~compare:Origin.compare
+    |> List.filter_map ~f:(fun grp ->
+        let o = List.hd_exn grp in
+        let find r = List.Assoc.find r o ~equal:Origin.equal in
+        match find r1, find r2 with
+        | Some a, Some b -> Some (Rel (o, fp a (P.union a b)))
+        | Some a, None | None, Some a -> Some (Rel (o, a))
+        | None, None -> None)
   in
   match t1, t2 with
   | Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
     canonical [ Rel (o1, fp a b) ]
-  | _ -> plain_pair ()
+  | _ ->
+    let r1 = rel_leaves t1 and r2 = rel_leaves t2 in
+    if List.is_empty r1 && List.is_empty r2 then plain_widen t1 t2
+    else if not (Stdlib.Int.equal (bitwidth t1) (bitwidth t2)) then
+      top (Stdlib.max (bitwidth t1) (bitwidth t2))
+    else
+      let plains =
+        match plain_part t1, plain_part t2 with
+        | None, None -> []
+        | Some p, None | None, Some p -> leaves p
+        | Some p1, Some p2 -> leaves (plain_widen p1 p2)
+      in
+      canonical (plains @ rel_widen r1 r2)
 
 let widen_join t1 t2 : t = hull_join Clp.widen_join P.widen_join t1 t2
 

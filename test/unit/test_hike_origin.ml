@@ -316,8 +316,11 @@ let ori_19 () =
        (Ws.enumerate ~cap:4 rip) (Some [ i2w 3L ]));
   check "membership is exact on the absolute line"
     (Ws.elem (i2w 3L) rip && not (Ws.elem (i2w 4L) rip));
-  check "a join with a plain value keeps the exact words, not the region"
-    (Ws.equal (Ws.union rip (plain 5L)) (Ws.union (plain 3L) (plain 5L)));
+  check "a join with a plain value keeps the region beside the words"
+    (let u = Ws.union rip (plain 5L) in
+     Ws.equal u (Ws.union (plain 5L) rip)
+     && Ws.equal (Ws.diff u (plain 5L)) rip
+     && Ws.elem (i2w 3L) u && Ws.elem (i2w 5L) u);
   check "a displacement and a mask keep the region"
     (Option.equal Origin.equal (Ws.origin (Ws.add rip (plain 8L))) (Some region)
      && Option.equal Origin.equal
@@ -326,15 +329,17 @@ let ori_19 () =
   check "subtracting a module address yields plain link-time words"
     (Ws.equal (Ws.sub (plain 12L) rip) (plain 9L)
      && Ws.equal (Ws.sub (Ws.add rip (plain 4L)) rip) (plain 4L));
-  check "different regions materialise to exact plain words"
-    (Ws.equal
-       (Ws.union rip (Ws.set_origin (Origin.Rip Hike_section.Data) (Ws.stack_word_i64 5L)))
-       (Ws.union (plain 3L) (plain 5L)));
+  check "different regions keep each region"
+    (let data = Ws.set_origin (Origin.Rip Hike_section.Data) (Ws.stack_word_i64 5L) in
+     let u = Ws.union rip data in
+     Ws.equal u (Ws.union data rip)
+     && Ws.equal (Ws.diff u (plain 5L)) rip
+     && Ws.equal (Ws.diff u (plain 3L)) data);
   List.iter [ Origin.Abs; region; Origin.Stack; Origin.Window ] ~f:(fun o ->
       check "memory namespace follows the carried origin"
-        (match Ws.address_pieces (value o) with
-         | Some (key, _) -> Origin.equal key (Ws.key_line o)
-         | None -> false))
+        (match Ws.address_groups (value o) with
+         | [ (key, _) ] -> Origin.equal key (Ws.key_line o)
+         | _ -> false))
 
 let ori_20 () =
   let abs k = Ws.set_origin Origin.Abs (Ws.stack_word_i64 k) in

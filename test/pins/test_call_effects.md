@@ -36,3 +36,4 @@ closure — no cross-pin state.
 | CE-03/04/07 | The frame-keep boundary is OFFSET-space: `keep_lo` is the SP's segment-relative offset (the space Stack cells key by), not the absolute position — the keep is real now, not a degenerate all-drop. | In `src/cbat_vsa/cbat_call_effects.ml` `frame_keep`, restore the `+ stack_base` in `bound`. | CE-03: the cells at/above the SP drop (review). |
 
 | CE-18 | caller-frame survival requires an SP with a stack-family origin | use raw numeric SP bounds after stack_offsets fails | an originless SP incorrectly keeps caller-frame facts |
+| CE-19 | an escape lane holding a stack address or NULL carves the stack address's range (the escapes are each value's `stack_leaves`) | read escapes through `in_stack_segment` again | the escaped cell at `0x2000` survives the call |

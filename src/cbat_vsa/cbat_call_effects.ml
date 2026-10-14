@@ -80,16 +80,13 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
           | _ -> bound (WordSet.Clp.max_elem offs))
       | None -> None
   in
-  (* The escape list: the escapes whose origin names the stack line.  A
-     plain or module-relative escape cannot collide with a Stack-line
-     cell (the key namespaces by origin); a bottom escape writes
-     nothing.  Such an escape keeps its bounded extent; a top one spans
-     the whole line (the sound claim). *)
+  (* The escape list: each escape's stack-line leaves (a mixed value's
+     stack addresses escape too).  A plain or module-relative escape
+     cannot collide with a Stack-line cell (the key namespaces by
+     origin); a bottom escape writes nothing.  Such an escape keeps its
+     bounded extent; a top one spans the whole line (the sound claim). *)
   let escape_ranges =
-    List.filter_map escape ~f:(fun ws ->
-        if WordSet.in_stack_segment ws
-        then range_of ws
-        else None)
+    List.concat_map escape ~f:(fun ws -> List.filter_map (WordSet.stack_leaves ws) ~f:range_of)
   in
   match keep_lo with
   | Some lo ->

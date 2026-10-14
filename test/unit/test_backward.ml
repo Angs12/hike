@@ -1979,6 +1979,25 @@ let tests : unit Alcotest.test list =
         check "BK-108.padding" (List.for_all (fun w -> Ws.elem w clp) pad);
         check "BK-108.cardinality"
           (Cbat_word.to_int_exn (Ws.cardinality clp) = 13));
+
+    (* The AND pre-image: [x land k <= vhi] bounds x by the largest
+       submask of k at most vhi, every unmasked bit set — vhi's own bits
+       outside the mask do not lower it. *)
+    pin "BK-109" "the AND-mask pre-image keeps every x whose masked bits satisfy the guard"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "bk109_x" (Type.Imm 8) in
+        let b8 n = Bil.Int (Word.of_int ~width:8 n) in
+        let env = AI.add_word AI.top ~key:x ~data:(Ws.top 8) in
+        let refined k vhi =
+          AI.find_word 8
+            (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env
+               (Bil.BinOp (Bil.LE, Bil.BinOp (Bil.AND, Bil.Var x, b8 k), b8 vhi)))
+            x
+        in
+        let w8 = Cbat_word.of_int ~width:8 in
+        check "BK-109.ones" (Ws.elem (w8 0xff) (refined 1 2));
+        check "BK-109.max" (Ws.elem (w8 0xfb) (refined 5 2));
+        check "BK-109.tight" (not (Ws.elem (w8 0xfc) (refined 5 2))))
   ]
 
 let () = run "backward" tests

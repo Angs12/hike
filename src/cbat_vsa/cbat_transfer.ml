@@ -404,13 +404,14 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     then return_mem @@ Mem.top (Mem.get_idx mv)
     else
     
-    (* The cell keyed by the bounded address set holds the written
-       value joined over the set — the same over-approximation the
-       strided store makes per slot. *)
+    (* One point address overwrites its cell; every key of a larger
+       address set is a weak update (the store hits one of them). *)
     let data = Mem.Val.create v e in
+    let keys = Mem.Key.of_wordset addr in
+    let strong = match keys with [ _ ] -> true | _ -> false in
     return_mem
-      @@ Base.List.fold (Mem.Key.of_wordset addr) ~init:mv
-           ~f:(fun mv key -> Mem.add mv ~key ~data)
+      @@ Base.List.fold keys ~init:mv
+           ~f:(fun mv key -> Mem.store mv ~strong ~key ~data)
   | Bil.Ite (cond, yes, no) ->
     denote_exp cond env >>= val_as_imm >>= fun condv ->
     denote_exp yes env >>= fun yesv ->

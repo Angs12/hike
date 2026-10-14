@@ -50,8 +50,8 @@ val expand : t -> bytes:int -> t
 
 (* [k] moved [bytes] up its line; None when a bound would wrap. *)
 val shift : t -> bytes:int -> t option
-(* One key per piece of the value's address line (capped at the piece
-   union's cap); every fanned entry stores the full value. *)
+(* One key per piece of each of the value's address lines (a mixed
+   value fans out per leaf); every fanned entry stores the full value. *)
 val of_wordset : Cbat_clp_set_composite.t -> t list
 val union : t -> t -> t
 val intersection : t -> t -> t

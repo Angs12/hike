@@ -451,32 +451,203 @@ let has_cell_in (m : t) ~(origin : Hike_origin.t) ~(lo : Cbat_word.t)
         not (Seq.is_empty (it_intersections it k))
       | _ -> true)
 
-(* Width-aware point-store merge. *)
+(* A store [d] merged into the cell [d'] that starts where it does: a
+   narrower store replaces the bytes it covers — the low bits
+   (little-endian) or the high bits (big-endian) — and keeps the rest. *)
 let store_merge (d : Val.t) (d' : Val.t) : Val.t =
   let w = WordSet.bitwidth (Val.data d) in
   let w' = WordSet.bitwidth (Val.data d') in
-  if w < w' then
-    let _, e = Val.get_idx d in
-    let _, e' = Val.get_idx d' in
-    if Bitvector.compare_endian e e' = 0 then
-      (* Low bits replaced, high bits kept. *)
-      let mask =
-        WordSet.lnot
-          (WordSet.cast Bil.UNSIGNED w'
-             (WordSet.singleton (Cbat_word.ones w))) in
-      Val.create
-        (WordSet.logor
-           (WordSet.logand (Val.data d') mask)
-           (WordSet.cast Bil.UNSIGNED w' (Val.data d)))
-        e'
-    else d
+  let _, e = Val.get_idx d in
+  let _, e' = Val.get_idx d' in
+  if w < w' && Bitvector.compare_endian e e' = 0 then
+    let at = match e with LittleEndian -> 0 | BigEndian -> w' - w in
+    let place v =
+      let v = WordSet.cast Bil.UNSIGNED w' v in
+      if at = 0 then v
+      else WordSet.lshift v (WordSet.singleton (Cbat_word.of_int ~width:w' at))
+    in
+    let mask = WordSet.lnot (place (WordSet.singleton (Cbat_word.ones w))) in
+    Val.create
+      (WordSet.logor (WordSet.logand (Val.data d') mask) (place (Val.data d)))
+      e'
   else d
 
-(* Point store overwrites; else joins. *)
-let add (m : t) ~key : data:Val.t -> t =
-  if Key.equal (Key.lower key) (Key.upper key)
-  then op_add ~op:store_merge ~op_demoted:store_merge m ~key
-  else join_add m ~key
+(* The bytes a cell's value covers from each of its starts. *)
+let val_bytes (v : Val.t) : int =
+  Int.max 1 (WordSet.bitwidth (Val.data v) / addressable_width)
+
+(* The widest cell a store records: [word_writes] splits a wider write
+   per word, so only an access that splits unevenly can exceed it. *)
+let max_cell_bytes = 64
+
+(* The last point of a [w]-bit line. *)
+let line_max (w : int) : int64 =
+  if w >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L w)
+
+(* [p] moved [n] along its line, wrapping. *)
+let pt_add (p : Key.point) (n : int64) : Key.point =
+  let v = Stdlib.Int64.add p.pvalue n in
+  { p with pvalue = (if p.pwidth >= 64 then v else Stdlib.Int64.logand v (line_max p.pwidth)) }
+
+(* [b - a] on [a]'s line, signed. *)
+let sdist (a : Key.point) (b : Key.point) : int64 =
+  let d = Stdlib.Int64.sub b.pvalue a.pvalue in
+  if a.pwidth >= 64 then d
+  else
+    let sh = 64 - a.pwidth in
+    Stdlib.Int64.shift_right (Stdlib.Int64.shift_left d sh) sh
+
+(* The starts a store writes: [w_lo + i*wstep] for [0 <= i*wstep <=
+   span], each writing [n] bytes; a negative [span] (a hull too wide to
+   measure) writes anywhere on the line. *)
+type write = { w_lo : Key.point; span : int64; wstep : int64; n : int64 }
+
+(* Whether some write's bytes meet [x, x+cb-1], [x] relative to [w_lo]. *)
+let touches (w : write) (x : int64) (cb : int64) : bool =
+  let module I = Stdlib.Int64 in
+  let ( <. ) a b = I.compare a b < 0 and ( <=. ) a b = I.compare a b <= 0 in
+  w.span <. 0L
+  || 0L <=. I.add x (I.pred cb)
+     && x <=. I.add w.span (I.pred w.n)
+     && (I.equal w.span 0L || x <. 0L || w.span <. x
+         || (let r = I.rem x w.wstep in
+             not (w.n <=. r && I.add r cb <=. w.wstep)))
+
+(* Floor and ceiling division by a positive [b]. *)
+let fdiv (a : int64) (b : int64) : int64 =
+  let q = Stdlib.Int64.div a b in
+  if Stdlib.Int64.compare (Stdlib.Int64.rem a b) 0L < 0 then Stdlib.Int64.pred q else q
+
+let cdiv (a : int64) (b : int64) : int64 = Stdlib.Int64.neg (fdiv (Stdlib.Int64.neg a) b)
+
+(* Distances past this bound are not measured: such a cell drops whole. *)
+let far = Stdlib.Int64.shift_left 1L 61
+
+(* What a store does to one cell [k'] (value [v']): the parts of its
+   grid no write touches keep [v'], and the touched starts are either
+   one start [x] (relative to the store, for the caller to decide) or a
+   run that lies exactly on the store's own grid at the store's width
+   (the weak-update join), or dropped. *)
+type cell_fate =
+  { kept : Key.t list; one : int64 option; same_grid : Key.t option }
+
+let cell_fate (w : write) ((k', v') : Key.t * Val.t) : cell_fate =
+  let module I = Stdlib.Int64 in
+  let ( <. ) a b = I.compare a b < 0 and ( <=. ) a b = I.compare a b <= 0 in
+  let none = { kept = []; one = None; same_grid = None } in
+  let cb = I.of_int (val_bytes v') in
+  let x0 = sdist w.w_lo k'.lo in
+  let cspan = sdist k'.lo k'.hi in
+  let g =
+    if I.equal cspan 0L then cb
+    else if k'.step > 1 then I.of_int k'.step else cb
+  in
+  if w.span <. 0L || cspan <. 0L || far <. I.abs x0 || far <. cspan then none
+  else
+    let count = I.succ (I.div cspan g) in
+    let i0 = I.max 0L (cdiv (I.sub (I.sub 1L cb) x0) g) in
+    let i1 = I.min (I.pred count) (fdiv (I.sub (I.add w.span (I.pred w.n)) x0) g) in
+    let start i = pt_add k'.lo (I.mul i g) in
+    let piece lo hi = { k' with Key.lo; hi } in
+    if i1 <. i0 then { none with kept = [ k' ] }
+    else
+      let lower = if 0L <. i0 then [ piece k'.lo (start (I.pred i0)) ] else [] in
+      let upper =
+        if i1 <. I.pred count then [ piece (start (I.succ i1)) k'.hi ] else []
+      in
+      let x_at i = I.add x0 (I.mul i g) in
+      if I.equal i0 i1 then
+        let x = x_at i0 in
+        if touches w x cb then { none with kept = lower @ upper; one = Some x }
+        else { none with kept = [ k' ] }
+      else
+        let on_grid =
+          I.equal cb w.n && I.equal g w.wstep && w.n <=. w.wstep
+          && I.equal (I.rem (x_at i0) w.wstep) 0L
+          && 0L <=. x_at i0 && x_at i1 <=. w.span
+        in
+        { kept = lower @ upper; one = None;
+          same_grid = (if on_grid then Some (piece (start i0) (start i1)) else None) }
+
+(* The cells on [k]'s line whose bytes can meet [k]'s writes of [n]
+   bytes: a cell starts at most [max_cell_bytes - 1] bytes before its
+   last byte, and the window may wrap the line's end. *)
+let candidates (m : itree) (k : Key.t) (w : write) : (Key.t * Val.t) list =
+  let q lo hi = Seq.to_list (it_intersections m { k with Key.lo; hi; step = 1 }) in
+  let top_pt = { k.lo with pvalue = line_max k.lo.pwidth } in
+  let zero_pt = { k.lo with pvalue = 0L } in
+  if Stdlib.Int64.compare w.span 0L < 0 then q zero_pt top_pt
+  else
+    let wlo = pt_add k.lo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
+    let whi = pt_add k.hi (Stdlib.Int64.pred w.n) in
+    if Key.le wlo k.lo && Key.le k.hi whi then q wlo whi
+    else
+      List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
+        (q wlo top_pt @ q zero_pt whi)
+
+(* One store at one key.  Every cell whose bytes the store may write is
+   resolved: a strong store (one point, the access's only address)
+   merges into the cell at its start and drops every other touched
+   cell; a weak store keeps a touched cell only where it lies on the
+   store's grid at the store's width (each slot is either the store's
+   value or what it held: the join); every other touched byte reads top.
+   No touched cell keeps its old value. *)
+let store_one ~(strong : bool) (m : itree) (width : int) ~(key : Key.t)
+    ~(data : Val.t) : t =
+  let n = val_bytes data in
+  let point = Key.equal key.lo key.hi in
+  let w =
+    { w_lo = key.lo;
+      span = (if point then 0L else sdist key.lo key.hi);
+      wstep = Stdlib.Int64.of_int (Int.max 1 key.step);
+      n = Stdlib.Int64.of_int n }
+  in
+  let strong = strong && point in
+  let cands = candidates m key w in
+  let rest = List.fold cands ~init:m ~f:(fun m (k', _) -> IT.remove m k') in
+  let add_val it k v = if Val.is_top v then it else IT.add it k v in
+  let at x = { key with Key.lo = pt_add key.lo x; hi = pt_add key.lo x; step = 1 } in
+  let it, merged =
+    List.fold cands ~init:(rest, None) ~f:(fun (it, merged) (k', v') ->
+        let f = cell_fate w (k', v') in
+        let it = List.fold f.kept ~init:it ~f:(fun it k -> IT.add it k v') in
+        let it =
+          match f.same_grid with
+          | Some kg when not strong -> add_val it kg (Val.join_poly data v')
+          | _ -> it
+        in
+        match f.one with
+        | Some x when strong && Stdlib.Int64.equal x 0L -> (it, Some (store_merge data v'))
+        | Some x
+          when (not strong) && Stdlib.Int64.compare x 0L >= 0
+               && Stdlib.Int64.compare x w.span <= 0
+               && Int.equal (val_bytes v') n
+               && (point || Stdlib.Int64.(equal (rem x w.wstep) 0L))
+               && (point || Stdlib.Int64.compare w.wstep w.n >= 0) ->
+          (add_val it (at x) (Val.join_poly data v'), merged)
+        | _ -> (it, merged))
+  in
+  let it =
+    if strong && n <= max_cell_bytes then
+      add_val it key (Option.value merged ~default:data)
+    else it
+  in
+  {itree = Some (coalesce it); width}
+
+(* A store of [data] at [key]: [strong] when the key is the access's
+   only address (the caller's fan-out decides), weak otherwise. *)
+let store (m : t) ~(strong : bool) ~(key : Key.t) ~(data : Val.t) : t =
+  match m.itree with
+  | None -> m
+  | Some _ ->
+    List.fold (word_writes m.width key data) ~init:m ~f:(fun m (key, data) ->
+        match m.itree with
+        | Some t -> store_one ~strong t m.width ~key ~data
+        | None -> m)
+
+(* A store at a single key: a point key overwrites, a wider key is a
+   weak update. *)
+let add (m : t) ~key ~data : t = store m ~strong:true ~key ~data
 
 (* Fold intersecting cells. *)
 let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)

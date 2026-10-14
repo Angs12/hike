@@ -25,6 +25,7 @@ module Key : sig
   val t_of_sexp : Sexp.t -> t
   val sexp_of_t : t -> Sexp.t
 
+  (* One key per address piece, every leaf of a mixed value fanned out. *)
   val of_wordset : WordSet.t -> t list
 
   (* The cell's stride: > 1 for a bounded strided address progression,
@@ -88,6 +89,12 @@ include Value.S with type t := t
 
 include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key and
 type t := t and type idx := idx
+
+(* A store of [data] at [key]: [strong] when [key] is the access's only
+   address (a point key then overwrites); a weak store joins only the
+   cells on its own grid at its width.  Every other cell whose bytes the
+   store may write is dropped. *)
+val store : t -> strong:bool -> key:Key.t -> data:Val.t -> t
 
 (* Meet [data] into every cell whose key intersects [key]. *)
 (* Meet into intersecting cells; an empty piece meet keeps the cell

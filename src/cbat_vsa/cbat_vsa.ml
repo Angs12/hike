@@ -31,16 +31,29 @@ module Cbat_kb_census = Cbat_kb_census
 module Cbat_attr_census = Cbat_attr_census
 #endif
 
-(* WTO over the engine cfg; [succ]/[pred] are the dispatch graph's
-   accessors — the resolved dispatches' extra edges ride BOTH, so the
-   ordering closes on the same graph pair it walks. *)
-(* The fixpoint's visit budget: a floor for tiny subs plus a
-   per-block allowance, so a sub's sweep count is size-independent. *)
-let min_visit_budget = 6000
-let visits_per_block = 8
 (* A head widens only after this many warmup visits. *)
 let head_warmup_visits = 10
 
+(* The fixpoint's visit budget grows with the sub: every block is
+   allowed [visits_per_level] visits per loop level it sits in (its WTO
+   depth, a head counting its own loop) — a level covers a head's warmup
+   and the widening and landmark rounds after it — and the floor keeps a
+   small sub's allowance. *)
+let min_visit_budget = 6000
+let visits_per_level = 64
+
+let visit_budget (wto : Cbat_wto.comp list) : int =
+  let rec go depth acc (c : Cbat_wto.comp) =
+    match c with
+    | Cbat_wto.Vertex _ -> acc + (visits_per_level * (depth + 1))
+    | Cbat_wto.SCC (_, cs) ->
+      List.fold cs ~init:(acc + (visits_per_level * (depth + 2))) ~f:(go (depth + 1))
+  in
+  Stdlib.max min_visit_budget (List.fold wto ~init:0 ~f:(go 0))
+
+(* WTO over the engine cfg; [succ]/[pred] are the dispatch graph's
+   accessors — the resolved dispatches' extra edges ride BOTH, so the
+   ordering closes on the same graph pair it walks. *)
 let wto_of_cfg ~(succ : tid -> tid list) ~(pred : tid -> tid list)
     (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
   Cbat_wto.wto
@@ -401,11 +414,7 @@ let rec static_graph_vsa
     Solution.create (!rc_cell).rc_state.fs_sol sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
-  (* The visit budget scales with the block count so a sub's sweep
-     allowance is size-independent; the floor bounds tiny subs. *)
-  let max_steps =
-    Stdlib.max min_visit_budget
-      (visits_per_block * Core.Map.length rctx.rc_blocks) in
+  let max_steps = visit_budget wto in
   (* Per-head visit counts; each head gets its own warmup window. *)
   let head_visits : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
   let head_warmed (v : Tid.t) : bool =

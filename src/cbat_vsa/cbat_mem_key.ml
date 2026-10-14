@@ -156,9 +156,11 @@ let overlap (k1 : t) (k2 : t) : bool =
 (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
      the shared base makes the offset the per-sub cell identity.  A
      plain denotation keys by its own absolute pieces.
-   The key FANS OUT per piece: each entry names one piece's line, the
-   stride is that piece's own bounded progression, and every fanned
-   entry stores the full value (the tree stays single-keyed). *)
+   The key FANS OUT per piece of every leaf (a mixed value names each
+   leaf's line): each entry names one piece's line, the stride is that
+   piece's own bounded progression, and every fanned entry stores the
+   full value (the tree stays single-keyed).  An empty piece names no
+   address; a piece too wide for a point keys its whole line. *)
 let of_wordset (p : WordSet.t) : t list =
   let open Monads.Std.Monad.Option.Syntax in
   let of_piece (origin : Hike_origin.t) (q : WordSet.Clp.t) : t option =
@@ -178,10 +180,14 @@ let of_wordset (p : WordSet.t) : t list =
     if le lo hi then Some {origin; lo; hi; step = stride}
     else Some {origin; lo = hi; hi = lo; step = stride}
   in
-  match WordSet.address_pieces p with
-  | None -> []
-  | Some (origin, ps) ->
-    List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:(of_piece origin)
+  let whole_line origin =
+    { origin; lo = { pwidth = 64; pvalue = 0L }; hi = { pwidth = 64; pvalue = -1L };
+      step = 1 } in
+  List.concat_map (WordSet.address_groups p) ~f:(fun (origin, ps) ->
+      List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:(fun q ->
+          if WordSet.Clp.is_bottom q then None
+          else
+            Some (Option.value (of_piece origin q) ~default:(whole_line origin))))
 
 (* Hull of both inputs.  Same-origin only: coalesce never unions across
    origins (the cells stay separate). *)

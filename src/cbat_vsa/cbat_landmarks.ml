@@ -413,7 +413,12 @@ let extrapolate ~(steps : int) ~(old : Cbat_clp_set_composite.t)
     List.filter entries ~f:(fun e ->
         Cbat_word.bitwidth e.bound = Cbat_clp_set_composite.bitwidth old)
   in
+  (* A stack address extrapolates only in its offsets: the translation
+     below answers a plain interval, which would move it off the stack
+     key line. *)
+  let stack v = not (List.is_empty (Cbat_clp_set_composite.stack_leaves v)) in
   match entries with
+  | _ :: _ when stack old || stack new_ -> `Widen
   | [] ->
     `Extrapolated (Cbat_clp_set_composite.extrapolate_steps ~steps old new_)
   | _ ->

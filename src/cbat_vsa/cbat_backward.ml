@@ -140,6 +140,22 @@ let neq_complement (c : Cbat_word.t) : wordset option =
     WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
   if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
 
+(* The largest submask of [k] that is at most [v], built greedily from
+   the top bit: every [x] with [x land k <= v] has [x land k] at most
+   it, so [x <= max_submask_le k v lor lnot k]. *)
+let max_submask_le (k : Cbat_word.t) (v : Cbat_word.t) : Cbat_word.t =
+  let w = Cbat_word.bitwidth k in
+  let rec go i acc =
+    if i < 0 then acc
+    else
+      let bit = Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w i) in
+      let cand = Cbat_word.logor acc bit in
+      if (not (Cbat_word.is_zero (Cbat_word.logand k bit))) && Cbat_word.(<=) cand v
+      then go (i - 1) cand
+      else go (i - 1) acc
+  in
+  go (w - 1) (Cbat_word.zero w)
+
 let operand_constraints (op : Bil.binop) (cstr : wordset)
     (a_ws : wordset) (b_ws : wordset) : wordset option * wordset option =
   let width = WordSet.bitwidth cstr in
@@ -266,8 +282,9 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       None, None
     | Bil.AND | Bil.OR | Bil.XOR ->
       (* Singleton masks constrain: XOR is a bitwise bijection, so its
-         pre-image is exact; AND keeps the mask's bits from the
-         constraint and leaves the others free (the hull). *)
+         pre-image is exact; AND bounds the operand below by the
+         constraint ([x >= x land k]) and above by the largest masked
+         value the constraint admits with every unmasked bit set. *)
       (match b_single with
        | Some k ->
          if Cbat_word.is_zero k then
@@ -288,7 +305,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
                | Some vlo, Some vhi -> (
                  match
                    hull ~wrapping:false width vlo
-                     (Cbat_word.logor vhi (Cbat_word.lnot k))
+                     (Cbat_word.logor (max_submask_le k vhi) (Cbat_word.lnot k))
                  with
                  | Some a' -> Some a', None
                  | None -> None, None)

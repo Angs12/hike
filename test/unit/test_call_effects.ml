@@ -312,6 +312,21 @@ let tests : unit Alcotest.test list =
             check "a non-stack SP cannot certify caller-frame survival"
               (Ws.is_top (ce_reads m 0x2000L post))));
 
+    pin "CE-19" "a mixed escape (a stack address or NULL) carves its stack range" (fun () ->
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let e, m = ce_raw_env () in
+        let env =
+          AI.add_word e ~key:rdi
+            ~data:(Ws.join (Ws.stack_word_i64 0x2000L) (Ws.singleton (w64 0)))
+        in
+        let kept =
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
+            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            env
+        in
+        check "CE-19"
+          (Ws.is_top (ce_reads m 0x2000L kept)
+          && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
   ]
 
 let () = run "call_effects" tests

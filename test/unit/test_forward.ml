@@ -77,6 +77,22 @@ let vla_roundtrip () =
   in
   (sub, tids, rax)
 
+(* The store/load vocabulary of the memory-write pins: one memory var,
+   64-bit literals, and [rsp - k] slots on the anchored entry. *)
+let st_m = memv "st_m"
+let st_lit n = Bil.Int (Cbat_word.to_word (w64 n))
+let st_slot k = Bil.BinOp (Bil.MINUS, Bil.Var sp, st_lit k)
+let st_store ?(size = `r64) env addr v =
+  Vsa.Test_seam.denote_def
+    (Def.create st_m (Bil.Store (Bil.Var st_m, addr, v, LittleEndian, size))) env
+let st_load ?(size = `r64) env addr =
+  match
+    Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var st_m, addr, LittleEndian, size)) env
+  with
+  | Ok v -> v
+  | Error _ -> failwith "st_load"
+let st_has env addr n = Ws.elem (w64 n) (st_load env addr)
+
 let tests : unit Alcotest.test list =
   [
     (* FWD-01: an Ite whose flag is {0,1} joins both arms. *)
@@ -441,6 +457,75 @@ let tests : unit Alcotest.test list =
         check "FWD-20.seeded" (not (Core.Set.is_empty frames));
         check "FWD-20.kept"
           (Core.Set.is_subset frames ~of_:(Vsa.WordSet.Origin.Vla_seed.keys ())));
+    pin "FWD-21" "a store through a mixed-kind address writes each leaf's cells (weakly)"
+      (fun () ->
+        let p = v64 "fwd21_p" in
+        let strided =
+          Ws.of_clp (Clp.create ~width:64 ~step:(w64 8)
+                       ~cardn:(Cbat_word.of_int ~width:65 20) (w64 0x10000)) in
+        let addr = Ws.join strided (Ws.singleton (w64 0x5000)) in
+        let env = AI.add_word AI.top ~key:p ~data:addr in
+        let env = st_store env (st_lit 0x5000) (st_lit 42) in
+        let env = st_store env (Bil.Var p) (st_lit 7) in
+        check "FWD-21.old" (st_has env (st_lit 0x5000) 42);
+        check "FWD-21.new" (st_has env (st_lit 0x5000) 7));
+
+    pin "FWD-22" "a store through a two-slot stack address is a weak update of both slots"
+      (fun () ->
+        let q = v64 "fwd22_q" in
+        let env =
+          AI.add_word (anchored_entry ()) ~key:q
+            ~data:(Ws.join (Ws.stack_word_i64 (-32L)) (Ws.stack_word_i64 (-24L))) in
+        let env = st_store env (st_slot 32) (st_lit 5) in
+        let env = st_store env (st_slot 24) (st_lit 6) in
+        let env = st_store env (Bil.Var q) (st_lit 9) in
+        check "FWD-22.lo" (st_has env (st_slot 32) 5 && st_has env (st_slot 32) 9);
+        check "FWD-22.hi" (st_has env (st_slot 24) 6 && st_has env (st_slot 24) 9));
+
+    pin "FWD-23" "a store inside a wider cell at another start invalidates the cell"
+      (fun () ->
+        let env = anchored_entry () in
+        let env = st_store env (st_slot 64) (st_lit 0) in
+        let env = st_store ~size:`r32 env (st_slot 60)
+            (Bil.Int (Word.of_int ~width:32 2)) in
+        (* The qword at rsp-64 now holds 0x2_0000_0000. *)
+        check "FWD-23" (st_has env (st_slot 64) 0x200000000));
+
+    pin "FWD-24" "a wider store invalidates the narrower cells inside its bytes"
+      (fun () ->
+        let env = anchored_entry () in
+        let env = st_store ~size:`r32 env (st_slot 60)
+            (Bil.Int (Word.of_int ~width:32 2)) in
+        let env = st_store env (st_slot 64) (st_lit 0) in
+        let hi = st_load ~size:`r32 env (st_slot 60) in
+        check "FWD-24" (Ws.elem (w32 0) hi));
+
+    pin "FWD-25" "a weak store on its own grid keeps the joined slots; a strong one overwrites"
+      (fun () ->
+        let q = v64 "fwd25_q" in
+        let env =
+          AI.add_word (anchored_entry ()) ~key:q
+            ~data:(Ws.stack_word (Clp.create ~width:64 ~step:(w64 8)
+                                    ~cardn:(Cbat_word.of_int ~width:65 2)
+                                    (Cbat_word.of_int ~width:64 (-32)))) in
+        let env = st_store env (st_slot 32) (st_lit 5) in
+        let env = st_store env (st_slot 24) (st_lit 6) in
+        let env = st_store env (Bil.Var q) (st_lit 9) in
+        let exact env a xs =
+          Ws.equal (st_load env a) (Ws.of_list ~width:64 (List.map w64 xs)) in
+        check "FWD-25.weak" (exact env (st_slot 32) [ 5; 9 ] && exact env (st_slot 24) [ 6; 9 ]);
+        let env = st_store env (st_slot 24) (st_lit 1) in
+        check "FWD-25.strong" (exact env (st_slot 24) [ 1 ] && exact env (st_slot 32) [ 5; 9 ]));
+
+    pin "FWD-26" "a store through a stack-or-NULL pointer writes the stack slot (weakly)"
+      (fun () ->
+        let p = v64 "fwd26_p" in
+        let env =
+          AI.add_word (anchored_entry ()) ~key:p
+            ~data:(Ws.join (Ws.stack_word_i64 (-16L)) (Ws.singleton (w64 0))) in
+        let env = st_store env (st_slot 16) (st_lit 42) in
+        let env = st_store env (Bil.Var p) (st_lit 7) in
+        check "FWD-26" (st_has env (st_slot 16) 42 && st_has env (st_slot 16) 7));
   ]
 
 let () = run "forward" tests

@@ -400,8 +400,8 @@ let tests : unit Alcotest.test list =
           [plain; Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base;
            Ws.set_origin Ws.Origin.Abs base];
         check "WS-40 (absolute memory key)"
-          (match Ws.address_pieces plain with
-           | Some (Ws.Origin.Abs, _) -> true | _ -> false);
+          (match Ws.address_groups plain with
+           | [ (Ws.Origin.Abs, _) ] -> true | _ -> false);
         List.iter (fun v ->
             check "WS-40 (stack-family identity)"
               (Ws.in_stack_segment v
@@ -476,7 +476,65 @@ let tests : unit Alcotest.test list =
         check "WS-46.equal"
           (List.for_all
              (fun x -> Ws.elem (w32 x) by_parts = Ws.elem (w32 x) by_bisect)
-             (List.init 16 Fun.id)))
+             (List.init 16 Fun.id)));
+
+    (* A stack address joined with NULL is a stack address or NULL: the
+       stack leaf keeps its line and offsets beside the plain leaf. *)
+    pin "WS-47" "a union with a plain value keeps the stack leaf" (fun () ->
+        let s = Ws.stack_word_i64 (-16L) in
+        let u = Ws.join s (Ws.singleton (w64 0)) in
+        check "WS-47.leaf"
+          (match Ws.stack_leaves u with [ l ] -> Ws.equal l s | _ -> false);
+        check "WS-47.null" (Ws.elem (w64 0) u);
+        let tid = Tid.create () in
+        let both = Ws.join s (Ws.vla_frame tid) in
+        check "WS-47.vla" (List.length (Ws.stack_leaves both) = 2);
+        check "WS-47.rip"
+          (Ws.equal
+             (Ws.join s (Ws.module_address 0x404000L))
+             (Ws.join (Ws.module_address 0x404000L) s)));
+
+    pin "WS-48" "arithmetic on a mixed value distributes over its leaves" (fun () ->
+        let u = Ws.join (Ws.stack_word_i64 (-16L)) (Ws.singleton (w64 0)) in
+        let r = Ws.add u (Ws.singleton (w64 8)) in
+        check "WS-48.stack"
+          (match Ws.stack_leaves r with
+           | [ l ] -> Ws.equal l (Ws.stack_word_i64 (-8L))
+           | _ -> false);
+        check "WS-48.plain" (Ws.elem (w64 8) r));
+
+    pin "WS-49" "a non-null refinement of a stack-or-NULL value is the stack address" (fun () ->
+        let s = Ws.stack_word_i64 (-16L) in
+        let u = Ws.join s (Ws.singleton (w64 0)) in
+        let nonnull = Ws.diff (Ws.top 64) (Ws.singleton (w64 0)) in
+        check "WS-49.meet" (Ws.equal (Ws.meet u nonnull) s);
+        check "WS-49.diff" (Ws.equal (Ws.diff u (Ws.singleton (w64 0))) s));
+
+    pin "WS-50" "widening a stack-or-NULL value keeps the stack leaf" (fun () ->
+        let u k = Ws.join (Ws.stack_word_i64 k) (Ws.singleton (w64 0)) in
+        let w = Ws.widen_join (u (-16L)) (Ws.join (u (-16L)) (u (-8L))) in
+        check "WS-50.leaf" (not (List.is_empty (Ws.stack_leaves w)));
+        check "WS-50.null" (Ws.elem (w64 0) w));
+
+    (* A walked pointer's next iterate need not contain the old offsets
+       (a frame walked from its seed loses offset 0): the relative leaf
+       still extrapolates instead of joining forever. *)
+    pin "WS-51" "the relative-leaf widen extrapolates over incomparable iterates" (fun () ->
+        let run base =
+          Ws.stack_word
+            (Clp.create ~width:64 ~step:(w64 16) ~cardn:(Cbat_word.of_int ~width:65 3) (w64 base))
+        in
+        let mixed v = Ws.join v (Ws.singleton (w64 0)) in
+        let w = Ws.widen_join (mixed (run 0)) (mixed (run 16)) in
+        check "WS-51"
+          (match Ws.stack_leaves w with
+           | [ l ] ->
+             (match Ws.stack_offsets l with
+              | Some offs ->
+                Clp.elem (w64 0x100) offs
+                && not (Clp.elem (Cbat_word.of_int ~width:64 (-31)) offs)
+              | None -> false)
+           | _ -> false))
   ]
 
 let () = run "ws" tests

@@ -1,6 +1,6 @@
 # Pins — test_forward
 
-Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-18`),
+Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-26`),
 migrating `test_cbat/test_forward.ml`.  Every source `check` site outside the
 Call_effects family is carried as one pin; none retired.  The `CE1`…`CE10`
 source checks are owned by `test/unit/test_call_effects.ml` and are not
@@ -35,3 +35,9 @@ produces (re-demonstrated whenever the cited mechanism changes).  Production
 | FWD-15 | The certified-nibble bit-op rule makes the movaps alignment guard (`(RSP−0x48) & 0xF == 0`) denotate the exact singleton `{1}` — the #GP path is provably dead. | In `src/cbat_vsa/cbat_clp_set_composite.ml`, set `certified_bits = 0` (the AND becomes blind and answers top). | FWD-15 FAILs: top contains `0` too, so `elem 0` is true. |
 | FWD-16 | A width-mismatched equality is the coercer's contract violation: the domain answers top — the one-bit `{0,1}` — never a coerced comparison. | In `cbat_transfer.ml`'s `denote_binop`, coerce the operands (cast to the common width + recurse) instead of the identity. | FWD-16 FAILs: the result is the coerced `{1}` (or a definite `{0}`). |
 | FWD-17 | A concat keeps its operands' order across representations: the composite's mixed Exact/Clp pair passes the Clp operand first only when it WAS first, so `Concat({0}, top64)` is the low-64 range `[0, 2^64-1]` — never the high-64 multiples `{k·2^64}`. | In `cbat_clp_set_scalar.ml`'s `op_pair`, merge the mixed pair back into one or-pattern `Ps ps, Fs s \| Fs s, Ps ps -> [ Clp (binop_pieces op ps (pieces_of_exact s)) ]` (the Clp operand always first). | FWD-17 FAILs: `1` is absent from the result (the swapped high-64 set). |
+| FWD-21 | A store through a mixed-kind address (`Many`: a strided set plus one global) writes every leaf's cells; the global's cell joins the stored value. | In `cbat_clp_set_scalar.ml`'s `address_groups`, answer `[]` for `Many` (the pre-fix `address_pieces` shape). | FWD-21 FAILs: the store is dropped, `[0x5000]` still reads `{42}`. |
+| FWD-22 | A two-slot stack address fans out into two point keys, each a weak update: both slots keep their old value joined with the stored one. | In `cbat_transfer.ml`'s store, pass `~strong:true` for every key. | FWD-22 FAILs: both slots read `{9}`. |
+| FWD-23 | A 32-bit store at `rsp-60` inside the qword cell at `rsp-64` resolves that cell (the extent-aware candidates), so the qword reads its new bytes. | In `cbat_ai_memmap.ml`'s `candidates`, query only the store's own start hull (`q k.lo k.hi`). | FWD-23 FAILs: the qword reads the stale `{0}`. |
+| FWD-24 | A qword store at `rsp-64` drops the dword cell at `rsp-60` inside its bytes. | As FWD-23. | FWD-24 FAILs: the dword reads the stale `{2}`. |
+| FWD-25 | Precision guard: a weak store on its own grid at its own width joins each slot (`{5,9}`, `{6,9}`), and a following point store overwrites its slot. | In `store_one`, drop the `same_grid`/aligned join (every weakly touched cell dropped). | FWD-25 FAILs: the slots read top. |
+| FWD-26 | a store through `stack−16 ∪ NULL` weakly updates the stack slot (the union keeps the stack leaf; its key is on the Stack line). | Materialise the stack leaf in the union (the pre-ADR-0035 row). | FWD-26 FAILs: the slot keeps only `{42}`. |
