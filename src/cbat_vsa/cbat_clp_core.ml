@@ -238,11 +238,15 @@ let lnot (p : t) : t =
 
 let iter (p : t) : W.t list =
   let p = forward p in
-  let rec iter_acc b s n acc =
-    if W.is_zero n then acc
-    else let n' = W.pred n in
-      iter_acc (W.add b s) s n' (b :: acc) in
-  List.rev (iter_acc (base_of p) (step_of p) (cardn_of p) [])
+  let b = base_of p and s = step_of p and n = cardn_of p in
+  if W.is_zero n then []
+  else
+    (* Walk from the last element down, prepending: the list comes back
+       ascending without a reverse (and without a second allocation). *)
+    let rec go x k acc =
+      if W.is_zero k then acc
+      else go (W.sub x s) (W.pred k) (x :: acc) in
+    go (W.add b (W.mul s (W.pred n))) n []
 
 (* Closest element at or below i. *)
 let nearest_pred (i : W.t) (p : t) : W.t option =
