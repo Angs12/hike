@@ -186,7 +186,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
                                     Hike_synth.fresh ~bits Hike_synth.Binding)
                             | _ -> None
                           in
-                          (Term.tid j, (e, d, bound)))))
+                          (Term.tid j, (e, d, bound))))))
             |> Seq.to_list
           in
           let binds = Base.List.filter_map plans ~f:(fun (_, (_, _, b)) -> b) in
