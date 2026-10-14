@@ -560,32 +560,11 @@ module Pieces = struct
     | _ when not (Stdlib.Int.equal (width_of a) (width_of b)) ->
       finish (collapse_width (List.append a b))
     | _ ->
-      let rec merge xs ys =
-        match xs, ys with
-        | [], ys -> ys
-        | xs, [] -> xs
-        | x :: xt, y :: yt ->
-          if compare_piece x y <= 0 then x :: merge xt ys
-          else y :: merge xs yt
-      in
-      (* [acc] is descending; its head is the largest minimum placed. *)
-      let rec go acc = function
-        | [] -> `Done (List.rev acc)
-        | p :: rest -> (
-          match acc with
-          | [] -> go [ p ] rest
-          | q :: tl ->
-            if overlap_exact p q then
-              let r = C.union p q in
-              if C.is_wrapped r then `Wrap else go (r :: tl) rest
-            else (
-              match adjacent_merge q p with
-              | Some r -> go (r :: tl) rest
-              | None -> go (p :: acc) rest))
-      in
-      (match go [] (merge a b) with
-       | `Done ps -> cap_to U.max_pieces ps
-       | `Wrap -> finish (merge a b))
+      (* [b] ascends, so each produced arc can only meet the placed tail;
+         split every arc and place it exactly. *)
+      finish
+        (List.fold b ~init:a ~f:(fun acc p ->
+             List.fold (split_arcs p) ~init:acc ~f:merge_arc))
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
