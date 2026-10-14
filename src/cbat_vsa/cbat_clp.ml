@@ -358,8 +358,8 @@ module Pieces = struct
     end
     else ps
 
-  (* The producer finish: every operation's raw output is placed by
-     [assemble] and then capped, so no value carries an unbounded piece list.
+  (* The producer finish: place the raw output (split arcs, order, combine
+     tail-only) and cap it, so no value carries an unbounded piece list.
      `max_pieces` is the fixpoint bound; the budget rule keeps a small
      exact union uncapped. *)
   let finish (ps : progression list) : t =
