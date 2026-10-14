@@ -82,18 +82,14 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
       Bil.BinOp (Bil.EQ, e, Bil.Var (Hike_synth.module_addr ~addr_bits:bits a))
   in
   (* The words no arm tests, grouped by transfer kind; the last group is
-     the default.  An in-sub block word is always armed. *)
+     the default.  A word naming an in-sub block is a real destination:
+     when the arming phase did not already arm it ([arm_dispatches] keys
+     on the solve's destination sets, which can lag the final word set)
+     the series arms it here under its own case test. *)
   let series sub j e words (base : (int64 list * exp) option) =
     let groups =
       Base.List.fold words ~init:[] ~f:(fun acc w ->
           let kind = name ~sub j w in
-          (match kind with
-           | Goto (Direct t) ->
-             failwith
-               (Printf.sprintf
-                  "hike: dispatch: sub %s jmp %s: block %s is a destination no arm tests"
-                  (Sub.name sub) (Tid.name (Term.tid j)) (Tid.name t))
-           | _ -> ());
           let w = Cbat_word.to_word w in
           match Base.List.Assoc.find acc kind ~equal:Base.Poly.equal with
           | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal:Base.Poly.equal
@@ -190,7 +186,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
                                     Hike_synth.fresh ~bits Hike_synth.Binding)
                             | _ -> None
                           in
-                          (Term.tid j, (e, d, bound))))))
+                          (Term.tid j, (e, d, bound)))))
             |> Seq.to_list
           in
           let binds = Base.List.filter_map plans ~f:(fun (_, (_, _, b)) -> b) in

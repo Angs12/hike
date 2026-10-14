@@ -213,6 +213,34 @@ let tests : unit Alcotest.test list =
           with Failure _ -> true
         in
         check "SBLK-07" raised);
+
+    pin "SBLK-08"
+      "an in-sub word the arming phase did not arm is armed as a case, not a failure"
+      (fun () ->
+        let target = v64 "sb8_target" in
+        let sub, tids =
+          sub_of "sb8"
+            [ [], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var target)))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub = stamp_sub sub [ (0x1000L, tids.(0)); (0x1008L, tids.(1)) ] in
+        let program = Program.create ~subs:[ sub ] () in
+        let facts =
+          materialize_facts ~program
+            ~words:(Cbat_vsa.WordSet.singleton (w64 0x1008)) ~subs:[]
+        in
+        let result = Hike.Split_blocks.materialize ~facts program in
+        let sub' = Term.find sub_t result (Term.tid sub) |> Base.Option.value_exn in
+        let gotos =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum jmp_t)
+          |> Seq.filter_map ~f:(fun j ->
+                 match Jmp.kind j with
+                 | Goto (Direct t) -> Some (Tid.name t)
+                 | _ -> None)
+          |> Seq.to_list
+        in
+        check "SBLK-08"
+          (Base.List.mem gotos (Tid.name tids.(1)) ~equal:String.equal));
   ]
 
 let () = run "split_blocks" tests
