@@ -11,16 +11,21 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* The domain's numeric substrate.  [Small] holds an int63 immediate,
-   [Big] a [Z.t]; the split is by VALUE MAGNITUDE, never by declared
-   width, and the [Z.t] arm is the same op at arbitrary precision, so a
-   fall back is exact.  A value is the canonical payload
+(* The domain's numeric substrate.  A value has exactly one
+   representation: [Small] holds a payload below 2^62 as an immediate,
+   [W64] a payload in [2^62, 2^64) at width <= 64 as an [int64] bit
+   pattern, and [Big] a payload of 2^62 or more at width > 64 as a
+   [Z.t].  The arms are the same op at different precisions, so moving
+   between them is exact.  A value is the canonical payload
    [0 <= v < 2^width], with the signed flag carried beside it;
    arithmetic results are unsigned. *)
 
 open Bap.Std
 
-type t = Small of int * int * bool | Big of Z.t * int * bool
+type t =
+  | Small of int * int * bool
+  | W64 of int64 * int * bool
+  | Big of Z.t * int * bool
 
 val bitwidth : t -> int
 val is_signed : t -> bool

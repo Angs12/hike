@@ -10,10 +10,10 @@
    the sweep cross-checks the production word ops against them.
 
    The word-op sweep runs at the widths the domain actually uses: the swept
-   widths (1..64) plus a direct 64/65/129-bit sweep (129 = [dom_size
+   widths (1..64) plus a direct 63/64/65/129-bit sweep (129 = [dom_size
    ~width:(2*width+1)] and [mul_exact]'s summed width at width 64).
 
-   The same sweep cross-checks [Cbat_word] (the int63 substrate) against the
+   The same sweep cross-checks [Cbat_word] (the numeric substrate) against the
    reference, over every op it exports.
 
    A composite-layer sweep drives [Cbat_clp_set_composite]'s own binops
@@ -28,30 +28,10 @@ module CKL = Core.List
 module CW = Cbat_word
 
 (* The word-gcd oracle, inlined for the sweep (the referee's own copy
-   of the op it cross-checks).  Production gcd_exn is not exported; it
-   is exercised through lcm_exn's Small path. *)
-let cw_mask (w : int) : int =
-  if w >= 62 then max_int else if w <= 0 then 0 else (1 lsl w) - 1
-
-let rec cw_gcd_int (a : int) (b : int) : int =
-  if b = 0 then a else cw_gcd_int b (a mod b)
-
+   of the op it cross-checks) at arbitrary precision.  Production
+   gcd_exn is not exported; it is exercised through lcm_exn. *)
 let cw_gcd_exn (a : CW.t) (b : CW.t) : CW.t =
-  let w = CW.bitwidth a in
-  match a, b with
-  | CW.Small (x, _, _), CW.Small (y, _, _) ->
-    if x = 0 then CW.Small (y, w, false)
-    else if y = 0 then CW.Small (x, w, false)
-    else CW.Small (cw_gcd_int x y land cw_mask w, w, false)
-  | _ ->
-    let to_z (t : CW.t) : Z.t =
-      match t with
-      | CW.Small (v, _, _) -> Z.of_int v
-      | CW.Big (z, _, _) -> z in
-    let zmax = Z.sub (Z.shift_left Z.one w) Z.one in
-    let z = Z.gcd (to_z a) (to_z b) in
-    let z = if Z.sign z >= 0 && Z.numbits z <= w then z else Z.logand z zmax in
-    if Z.fits_int z then CW.Small (Z.to_int z, w, false) else CW.Big (z, w, false)
+  CW.of_z (Z.gcd (CW.to_z a) (CW.to_z b)) (CW.bitwidth a)
 
 (* ========================================================================= *)
 (* CLP reference implementations. *)
@@ -237,12 +217,20 @@ let run_sweep () : int * int * int =
   (* ---- Cbat_word vs the reference ---------------------------------- *)
 
   (* Both sides are compared as BAP words, so width and payload must agree:
-     the substrate's own [Small]/[Big] split is invisible here. *)
+     the substrate's own [Small]/[W64]/[Big] split is invisible here.
+     [canonical] checks that split separately: a result is structurally
+     the representation [of_z] picks for its payload. *)
   let cw_of (w : word) : CW.t = CW.of_word w in
+  let canonical (nm : string) (r : CW.t) =
+    let c = CW.of_z (CW.to_z r) (CW.bitwidth r) in
+    let c = if CW.is_signed r then CW.signed c else c in
+    if not (Stdlib.( = ) r c) then
+      bad (Printf.sprintf "CW %s: %s is not in its canonical arm" nm (CW.to_string r))
+  in
   let cw1 (nm : string) (rf : word -> word) (nf : CW.t -> CW.t) (w : CW.t) =
     incr checked;
     let exp = (try Ok (rf (CW.to_word w)) with e -> Error e) in
-    let got = (try Ok (CW.to_word (nf w)) with e -> Error e) in
+    let got = (try Ok (let r = nf w in canonical nm r; CW.to_word r) with e -> Error e) in
     match got, exp with
     | Ok g, Ok e ->
       if not (eqw g e) then
@@ -259,7 +247,7 @@ let run_sweep () : int * int * int =
       (a : CW.t) (b : CW.t) =
     incr checked;
     let exp = (try Ok (rf (CW.to_word a) (CW.to_word b)) with e -> Error e) in
-    let got = (try Ok (CW.to_word (nf a b)) with e -> Error e) in
+    let got = (try Ok (let r = nf a b in canonical nm r; CW.to_word r) with e -> Error e) in
     match got, exp with
     | Ok g, Ok e ->
       if not (eqw g e) then
@@ -340,6 +328,25 @@ let run_sweep () : int * int * int =
     cwi "bitwidth" Word.bitwidth CW.bitwidth w1;
     cwi "to_int_exn" Word.to_int_exn CW.to_int_exn w1;
     cwi "to_int_exn" Word.to_int_exn CW.to_int_exn w2;
+    cw1b "msb" (fun w -> Z.testbit (z_of w) (width - 1)) CW.msb w1;
+    cwi "lead_1_bit"
+      (fun w -> Z.numbits (z_of w) - 1)
+      (fun w -> Option.value (CW.lead_1_bit w) ~default:(-1)) w1;
+    (incr checked;
+     let r = (try Some (Word.to_int64_exn (CW.to_word w1)) with _ -> None)
+     and g = (try Some (CW.to_int64_exn w1) with _ -> None) in
+     if not (Option.equal Int64.equal r g) then
+       bad (Printf.sprintf "CW to_int64_exn(%s) differs" (CW.to_string w1)));
+    CKL.iter [ Bil.UNSIGNED; Bil.SIGNED; Bil.HIGH; Bil.LOW ] ~f:(fun ct ->
+        CKL.iter [ Stdlib.max 1 (width / 2); width; 64; 65; 129 ] ~f:(fun sz ->
+            let narrows = match ct with Bil.HIGH | Bil.LOW -> true | _ -> false in
+            if sz <= width || not narrows then
+              cw1 (Printf.sprintf "cast %s %d" (Bil.string_of_cast ct) sz)
+                (* [Cbat_word.cast] marks a SIGNED result signed. *)
+                (fun w ->
+                   let r = Bil.Apply.cast ct sz w in
+                   match ct with Bil.SIGNED -> Word.signed r | _ -> r)
+                (CW.cast ct sz) w1));
     (* extract: the default-hi, a high slice and a low slice. *)
     CKL.iter [ (width - 1, 0); (width - 1, Stdlib.max 0 (width / 2)); (width / 2, 0) ]
       ~f:(fun (hi, lo) ->
@@ -415,11 +422,18 @@ let run_sweep () : int * int * int =
      | _ -> ())
   in
 
-  (* The domain's real widths: 64 (words), 65 (width+1: cardn and the
-     infinite set), 129 (dom_size ~width:(2*width+1) and mul_exact's summed
-     width at width 64). *)
-  let big_widths = [ 64; 65; 129 ] in
+  (* The domain's real widths: 63 (the [W64] arm below 64), 64 (words),
+     65 (width+1: cardn and the infinite set), 129 (dom_size
+     ~width:(2*width+1) and mul_exact's summed width at width 64). *)
+  let big_widths = [ 63; 64; 65; 129 ] in
   CKL.iter big_widths ~f:(fun width ->
+      CKL.iter [ -1; -1120; min_int ] ~f:(fun v ->
+          cw1 (Printf.sprintf "of_int %d" v) (fun _ -> Word.of_int ~width v)
+            (fun _ -> CW.of_int ~width v) (CW.zero width);
+          cw1 (Printf.sprintf "of_int64 %d" v)
+            (fun _ -> Word.of_int64 ~width (Int64.of_int v))
+            (fun _ -> CW.of_int64 ~width (Int64.of_int v)) (CW.zero width));
+      cw1 "ones" (fun _ -> Word.ones width) (fun _ -> CW.ones width) (CW.zero width);
       let modulus = Z.shift_left Z.one width in
       let half = Z.shift_left Z.one (width - 1) in
       let small : Z.t list =
