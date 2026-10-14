@@ -88,8 +88,10 @@ let protect ~(set : unit -> unit) ~(restore : unit -> unit) (f : unit -> unit) :
   Fun.protect ~finally:restore f
 
 (* A minimal x86-64 ELF over [code] at 0x400078 (its entry), with a .text
-   section: binary fixtures need no compiler or external corpus. *)
-let with_binary code f =
+   section: binary fixtures need no compiler or external corpus.  [load]
+   creates the project (default: BAP's, with its disassembly). *)
+let with_binary ?(load = fun file -> Project.create (Project.Input.load ~loader:"llvm" file))
+    code f =
   let names = "\000.text\000.shstrtab\000" in
   let names_off = 120 + String.length code in
   let sections_off = names_off + String.length names in
@@ -126,6 +128,6 @@ let with_binary code f =
       let out = open_out_bin file in
       output_bytes out bytes;
       close_out out;
-      match Project.create (Project.Input.load ~loader:"llvm" file) with
+      match load file with
       | Ok project -> f project
       | Error error -> failwith (Core.Error.to_string_hum error))

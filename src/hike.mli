@@ -21,6 +21,10 @@ module Decode = Hike_decode
 (** Callee-first discovery: the solved program and its analysis facts. *)
 module Worklist = Hike_worklist
 
+(** The program producer: discovery over the decoder's own scan, and
+    the project loader that skips BAP's disassembly. *)
+module Drive = Hike_drive
+
 (** The CFG completion, fused into the solver's loop: resolution is an
     in-loop step of the fixpoint, materialization runs once at drain. *)
 module Cfg_complete = Hike_cfg_complete
@@ -94,3 +98,10 @@ module Types = Hike_types
 
 (** LLVM emitter. *)
 module Bil2llvm = Bil2llvm
+
+(** The pass chain from discovery through types: the stages the plugin
+    registers as passes, run in order. *)
+val lift : Project.t -> Project.t
+
+(** Emits the lifted project's LLVM IR to the file [output]. *)
+val emit : string -> Project.t -> unit

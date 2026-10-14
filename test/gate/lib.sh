@@ -88,5 +88,14 @@ provenance_ok() {
     echo "       another session may have reinstalled; reinstall from this tree" >&2
     return 5
   fi
+  # The embedded lift entry is part of the same build.
+  local rec_drive drive
+  rec_drive="$(sed -n 's/^bin_sha16: //p' "$prov")"
+  drive="$(sha256sum "$(opam var bin 2>/dev/null)/hike" 2>/dev/null | cut -c1-16)"
+  if [ -z "$rec_drive" ] || [ "$rec_drive" != "$drive" ]; then
+    echo "FATAL: the installed hike does not match the record (${rec_drive:-none} != ${drive:-missing})" >&2
+    echo "       reinstall from this tree, then re-run src/record_provenance.sh" >&2
+    return 6
+  fi
   return 0
 }

@@ -19,7 +19,9 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def lift_command(binary, stem, arguments):
+def lift_command(binary, stem, arguments, entry="plugin"):
+    if entry == "drive":
+        return ["hike", str(binary), "-o", f"{stem}.ll"]
     return ["bap", str(binary), "--pass=hike-convlir", "--no-cache",
             f"--hike-output-file={stem}.ll", *arguments]
 
@@ -66,7 +68,7 @@ def profile(binary, stem, args):
                "-o", f"{stem}.stat", "--", "perf", "record", "-F", "99",
                "-e", "cpu-clock", "--call-graph", "dwarf,8192",
                "-o", f"{stem}.perf.data", "--",
-               *lift_command(binary, stem, args.bap_arg)]
+               *lift_command(binary, stem, args.bap_arg, args.entry)]
     result = measure(command, Path(f"{stem}.log"), args.timeout, os.environ.copy())
     if Path(f"{stem}.perf.data").exists():
         with Path(f"{stem}.report.txt").open("wb") as report:
@@ -97,6 +99,9 @@ def main():
     parser.add_argument("--budget", type=float)
     parser.add_argument("--max-ratio", type=float, default=1.15)
     parser.add_argument("--bap-arg", action="append", default=[])
+    parser.add_argument("--entry", choices=["plugin", "drive"], default="plugin",
+                        help="lift the current build through the bap plugin or hike; "
+                             "an interleaved reference always runs the plugin")
     args = parser.parse_args()
     if not args.binaries:
         corpus = Path(os.environ.get("HIKE_CORPUS", "/tmp/corpus-o2"))
@@ -121,7 +126,7 @@ def main():
         baseline = recorded["binaries"]
     lib = Path(subprocess.check_output(["ocamlfind", "query", "hike"], text=True).strip())
     provenance = lib / "hike.cmxs.provenance"
-    manifest = {"arguments": args.bap_arg,
+    manifest = {"arguments": args.bap_arg, "entry": args.entry,
                 "affinity": sorted(os.sched_getaffinity(0)),
                 "plugin_provenance": provenance.read_text() if provenance.exists() else None,
                 "binaries": {}}
@@ -146,7 +151,8 @@ def main():
                 if label == "reference":
                     env["OCAMLPATH"] = str(args.reference_lib.resolve()) + (
                         os.pathsep + env["OCAMLPATH"] if env.get("OCAMLPATH") else "")
-                sample = measure(lift_command(binary, stem, args.bap_arg),
+                entry = "plugin" if label == "reference" else args.entry
+                sample = measure(lift_command(binary, stem, args.bap_arg, entry),
                                  Path(f"{stem}.log"), args.timeout, env)
                 target = reference if label == "reference" else samples
                 target.append(sample)

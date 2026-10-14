@@ -18,14 +18,10 @@ let rec kb_fold (f : 'a -> 'x -> 'a Kb.t) (acc : 'a) (xs : 'x list) :
   | [] -> !!acc
   | x :: xs -> f acc x >>= fun acc -> kb_fold f acc xs
 
-let file_of (prog : program term) : string =
-  match
-    Term.enum sub_t prog
-    |> Seq.filter_map ~f:(fun s -> Term.get_attr s filename)
-    |> Seq.hd
-  with
+let file_of (proj : Project.t) : string =
+  match Project.get proj filename with
   | Some file -> file
-  | None -> failwith "hike-drive: the program names no source file"
+  | None -> failwith "hike-decode: the project names no source file"
 
 let code_mems (proj : Project.t) : mem list =
   Memmap.to_sequence (Project.memory proj)
@@ -165,10 +161,6 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
        (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
   Toplevel.get run
 
-(* The loader's decode. *)
-let initial (proj : Project.t) : Driver.state =
-  Project.State.disassembly (Project.state proj)
-
 (* A fresh decode of every code region with [roots] as subroutine
    facts and every provided destination fact. *)
 let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.state =
@@ -179,23 +171,6 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
   ignore roots;
 #endif
   let width = Theory.Target.code_addr_size (Project.target proj) in
-  (* The program's own entries ride every scan: they are the decode the
-     primary lift already named, and their facts keep the partition
-     from assigning their blocks to a discovered root. *)
-  let program_roots =
-    Term.enum sub_t (Project.program proj)
-    |> Seq.filter_map ~f:(fun s ->
-           match Term.first blk_t s with
-           | Some b -> Base.Option.map (Term.get_attr b address)
-                         ~f:(fun a -> Word.to_int64_exn a)
-           | None -> None)
-    |> Seq.to_list
-  in
-  let roots =
-    Base.List.append program_roots
-      (Base.List.filter roots
-         ~f:(fun w -> not (Base.List.mem program_roots w ~equal:Int64.equal)))
-  in
   let roots_set =
     Core.Set.of_list (module Addr) (Base.List.map roots ~f:Addr.of_int64)
   in
@@ -243,3 +218,19 @@ let terminators (cfg : Graphs.Cfg.t) : (Addr.t * Addr.t) list =
          | Some (mem, _) -> Some (Block.addr b, Memory.min_addr mem)
          | None -> None)
   |> Seq.to_list
+
+(* BAP's partition of a decode into subroutines and the symbol table it
+   names them by, computed as the project's own disassembly computes
+   them. *)
+let symtab ~(file : string) (state : Driver.state) : Symtab.t =
+  let out : Symtab.t Toplevel.var = Toplevel.var "hike-decode-symtab" in
+  Toplevel.put out
+    (let open Kb.Syntax in
+     Kb.Symbol.in_package file @@ fun () ->
+     Theory.instance () >>= fun theory ->
+     Theory.with_current theory @@ fun () ->
+     Theory.Unit.for_file file >>= fun unit ->
+     Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) (fun () ->
+         Disasm.Subroutines.update Disasm.Subroutines.empty state)
+     >>= fun subs -> Symtab.create state subs);
+  Toplevel.get out

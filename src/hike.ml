@@ -9,6 +9,7 @@ module Vsa = Hike_vsa
 module Summary = Hike_summary
 module Worklist = Hike_worklist
 module Decode = Hike_decode
+module Drive = Hike_drive
 module Diag = Hike_diag
 module Cfg_complete = Hike_cfg_complete
 
@@ -33,7 +34,7 @@ module Types = Hike_types
 module Ssa = Hike_ssa
 module Bil2llvm = Bil2llvm
 
-let convert_binary output_program proj =
+let emit output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   let target = Project.target proj in
@@ -87,17 +88,17 @@ let chain' ~name ~deps run =
   Project.register_pass' ~name ~deps ~runonce:true run;
   last_pass ()
 
-(* Discovery: the worklist's program and the analysis facts every later
-   pass reads. *)
+(* Discovery: the drive's program and symbol table, and the analysis
+   facts every later pass reads. *)
 let pass_discover proj =
   let target = Project.target proj in
   if Hike_abi.is_known_foreign target then
     Hike_diag.warn
       "target %s is not x86_64-gnu-elf; the x86-64 SysV convention record serves it"
       (KB.Name.to_string (Theory.Target.name target));
-  let result = Hike_worklist.run proj in
+  let result = Hike_drive.run proj in
   Hike_kb.install result.facts;
-  Project.with_program proj result.program
+  Project.with_program (Project.with_symbols proj result.symtab) result.program
 
 (* ELF facts are read here; attribution owns the BIR and facts protocol. *)
 let pass_attrib proj =
@@ -125,8 +126,6 @@ let pass_variadic proj =
     ~f:(Hike_variadic.stamp ~abi:facts.abi ~entry:Hike_stack_model.segment_base
           ~denote:facts.denote)
 
-let pass_convlir ~output proj = convert_binary output proj
-
 let pass_split_blocks proj =
   Project.map_program proj ~f:Hike_split_blocks.normalize
 
@@ -134,18 +133,25 @@ let pass_ssa proj =
   let target = Project.target proj in
   Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
 
+(* The pass chain in order: the plugin registers each stage as a pass
+   and [lift] runs them in sequence, so the two entries cannot drift. *)
+let stages = [
+  ("discover", pass_discover);
+  ("variadic", pass_variadic);
+  ("sections", pass_attrib);
+  ("split-blocks", pass_split_blocks);
+  ("sign", Hike_types.sign_run);
+  ("ssa", pass_ssa);
+  ("types", Hike_types.run);
+]
+
+let lift proj = Base.List.fold stages ~init:proj ~f:(fun proj (_, run) -> run proj)
+
 let () =
   Extension.declare ~provides:["pass"; "hike"] (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
-      let discover = chain ~name:"discover" ~deps:[] pass_discover in
-      let variadic = chain ~name:"variadic" ~deps:[ discover ] pass_variadic in
-      let sections = chain ~name:"sections" ~deps:[ variadic ] pass_attrib in
-      let split_blocks =
-        chain ~name:"split-blocks" ~deps:[ sections ] pass_split_blocks
+      let last =
+        Base.List.fold stages ~init:[] ~f:(fun deps (name, run) -> [ chain ~name ~deps run ])
       in
-      let sign = chain ~name:"sign" ~deps:[ split_blocks ] Hike_types.sign_run in
-      let ssa = chain ~name:"ssa" ~deps:[ sign ] pass_ssa in
-      let types = chain ~name:"types" ~deps:[ ssa ] Hike_types.run in
-      let convlir = chain' ~name:"convlir" ~deps:[ types ] (pass_convlir ~output:output_file) in
-      ignore convlir;
+      ignore (chain' ~name:"convlir" ~deps:last (emit output_file));
       Ok ())

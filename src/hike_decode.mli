@@ -1,11 +1,9 @@
 (* Internal BAP adapter for the discovery pass. *)
 open Bap.Std
 
-(** The package the program's subs name as their source file. *)
-val file_of : program term -> string
-
-(** The loader's decode. *)
-val initial : Project.t -> Disasm.Driver.state
+(** The package the project's labels live in: the file it was loaded
+    from. *)
+val file_of : Project.t -> string
 
 (** Each block's start address and its last instruction's address. *)
 val terminators : Graphs.Cfg.t -> (Addr.t * Addr.t) list
@@ -49,3 +47,7 @@ val trim : Graphs.Cfg.t -> entry:Block.t -> keep_fall:(Block.t -> bool) -> Graph
 
 (** The body lifted by BAP's sub lifter under [tid] and [name]. *)
 val lift : file:string -> tid:Tid.t -> name:string -> Block.t -> Graphs.Cfg.t -> sub term
+
+(** BAP's partition of a decode into subroutines and the symbol table
+    naming them: the facts the project's own disassembly would hold. *)
+val symtab : file:string -> Disasm.Driver.state -> Symtab.t

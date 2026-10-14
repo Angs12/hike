@@ -29,6 +29,10 @@ SRC_HASH=$({ find "$TREE/src" \( -name '*.ml' -o -name '*.mli' -o -name '*.c' -o
 # loads with it (the analysis code lives in hike/cbat_vsa/*.cmxs).
 PLUGIN_DIR=$(dirname "$PLUGIN_DST")
 BUNDLE_HASH=$( (cd "$PLUGIN_DIR" && find . -name '*.cmxs' | sort | xargs sha256sum) | sha256sum | cut -c1-16)
+# The embedded lift entry installs beside bap in the switch's bin.
+HIKE_BIN="$(dirname "$(dirname "$PLUGIN_DIR")")/bin/hike"
+[ -x "$HIKE_BIN" ] || { echo "record_provenance: no installed hike at $HIKE_BIN" >&2; exit 1; }
+BIN_HASH=$(sha256sum "$HIKE_BIN" | cut -c1-16)
 
 cat > "${PLUGIN_DST}.provenance" <<EOF
 # hike plugin provenance — written by src/record_provenance.sh at install time.
@@ -38,6 +42,7 @@ tree: $TREE
 git: $GIT_DESC
 src_sha16: $SRC_HASH
 bundle_sha16: $BUNDLE_HASH
+bin_sha16: $BIN_HASH
 EOF
 
-echo "record_provenance: wrote ${PLUGIN_DST}.provenance (git=$GIT_DESC src=$SRC_HASH bundle=$BUNDLE_HASH)"
+echo "record_provenance: wrote ${PLUGIN_DST}.provenance (git=$GIT_DESC src=$SRC_HASH bundle=$BUNDLE_HASH bin=$BIN_HASH)"

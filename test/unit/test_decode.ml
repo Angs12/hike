@@ -7,11 +7,11 @@ open Hike_test.Harness
 module D = Hike.Decode
 
 let addr = Addr.of_int64
-let file_of project = D.file_of (Project.program project)
+let file_of = D.file_of
 
 (* The decoded state and one function's candidate graph and entry block. *)
 let candidate ?is_entry project entry =
-  let state = D.initial project in
+  let state = D.scan project ~file:(file_of project) ~roots:[] in
   let is_entry =
     Base.Option.value is_entry ~default:(Disasm.Driver.is_subroutine state) in
   let cfg = D.function_cfg ~file:(file_of project) state ~entry ~is_entry in

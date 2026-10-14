@@ -48,6 +48,9 @@ type t = {
   abi : Hike_abi.t;
   slot_names : string Core.Int64.Map.t;
   mutable state : Disasm.Driver.state;
+  (* BAP's subroutine entries in the initial decode: every scan carries
+     them, and the refusal path takes them as roots. *)
+  subroutines : int64 list;
   (* The subroutine facts every scan carries, in discovery order. *)
   mutable roots : int64 list;
   (* The provided destinations, by dispatch instruction. *)
@@ -86,7 +89,14 @@ let is_entry t (a : int64) : bool =
   Core.Hashtbl.mem t.entries a
   || Disasm.Driver.is_subroutine t.state (Addr.of_int64 a)
 
-let rescan t = t.state <- D.scan t.proj ~file:t.file ~roots:t.roots
+(* The subroutine entries keep the scan's decode from treating their
+   blocks as reached from a discovered root. *)
+let rescan t =
+  let fresh =
+    Base.List.filter t.roots ~f:(fun w ->
+        not (Base.List.mem t.subroutines w ~equal:Int64.equal))
+  in
+  t.state <- D.scan t.proj ~file:t.file ~roots:(t.subroutines @ fresh)
 
 (* ---- targets ---- *)
 
@@ -586,17 +596,18 @@ and materialised_words t (f : func) : int64 list =
 
 (* ---- the program ---- *)
 
-let create proj : t =
+let create proj ~file ~state ~subroutines : t =
   let context = Hike_program_vsa.prepare proj in
   {
     proj;
-    file = D.file_of (Project.program proj);
+    file;
     context;
     abi = Hike_abi.of_target context.target;
     slot_names =
       Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
         (Hike_image.external_references proj);
-    state = D.initial proj;
+    state;
+    subroutines;
     roots = [];
     dests = Core.Int64.Map.empty;
     jump_dests = Core.Int64.Set.empty;
@@ -761,12 +772,12 @@ let facts t : Hike_kb.facts =
     foreign_slots = t.context.linker_slots }
 
 (* The worklist's program: main's closure (or, on refusal, that of
-   every BAP subroutine and every materialised code word) as solved
+   every subroutine entry and every materialised code word) as solved
    bodies with one jump per block, plus a block-less declaration per
    external target (the emitter maps intrinsic targets itself); and the
    solves' analysis facts. *)
-let run (proj : Project.t) : result =
-  let t = create proj in
+let run (proj : Project.t) ~file ~state ~subroutines : result =
+  let t = create proj ~file ~state ~subroutines in
   let entry = Hike_image.entry_point proj in
   Base.Option.iter entry ~f:(fun a -> solve_roots t [ a ]);
   let main =
@@ -798,13 +809,7 @@ let run (proj : Project.t) : result =
     t.refused <- true;
     t.found <-
       Base.List.concat_map (functions t) ~f:(fun (_, f) -> materialised_words t f);
-    solve_roots t
-      (Term.enum sub_t (Project.program proj)
-       |> Seq.filter_map ~f:(fun s ->
-           Base.Option.bind (Term.first blk_t s) ~f:(fun b ->
-               Base.Option.map (Term.get_attr b address) ~f:Word.to_int64_exn))
-       |> Seq.filter ~f:(in_text t)
-       |> Seq.to_list);
+    solve_roots t (Base.List.filter t.subroutines ~f:(in_text t));
     close t
   end;
   let lifted =

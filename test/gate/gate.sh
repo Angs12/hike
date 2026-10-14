@@ -2,14 +2,14 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: provenance corpus lift allocas semantics unit referee performance
-#             unit all
+#     stages: provenance corpus lift allocas semantics drive unit referee
+#             performance all
 #
 # `all` runs the documented chain in order and aborts on the first failure.
 # Every stage is strict (non-zero exit on any failure) and provenance is
 # verified before any stage that consumes an emission.
 #
-# Paths are overridable: HIKE_CORPUS, HIKE_EMIT, HIKE_SEMOUT.
+# Paths are overridable: HIKE_CORPUS, HIKE_EMIT, HIKE_SEMOUT, HIKE_DRIVE_EMIT.
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,9 +19,10 @@ TREE="$(cd "$HERE/../.." && pwd)"
 CORPUS="${HIKE_CORPUS:-/tmp/corpus-o2}"
 EMIT="${HIKE_EMIT:-/tmp/hike-emit}"
 SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
+DRIVE_EMIT="${HIKE_DRIVE_EMIT:-/tmp/hike-drive-emit}"
 
 usage() {
-  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|unit|referee|performance|all> [performance options and binaries]" >&2
+  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|drive|unit|referee|performance|all> [performance options and binaries]" >&2
   exit 2
 }
 
@@ -45,6 +46,11 @@ stage() {
     allocas)    "$HERE/check_allocas.sh" "$EMIT" &&
                 python3 "$HERE/check_initializers.py" "$EMIT" "$CORPUS" ;;
     semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
+    drive)      need_provenance; need_renderer
+                "$HERE/run_drive.sh" "$CORPUS" "$EMIT" "$DRIVE_EMIT" &&
+                "$HERE/check_allocas.sh" "$DRIVE_EMIT" &&
+                python3 "$HERE/check_initializers.py" "$DRIVE_EMIT" "$CORPUS" &&
+                "$HERE/semantic/run_semantic.sh" "$CORPUS" "$DRIVE_EMIT" "$SEMOUT-drive" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
     referee)    ( cd "$TREE" && dune exec test/unit/test_clp_equiv.exe ) ;;
     performance)
@@ -60,7 +66,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in provenance corpus lift allocas semantics unit referee; do
+  for s in provenance corpus lift allocas semantics drive unit referee; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2

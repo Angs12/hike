@@ -1,0 +1,6 @@
+; The sole-decoder lift entry (ADR 0032): BAP embedded as a library.
+(executable
+ (name main)
+ (public_name hike)
+ (package hike)
+ (libraries hike bap bap-core-theory bap-main core findlib.dynload threads))

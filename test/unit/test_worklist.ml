@@ -23,7 +23,7 @@ let returns_after_every_call prog sub =
       | _ -> true)
     (calls sub)
 
-let lift code = with_binary code (fun p -> (Hike.Worklist.run p).program)
+let lift code = with_binary code (fun p -> (Hike.Drive.run p).program)
 
 let starts_at a t =
   Base.Option.equal Addr.equal (Term.get_attr t address) (Some (Addr.of_int64 a))
