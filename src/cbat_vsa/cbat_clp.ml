@@ -751,23 +751,37 @@ module Pieces = struct
 
   (* Pointwise map for the elementwise unary ops. *)
   let map (f : progression -> progression) (ps : t) : t =
-    finish (List.map ps ~f)
+    match ps with
+    | [ p ] -> finish [ f p ]
+    | _ -> finish (List.map ps ~f)
 
   (* Cross product with empty pair results dropped; the results are
-     placed by construction (their order is the grid's, not sorted). *)
+     placed by construction (their order is the grid's, not sorted).  A
+     single piece on either side is the common case: build it directly. *)
   let lift2 (f : progression -> progression -> progression) (a : t) (b : t)
     : t =
-    finish
-      (List.concat_map a ~f:(fun pa ->
-           List.filter_map b ~f:(fun pb ->
-               let r = f pa pb in
-               if C.is_bottom r then None else Some r)))
+    match a, b with
+    | [ pa ], [ pb ] ->
+      let r = f pa pb in
+      if C.is_bottom r then [] else finish [ r ]
+    | _ ->
+      finish
+        (List.concat_map a ~f:(fun pa ->
+             List.filter_map b ~f:(fun pb ->
+                 let r = f pa pb in
+                 if C.is_bottom r then None else Some r)))
 
   (* Cross product where a pair yields several pieces; a wrapped operand
      is split into its arcs first (the parts producers are
      progression-level). *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
+    match a, b with
+    | [ pa ], [ pb ] ->
+      finish
+        (List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
+             List.concat_map (C.split_wrapped pb) ~f:(fun qb -> f qa qb)))
+    | _ ->
     finish
       (List.concat_map a ~f:(fun pa ->
            List.concat_map (C.split_wrapped pa) ~f:(fun qa ->
