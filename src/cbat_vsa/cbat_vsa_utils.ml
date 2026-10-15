@@ -85,5 +85,10 @@ and negated_cond (e : exp) : exp =
   | Bil.BinOp (op, a, b) when is_comparison_op op ->
     let op', swap = negate_comparison op in
     if swap then Bil.BinOp (op', b, a) else Bil.BinOp (op', a, b)
+  | Bil.BinOp (Bil.OR, a, b) ->
+    (* De Morgan over 1-bit conds: ~(a | b) is (~a) & (~b).  Pushing the
+       negation onto each operand exposes the flag constraints instead of
+       leaving an opaque NOT the evaluator cannot split. *)
+    Bil.BinOp (Bil.AND, negated_cond a, negated_cond b)
   | Bil.UnOp (Bil.NOT, u) -> complete_cond u
   | _ -> Bil.UnOp (Bil.NOT, e)

@@ -1978,7 +1978,35 @@ let tests : unit Alcotest.test list =
         let w8 = Cbat_word.of_int ~width:8 in
         check "BK-109.ones" (Ws.elem (w8 0xff) (refined 1 2));
         check "BK-109.max" (Ws.elem (w8 0xfb) (refined 5 2));
-        check "BK-109.tight" (not (Ws.elem (w8 0xfc) (refined 5 2))))
+        check "BK-109.tight" (not (Ws.elem (w8 0xfc) (refined 5 2))));
+
+    (* ~(a | b): the complete_cond push (De Morgan) exposes each flag,
+       and the OR=false row constrains both operands when the OR itself
+       is met to false. *)
+    pin "BK-110" "~(|): complete_cond pushes NOT through OR and the OR-false row constrains both flags"
+      (fun () ->
+        let cf = Var.create ~is_virtual:false ~fresh:false "bk110_cf" (Type.Imm 1) in
+        let zf = Var.create ~is_virtual:false ~fresh:false "bk110_zf" (Type.Imm 1) in
+        let env =
+          AI.add_word (AI.add_word AI.top ~key:cf ~data:(Ws.top 1)) ~key:zf
+            ~data:(Ws.top 1) in
+        let cond = Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.OR, Bil.Var cf, Bil.Var zf)) in
+        check "BK-110.demorgan"
+          (match Cbat_vsa_utils.complete_cond cond with
+           | Bil.BinOp (Bil.AND, Bil.UnOp (Bil.NOT, _), Bil.UnOp (Bil.NOT, _)) -> true
+           | _ -> false);
+        let false_ = Ws.singleton Cbat_word.b0 in
+        (* The pushed form (AND of the two negations) reaches each flag. *)
+        let pushed =
+          Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env
+            (Cbat_vsa_utils.complete_cond cond) in
+        check "BK-110.pushed-cf" (Ws.equal (AI.find_word 1 pushed cf) false_);
+        check "BK-110.pushed-zf" (Ws.equal (AI.find_word 1 pushed zf) false_);
+        (* The raw form exercises the NOT row then the OR=false row. *)
+        let raw =
+          Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env cond in
+        check "BK-110.raw-cf" (Ws.equal (AI.find_word 1 raw cf) false_);
+        check "BK-110.raw-zf" (Ws.equal (AI.find_word 1 raw zf) false_));
   ]
 
 let () = run "backward" tests

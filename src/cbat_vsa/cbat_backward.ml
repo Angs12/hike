@@ -1316,6 +1316,14 @@ let rec constrain_operands ~(env : AI.t)
       (* AND = false: which operand is false is unknown — identity. *)
       env
     else env
+  | Bil.BinOp (Bil.OR, a, b) when WordSet.bitwidth produced = 1 ->
+    (* OR = false constrains both operands to false. *)
+    if WordSet.elem Cbat_word.b0 produced
+       && not (WordSet.elem Cbat_word.b1 produced)
+    then
+      let env = constrain_operands ~env ~cells ~nonneg ~landmarks a produced in
+      constrain_operands ~env ~cells ~nonneg ~landmarks b produced
+    else env
   | Bil.BinOp (op, a, b) ->
     (match op with
      | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE
