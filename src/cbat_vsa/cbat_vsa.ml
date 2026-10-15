@@ -723,6 +723,13 @@ module Test_seam = struct
   let refine_edge = refine_edge
   let refine_edge_count_writes = refine_edge_count_writes
 
+  let acquire_unsat ~(rctx : refine_ctx) ~entry env blk disabled =
+    Cbat_backward.acquire_unsat ~entry ~landmarks:rctx.Cbat_runctx.rc_landmarks
+      ~cache:rctx.rc_prefix ~witness:rctx.rc_nonneg env blk disabled
+
+  let prefix_cached (rctx : refine_ctx) blk =
+    Core.Map.mem !(rctx.Cbat_runctx.rc_prefix) (Term.tid blk)
+
   (* The walk's env-write sites, named for the counting refine. *)
   type write_site = Cbat_backward.write_site = Output_write | Input_write
 

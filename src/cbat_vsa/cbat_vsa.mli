@@ -242,4 +242,11 @@ module Test_seam : sig
     seeds:Var.Set.t ->
     AI.t -> blk term -> AI.t * int * int
 
+  (* The disabled-continuation observer on [blk] from [entry], and
+     whether the context holds [blk]'s def-prefix chain. *)
+  val acquire_unsat :
+    rctx:refine_ctx -> entry:AI.t -> AI.t -> blk term -> exp -> unit
+
+  val prefix_cached : refine_ctx -> blk term -> bool
+
 end

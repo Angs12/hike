@@ -2006,6 +2006,34 @@ let tests : unit Alcotest.test list =
           Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env cond in
         check "BK-110.raw-cf" (Ws.equal (AI.find_word 1 raw cf) false_);
         check "BK-110.raw-zf" (Ws.equal (AI.find_word 1 raw zf) false_));
+
+    (* The observer inside a cycle: a disabled cond with no constrained
+       var walks nothing, so it builds no def-prefix chain; a cond that
+       bounds a var does. *)
+    pin "BK-111" "a seedless observer skips the walk and its def-prefix replay"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "bk111_x" (Type.Imm 32) in
+        let y = Var.create ~is_virtual:false ~fresh:false "bk111_y" (Type.Imm 32) in
+        let sub, tids =
+          sub_of "bk111"
+            [ [ Def.create x
+                  (Bil.BinOp (Bil.PLUS, Bil.Var y, Bil.Int (Cbat_word.to_word (s_r32 1)))) ],
+              [ (1, mk_goto) ];
+              [], [] ]
+        in
+        let blk = Term.find_exn blk_t sub tids.(0) in
+        let observe disabled =
+          let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+          let entry = AI.add_word AI.top ~key:y ~data:(Ws.top 32) in
+          let env = Vsa.Test_seam.denote_defs blk entry in
+          Vsa.Test_seam.with_widening_head rctx (Some tids.(0)) (fun () ->
+              Vsa.Test_seam.acquire_unsat ~rctx ~entry env blk disabled);
+          Vsa.Test_seam.prefix_cached rctx blk
+        in
+        check "BK-111.seedless" (not (observe (Bil.Int Bitvector.b1)));
+        check "BK-111.seeded"
+          (observe
+             (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (s_r32 5))))));
   ]
 
 let () = run "backward" tests

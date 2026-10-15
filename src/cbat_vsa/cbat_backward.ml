@@ -1769,9 +1769,12 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     let constrained = constrain_edge ~env ~landmarks disabled in
     if not (AI.equal constrained AI.bottom) then begin
       let seeds = cond_seeds ~env:constrained disabled in
-      ignore
-        (walk ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
-           constrained blk)
+      (* Without seeds the observer, which never inverts memory defs,
+         reaches no leaf meet: skip the walk and its prefix replay. *)
+      if not (Core.Set.is_empty seeds) then
+        ignore
+          (walk ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
+             constrained blk)
     end
   end
 
