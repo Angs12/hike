@@ -37,22 +37,14 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     | Bil.Int n -> nonneg_word (Cbat_word.of_word n)
     | Bil.Var v ->
       let seen = Core.Set.mem vars e in
-      let info = Core.Map.find defs (Var.base v) in
-      let result =
-        if seen then
-          (* Loads may close the induction. *)
-          (match info with
-           | Some (d, true) ->
-             (match Def.rhs d with
-              | Bil.Load _ -> walk cells vars (Def.rhs d)
-              | _ -> false)
-           | _ -> false)
-        else begin match info with
-          | Some (d, true) -> walk cells (Core.Set.add vars e) (Def.rhs d)
-          | _ -> false
-        end
-      in
-      result
+      (match Core.Map.find defs (Var.base v) with
+       | Some (d, true) when seen ->
+         (* Loads may close the induction. *)
+         (match Def.rhs d with
+          | Bil.Load _ -> walk cells vars (Def.rhs d)
+          | _ -> false)
+       | Some (d, true) -> walk cells (Core.Set.add vars e) (Def.rhs d)
+       | _ -> false)
     | Bil.BinOp (Bil.PLUS, a, b) ->
       walk cells vars a && walk cells vars b
     | Bil.BinOp (Bil.MINUS, a, b) ->
@@ -391,7 +383,7 @@ let evidence_constraint ?(cur : wordset option = None)
   let cardn_of_int (i : int) : Cbat_word.t option =
     if i < 0 then None else Some (Cbat_word.of_int ~width:(width + 1) i) in
   let int_of_word (v : Cbat_word.t) : int option =
-    try Some (Cbat_word.to_int_exn v) with _ -> None in
+    Cbat_word.to_int v |> Result.ok in
   (* The arms read the bound's payload: the sign flag a signed extremum
      carries is an annotation, not part of the value the comparison
      denotes, so the half tests run unsigned. *)
