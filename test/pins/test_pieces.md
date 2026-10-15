@@ -9,7 +9,7 @@ recipes invert the pinned contracts in the vendored domain library.
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
 | PCS-01 | the canonical form: sorted, disjoint, constant-difference runs, contained pieces dropped, adjacent same-step runs merged | drop the merge/drop arms of `insert` in `Cbat_clp.Pieces` | pin FAILs under that inversion (re-demonstrated by review) |
-| PCS-04 | the cap: five pieces hull to four by the smallest growth, sound | pick an arbitrary pair in `choose_pair` | pin FAILs under that inversion (re-demonstrated by review) |
+| PCS-04 | the cap: five pieces hull to four by merging the last two, sound | hull the first two pieces in `cap_to` | pin FAILs under that inversion (the smallest-growth cap also fails it) |
 | PCS-05 | the widening pairing: the overlapping couple widens, an unmatched piece stays its own atom, a top couple collapses | restore the rank pairing and the excess hull in `positional` | observed FAIL on the pre-T28 code (2026-10-14): the one-sided `{10..12}` was hulled into the first pair (`l` had 1 piece containing 5) |
 | PCS-06 | the union-order precedes: one covering piece or element-wise coverage | replace `precedes` with hull containment | pin FAILs under that inversion (re-demonstrated by review) |
 | PCS-08 | the parts exactness: a straddling lshift keeps the overshift and the capped exact pieces apart | collapse the parts in `Pieces.lshift` | pin FAILs under that inversion (re-demonstrated by review) |
