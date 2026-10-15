@@ -141,6 +141,9 @@ module Exact : sig
   val singleton : Cbat_word.t -> t
   val of_list : width:int -> Cbat_word.t list -> t
   val is_bottom : t -> bool
+  (* A one-element set's pieces: [create] makes every singleton
+     canonical, so they are the ones [Pieces.of_list] would build. *)
+  val point_pieces : t -> Pieces.t option
 
   val bitwidth : t -> int
   val cardinality : t -> Cbat_word.t

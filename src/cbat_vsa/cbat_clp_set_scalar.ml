@@ -92,7 +92,9 @@ let hull_of_pieces (ps : P.t) : clp option =
 let pieces_of_words ~width (l : word list) : P.t = P.of_list ~width l
 
 let pieces_of_finset (s : fset) : P.t =
-  pieces_of_words ~width:(Exact.bitwidth s) (Exact.iter s)
+  match Exact.point_pieces s with
+  | Some ps -> ps
+  | None -> pieces_of_words ~width:(Exact.bitwidth s) (Exact.iter s)
 
 let clp_of_finset fs : clp =
   let width = Exact.bitwidth fs in

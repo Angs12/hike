@@ -61,9 +61,9 @@ let pred (p : point) : point =
 let of_word (w : Cbat_word.t) : point option =
     let bw = Cbat_word.bitwidth w in
     if bw <= 64 then
-      match Cbat_word.to_int64 w with
-      | Ok i -> Some {pwidth = bw; pvalue = Stdlib.Int64.logand i (mask bw)}
-      | Error _ -> None
+      match Cbat_word.to_int64_opt w with
+      | Some i -> Some {pwidth = bw; pvalue = Stdlib.Int64.logand i (mask bw)}
+      | None -> None
     else None
 
 (* Last writable byte. *)
@@ -167,23 +167,24 @@ let overlap (k1 : t) (k2 : t) : bool =
    full value (the tree stays single-keyed).  An empty piece names no
    address; a piece too wide for a point keys its whole line. *)
 let of_wordset (p : WordSet.t) : t list =
-  let open Monads.Std.Monad.Option.Syntax in
   let of_piece (origin : Hike_origin.t) (q : WordSet.Clp.t) : t option =
     let stride =
       if WordSet.Clp.is_infinite q then 1
       else
-        match Cbat_word.to_int64 (WordSet.Clp.step_of q) with
-        | Ok i when Stdlib.Int64.compare i 1L > 0
-                    && Stdlib.Int64.compare i
-                         (Stdlib.Int64.of_int Stdlib.max_int) <= 0 ->
+        match Cbat_word.to_int64_opt (WordSet.Clp.step_of q) with
+        | Some i when Stdlib.Int64.compare i 1L > 0
+                      && Stdlib.Int64.compare i
+                           (Stdlib.Int64.of_int Stdlib.max_int) <= 0 ->
           Stdlib.Int64.to_int i
         | _ -> 1 in
-    WordSet.Clp.min_elem q >>= fun lo_w ->
-    WordSet.Clp.max_elem q >>= fun hi_w ->
-    of_word lo_w >>= fun lo ->
-    of_word hi_w >>= fun hi ->
-    if le lo hi then Some {origin; lo; hi; step = stride}
-    else Some {origin; lo = hi; hi = lo; step = stride}
+    match WordSet.Clp.min_elem q, WordSet.Clp.max_elem q with
+    | Some lo_w, Some hi_w -> (
+      match of_word lo_w, of_word hi_w with
+      | Some lo, Some hi ->
+        if le lo hi then Some {origin; lo; hi; step = stride}
+        else Some {origin; lo = hi; hi = lo; step = stride}
+      | _ -> None)
+    | _ -> None
   in
   let whole_line origin =
     { origin; lo = { pwidth = 64; pvalue = 0L }; hi = { pwidth = 64; pvalue = -1L };

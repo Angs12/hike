@@ -505,7 +505,12 @@ let to_int_exn (t : t) : int =
 let to_int_sat (t : t) : int =
   match t with Small (v, _, _) -> v | W64 _ | Big _ -> max_int
 
-let to_int (t : t) : int Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int_exn t)
+(* The fitting cases answer directly; only a failure pays for [try_with]. *)
+let to_int (t : t) : int Core.Or_error.t =
+  match t with
+  | Small (v, _, _) -> Ok v
+  | W64 (x, _, _) when Int64.compare x 0L >= 0 -> Ok (Int64.to_int x)
+  | _ -> Core.Or_error.try_with (fun () -> to_int_exn t)
 
 let to_int64_exn (t : t) : int64 =
   match t with
@@ -514,10 +519,18 @@ let to_int64_exn (t : t) : int64 =
   | Big (z, _, _) when Z.numbits z <= 64 -> Z.to_int64_unsigned z
   | Big _ -> failwith (Printf.sprintf "%s doesn't fit the int64 type" (to_string t))
 
-let to_int64 (t : t) : int64 Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int64_exn t)
+let to_int64 (t : t) : int64 Core.Or_error.t =
+  match t with
+  | Small (v, _, _) -> Ok (Int64.of_int v)
+  | W64 (x, _, _) -> Ok x
+  | Big _ -> Core.Or_error.try_with (fun () -> to_int64_exn t)
 
 let to_int64_opt (t : t) : int64 option =
-  match to_int64 t with Ok v -> Some v | Error _ -> None
+  match t with
+  | Small (v, _, _) -> Some (Int64.of_int v)
+  | W64 (x, _, _) -> Some x
+  | Big (z, _, _) when Z.numbits z <= 64 -> Some (Z.to_int64_unsigned z)
+  | Big _ -> None
 
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 

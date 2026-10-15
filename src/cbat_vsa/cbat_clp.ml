@@ -954,6 +954,11 @@ module Exact = struct
   let singleton (w : W.t) : t =
     { width = W.bitwidth w; pieces = [ C.singleton w ] }
 
+  let point_pieces (t : t) : Pieces.t option =
+    match t.pieces with
+    | [ p ] when W.is_one (C.cardn_of p) -> Some t.pieces
+    | _ -> None
+
   let bitwidth (t : t) : int = t.width
   let get_idx (t : t) : int = t.width
 
