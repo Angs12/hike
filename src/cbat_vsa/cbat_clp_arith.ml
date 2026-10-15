@@ -35,13 +35,10 @@ let arcs2 (f : t -> t -> t) (p1 : t) (p2 : t) : t =
   match split_wrapped p1, split_wrapped p2 with
   | [ q1 ], [ q2 ] -> f q1 q2
   | qs1, qs2 ->
-    List.fold
-      (List.concat_map qs1 ~f:(fun q1 ->
-           List.map qs2 ~f:(fun q2 -> q1, q2)))
-      ~init:None
-      ~f:(fun acc (q1, q2) ->
-          let r = f q1 q2 in
-          match acc with None -> Some r | Some a -> Some (union a r))
+    List.fold qs1 ~init:None ~f:(fun acc q1 ->
+        List.fold qs2 ~init:acc ~f:(fun acc q2 ->
+            let r = f q1 q2 in
+            match acc with None -> Some r | Some a -> Some (union a r)))
     |> function
     | Some r -> r
     | None -> bottom (Stdlib.max (bitwidth p1) (bitwidth p2))
@@ -762,12 +759,10 @@ let sdiv_core (p1 : t) (p2 : t) : t =
         | false, true -> 1
         | _ -> W.compare a b
       in
-      let lo =
-        List.reduce_exn [ minmax; minmin; maxmax; maxmin ]
-          ~f:(fun a b -> if scmp a b <= 0 then a else b) in
-      let hi =
-        List.reduce_exn [ minmax; minmin; maxmax; maxmin ]
-          ~f:(fun a b -> if scmp a b >= 0 then a else b) in
+      let lesser a b = if scmp a b <= 0 then a else b in
+      let greater a b = if scmp a b >= 0 then a else b in
+      let lo = lesser (lesser (lesser minmax minmin) maxmax) maxmin in
+      let hi = greater (greater (greater minmax minmin) maxmax) maxmin in
       let step = W.one width in
       let cardn = cardn_from_bounds lo step hi in
       !!(create lo ~step ~cardn)

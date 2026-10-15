@@ -387,8 +387,9 @@ let arc_min_signed (p : t) : W.t =
   else if W.(>=) a h then a
   else
     let n = W.extract_exn ~hi:width (cardn_of p) in
-    let k = W.div (W.sub h a) s in
-    let rem = W.modulo (W.sub h a) s in
+    let gap = W.sub h a in
+    let k = W.div gap s in
+    let rem = W.modulo gap s in
     let k = if W.is_zero rem then k else W.succ k in
     let k = if W.(>=) k (W.pred n) then W.pred n else k in
     W.add a (W.mul k s)
@@ -688,10 +689,10 @@ let rec union (p1 : t) (p2 : t) : t =
         Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
           let b1 = base_of p1 and b2 = base_of p2 in
           let base, newE = interval_union (b1, e1) (b2, e2) in
+          let g x acc = bounded_gcd acc (W.sub x base) in
           let step =
-            List.fold [ b1; e1; b2; e2 ]
-              ~init:(bounded_gcd (step_of p1) (step_of p2))
-              ~f:(fun acc x -> bounded_gcd acc (W.sub x base)) in
+            bounded_gcd (step_of p1) (step_of p2)
+            |> g b1 |> g e1 |> g b2 |> g e2 in
           let cardn = cardn_from_bounds base step newE in
           create base ~step ~cardn
         end
