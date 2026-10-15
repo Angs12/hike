@@ -34,16 +34,6 @@ let written_regs_of_sub (sub : sub term) : Var.Set.t =
         Core.Set.add acc (Var.base lhs)
       | _ -> acc)
 
-(* The fused solve: each phase runs the engine over the resolved
-   extra-edge set, then the resolver grows the edges and splits
-   mid-block case entries — a resolution event — and the next phase
-   solves warm.  A phase whose reachable calls wait on a callee with no
-   summary yet pauses instead: the phase's solution is the seed the
-   resume warms from (a blocked call's continuation is bottom, so the
-   seed stays below the final state).  The BIR's claims are immutable
-   during the solve; at drain the materialization lands once.
-   Non-convergence is the top identity: empty environments, the
-   shape-canonicalized sub, the input block-address map. *)
 type lookup_fn = int64 -> Tid.t option
 
 type paused = {
@@ -99,6 +89,16 @@ let blocked_callees ~(lookup : lookup_fn)
               (Core.Set.add callees t, Core.Set.add blocks (Term.tid blk))
             | _ -> acc))
 
+(* The fused solve: each phase runs the engine over the resolved
+   extra-edge set, then the resolver grows the edges and splits
+   mid-block case entries — a resolution event — and the next phase
+   solves warm.  A phase whose reachable calls wait on a callee with no
+   summary yet pauses instead: the phase's solution is the seed the
+   resume warms from (a blocked call's continuation is bottom, so the
+   seed stays below the final state).  The BIR's claims are immutable
+   during the solve; at drain the materialization lands once.
+   Non-convergence is not a top identity: the phases fail the lift
+   with a [hike-vsa] error. *)
 let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)
     ~(callee : Tid.t -> Vsa.Call_effects.callee)
