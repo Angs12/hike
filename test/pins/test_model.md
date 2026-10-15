@@ -41,3 +41,4 @@ here.
 | MOD-46 | Two VLAs through copy chains are two top-level allocations; the second's descent is compared in the first frame's own offsets (its stack position is unknown). | In `vla_event`, always use `offset_bounds`. | MOD-46: the second allocation is missing. |
 | MOD-47 | The floor is where SP enters the frame: `SP := t & −16` gives −15; a later `SP := SP − 8` (a push below the allocation) does not lower it. | In `vla_confirm`, drop the `entering` test. | MOD-47: the floor reads −23. |
 | MOD-48 | An access through the producer's register (`mem[t + 8]`) is rewritten to the allocation base plus 8, whichever register carries it. | In `def_facts`'s `Keep` arm, drop the `Vla` routing. | MOD-48: the address stays `t + 8`. |
+| MOD-41 | term read sets use BAP terms and include the ABI transfer reads. | textually invert the pinned contract in `Hike_stack_model` | pin FAILs under that inversion (re-demonstrated by review) |

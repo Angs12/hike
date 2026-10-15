@@ -58,3 +58,4 @@ assertions.
 | SEC-66 | `S2`: an untagged heap-RBP store does not degrade the sub (rsp cell keeps Region) | classify stack-ness by the base register's name | SEC-66 red: storage ≠ `Stack_region 1` |
 | SEC-69 | AT4-VLA: a runtime-sized VLA claim binds nowhere (origin = `Vla (the decrement's tid)`, portions = `[]`), and the static frame cells carve as `Stack_region`s | bind a `Vla` claim as a Stack portion | SEC-69 red: the portions/carve asserts fail |
 | SEC-70 | AT4-VLA: a frame claim is not cut around the VLA — it binds on its own line as one Stack portion | split a frame claim around the run's extents | SEC-70 red: the portion-count/split assert fails |
+| SEC-71 | B2a: the residue's window reserve is the def-backed members' proven reach — the call escape does not size it. | textually invert the pinned contract in `Hike_sections` | pin FAILs under that inversion (re-demonstrated by review) |

@@ -15,3 +15,6 @@ through the ordinary def/phi fixpoint alongside ABI and escape roots.
 | DCE-06 | a `Sub.intrinsic` sub passes through `dce` unchanged | run the sweep on intrinsic subs | the dead def is deleted → length 1 fails |
 | DCE-08 | a phi whose result no survivor reads is swept, and the operand defs cascade with it (the phi arm) | count phi reads as permanent (feed `perm` from `blk_reads`) | the phi and the `d8_v` defs survive → `phi_gone`/`v_gone` fail |
 | DCE-09 | attribution carries escape roots through the facts record | remove the relevant liveness root | the retained operation or carried fact disappears |
+| DCE-10 | a call-bearing block's argument temps are the call's boundary reads. | textually invert the pinned contract in `Hike_dce` | pin FAILs under that inversion (re-demonstrated by review) |
+| DCE-11 | a store into an escape-rooted storage survives with no in-sub reader. | textually invert the pinned contract in `Hike_dce` | pin FAILs under that inversion (re-demonstrated by review) |
+| DCE-12 | a store into the global memory state survives with no in-sub reader. | textually invert the pinned contract in `Hike_dce` | pin FAILs under that inversion (re-demonstrated by review) |

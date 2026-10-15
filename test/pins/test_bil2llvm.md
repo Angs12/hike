@@ -53,3 +53,5 @@ its false edge named.  The fixtures whose guard and fallthrough targeted
 the SAME block (EMIT-01, EMIT-03, EMIT-09) now target distinct blocks —
 that shape is folded to one unconditional edge by the completion, which
 is the pin's point, not its subject.
+| EMIT-46 | the entry's declaration carries the ABI entry symbol, not the decoded tid name. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
+| EMIT-58 | a pointer masked by an integer stays a pointer (`ptrmask`); a pointer difference is an integer. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
