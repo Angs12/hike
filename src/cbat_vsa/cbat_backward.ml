@@ -919,7 +919,7 @@ let piece_dense (p : Cbat_clp.t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool 
    per-cell element test.  The cell's stride is not read: the forward
    load consults cells by hull overlap, and narrowing by the grid could
    clear a consulted read. *)
-let piece_touches_cell_bounds (mv : Mem.t) ~(line : Hike_origin.t)
+let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t)
     ~(bytes : int) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t)
     (p : Cbat_clp.t) : bool =
   let w = Cbat_word.bitwidth hi in
@@ -929,7 +929,9 @@ let piece_touches_cell_bounds (mv : Mem.t) ~(line : Hike_origin.t)
   Cbat_word.(<) last hi
   || (Mem.has_cell_in mv ~origin:line ~lo ~hi:last
       && (let qp = Cbat_clp.Pieces.of_progression p in
-          List.exists (Mem.cells mv) ~f:(fun (k, _) ->
+          let cells =
+            match cells with Some c -> Lazy.force c | None -> Mem.cells mv in
+          List.exists cells ~f:(fun (k, _) ->
               Hike_origin.equal (Mem.Key.origin k) line
               && (let cl, ch = Mem.Key.hull k in
                   Cbat_word.bitwidth cl <> w
@@ -1013,6 +1015,8 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         (* The threaded images' read-start ranges: constant across this
            constraint's decisions (one read width). *)
         let image_fits = image_read_starts ~bytes:nb in
+        (* The memory's cells, materialized at most once per constraint. *)
+        let cells = lazy (Mem.cells mv) in
         (* The singleton rule: the address value of the one-element
            piece [p]; a known read whose value, on this constraint's own
            origin, misses [produced], drops its address. *)
@@ -1057,7 +1061,7 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                    :: !ranges)
            | _ -> ());
           if Mem.has_cell_in mv ~origin:line ~lo ~hi:last then
-            List.iter (Mem.cells mv) ~f:(fun (k, _) ->
+            List.iter (Lazy.force cells) ~f:(fun (k, _) ->
                 if Hike_origin.equal (Mem.Key.origin k) line then
                   let cl, ch = Mem.Key.hull k in
                   if Cbat_word.bitwidth cl = w && Cbat_word.bitwidth ch = w
@@ -1174,7 +1178,7 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                     piece_touches_image_bounds ~fits:image_fits
                       ~dense:(piece_dense p ~lo ~hi) ~lo ~hi p
                   | _ -> false)
-                 || piece_touches_cell_bounds mv ~line ~bytes:nb ~lo ~hi p)
+                 || piece_touches_cell_bounds ~cells mv ~line ~bytes:nb ~lo ~hi p)
             then `Keep
             else if Cbat_word.is_one (Cbat_clp.cardinality p) then
               (if singleton_keep line p then `Keep else `Drop)
