@@ -142,13 +142,11 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
   (* The stores grouped by their address exp: the witness reads the
      matching group, never every store in the sub. *)
   let store_index =
-    Base.List.fold stores ~init:[] ~f:(fun acc d ->
+    Base.List.fold stores ~init:Exp.Map.empty ~f:(fun acc d ->
         match Def.rhs d with
         | Bil.Store (_, addr', _, _, _) ->
-          (match Base.List.Assoc.find acc addr' ~equal:Exp.equal with
-           | Some grp -> Base.List.Assoc.add acc addr' (d :: grp) ~equal:Exp.equal
-           | None -> (addr', [ d ]) :: acc)
-          | _ -> acc)
+          Core.Map.add_multi acc ~key:addr' ~data:d
+        | _ -> acc)
   in
   { rctx with
     Cbat_runctx.rc_nonneg =

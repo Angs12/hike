@@ -19,7 +19,7 @@ type guard_op = ULT | ULE | UGT | UGE | EQ | NEQ | SLT | SLE | SGT | SGE
    literals, positive-preserving arithmetic, and — through unique defs —
    anchored loads seeded and written only with non-negative data. *)
 let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
-    ~(index : (exp * def term list) list)
+    ~(index : def term list Exp.Map.t)
     ~(env : AI.t) (e : exp) : bool =
   let nonneg_word (n : Cbat_word.t) : bool =
     let w = Cbat_word.bitwidth n in
@@ -86,18 +86,17 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       when Cbat_word.is_zero (Cbat_word.of_word k) -> walk cells vars a
     | Bil.Cast (Bil.HIGH, _, a) -> walk cells vars a
     | Bil.Load (_, addr, _, _) ->
+      let addr_vars = Exp.free_vars addr in
       let anchored =
-        not (Core.Set.is_empty (Exp.free_vars addr))
-        && Core.Set.for_all (Exp.free_vars addr) ~f:stack_anchor in
+        not (Core.Set.is_empty addr_vars)
+        && Core.Set.for_all addr_vars ~f:stack_anchor in
       let reentry = Core.Set.mem cells addr in
       if not anchored then false
       else if reentry then true
       else
         let cells' = Core.Set.add cells addr in
         let matches =
-          match Base.List.Assoc.find index addr ~equal:Exp.equal with
-          | Some grp -> grp
-          | None -> []
+          Core.Map.find index addr |> Option.value ~default:[]
         in
         let has_seed = List.exists matches ~f:(fun d ->
             match Def.rhs d with
