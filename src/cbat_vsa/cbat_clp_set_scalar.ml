@@ -901,7 +901,14 @@ let piece_collapse (ps : P.t) : P.t =
     | Some p -> P.of_progression p
     | None -> ps
 
+(* The pairwise product stays within [max_pieces^2] pairs: past it, the
+   wider operand enters as its hull (sound). *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
+  let na = List.length (P.to_list a) and nb = List.length (P.to_list b) in
+  let a, b =
+    if na * nb <= Utils.max_pieces * Utils.max_pieces then (a, b)
+    else if na >= nb then (piece_collapse a, b)
+    else (a, piece_collapse b) in
   let r = Piece_binop.binop op a b in
   if P.card_exceeds Utils.keep_exact_elements r then piece_collapse r else r
 
