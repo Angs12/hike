@@ -33,6 +33,12 @@ fi
 for ll in "$OUT_DIR"/out_*.ll; do
   name="$(basename "$ll" .ll)"
 
+  if [ ! -s "$ll" ]; then
+    echo "FAIL $name (empty IR)" >&2
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+
   # The count rules (a/c/e/f/g) read one awk pass over the module;
   # the state-machine rules (b/d/INFO) keep their own passes.
   eval "$(awk '

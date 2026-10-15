@@ -51,12 +51,6 @@ type member = {
 }
 [@@deriving equal, compare, sexp]
 
-(** The word cell an args-space span names: one slot only when the span
-    starts at/above the args base and both ends land in the same cell. *)
-
-(** The word cell of a promotable Args member: a def-backed, non-identity
-    access wholly inside one word cell at/above the args base.  [None] for
-    any other member. *)
 (** The finalized storage of one merged range: a stack region id keys
     a per-sub alloca (the residue, id 0, is the fallback), a data
     region id a module-wide global (a whole span is one data region),

@@ -17,7 +17,6 @@ TREE="$(cd "$HERE/../.." && pwd)"
 
 WORK="${HIKE_MATRIX:-/tmp/hike-matrix}"
 SRC="$TREE/src/progs"
-OPT="${HIKE_OPT:-opt-21}"
 LLC="${HIKE_LLC:-llc-21}"
 
 provenance_ok "$TREE" || exit $?

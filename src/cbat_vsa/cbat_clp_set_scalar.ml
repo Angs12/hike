@@ -803,11 +803,6 @@ type binop =
   | Logxor
   | Concat
 
-(* The distributed arithmetic collapses to one progression: multi-piece
-   results churn the fixpoint — the 4-piece cap is not associative
-   under repeated joins, and in-loop values oscillate between
-   incomparable capped forms (measured: five fresh fixpoint backstops on
-   du and expr). *)
 (* The 16-op table, written ONCE over a representation signature: the
    two concrete tables are instantiations, and the piece table's
    collapse is that representation's policy, applied by its

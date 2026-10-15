@@ -229,11 +229,6 @@ module Sub_layout : sig
     r_bytes : int64;
   }
 
-  val equal_region : region -> region -> bool
-  val compare_region : region -> region -> int
-  val sexp_of_region : region -> Base.Sexp.t
-  val region_of_sexp : Base.Sexp.t -> region
-
   type t = {
     regions : region list;
     window_param : bool;

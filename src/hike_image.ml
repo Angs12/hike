@@ -348,10 +348,13 @@ let tls_spec (proj : Project.t) : Hike_spec.tls_spec option =
     let rounded = Int64.logand (Int64.add span (Int64.sub alignment 1L))
         (Int64.neg alignment) in
     let lo = Int64.add vaddr (get_bias proj) in
+    (* Materialise the memory regions once; a per-byte [Memmap.to_sequence]
+       would re-walk the map for every TLS byte. *)
+    let mems =
+      Project.memory proj |> Memmap.to_sequence |> Base.Sequence.to_list in
     let image = Bytes.init (Int64.to_int filesz) (fun i ->
         let a = Word.of_int64 ~width:64 (Int64.add lo (Int64.of_int i)) in
-        let mem = Project.memory proj |> Memmap.to_sequence
-            |> Base.Sequence.find ~f:(fun (mem, _) -> Memory.contains mem a)
+        let mem = Base.List.find mems ~f:(fun (mem, _) -> Memory.contains mem a)
             |> Base.Option.value_exn ~message:"hike-image: unreadable PT_TLS image"
             |> fst in
         Memory.get ~addr:a mem |> Core.Or_error.ok_exn |> Word.to_int_exn

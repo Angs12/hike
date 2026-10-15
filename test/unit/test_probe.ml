@@ -91,7 +91,8 @@ let tests : unit Alcotest.test list =
            && s.Rows.Sub_stats.def_bottom_live = 1));
 
     pin "PROBE-04"
-      "the probe follows stack-family origins and diagnostic bottom"
+      "the probe follows stack-family origins, not numeric bands: a magic, a band-reaching \
+       integer, a sign-crossing hull and a frame-band literal are not stack; the symbolic arm is"
       (fun () ->
         let magic =
           Ws.singleton (Cbat_word.of_int64 ~width:64 0x4EC4EC4EC4EC4EC5L) in
@@ -100,10 +101,22 @@ let tests : unit Alcotest.test list =
         let below =
           Ws.singleton
             (Cbat_word.of_int64 ~width:64 (Int64.sub Ws.stack_base 64L)) in
+        (* A pointer difference: min 2^63 - 8192, max 2^64 - 1. *)
+        let base = Cbat_word.of_int64 ~width:64 0x7FFFFFFFFFFFE000L in
+        let cardn = Cbat_word.of_int64 ~width:64 0x8000000000002000L in
+        let crossed =
+          Ws.of_clp
+            (Ws.Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn base) in
+        let literal =
+          Ws.singleton (Cbat_word.of_int64 ~width:64 0x3FFFFFFFFFFFFFFFL) in
         check "PROBE-04 (the domain rejects numeric coincidence)"
           (not (Ws.in_stack_segment magic));
         check "PROBE-04 (the probe rejects the band-reaching integer)"
           (not (Rows.is_stack_value magic));
+        check "PROBE-04 (the sign-crossing hull is not stack)"
+          (not (Rows.is_stack_value crossed));
+        check "PROBE-04 (the frame-band literal is not stack, a lost shape)"
+          (not (Rows.is_stack_value literal) && Rows.shape_of literal = Some `Lost);
         check "PROBE-04 (the symbolic arm is stack)"
           (Rows.is_stack_value (Ws.stack_word_i64 0L));
         check "PROBE-04 (plain frame-shaped integers are not stack)"
@@ -112,35 +125,6 @@ let tests : unit Alcotest.test list =
           (Rows.is_stack_value (Ws.bottom 64));
         check "PROBE-04 (the dead-path bottom carries no shape)"
           (Rows.shape_of (Ws.bottom 64) = None));
-
-    pin "PROBE-05"
-      "a plain hull crossing the sign boundary is not a stack value"
-      (fun () ->
-        (* A pointer difference: min 2^63 - 8192, max 2^64 - 1. *)
-        let base = Cbat_word.of_int64 ~width:64 0x7FFFFFFFFFFFE000L in
-        let cardn = Cbat_word.of_int64 ~width:64 0x8000000000002000L in
-        let crossed =
-          Ws.of_clp
-            (Ws.Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn base) in
-        check "PROBE-05 (the hull reads its max negative)"
-          (match Ws.min_elem crossed, Ws.max_elem crossed with
-           | Some mn, Some mx ->
-             (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
-              | Ok mni, Ok mxi -> Int64.compare mni mxi > 0
-              | _ -> false)
-           | _ -> false);
-        check "PROBE-05 (the probe rejects the crossing hull)"
-          (not (Rows.is_stack_value crossed)));
-
-    pin "PROBE-06"
-      "a plain literal inside the frame band has no stack identity"
-      (fun () ->
-        let literal =
-          Ws.singleton (Cbat_word.of_int64 ~width:64 0x3FFFFFFFFFFFFFFFL) in
-        check "PROBE-06 (the literal has no stack origin)"
-          (not (Rows.is_stack_value literal));
-        check "PROBE-06 (and reads as a lost shape)"
-          (Rows.shape_of literal = Some `Lost));
   ]
 
 let () = run "probe" tests

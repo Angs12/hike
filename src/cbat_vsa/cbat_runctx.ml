@@ -149,6 +149,3 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
                 (Option.value ~default:Var.Set.empty
                    (Core.Map.find live.before (Term.tid b))) });
 }
-
-(* The per-run analysis context: one fold over the sub's blocks builds
-   the per-block fact records; the live-in fixpoint feeds them. *)
