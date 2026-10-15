@@ -526,6 +526,28 @@ let tests : unit Alcotest.test list =
         let env = st_store env (st_slot 16) (st_lit 42) in
         let env = st_store env (Bil.Var p) (st_lit 7) in
         check "FWD-26" (st_has env (st_slot 16) 42 && st_has env (st_slot 16) 7));
+
+    pin "FWD-27"
+      "EQ/NEQ on same-origin stack singletons compare by offsets: p == p is true, p == (p - 8) \
+       is false and its NEQ is true (the saturated stack cardinality no longer hides it)"
+      (fun () ->
+        let p = v64 "fwd27_p" in
+        let q = v64 "fwd27_q" in
+        let env =
+          AI.add_word
+            (AI.add_word AI.top ~key:p ~data:(Ws.stack_word_i64 (-16L)))
+            ~key:q ~data:(Ws.stack_word_i64 (-24L)) in
+        let btrue = Ws.singleton Cbat_word.b1 and bfalse = Ws.singleton Cbat_word.b0 in
+        let denote e =
+          match Vsa.Test_seam.denote_imm_exp e env with
+          | Ok ws -> ws
+          | Error _ -> Ws.bottom 1 in
+        check "FWD-27.eq-self"
+          (Ws.equal (denote (Bil.BinOp (Bil.EQ, Bil.Var p, Bil.Var p))) btrue);
+        check "FWD-27.eq-distinct"
+          (Ws.equal (denote (Bil.BinOp (Bil.EQ, Bil.Var p, Bil.Var q))) bfalse);
+        check "FWD-27.neq-distinct"
+          (Ws.equal (denote (Bil.BinOp (Bil.NEQ, Bil.Var p, Bil.Var q))) btrue));
   ]
 
 let () = run "forward" tests

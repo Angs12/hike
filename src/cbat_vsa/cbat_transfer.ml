@@ -92,7 +92,19 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
 #endif
   (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
-    let v1_size = WordSet.cardinality v1 in
+    (* Same-origin relatives compare by their offsets: a single offset on
+       each side pins the one concrete address, so equality is decidable
+       even though the saturated stack cardinality hides it (LT already
+       reads the same line through plain_bounds). *)
+    let rel_singleton (v : wordset) : (Hike_origin.t * Cbat_word.t) option =
+      match WordSet.origin v, WordSet.offset_extrema v with
+      | Some o, Some (lo, hi) when Cbat_word.equal lo hi -> Some (o, lo)
+      | _ -> None in
+    match rel_singleton v1, rel_singleton v2 with
+    | Some (o1, a), Some (o2, b) when Hike_origin.equal o1 o2 ->
+      wordset_of_bool (if negate then not (Cbat_word.equal a b) else Cbat_word.equal a b)
+    | _ ->
+    (let v1_size = WordSet.cardinality v1 in
     let v2_size = WordSet.cardinality v2 in
     if Cbat_word.is_zero v1_size || Cbat_word.is_zero v2_size then bool_bottom
     else if Word_ops.is_one v1_size && Word_ops.is_one v2_size then begin
@@ -114,7 +126,7 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
 #endif
       bool_top
     end
-    else if negate then btrue else bfalse
+    else if negate then btrue else bfalse)
   in
   let op_fn : wordset -> wordset -> wordset =
     match op with
