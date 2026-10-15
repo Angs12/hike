@@ -453,8 +453,12 @@ module Pieces = struct
   let of_list ~(width : int) (l : Cbat_word.t list) : t =
     if width <= 0 then []
     else
-      let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
-      finish (ordered (runs_from_sorted_elements ~width l))
+      match l with
+      (* A point address, the common key: its one run is its singleton. *)
+      | [ w ] -> [ C.singleton (Cbat_word.extract_exn ~hi:(width - 1) ~lo:0 w) ]
+      | _ ->
+        let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
+        finish (ordered (runs_from_sorted_elements ~width l))
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
