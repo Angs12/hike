@@ -277,6 +277,19 @@ let tests : unit Alcotest.test list =
         check "MAP-32.fact-vs-other" (not (Mem.precedes fact other)));
 
 
+    pin "MAP-33"
+      "join and meet of a memory with itself return it physically"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let byte n = Mem.Val.create (Ws.singleton (w8 n)) LittleEndian in
+        let top = Mem.top { Mem.addr_width = 64; addressable_width = 8 } in
+        let m = Mem.add top ~key:(point 0) ~data:(byte 0x11) in
+        check "MAP-33.join" (Mem.join m m == m);
+        check "MAP-33.meet" (Mem.meet m m == m);
+        let other = Mem.add top ~key:(point 0) ~data:(byte 0x22) in
+        check "MAP-33.distinct" (Mem.join m other != m));
+
+
 
 
   ]

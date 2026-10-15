@@ -995,7 +995,14 @@ let lift_join f (m1 : t) (m2 : t) : t =
   | None, Some _ -> m2
   | None, None -> m1 (* both bottom *)
 
-let join : t -> t -> t = lift_join join'
+(* The same stored tree: join and meet of it with itself are itself. *)
+let same_tree (m1 : t) (m2 : t) : bool =
+  match m1.itree, m2.itree with
+  | Some t1, Some t2 -> phys_equal t1 t2 && m1.width = m2.width
+  | _ -> false
+
+let join : t -> t -> t =
+  fun m1 m2 -> if same_tree m1 m2 then m1 else lift_join join' m1 m2
 
 (* The trees widen cell by cell over the key-aligned product: every
    overlapping pair takes the caller's per-cell widen, and a cell only
@@ -1020,6 +1027,7 @@ let meet' (m1 : itree) (m2 : itree) : itree =
 
 let meet (m1 : t) (m2 : t) : t =
   assert(m1.width = m2.width);
+  if same_tree m1 m2 then m1 else
   match m1.itree, m2.itree with
   | Some t1, Some t2 -> {itree=Some (meet' t1 t2); width=m1.width}
   | None, _ -> {itree=None; width=m1.width}
