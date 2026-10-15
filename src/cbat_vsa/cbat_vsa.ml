@@ -471,7 +471,7 @@ let rec static_graph_vsa
     let incoming =
       if List.is_empty preds then old
       else
-        let outs = List.map preds ~f:(fun p ->
+        let out p =
             Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
               (Hashtbl.find block_to_head p) (fun () ->
 #ifdef VSA_DEBUG
@@ -493,9 +493,15 @@ let rec static_graph_vsa
                    else Cbat_attr_census.bump "bottomskip.edge.refine_only"
                  end);
 #endif
-                res)) in
-        (Stages.time `Join (fun () ->
-           Option.value ~default:old (List.reduce outs ~f:AI.join)))
+                res) in
+        (* The first predecessor's edge seeds the join; each later edge
+           joins in as it is denoted, in predecessor order. *)
+        Option.value ~default:old
+          (List.fold preds ~init:None ~f:(fun acc p ->
+               let res = out p in
+               match acc with
+               | None -> Some res
+               | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
     in
 #ifdef VSA_DEBUG
     (if not (List.is_empty preds) then
