@@ -1093,11 +1093,12 @@ module Exact = struct
 
   (* True when consecutive elements are spaced by a multiple of [w]. *)
   let splits_by (t : t) (w : W.t) : bool =
-    let rec go prev = function
-      | [] -> true
-      | x :: rest -> W.is_zero (W.modulo (W.sub x prev) w) && go x rest
+    let rec go i =
+      i >= count t
+      || (W.is_zero (W.modulo (W.sub t.words.(i) t.words.(i - 1)) w)
+          && go (i + 1))
     in
-    match elements t with [] -> true | x :: rest -> go x rest
+    go 1
 
   let min_elem (t : t) : W.t option =
     if is_bottom t then None else Some (nth t 0)
@@ -1105,18 +1106,35 @@ module Exact = struct
   let max_elem (t : t) : W.t option =
     if is_bottom t then None else Some (nth t (count t - 1))
 
+  (* The index of the first element with its sign bit set: the array
+     ascends unsigned, so the sign bit is monotone along it. *)
+  let first_negative (t : t) : int =
+    let rec search lo hi =
+      if lo >= hi then lo
+      else
+        let mid = (lo + hi) / 2 in
+        if W.msb t.words.(mid) then search lo mid else search (mid + 1) hi
+    in
+    search 0 (count t)
+
   let min_elem_signed (t : t) : W.t option =
-    List.min_elt (List.map (elements t) ~f:W.signed) ~compare:W.compare
+    if is_bottom t then None
+    else
+      let i = first_negative t in
+      Some (W.signed t.words.(if i < count t then i else 0))
 
   let max_elem_signed (t : t) : W.t option =
-    List.max_elt (List.map (elements t) ~f:W.signed) ~compare:W.compare
+    if is_bottom t then None
+    else
+      let i = first_negative t in
+      Some (W.signed t.words.(if i > 0 then i - 1 else count t - 1))
 
   let overlap_generic (type ws)
       (module WS : Cbat_wordset_intf.S with type t = ws)
       (t : t) (s' : ws) : bool =
     (* Width mismatch answers may-overlap. *)
     if WS.bitwidth s' <> t.width then not (is_bottom t)
-    else List.exists (elements t) ~f:(fun w -> WS.elem w s')
+    else Array.exists t.words ~f:(fun w -> WS.elem w s')
 
   (* An exact value is never a top; a growing widen is the caller's
      promotion signal, so the union is the sound answer if it arrives. *)

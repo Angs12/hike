@@ -118,6 +118,36 @@ let tests : unit Alcotest.test list =
           && Ex.is_bottom (Ex.filter a ~f:(fun _ -> false))));
 
 
+    pin "FS-13" "N7: signed extrema agree with a signed scan; splits_by checks consecutive gaps"
+      (fun () ->
+        let at8 n = Cbat_word.of_int ~width:8 n in
+        let signed_val n = if n >= 128 then n - 256 else n in
+        List.iter
+          (fun l ->
+            let e = Ex.of_list ~width:8 (List.map at8 l) in
+            let vs = List.map signed_val l in
+            let lo = List.fold_left min max_int vs
+            and hi = List.fold_left max min_int vs in
+            let sv w = signed_val (Cbat_word.to_int_exn (Cbat_word.unsigned w)) in
+            check "FS-13.extrema"
+              (match Ex.min_elem_signed e, Ex.max_elem_signed e with
+               | Some a, Some b ->
+                 sv a = lo && sv b = hi
+                 && Cbat_word.is_signed a && Cbat_word.is_signed b
+               | _ -> false))
+          [ [ 5 ]; [ 200 ]; [ 1; 2; 3 ]; [ 130; 200; 255 ]; [ 0; 127; 128; 255 ];
+            [ 3; 100; 250 ] ];
+        check "FS-13.empty"
+          (Ex.min_elem_signed (Ex.bottom 8) = None
+          && Ex.max_elem_signed (Ex.bottom 8) = None);
+        let grid = Ex.of_list ~width:8 (List.map at8 [ 2; 6; 10 ]) in
+        check "FS-13.splits"
+          (Ex.splits_by grid (at8 4)
+          && not (Ex.splits_by grid (at8 8))
+          && Ex.splits_by (Ex.bottom 8) (at8 3)
+          && Ex.splits_by (Ex.singleton (at8 9)) (at8 3)));
+
+
 
 
   ]
