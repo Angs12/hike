@@ -523,6 +523,30 @@ let tests : unit Alcotest.test list =
           && covers (Clp.singleton (w8 0x05))
           && covers (Clp.of_list ~width:8 [ w8 0; w8 0xFF ])));
 
+    pin "CLP-115"
+      "AND/OR with a constant respect the operand's bounds and stride: [0..10] & 0xff stays \
+       [0..10], {0,8,…,800} & 0xf is the exact {0,8}, and [0..100] | 1 stays bounded"
+      (fun () ->
+        let bounded = int32 ~lo:0 ~hi:10 in
+        let r = Clp.logand bounded (Clp.singleton (w32 0xff)) in
+        check "CLP-115.and-bounds"
+          (Clp.min_elem r = Some (w32 0) && Clp.max_elem r = Some (w32 10));
+        let grid =
+          Clp.create ~width:32 ~step:(w32 8)
+            ~cardn:(Cbat_word.of_int ~width:33 101) (w32 0) in
+        let r2 = Clp.logand grid (Clp.singleton (w32 0xf)) in
+        check "CLP-115.and-stride" (Clp.equal r2 (Clp.of_list ~width:32 [ w32 0; w32 8 ]));
+        let ray = int32 ~lo:0 ~hi:100 in
+        let r3 = Clp.logor ray (Clp.singleton (w32 1)) in
+        let odd_image =
+          Clp.create ~width:32 ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 64) (w32 1)
+        in
+        check "CLP-115.or-bounds"
+          (not (Clp.is_top r3)
+          && Clp.subset (Clp.of_list ~width:32 [ w32 1; w32 3; w32 101 ]) r3
+          && Clp.max_elem r3 = Some (w32 0x7F)
+          && Clp.equal r3 odd_image));
+
 
 
 

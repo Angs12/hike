@@ -30,10 +30,10 @@ let ceilings : (string * int) list =
     ("word.mkzw(via of_int 64 -1)", 30);
     ("clp.logand(asc8,asc8b)", 668);
     ("clp.logand(interval,interval)", 1360);
-    ("clp.logand(interval,singleton)", 204);
+    ("clp.logand(interval,singleton)", 1232);
     ("clp.logand(128,128)", 1320);
     ("clp.logor(asc8,asc8b)", 1022);
-    ("clp.logor(interval,singleton)", 678);
+    ("clp.logor(interval,singleton)", 1676);
     ("clp.logxor(singleton,singleton)", 2178);
     ("clp.logxor(asc8,asc8b)", 4920);
     ("clp.logxor(interval,interval)", 6254);

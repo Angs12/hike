@@ -200,15 +200,13 @@ let logand_rule ?f (cp1 : t) (cp2 : t) : t =
       let step = W.sub newE base in
       let cardn = cardn_two in
       !!(create base ~step ~cardn)
-    else if W.is_one (cardn_of p1) then
-      (* AND with a constant k: the result never exceeds k, and k's low
-         bits take every combination over an operand whose set is a
-         ray or the full width — [0, k].  The all-ones constant is the
-         identity. *)
-      let k = base_of p1 in
-      if W.equal k (W.ones sz) then !!(p2)
-      else !!(create (W.zero sz) ~step:(W.one sz) ~cardn:(W.succ k))
+    else if W.is_one (cardn_of p1) && W.equal (base_of p1) (W.ones sz) then
+      (* The all-ones constant is the identity. *)
+      !!(p2)
     else
+      (* Each operand's facts flow through the general arm: a constant's
+         facts fix every bit, so the result is bounded by both maxima and
+         keeps the forced low bits of the other operand's stride. *)
       match facts_of p1 f, facts_of p2 f with
       | Some f1, Some f2 -> Some (logand_general f1 f2)
       | _ -> None
