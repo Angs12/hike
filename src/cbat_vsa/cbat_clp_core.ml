@@ -450,7 +450,7 @@ let equal (p1 : t) (p2 : t) : bool =
   if phys_equal p1 p2 then true
   else if bitwidth p1 <> bitwidth p2 then false
   else
-    Stdlib.Int.equal (Stdlib.compare p1.dir p2.dir) 0
+    Int.equal (compare_direction p1.dir p2.dir) 0
     && W.equal p1.base p2.base
     && W.equal p1.step p2.step
     && W.equal p1.cardn p2.cardn

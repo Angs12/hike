@@ -224,6 +224,8 @@ type tp_offset = Tp_absent | Tp_based of int64 option | Tp_nonlinear
 (* The affine coefficient of the thread pointer. *)
 type tp_coeff = Tp_zero | Tp_one | Tp_non
 
+let tp_is_zero = function Tp_zero -> true | Tp_one | Tp_non -> false
+
 let tp_add_coeff a b =
   match (a, b) with
   | Tp_zero, x | x, Tp_zero -> x
@@ -254,25 +256,25 @@ let tls_tp_offset ~(tp : var) (e : exp) : tp_offset =
       let coeff = match op with
         | Bil.PLUS -> tp_add_coeff ca cb
         | Bil.MINUS -> tp_sub_coeff ca cb
-        | _ -> if ca = Tp_zero && cb = Tp_zero then Tp_zero else Tp_non in
+        | _ -> if tp_is_zero ca && tp_is_zero cb then Tp_zero else Tp_non in
       coeff, Base.Option.map2 va vb ~f:(Bil.Apply.binop op)
     | Bil.Cast (cast, bits, e) ->
       let c, v = fold e in
-      if c = Tp_zero then c, Base.Option.map v ~f:(Bil.Apply.cast cast bits)
+      if tp_is_zero c then c, Base.Option.map v ~f:(Bil.Apply.cast cast bits)
       else if bits = tp_bits then c, v
       else Tp_non, None
     | Bil.UnOp (op, e) ->
       let c, v = fold e in
-      if c = Tp_zero then c, Base.Option.map v ~f:(Bil.Apply.unop op)
+      if tp_is_zero c then c, Base.Option.map v ~f:(Bil.Apply.unop op)
       else Tp_non, None
     | Bil.Concat (a, b) ->
       let ca, va = fold a and cb, vb = fold b in
-      if ca = Tp_zero && cb = Tp_zero then
+      if tp_is_zero ca && tp_is_zero cb then
         Tp_zero, Base.Option.map2 va vb ~f:Word.concat
       else Tp_non, None
     | Bil.Extract (hi, lo, e) ->
       let c, v = fold e in
-      if c = Tp_zero then c, Base.Option.map v ~f:(Word.extract_exn ~hi ~lo)
+      if tp_is_zero c then c, Base.Option.map v ~f:(Word.extract_exn ~hi ~lo)
       else Tp_non, None
     | e ->
       let reads_tp = (object inherit [bool] Exp.visitor

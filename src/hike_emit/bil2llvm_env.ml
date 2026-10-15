@@ -594,7 +594,7 @@ let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
   let roots =
     Graphs.Tid.Node.succs Graphs.Tid.start cfg
-    |> Seq.filter ~f:(fun tid -> not (tid = Graphs.Tid.exit))
+    |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit))
     |> Seq.to_list
     |> Core.Set.of_list (module Tid)
   in
@@ -608,4 +608,4 @@ let is_empty sub =
   let cfg = Sub.to_graph sub in
   Seq.is_empty
     (Graphs.Tid.Node.succs Graphs.Tid.start cfg
-    |> Seq.filter ~f:(fun tid -> not (tid = Graphs.Tid.exit)))
+    |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit)))

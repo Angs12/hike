@@ -43,8 +43,9 @@ let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
                   | Ok x', Ok y' ->
                       Some
                         (w64
-                           ((if op = Bil.PLUS then Stdlib.Int64.add
-                             else Stdlib.Int64.sub)
+                           ((match op with
+                             | Bil.PLUS -> Stdlib.Int64.add
+                             | _ -> Stdlib.Int64.sub)
                               x' y'))
                   | _ -> Some (Bil.BinOp (op, a', b')))
               | _ -> Some (Bil.BinOp (op, a', b')))

@@ -27,10 +27,10 @@ let call_of_jmp (j : jmp term) : Call.t option =
       match Call.target c with
       | Direct target ->
           if Hike_abi.is_interrupt_name (Tid.name target) then None
-          else if
-            Hike_native_fp.native_fp_op (Tid.name target) = Some Hike_native_fp.FHLT
-          then None
-          else Some c
+          else
+            (match Hike_native_fp.native_fp_op (Tid.name target) with
+             | Some Hike_native_fp.FHLT -> None
+             | _ -> Some c)
       | Indirect _ -> Some c)
   | _ -> None
 
