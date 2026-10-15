@@ -37,12 +37,14 @@ let[@inline] is_signed (t : t) : bool =
 
 let[@inline] signed (t : t) : t =
   match t with
+  | Small (_, _, true) | W64 (_, _, true) | Big (_, _, true) -> t
   | Small (v, w, _) -> Small (v, w, true)
   | W64 (x, w, _) -> W64 (x, w, true)
   | Big (z, w, _) -> Big (z, w, true)
 
 let[@inline] unsigned (t : t) : t =
   match t with
+  | Small (_, _, false) | W64 (_, _, false) | Big (_, _, false) -> t
   | Small (v, w, _) -> Small (v, w, false)
   | W64 (x, w, _) -> W64 (x, w, false)
   | Big (z, w, _) -> Big (z, w, false)

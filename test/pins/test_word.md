@@ -12,3 +12,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | WORD-05 | WO5: lead_1_bit | textually invert the pinned contract in `Cbat_word` | pin FAILs under that inversion (re-demonstrated by review) |
 | WORD-07 | WO7: gt_int | textually invert the pinned contract in `Cbat_word` | pin FAILs under that inversion (re-demonstrated by review) |
 | WORD-08 | CAST-W1: a negative 32-bit word's SIGNED cast to 64 sign-extends | textually invert the pinned contract in `Cbat_word` | pin FAILs under that inversion (re-demonstrated by review) |
+| WORD-09 | N4: signed/unsigned return the word itself when the flag already matches | rebuild the word unconditionally in `Cbat_word.signed` / `unsigned` | pin FAILs (physical equality) with the early-return arms removed |

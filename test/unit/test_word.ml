@@ -40,6 +40,16 @@ let tests : unit Alcotest.test list =
            | Ok v -> Int64.equal v (-1L)
            | Error _ -> false));
 
+    pin "WORD-09" "signed/unsigned return the word itself when the flag already matches"
+      (fun () ->
+        let u = Cbat_word.of_int ~width:8 5 in
+        let s = Cbat_word.signed u in
+        check "WORD-09"
+          (Cbat_word.unsigned u == u
+           && Cbat_word.signed s == s
+           && Cbat_word.is_signed s
+           && not (Cbat_word.is_signed (Cbat_word.unsigned s))));
+
 
 
 
