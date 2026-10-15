@@ -1312,11 +1312,14 @@ let certified_image ~(origin : Origin.t) ~(width : int) (f : word -> word) (offs
    o mod 2^certified). *)
 let certified_offset_image (origin : Origin.t) (f : word -> word) (offs : P.t) :
     P.t option =
-  let base = w64_of_i64 ((base_facts origin).base) in
-  let c = (base_facts origin).certified in
+  let facts = base_facts origin in
+  let base = w64_of_i64 facts.base in
+  let c = facts.certified in
   if c <= 0 || c >= 64 then None
   else
-    let change_off o = Cbat_word.add o (Cbat_word.sub (f (Cbat_word.add base o)) (Cbat_word.add base o)) in
+    let change_off o =
+      let x = Cbat_word.add base o in
+      Cbat_word.add o (Cbat_word.sub (f x) x) in
     match Cbat_word.to_int (P.cardinality offs) with
     | Ok n when n > 0 && n <= Utils.fin_set_size ->
       Some
@@ -1342,18 +1345,16 @@ let round_down_shift (k : word) : int option =
     let m1 = Cbat_word.add m (Cbat_word.one 64) in
     if Cbat_word.is_zero m1 then None
     else if Cbat_word.is_zero (Cbat_word.logand m m1) then
-      let rec count v acc =
-        if Cbat_word.is_zero v then Some acc
-        else count (Cbat_word.rshift v (Cbat_word.one 64)) (acc + 1)
-      in
-      count m 0
+      Some (match Cbat_word.lead_1_bit m with None -> 0 | Some b -> b + 1)
     else None
 
 (* Round offsets using the carried base's certified residue. A VLA's
    routing floor expands by the possible alignment slack. *)
 let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
   if s >= 64 then Some offs
-  else if s > (base_facts o).certified then
+  else
+  let facts = base_facts o in
+  if s > facts.certified then
     let slack = Cbat_word.sub (Cbat_word.lshift (Cbat_word.one 64)
         (Cbat_word.of_int ~width:64 s)) (Cbat_word.one 64) in
     (match o, Cbat_word.to_int64 slack with
@@ -1363,7 +1364,7 @@ let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
         (Clp.interval ~width:64 (Cbat_word.zero 64) slack)))
   else
     let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
-    let b_lo = Stdlib.Int64.logand ((base_facts o).base) m64 in
+    let b_lo = Stdlib.Int64.logand facts.base m64 in
     let block (w : word) =
       match Cbat_word.to_int64 w with
       | Error _ -> None
