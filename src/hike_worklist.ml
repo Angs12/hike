@@ -57,6 +57,8 @@ type frontier = {
   symtab_addresses : Core.Int64.Set.t;
   (* Decode entries: the symtab's entries, then the discovered roots. *)
   mutable roots : int64 list;
+  (* Batches appended since [roots] was last materialized, newest first. *)
+  mutable roots_pending : int64 list list;
   (* Code words a solve materialised, newest first. *)
   mutable found : int64 list;
   mutable found_addresses : Core.Int64.Set.t;
@@ -72,7 +74,8 @@ let frontier_create ~(subroutines : int64 list) : frontier =
         Core.Hashtbl.set seen ~key:a ~data:Symtab;
         Core.Set.add addresses a)
   in
-  { seen; symtab; symtab_addresses; roots = symtab; found = [];
+  { seen; symtab; symtab_addresses; roots = symtab; roots_pending = [];
+    found = [];
     found_addresses = Core.Int64.Set.empty; jumps = Core.Int64.Set.empty }
 
 (* Appends the addresses not yet decode entries; the first role wins, so
@@ -84,8 +87,18 @@ let frontier_add_roots f (addrs : int64 list) : unit =
   if not (Base.List.is_empty fresh) then begin
     Base.List.iter fresh ~f:(fun a ->
         Core.Hashtbl.set f.seen ~key:a ~data:Discovered);
-    f.roots <- f.roots @ fresh
+    f.roots_pending <- fresh :: f.roots_pending
   end
+
+(* The decode entries in append order; pending batches join the prefix
+   once per scan. *)
+let frontier_roots f : int64 list =
+  (match f.roots_pending with
+   | [] -> ()
+   | pending ->
+     f.roots <- f.roots @ Base.List.concat (Base.List.rev pending);
+     f.roots_pending <- []);
+  f.roots
 
 (* Prepends the code words a solve just materialised (newest first). *)
 let frontier_add_found f (ws : int64 list) : unit =
@@ -162,7 +175,7 @@ let is_entry t (a : int64) : bool =
 (* The frontier's decode entries are the symtab's entries and every
    discovered root; the scan's promise must carry all of them. *)
 let rescan t =
-  t.state <- D.scan t.proj ~file:t.file ~roots:t.frontier.roots
+  t.state <- D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
 
 (* ---- targets ---- *)
 
@@ -279,15 +292,16 @@ and visit t (e : entry) : unit =
 (* Whether every tentative summary read since [mark] is still the
    member's current one. *)
 and current t ~mark : bool =
-  let rec since = function
-    | l when l == mark -> []
-    | [] -> []
-    | r :: rest -> r :: since rest
+  let rec settled = function
+    | l when l == mark -> true
+    | [] -> true
+    | (e, s) :: rest ->
+      (match e.status with
+       | Open _ -> S.equal s (Core.Hashtbl.find_exn t.tentative e.addr)
+       | Fresh | Final _ -> true)
+      && settled rest
   in
-  Base.List.for_all (since t.reads) ~f:(fun (e, s) ->
-      match e.status with
-      | Open _ -> S.equal s (Core.Hashtbl.find_exn t.tentative e.addr)
-      | Fresh | Final _ -> true)
+  settled t.reads
 
 (* Pops the members above [head]: published with their last results, or
    reset for the head's next iteration (their tentative summaries
