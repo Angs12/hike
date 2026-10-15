@@ -30,6 +30,9 @@ let not_implemented ?(top : 'a option) component : 'a = match top with
 (* Max elements of an exact set. *)
 let fin_set_size : int = 10
 
+(* Max elements of a finite piece union kept as exact runs. *)
+let keep_exact_elements : int = 64
+
 (* Max progressions in a canonical piece union. *)
 let max_pieces : int = 4
 

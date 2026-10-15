@@ -893,7 +893,8 @@ let piece_collapse (ps : P.t) : P.t =
     | None -> ps
 
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
-  piece_collapse (Piece_binop.binop op a b)
+  let r = Piece_binop.binop op a b in
+  if P.card_exceeds Utils.keep_exact_elements r then piece_collapse r else r
 
 module Fs_repr = struct
   type t = fset

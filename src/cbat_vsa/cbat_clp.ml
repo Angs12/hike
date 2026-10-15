@@ -335,10 +335,10 @@ module Pieces = struct
       let rest = List.filteri ps ~f:(fun k _ -> k <> i && k <> j) in
       Some (hull, rest)
 
-  (* A union of at most [U.fin_set_size] elements stays exact: the cap
-     bounds large unions, never a set the exact tier keeps. *)
+  (* A union of at most [U.keep_exact_elements] elements stays exact
+     runs: the cap bounds large unions, never a set the runs hold. *)
   let within_exact_budget (ps : progression list) : bool =
-    let budget = U.fin_set_size in
+    let budget = U.keep_exact_elements in
     let rec go n = function
       | [] -> true
       | p :: rest ->
