@@ -659,7 +659,7 @@ let tests : unit Alcotest.test list =
         check "PR-19"
           (let fa6, a6 = fixture_facts_sub a6 in
            let bindings =
-             Hike.Promote.site_bindings_of_sub ~word:8 ~abi:Hike.Abi.x86_64_sysv ~sp
+             Hike.Promote.site_bindings_of_sub ~word:8 ~sp
                ~denote:fa6.denote a6
            in
            match Core.Map.find bindings (Term.tid body) with

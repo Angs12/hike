@@ -171,8 +171,6 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
 #ifdef VSA_DEBUG
   Printf.eprintf "hike-dbg-roots: [%s]\n%!"
     (Base.List.map roots ~f:(Printf.sprintf "%Lx") |> String.concat ",");
-#else
-  ignore roots;
 #endif
   let width = Theory.Target.code_addr_size (Project.target proj) in
   let roots_set =

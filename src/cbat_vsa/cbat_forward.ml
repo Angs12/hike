@@ -171,5 +171,5 @@ let denote_block
        denote_jump ~preserved ~callee ~resolved ~edge_conds ~disabled
          ~rctx
          b postcond ~entry:env ~target
-   | None -> fun ~target ->
+   | None -> fun ~target:_ ->
        invalid_arg "hike: source tid does not represent block"

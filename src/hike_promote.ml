@@ -17,7 +17,7 @@ type site_binding = {
   sb_def : def term;
 }
 
-let site_bindings_of_sub_with_blocks ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
+let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     (sub : sub term) : (site_binding list * blk term) Tid.Map.t =
@@ -73,11 +73,11 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(abi : Hike_abi.t) ~(sp : va
                         Int.compare a.sb_slot b.sb_slot),
                      blk ))
 
-let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
+let site_bindings_of_sub ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     (sub : sub term) : site_binding list Tid.Map.t =
-  site_bindings_of_sub_with_blocks ~word ~abi ~sp ~denote sub
+  site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
   |> Core.Map.map ~f:fst
 
 (* ---- The one address map: every address def's value is its storage's
@@ -298,7 +298,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
            let sites =
-             site_bindings_of_sub_with_blocks ~word ~abi ~sp ~denote sub
+             site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
            in
            let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))

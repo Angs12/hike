@@ -115,7 +115,7 @@ let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
       failwith
         "hike: create_branches: an unsplit multi-jmp series reached the emitter"
 
-let create_control_flow ctx scope llvm_builder blk sub fr =
+let create_control_flow ctx scope llvm_builder blk sub =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
@@ -135,14 +135,14 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
       create_indirect_tail ctx scope llvm_builder tid blk sub j
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_call ctx scope llvm_builder tid blk sub call fr
+      create_call ctx scope llvm_builder tid blk sub call
 
-let create_elts ctx scope llvm_builder blk sub_tid fr =
+let create_elts ctx scope llvm_builder blk sub_tid =
   let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
-      | `Def def -> create_def ctx scope tid llvm_builder sub_tid fr def
+      | `Def def -> create_def ctx scope tid llvm_builder sub_tid def
       | `Phi phi ->
           (* A BIR phi renders as the LLVM phi of its own lhs; the
              incomings fill after every body (a compound incoming
@@ -216,14 +216,14 @@ let fill_bir_phis ctx scope blks =
                 ignore (Llvm.build_store value (env_global ctx (Phi.lhs phi)) src_b);
               Llvm.add_incoming (value, src_bb) phi_ll)))
 
-let populate_blks ctx scope blks sub fr =
+let populate_blks ctx scope blks sub =
   let sub_tid = Term.tid sub in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end ctx.llvm_ctx (get_bb scope (Term.tid blk))
       in
-      create_elts ctx scope llvm_builder blk sub_tid fr;
-      create_control_flow ctx scope llvm_builder blk sub fr)
+      create_elts ctx scope llvm_builder blk sub_tid;
+      create_control_flow ctx scope llvm_builder blk sub)
 
 
 let exit_entry scope llvm_builder sub =
@@ -310,7 +310,7 @@ let create_sub ctx scope sub =
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
-    populate_blks ctx scope blks sub fr;
+    populate_blks ctx scope blks sub;
     fill_bir_phis ctx scope blks;
     scope.cur_frame := None;
     let sub_tid = Term.tid sub in

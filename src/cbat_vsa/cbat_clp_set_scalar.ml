@@ -955,8 +955,7 @@ let op_fs_ps (op : binop) (s : fset) (b : P.t) : t =
   Clp (binop_pieces op (pieces_of_finset s) b)
 
 (* A relative/opaque leaf is top at the wider width. *)
-let op_wide (op : binop) (q1 : t) (q2 : t) : t =
-  ignore op;
+let op_wide (q1 : t) (q2 : t) : t =
   Clp (P.top (Stdlib.max (bitwidth q1) (bitwidth q2)))
 
 (* The dispatcher: one row per representation pair. *)
@@ -966,7 +965,7 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   | Ps a, Ps b -> [ op_ps_ps op a b ]
   | Ps a, Fs s -> [ op_ps_fs op a s ]
   | Fs s, Ps b -> [ op_fs_ps op s b ]
-  | Opaque, _ | _, Opaque -> [ op_wide op q1 q2 ]
+  | Opaque, _ | _, Opaque -> [ op_wide q1 q2 ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with

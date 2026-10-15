@@ -96,7 +96,7 @@ let base_vars vars =
   Core.Set.fold vars ~init:Var.Set.empty ~f:(fun acc v ->
       Core.Set.add acc (Var.base v))
 
-let live_in_of_sub ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
+let live_in_of_sub ~def_reads ~def_writes ~phi_reads
     ~phi_writes ~jmp_reads (s : sub term) =
   let def live d =
     let live =
@@ -135,7 +135,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
   rc_sub_lookup = sub_lookup;
   rc_blocks =
     let live =
-      live_in_of_sub ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+      live_in_of_sub ~def_reads ~def_writes ~phi_reads ~phi_writes
         ~jmp_reads s
     in
     Term.enum blk_t s

@@ -75,7 +75,7 @@ let temp_defs_of_blk (blk : blk term) : def term Var.Map.t =
   |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
          Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
 
-let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op =
+let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
   match op with
   | FHLT ->
       (* Halt traps without binding results or emitting fallthrough. *)
@@ -99,7 +99,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
     as_int ctx llvm_builder
       (match Core.Map.find temp_defs av with
        | Some d ->
-           mem_access ctx scope llvm_builder blk_tid sub_tid (find_def_tag d) d
+           mem_access ctx scope llvm_builder blk_tid (find_def_tag d) d
              (Def.rhs d)
        | None -> create_exp ctx scope llvm_builder blk_tid (Bil.Var av))
   in

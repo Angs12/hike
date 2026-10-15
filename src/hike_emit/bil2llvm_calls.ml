@@ -626,7 +626,7 @@ let create_atomic_intrinsic_call ctx scope llvm_builder ~sub_tid name call =
   let fallthrough = Option.map label_tid (Call.return call) in
   finish_call scope llvm_builder fallthrough
 
-let create_call ctx scope llvm_builder blk_tid blk sub call fr =
+let create_call ctx scope llvm_builder blk_tid blk sub call =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
   if Hike_abi.is_interrupt_name (Tid.name target) then
@@ -637,8 +637,7 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   else
     match native_fp_op (Tid.name target) with
     | Some op ->
-        create_native_fp_call ctx scope llvm_builder blk_tid (Term.tid sub) fr blk call
-          op
+        create_native_fp_call ctx scope llvm_builder blk_tid blk call op
     | None ->
         if Hike_abi.is_intrinsic_name name then
           failwith

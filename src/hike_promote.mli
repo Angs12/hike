@@ -39,7 +39,6 @@ type site_binding = {
 (** The per-block store-to-call-slot correspondence. *)
 val site_bindings_of_sub :
   word:int ->
-  abi:Hike_abi.t ->
   sp:var ->
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
