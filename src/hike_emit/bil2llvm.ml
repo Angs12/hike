@@ -236,11 +236,11 @@ let build_entry_block ctx scope llvm_builder fr sub =
   let sp0 =
     match fr.entry_ptr with
     | Some p -> Bil2llvm_value.Ptr p
-    | None -> Bil2llvm_value.Int (frame_stack0 fr)
+    | None -> Bil2llvm_value.Int fr.entry_line
   in
   insert_local scope Graphs.Tid.start ctx.sp sp0;
   bind_ssaval scope ctx.sp sp0;
-  insert_ptr_offset scope ctx.sp (frame_stack0 fr);
+  insert_ptr_offset scope ctx.sp fr.entry_line;
   exit_entry scope llvm_builder sub
 
 (* Creates the LLVM blocks: one per BIR block plus the entry. *)

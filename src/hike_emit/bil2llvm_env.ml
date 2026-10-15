@@ -261,9 +261,6 @@ let is_extern ctx (sub_tid : tid) : bool =
    so the emitter's names and the resolver's name map agree. *)
 let sanitize_name = Hike_stack_model.sanitize_tid_name
 
-(* The frame's entry-line value. *)
-let frame_stack0 (fr : sub_frame) : Llvm.llvalue = fr.entry_line
-
 
 (* The synthetic indirect-call sub: every pointer call targets it, and
    its convention is [window_conv_args]. *)
@@ -273,8 +270,6 @@ let indirect_call_tid : tid = Tid.for_name "indirect_call"
    has-slots test's count. *)
 let count_slot_args (args : Arg.t list) : int =
   Base.List.count args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
-
-let strip_at = Hike_abi.strip_at
 
 let bb_find map tid =
   match Core.Map.find map tid with
@@ -591,16 +586,7 @@ let create_interrupt ctx llvm_builder =
    entry is the block the sub's own execution starts at, which the lift
    put first in the term. *)
 let entry_blk_tid sub =
-  let cfg = Sub.to_graph sub in
-  let roots =
-    Graphs.Tid.Node.succs Graphs.Tid.start cfg
-    |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit))
-    |> Seq.to_list
-    |> Core.Set.of_list (module Tid)
-  in
-  match
-    Term.enum blk_t sub |> Seq.find ~f:(fun b -> Core.Set.mem roots (Term.tid b))
-  with
+  match Cbat_vsa.entry_block_of sub with
   | Some b -> Term.tid b
   | None -> failwith "entry_blk_tid: no entry blk"
 

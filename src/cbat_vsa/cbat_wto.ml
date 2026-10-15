@@ -116,14 +116,6 @@ module Tid_scc = Scc (struct
     type t = Tid.t
   end)
 
-(* Recursive SCC partition. *)
-let scc_partition
-    (nodes : Tid.t list)
-    (succ : Tid.t -> Tid.t list)
-    (pred : Tid.t -> Tid.t list)
-  : Tid.t list list =
-  Tid_scc.partition nodes succ pred
-
 (* WTO over plain accessors. *)
 let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
     ~(pred : Tid.t -> Tid.t list) : comp list =
@@ -150,7 +142,7 @@ let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
         List.filter (succ n) ~f:(fun m -> Core.Set.mem node_set m) in
       let pred (n : Tid.t) : Tid.t list =
         List.filter (pred n) ~f:(fun m -> Core.Set.mem node_set m) in
-      let sccs = Array.of_list (scc_partition nodes succ pred) in
+      let sccs = Array.of_list (Tid_scc.partition nodes succ pred) in
       let owners = Hashtbl.create (module Tid) in
       Array.iteri sccs ~f:(fun i scc ->
           List.iter scc ~f:(fun n -> Hashtbl.set owners ~key:n ~data:i));

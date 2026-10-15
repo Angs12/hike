@@ -47,12 +47,12 @@ let binop_result_width (op : Bil.binop) (w1 : int) (w2 : int) : int =
   | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE -> 1
   | _ -> Stdlib.max w1 w2
 
+let b1_set = WordSet.singleton Cbat_word.b1
+let b0_set = WordSet.singleton Cbat_word.b0
+
 (* The width-1 shapes the comparison rows return, built once — the
    hottest solver function reads these on every row. *)
-let bool_row =
-  let btrue = WordSet.singleton (Cbat_word.b1) in
-  let bfalse = WordSet.singleton (Cbat_word.b0) in
-  (btrue, bfalse, WordSet.top 1, WordSet.bottom 1)
+let bool_row = (b1_set, b0_set, WordSet.top 1, WordSet.bottom 1)
 
 let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   let btrue, bfalse, bool_top, bool_bottom = bool_row in
@@ -128,24 +128,24 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   let op_fn : wordset -> wordset -> wordset =
     match op with
     | Bil.PLUS -> WordSet.add
-  | Bil.MINUS -> WordSet.sub
-  | Bil.TIMES -> WordSet.mul
-  | Bil.LSHIFT -> WordSet.lshift
-  | Bil.RSHIFT -> WordSet.rshift
-  | Bil.ARSHIFT -> WordSet.arshift
-  | Bil.DIVIDE -> WordSet.div
-  | Bil.SDIVIDE -> WordSet.sdiv
-  | Bil.MOD -> WordSet.modulo
-  | Bil.SMOD -> WordSet.smodulo
-  | Bil.AND -> WordSet.logand
-  | Bil.OR -> WordSet.logor
-  | Bil.XOR -> WordSet.logxor
-  | Bil.EQ -> compare_eq ~negate:false
-  | Bil.NEQ -> compare_eq ~negate:true
-  | Bil.LT -> ordering ~signed:false ~le:false
-  | Bil.LE -> ordering ~signed:false ~le:true
-  | Bil.SLT -> ordering ~signed:true ~le:false
-  | Bil.SLE -> ordering ~signed:true ~le:true
+    | Bil.MINUS -> WordSet.sub
+    | Bil.TIMES -> WordSet.mul
+    | Bil.LSHIFT -> WordSet.lshift
+    | Bil.RSHIFT -> WordSet.rshift
+    | Bil.ARSHIFT -> WordSet.arshift
+    | Bil.DIVIDE -> WordSet.div
+    | Bil.SDIVIDE -> WordSet.sdiv
+    | Bil.MOD -> WordSet.modulo
+    | Bil.SMOD -> WordSet.smodulo
+    | Bil.AND -> WordSet.logand
+    | Bil.OR -> WordSet.logor
+    | Bil.XOR -> WordSet.logxor
+    | Bil.EQ -> compare_eq ~negate:false
+    | Bil.NEQ -> compare_eq ~negate:true
+    | Bil.LT -> ordering ~signed:false ~le:false
+    | Bil.LE -> ordering ~signed:false ~le:true
+    | Bil.SLT -> ordering ~signed:true ~le:false
+    | Bil.SLE -> ordering ~signed:true ~le:true
   in
   fun v1 v2 ->
     (* The coercion pass makes every binop's operand widths uniform; a
@@ -245,7 +245,6 @@ let image_load_card_cap = 64
    threaded image, with no stored cell intersecting the access extent
    and an enumerable address set, reads the image's bytes — the exact
    value set.  Anything else keeps the abstract read. *)
-let word_i64 (w : Cbat_word.t) : int64 option = Cbat_word.to_int64_opt w
 
 (* The image arm's address preconditions: a bounded, non-stack,
    byte-width set the enumerate-and-read can walk. *)
@@ -269,7 +268,7 @@ let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
     let words =
       Cbat_clp.Exact.of_iter ~width:bits ~iter:(fun emit ->
           List.iter (WordSet.iter addr) ~f:(fun a ->
-              match word_i64 a with
+              match Cbat_word.to_int64_opt a with
               | None -> raise Unreadable
               | Some ai ->
                 if Core.Set.mem slots ai then raise Unreadable;
@@ -297,7 +296,7 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
       else
         let mn_w = WordSet.min_elem addr and mx_w = WordSet.max_elem addr in
         match
-          Base.Option.bind mn_w ~f:word_i64, Base.Option.bind mx_w ~f:word_i64
+          Base.Option.bind mn_w ~f:Cbat_word.to_int64_opt, Base.Option.bind mx_w ~f:Cbat_word.to_int64_opt
         with
         | Some lo_a, Some hi_a -> (
           let nb = bits / 8 in
@@ -380,9 +379,6 @@ let rec static_kind (e : exp) : [ `Word | `Mem ] option =
   | Bil.Unknown (_, Type.Mem _) -> Some `Mem
   | Bil.Unknown (_, Type.Unk) | Bil.Store _ | Bil.Ite _ | Bil.Let _ -> None
 
-let b1_set = WordSet.singleton Cbat_word.b1
-let b0_set = WordSet.singleton Cbat_word.b0
-
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
@@ -433,7 +429,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     denote_exp u env >>= val_as_imm >>= fun v ->
-    
+
     if WordSet.is_top addr
     (* The store may write any cell: whole-memory top. *)
     then return_mem @@ Mem.top (Mem.get_idx mv)
