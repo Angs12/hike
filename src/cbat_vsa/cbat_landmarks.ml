@@ -15,7 +15,6 @@ type lm_entry = {
 
 (* Distance readings cap at 2^40. *)
 let max_landmark_distance = 1 lsl 40
-let cap_distance (d : int) : int = min d max_landmark_distance
 (* The distance from [a] to [b] on the counter's own (signed) line: a
    counter walking toward a negative boundary reads small, not as a
    2^width jump.  Unrepresentable distances cap. *)
@@ -186,13 +185,13 @@ let record_excluded (t : t) ~(head : Tid.t) ~(key : key)
       (* Set below the boundary: upper landmark. *)
       let d = distance_words p_max c_min in
       record t ~head ~key ~bound:c_min ~is_upper:true ~warmed:false
-        ~dist:(cap_distance d);
+        ~dist:d;
       true
     end else if Cbat_word.(>) p_min c_max then begin
       (* Set above the boundary: lower landmark. *)
       let d = distance_words c_max p_min in
       record t ~head ~key ~bound:c_max ~is_upper:false ~warmed:false
-        ~dist:(cap_distance d);
+        ~dist:d;
       true
     end else false
   | _ -> false
@@ -210,12 +209,12 @@ let record_narrowed (t : t) ~(head : Tid.t) ~(key : key)
     if Cbat_word.(<) p_min m_min then begin
       let bound = Cbat_word.pred m_min in
       let d = distance_words p_min bound in
-      record t ~head ~key ~bound ~is_upper:false ~dist:(cap_distance d) ~warmed:true;
+      record t ~head ~key ~bound ~is_upper:false ~dist:d ~warmed:true;
       true
     end else if Cbat_word.(>) p_max m_max then begin
       let bound = Cbat_word.succ m_max in
       let d = distance_words bound p_max in
-      record t ~head ~key ~bound ~is_upper:true ~dist:(cap_distance d) ~warmed:true;
+      record t ~head ~key ~bound ~is_upper:true ~dist:d ~warmed:true;
       true
     end else false
   | _ -> false

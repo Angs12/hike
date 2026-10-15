@@ -121,7 +121,7 @@ let kind_of_var v =
   let n = Var.name v in
   if Base.String.is_prefix n ~prefix:"hike_synth_" then
     Base.Option.bind (Base.String.chop_prefix n ~prefix:"hike_synth_")
-      ~f:(fun h -> try Some (K_addr (Int64.of_string ("0x" ^ h))) with _ -> None)
+      ~f:(fun h -> Option.map (fun a -> K_addr a) (Int64.of_string_opt ("0x" ^ h)))
   else if Base.String.is_prefix n ~prefix:"hike_slot" then
     family n ~prefix:"hike_slot" ~suffix:"" (fun i -> K_slot i)
   else if Base.String.is_prefix n ~prefix:"hike_arg" then

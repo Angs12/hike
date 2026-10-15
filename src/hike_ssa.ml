@@ -480,7 +480,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
            in
            Term.enum phi_t blk |> Seq.iter ~f:(fun phi -> pop (Phi.lhs phi));
            Term.enum def_t blk |> Seq.iter ~f:(fun d -> pop (Def.lhs d));
-           Base.List.iter !minted ~f:(fun (v, _) -> pop (Var.base v) |> ignore)
+           Base.List.iter !minted ~f:(fun (v, _) -> pop (Var.base v))
        | None -> ());
       sub'
     in
