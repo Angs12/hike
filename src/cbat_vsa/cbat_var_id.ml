@@ -40,7 +40,6 @@ and add_new (v : var) : int =
   (!bases).(i) <- intern (Var.base v);
   i
 
-let find (v : var) : int option = Core.Hashtbl.find ids v
 let var_of (i : int) : var = Core.Option.value_exn (!vars).(i)
 let base_of (i : int) : int = (!bases).(i)
 let is_virtual (i : int) : bool = (!virtuals).(i)

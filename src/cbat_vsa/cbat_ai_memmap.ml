@@ -62,8 +62,6 @@ module Val : sig
   (* [equal v (top (get_idx v))]: the lattice top, not a symbolic one. *)
   val equal_top : t -> bool
 
-  val join_at : idx -> t -> t -> t
-  val meet_at : idx -> t -> t -> t
 
 
   val join_poly : t -> t -> t
@@ -260,9 +258,6 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     let w2, _ = get_idx v2 in
     let sz = max w1 w2 in
     op_at op (sz, v2.endian) v1 v2
-
-  let join_at = op_at WordSet.join
-  let meet_at = op_at WordSet.meet
 
   let join_poly = op_poly WordSet.join
   let meet_poly = op_poly WordSet.meet
@@ -907,9 +902,6 @@ let find_idx' (m : itree) (k : Key.t) : Val.idx =
   fold_intersections ~default:Val.Idx.top m k ~f:(fun hd _ tl ->
     Seq.map ~f:(Fn.compose Val.get_idx snd) tl
     |> Seq.fold ~init:(Val.get_idx hd) ~f:Val.Idx.join)
-
-let find_idx (m : t) (k : Key.t) : Val.idx =
-  Option.value_map m.itree ~default:Val.Idx.top ~f:(fun t -> find_idx' t k)
 
 (* Order via cellwise precedes. *)
 let precedes' (m1 : itree) (m2 : itree) : bool =

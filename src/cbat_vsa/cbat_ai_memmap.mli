@@ -72,7 +72,6 @@ module Val : sig
   val is_top : t -> bool
   val is_bottom : t -> bool
 
-  val join_poly : t -> t -> t
   val meet_poly : t -> t -> t
 
 end

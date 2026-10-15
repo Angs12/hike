@@ -46,8 +46,6 @@ let def_origin_d : Origin.t option Hike_def_slot.t =
     ~equal:Origin.equal
     ~get_bump:"" ~put_bump:"" ~bump:(fun _ -> ())
 
-let def_origin_slot = Hike_def_slot.slot def_origin_d
-
 let def_origin (d : def term) : Origin.t option =
   Hike_def_slot.get def_origin_d d
 

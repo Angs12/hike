@@ -13,19 +13,12 @@
 
 (* Cbat_vsa_utils: small shared utilities. Every def is denoted. *)
 
-exception NotImplemented of string
-
-(* Raised by [not_implemented] without a [~top] fallback. *)
-
-(* Placeholder degrading to [~top]. *)
-let not_implemented ?(top : 'a option) component : 'a = match top with
-  | None -> raise (NotImplemented component)
-  | Some tp ->
-    (* Log through Event.Log. *)
-    Bap.Std.Event.Log.message Bap.Std.Event.Log.Warning
-      ~section:"cbat_vsa"
-      "not_implemented: %s (degrading to top)" component;
-    tp
+(* Placeholder degrading to [top]. *)
+let not_implemented ~(top : 'a) component : 'a =
+  Bap.Std.Event.Log.message Bap.Std.Event.Log.Warning
+    ~section:"cbat_vsa"
+    "not_implemented: %s (degrading to top)" component;
+  top
 
 (* Max elements of an exact set. *)
 let fin_set_size : int = 16
@@ -35,10 +28,6 @@ let max_pieces : int = 64
 
 open !Core
 open Bap.Std
-
-let exn_on_err : ('a, Type.error) Result.t -> 'a = function
-  | Ok e -> e
-  | Error e -> raise (Type.Error.T e)
 
 let rotate_list (l : 'a list) : 'a list =
   let l_r = List.rev l in

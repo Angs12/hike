@@ -149,9 +149,6 @@ module Exact : sig
      order; the set itself when every element survives. *)
   val filter : t -> f:(Cbat_word.t -> bool) -> t
   val is_bottom : t -> bool
-  (* A one-element set's pieces: [create] makes every singleton
-     canonical, so they are the ones [Pieces.of_list] would build. *)
-  val point_pieces : t -> Pieces.t option
   (* The same elements as a canonical piece union. *)
   val pieces : t -> Pieces.t
   (* The elements of a piece union at their common [width]. *)
@@ -202,8 +199,7 @@ module Exact : sig
   val max_elem : t -> Cbat_word.t option
   val min_elem_signed : t -> Cbat_word.t option
   val max_elem_signed : t -> Cbat_word.t option
-  val overlap_generic :
-    (module Cbat_wordset_intf.S with type t = 'ws) -> t -> 'ws -> bool
+  val overlap_elem : width:int -> elem:(Cbat_word.t -> bool) -> t -> bool
 
   val get_idx : t -> int
   val pp : Format.formatter -> t -> unit

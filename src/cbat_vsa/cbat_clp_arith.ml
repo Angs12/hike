@@ -330,12 +330,6 @@ let split_shift_parts ~(sz1 : int) ~(overshift : t)
         exact p2' (base_of p2')
           (Option.value (finite_end p2') ~default:(base_of p2'))))
 
-let split_shift ~sz1 ~overshift ~exact (p2 : t) : t option =
-  Option.map (split_shift_parts ~sz1 ~overshift ~exact p2)
-    ~f:(function
-      | [] -> overshift
-      | x :: rest -> List.fold rest ~init:x ~f:union)
-
 let lshift_parts (p1 : t) (p2 : t) : t list =
   let sz1 = bitwidth p1 in
     let open Monads.Std.Monad.Option.Syntax in

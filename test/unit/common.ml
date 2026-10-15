@@ -48,7 +48,13 @@ module IntLattice : Cbat_lattice_intf.S_val with type t = int = struct
   let precedes = ( <= )
 end
 
-module Map = Cbat_map_lattice.Make_val (IntLattice) (IntLattice)
+module Make_val (K : Cbat_map_lattice.Key_val) (L : Cbat_lattice_intf.S_val) =
+struct
+  module IL = Cbat_lattice_intf.Free_index_val (L)
+  include Cbat_map_lattice.Make_indexed_val (K) (IL)
+end
+
+module Map = Make_val (IntLattice) (IntLattice)
 
 (* Every def is denoted (spec §2.1); all-tracked is the only mode. *)
 

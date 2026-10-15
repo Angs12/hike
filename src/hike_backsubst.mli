@@ -10,9 +10,6 @@ val size : exp -> int
 
 val has_unknown : exp -> bool
 
-(** Exact rewrites to a fixpoint: constant folding, integer identities,
-    the flag idioms, and relation combination over one operand pair. *)
-val simplify : exp -> exp
 
 (** A sub's blocks and incoming edges; a call, return, or interrupt edge
     ends a walk, as does the entry block. *)

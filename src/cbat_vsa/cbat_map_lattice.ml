@@ -93,7 +93,6 @@ module Make_indexed_from_map
   let top : t = Some M.empty
   let bottom : t = None
 
-  let lift : (L.t M.t -> L.t M.t) -> t -> t = Fn.flip Option.(>>|)
 
   let lift_meet f = Option.map2 ~f
 
@@ -232,8 +231,3 @@ module Make_indexed_val(K : Key_val)(L : Lattice.S_indexed_val) = struct
 
 end
 
-
-module Make_val (K : Key_val)(L : Lattice.S_val) = struct
-  module IL = Lattice.Free_index_val(L)
-  include Make_indexed_val(K)(IL)
-end

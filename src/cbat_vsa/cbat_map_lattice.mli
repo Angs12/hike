@@ -79,6 +79,3 @@ end
 module Make_indexed_val(K : Key_val)(L : Cbat_lattice_intf.S_indexed_val) : S_val
   with module Key = K and module Val = L
 
-module Make_val(K : Key_val)(L : Cbat_lattice_intf.S_val) : S_val
-  with module Key = K and module Val = Cbat_lattice_intf.Free_index_val(L)
-

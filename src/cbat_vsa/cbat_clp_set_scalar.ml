@@ -769,8 +769,12 @@ let overlap (t1 : t) (t2 : t) : bool =
   let leaf_pair q1 q2 =
     match q1, q2 with
     | Exact s1, Exact s2 -> Exact.overlap s1 s2
-    | Exact s1, Clp ps2 -> Exact.overlap_generic (module Clp) s1 (hull ps2)
-    | Clp ps1, Exact s2 -> Exact.overlap_generic (module Clp) s2 (hull ps1)
+    | Exact s1, Clp ps2 ->
+      let h = hull ps2 in
+      Exact.overlap_elem ~width:(Clp.bitwidth h) ~elem:(fun w -> Clp.elem w h) s1
+    | Clp ps1, Exact s2 ->
+      let h = hull ps1 in
+      Exact.overlap_elem ~width:(Clp.bitwidth h) ~elem:(fun w -> Clp.elem w h) s2
     | Clp ps1, Clp ps2 -> P.overlap ps1 ps2
     | _ -> false
   in

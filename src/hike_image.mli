@@ -59,9 +59,6 @@ val get_section_images : Project.t -> page:int64 -> (Bytes.t * int64 * int64) li
 
 val get_named_region_info : Project.t -> region Base.Sequence.t
 
-(** A loaded section's byte range; the stack lines have none. *)
-val section_range : Project.t -> Hike_section.t -> (int64 * int64) option
-
 (** A section's runtime access under the protections; a section with no
     bytes is [Writable]. *)
 val section_access :

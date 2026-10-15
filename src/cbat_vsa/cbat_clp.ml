@@ -948,9 +948,6 @@ module Exact = struct
     if is_bottom t then []
     else List.rev (Pieces.runs_from_sorted_elements ~width:t.width (elements t))
 
-  let point_pieces (t : t) : Pieces.t option =
-    if count t = 1 then Some (to_pieces t) else None
-
   (* The same elements as a canonical piece union.  The array is strictly
      ascending at [width], so its runs are ascending, disjoint and
      non-wrapping: only the budget combines. *)
@@ -1128,12 +1125,11 @@ module Exact = struct
       let i = first_negative t in
       Some (W.signed t.words.(if i > 0 then i - 1 else count t - 1))
 
-  let overlap_generic (type ws)
-      (module WS : Cbat_wordset_intf.S with type t = ws)
-      (t : t) (s' : ws) : bool =
-    (* Width mismatch answers may-overlap. *)
-    if WS.bitwidth s' <> t.width then not (is_bottom t)
-    else Array.exists t.words ~f:(fun w -> WS.elem w s')
+  (* [elem] tests one element of the other operand, which has width
+     [width]; a width mismatch answers may-overlap. *)
+  let overlap_elem ~(width : int) ~(elem : W.t -> bool) (t : t) : bool =
+    if width <> t.width then not (is_bottom t)
+    else Array.exists t.words ~f:elem
 
   (* An exact value is never a top; a growing widen is the caller's
      promotion signal, so the union is the sound answer if it arrives. *)

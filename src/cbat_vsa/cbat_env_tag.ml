@@ -53,8 +53,6 @@ let env_tag_d : AI.t option Hike_def_slot.t =
       (fun _ -> ())
 #endif
 
-let env_tag_slot = Hike_def_slot.slot env_tag_d
-
 let env_tag (d : def term) : AI.t option = Hike_def_slot.get env_tag_d d
 
 let set_env_tag (env : AI.t) (d : def term) : def term =
