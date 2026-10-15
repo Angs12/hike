@@ -782,27 +782,38 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
    bytes at the read's offset are the answer, but only when it is the
    sole cell overlapping the read — any other overlap must join, which
    this rule cannot do, so it answers top. *)
-let containing_cell ((bits, endian) : Val.idx) (m : itree) (k : Key.t) :
-    Val.t option =
+
+(* The last byte a [bits]-wide read at point [klo] covers. *)
+let read_end (bits : int) (klo : Key.point) : Key.point =
+  { klo with
+    pvalue =
+      Stdlib.Int64.add klo.pvalue
+        (Stdlib.Int64.of_int (bits / addressable_width - 1)) }
+
+(* The cells meeting [klo - (max_cell_bytes - 1) .. read_end], in key
+   order: every cell a point read at [klo] can overlap. *)
+let point_candidates (bits : int) (m : itree) (k : Key.t) :
+    (Key.t * Val.t) list =
+  let klo = Key.lower k in
+  let khi = read_end bits klo in
+  let back_lo = pt_add klo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
+  let q lo hi =
+    Seq.to_list (it_intersections m { k with Key.lo = lo; hi; step = 1 }) in
+  if Key.le back_lo klo then q back_lo khi
+  else
+    let top_pt = { klo with pvalue = line_max klo.pwidth } in
+    let zero_pt = { klo with pvalue = 0L } in
+    List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
+      (q back_lo top_pt @ q zero_pt khi)
+
+let containing_cell ((bits, endian) : Val.idx) (k : Key.t)
+    (cands : (Key.t * Val.t) list) : Val.t option =
   if not (Key.equal (Key.lower k) (Key.upper k)) then None
   else
     let req_bytes = bits / addressable_width in
     let klo = Key.lower k in
     let qlo = klo.pvalue in
-    let khi =
-      { klo with
-        pvalue =
-          Stdlib.Int64.add qlo (Stdlib.Int64.of_int (req_bytes - 1)) } in
-    let back_lo = pt_add klo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
-    let q lo hi =
-      Seq.to_list (it_intersections m { k with Key.lo = lo; hi; step = 1 }) in
-    let cands =
-      if Key.le back_lo klo then q back_lo khi
-      else
-        let top_pt = { klo with pvalue = line_max klo.pwidth } in
-        let zero_pt = { klo with pvalue = 0L } in
-        List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
-          (q back_lo top_pt @ q zero_pt khi) in
+    let khi = read_end bits klo in
     (* Only a point cell has a determined byte extent; its bytes overlap
        the read when the spans meet. *)
     let overlaps ((c, v) : Key.t * Val.t) : bool =
@@ -847,22 +858,28 @@ let containing_cell ((bits, endian) : Val.idx) (m : itree) (k : Key.t) :
    else the cells read on the key's grid. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
-  let req_bytes = fst i / addressable_width in
+  let bits = fst i in
+  let req_bytes = bits / addressable_width in
+  let point = Key.equal (Key.lower k) (Key.upper k) in
   let query_k, expanded =
-    if req_bytes > 1 && Key.equal (Key.lower k) (Key.upper k) then
-      let hi =
-        { (Key.lower k) with
-          pvalue =
-            Stdlib.Int64.add (Key.lower k).pvalue
-              (Stdlib.Int64.of_int (req_bytes - 1)) } in
-      ( { Key.origin = Key.origin k; lo = Key.lower k; hi; step = Key.step k },
+    if req_bytes > 1 && point then
+      ( { Key.origin = Key.origin k; lo = Key.lower k;
+          hi = read_end bits (Key.lower k); step = Key.step k },
         true )
     else (k, false) in
-  let ints_list = Seq.to_list (it_intersections m query_k) in
+  (* A point read's candidates cover its own query: one tree walk serves
+     both, filtered (in key order) to the cells meeting the query. *)
+  let cands = if point then point_candidates bits m k else [] in
+  let ints_list =
+    if point && req_bytes >= 1 then
+      let qlo = Key.lower query_k and qhi = Key.upper query_k in
+      List.filter cands ~f:(fun (c, _) ->
+          Key.le (Key.lower c) qhi && Key.le qlo (Key.upper c))
+    else Seq.to_list (it_intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
   | None -> (
-    match containing_cell i m k with
+    match containing_cell i k cands with
     | Some v -> v
     | None ->
       (* [ints_list] is the read's own query, or a superset widened by the
