@@ -605,11 +605,12 @@ let bounded_diophantine (a : t) (b : t) (c : t) : (t * t) option =
     if is_zero (modulo c a) then Some (div c a, z) else None
   else begin
     let d, ux, uy = gcdext_exn a b in
-    let sx = signed ux and sy = signed uy in
-    let q = div c d in
-    let x0 = signed (mul_exact sx q) and y0 = signed (mul_exact sy q) in
     if not (is_zero (modulo c d)) then None
-    else Some (extract_exn ~hi:(size - 1) x0, extract_exn ~hi:(size - 1) y0)
+    else
+      let sx = signed ux and sy = signed uy in
+      let q = div c d in
+      let x0 = signed (mul_exact sx q) and y0 = signed (mul_exact sy q) in
+      Some (extract_exn ~hi:(size - 1) x0, extract_exn ~hi:(size - 1) y0)
   end
 
 (* Trailing-zero count of a positive immediate. *)
