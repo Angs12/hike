@@ -174,6 +174,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     (* The constraint's and the right operand's extrema, computed
        once; every arm opens with the pair it needs. *)
     let v_extrema = (WordSet.min_elem cstr, WordSet.max_elem cstr) in
+    let a_extrema = (WordSet.min_elem a_ws, WordSet.max_elem a_ws) in
     let b_extrema = (WordSet.min_elem b_ws, WordSet.max_elem b_ws) in
     let b_single =
       match b_extrema with
@@ -183,10 +184,10 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     | Bil.PLUS ->
       (match v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
+         let a' = Option.map2 (fst b_extrema) (snd b_extrema)
              ~f:(fun bmin bmax ->
                hull ~wrapping:true width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)) |> Option.join in
-         let b' = Option.map2 (WordSet.min_elem a_ws) (WordSet.max_elem a_ws)
+         let b' = Option.map2 (fst a_extrema) (snd a_extrema)
              ~f:(fun amin amax ->
                hull ~wrapping:true width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)) |> Option.join in
          a', b'
@@ -194,10 +195,10 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     | Bil.MINUS ->
       (match v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
+         let a' = Option.map2 (fst b_extrema) (snd b_extrema)
              ~f:(fun bmin bmax ->
                hull ~wrapping:true width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)) |> Option.join in
-         let b' = Option.map2 (WordSet.min_elem a_ws) (WordSet.max_elem a_ws)
+         let b' = Option.map2 (fst a_extrema) (snd a_extrema)
              ~f:(fun amin amax ->
                hull ~wrapping:true width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)) |> Option.join in
          a', b'

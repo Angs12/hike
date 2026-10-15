@@ -459,7 +459,7 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     else
       match Cbat_clp_set_composite.origin data_new with
       | Some o when Hike_origin.names_stack_line o -> (
-          match rel_line_base o, value_progression o data_new with
+          match rel, value_progression o data_new with
           | Some b, Some p ->
             let lo_off = Cbat_word.sub extrap_lo b in
             let hi_off = Cbat_word.sub extrap_hi b in

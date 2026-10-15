@@ -303,9 +303,14 @@ let coalesce (it : itree) : itree =
             (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
         | Some (pk, pv)
           when Hike_origin.equal (Key.origin k) (Key.origin pk)
-               && Val.equal pv v &&
-            (let nxt = Key.succ (Key.upper pk) in
-             not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
+               && Val.equal pv v
+               (* Only a dense or congruently-strided union claims exactly
+                  the two cells' bytes; a mixed-step union would demote to
+                  a hull and claim the stride gaps. *)
+               && ((Key.step pk = 1 && Key.step k = 1)
+                   || Key.combined_step pk k > 1)
+            && (let nxt = Key.succ (Key.upper pk) in
+                not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
             (acc, Some (Key.union pk k, v))
         | Some (pk, pv) -> (IT.add acc pk pv, Some (k, v)))
   |> fun (acc, pending) ->
@@ -828,22 +833,30 @@ let containing_cell ((bits, endian) : Val.idx) (m : itree) (k : Key.t) :
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
   let req_bytes = fst i / addressable_width in
-  let query_k =
+  let query_k, expanded =
     if req_bytes > 1 && Key.equal (Key.lower k) (Key.upper k) then
       let hi =
         { (Key.lower k) with
           pvalue =
             Stdlib.Int64.add (Key.lower k).pvalue
               (Stdlib.Int64.of_int (req_bytes - 1)) } in
-      { Key.origin = Key.origin k; lo = Key.lower k; hi; step = Key.step k }
-    else k in
+      ( { Key.origin = Key.origin k; lo = Key.lower k; hi; step = Key.step k },
+        true )
+    else (k, false) in
   let ints_list = Seq.to_list (it_intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
   | None -> (
     match containing_cell i m k with
     | Some v -> v
-    | None -> read_cells i k (Seq.to_list (it_intersections m k)))
+    | None ->
+      (* [ints_list] is the read's own query, or a superset widened by the
+         read size: the cells containing the read's start are [m k]'s. *)
+      let cell_ints =
+        if expanded then
+          List.filter ints_list ~f:(fun (c, _) -> Key.contains c (Key.lower k))
+        else ints_list in
+      read_cells i k cell_ints)
 
 let find (i : Val.idx) (m : t) (k : Key.t) =
   Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)

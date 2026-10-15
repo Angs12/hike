@@ -35,6 +35,8 @@ val succ : point -> point
 val of_word : Cbat_word.t -> point option
 val upper : t -> point
 val lower : t -> point
+(* Whether [k]'s byte hull contains [pt]. *)
+val contains : t -> point -> bool
 val step : t -> int
 val cell_key : t -> Cbat_landmarks.cell_desc
 val combined_step : t -> t -> int

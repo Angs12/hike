@@ -140,10 +140,15 @@ let shift (k : t) ~(bytes : int) : t option =
 (* Sub-range of one owner key: the owner's stride carries. *)
 let piece (k : t) ~lo ~hi : t = {origin = k.origin; lo; hi; step = k.step}
 
-(* Orders by origin, then point width, then unsigned value. *)
+(* A TOTAL order (origin, then lower, upper, stride): the interval tree's
+   [add] treats [compare = 0] as identity and replaces the node, so a
+   partial order would silently drop a cell sharing origin+lower with a
+   different extent. *)
 let compare (k1 : t) (k2 : t) : int =
     let c = Hike_origin.compare k1.origin k2.origin in
-    if c <> 0 then c else compare_point (lower k1) (lower k2)
+    let c = if c <> 0 then c else compare_point (lower k1) (lower k2) in
+    let c = if c <> 0 then c else compare_point (upper k1) (upper k2) in
+    if c <> 0 then c else Int.compare (step k1) (step k2)
 
 let contains (k : t) (pt : point) : bool =
     le (lower k) pt && le pt (upper k)

@@ -720,7 +720,9 @@ let rec elem w (t : t) =
           && Stdlib.Int64.compare wi cmax <= 0
         | _ -> false)
      | None -> not (is_bottom t))
-  | Clp ps -> P.elem w ps
+  | Clp ps ->
+    (* [P.elem] asserts equal widths; a mismatched query is not a member. *)
+    Cbat_word.bitwidth w = P.bitwidth ps && P.elem w ps
   | Exact s -> Exact.elem w s
   | Many ps -> List.exists ps ~f:(fun q -> elem w q)
 
