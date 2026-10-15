@@ -2,6 +2,6 @@
    load-bearing. *)
 let warn fmt =
   Printf.ksprintf
-    (fun s -> Printf.eprintf "hike: %s\n" s)
+    (fun s -> Printf.eprintf "hike: %s\n%!" s)
     fmt
 
