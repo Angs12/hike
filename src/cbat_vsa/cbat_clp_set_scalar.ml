@@ -330,7 +330,7 @@ and canonical_pool (ps : t list) : t =
       | [ s ] -> Exact.card_exceeds Utils.fin_set_size s
       | _ ->
         List.fold fss ~init:0 ~f:(fun a s ->
-            let c = Cbat_word.to_int_sat (Exact.cardinality s) in
+            let c = Exact.count s in
             if c > Stdlib.max_int - a then Stdlib.max_int else a + c)
         > Utils.fin_set_size
     in

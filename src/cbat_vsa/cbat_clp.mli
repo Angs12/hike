@@ -158,6 +158,7 @@ module Exact : sig
   val of_pieces : width:int -> Pieces.t -> t
 
   val bitwidth : t -> int
+  val count : t -> int
   val cardinality : t -> Cbat_word.t
   (* [gt_int (cardinality t) n], without building the sum. *)
   val card_exceeds : int -> t -> bool
