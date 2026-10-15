@@ -130,7 +130,7 @@ module Pieces : sig
 end
 
 (* The exact finite element set as an uncapped flat ascending array of
-   payloads (ADR 0036).  No budget and no [max_pieces] cap — the caller's
+   words (ADR 0036).  No budget and no [max_pieces] cap — the caller's
    canonical promotion applies the budget.  [to_pieces] is the run view. *)
 module Exact : sig
   type t [@@deriving bin_io, sexp, compare]

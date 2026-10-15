@@ -927,86 +927,52 @@ end
 
 (* ==================== Exact: the uncapped flat element array ========== *)
 
-(* The exact finite tier as a flat array: the elements' payloads at the
-   declared width, strictly ascending, as fixed-size big-endian records
-   ([rec_size] bytes each; 8 at width <= 64).  The array is the canonical
-   form, so structural equality is set equality; the empty array is
-   bottom and the width survives in the record.  Unlike [Pieces], the set
-   is uncapped and unbudgeted; the caller's canonical promotion applies
-   the budget.  Every op is [lift1] or [lift2] of its word op: the
-   producer computes the element image, and [of_array] orders it once. *)
+(* The exact finite tier as a flat array: the elements as words at the
+   declared width, unsigned, strictly ascending.  The array is the
+   canonical form, so structural equality is set equality; the empty
+   array is bottom and the width survives in the record.  It is never
+   mutated after [of_array] builds it.  Unlike [Pieces], the set is
+   uncapped and unbudgeted; the caller's canonical promotion applies the
+   budget.  Every op is [lift1] or [lift2] of its word op: the producer
+   computes the element image, and [of_array] orders it once. *)
 module Exact = struct
   module W = Cbat_word
 
-  type t = { width : int; words : string }
+  type t = { width : int; words : W.t array }
   [@@deriving bin_io, sexp, compare]
 
-  let rec_size (width : int) : int = 8 * ((Stdlib.max width 1 + 63) / 64)
+  let count (t : t) : int = Array.length t.words
 
-  let count (t : t) : int = String.length t.words / rec_size t.width
+  let is_bottom (t : t) : bool = Array.is_empty t.words
 
-  let is_bottom (t : t) : bool = String.is_empty t.words
+  let nth (t : t) (i : int) : W.t = t.words.(i)
 
-  let get64 (s : string) (i : int) : int64 = Stdlib.String.get_int64_be s (8 * i)
-
-  (* A wide record, most significant 64-bit chunk first. *)
-  let z_at (k : int) (s : string) (i : int) : Z.t =
-    let z = ref Z.zero in
-    for c = 0 to (k / 8) - 1 do
-      let x = Stdlib.String.get_int64_be s ((i * k) + (8 * c)) in
-      z := Z.logor (Z.shift_left !z 64) (Z.extract (Z.of_int64 x) 0 64)
-    done;
-    !z
-
-  let nth (t : t) (i : int) : W.t =
-    if t.width <= 64 then W.of_int64 ~width:t.width (get64 t.words i)
-    else W.of_z (z_at (rec_size t.width) t.words i) t.width
-
-  let elements (t : t) : W.t list = List.init (count t) ~f:(nth t)
+  let elements (t : t) : W.t list = Array.to_list t.words
   let iter = elements
 
-  (* An element's payload at [width]: a narrower or wider word is
+  (* An element at [width], unsigned: a narrower or wider word is
      zero-extended or truncated, as [W.extract_exn] slices. *)
   let at_width (width : int) (w : W.t) : W.t =
-    if W.bitwidth w = width then w else W.extract_exn ~hi:(width - 1) w
+    if W.bitwidth w = width then W.unsigned w else W.extract_exn ~hi:(width - 1) w
 
   (* The one ordering pass: the producers' element images arrive in any
-     order and with repeats. *)
+     order and with repeats.  [ws] is the producer's own scratch array. *)
   let of_array ~(width : int) (ws : W.t array) : t =
-    if width <= 64 then begin
-      let a = Array.map ws ~f:(fun w -> W.to_int64_exn (at_width width w)) in
-      Array.sort a ~compare:Stdlib.Int64.unsigned_compare;
-      let b = Bytes.create (8 * Array.length a) in
-      let n = ref 0 in
-      Array.iteri a ~f:(fun i x ->
-          if i = 0 || not (Int64.equal x a.(i - 1)) then begin
-            Stdlib.Bytes.set_int64_be b (8 * !n) x;
-            incr n
-          end);
-      { width; words = Stdlib.Bytes.sub_string b 0 (8 * !n) }
-    end
-    else begin
-      let k = rec_size width in
-      let a = Array.map ws ~f:(fun w -> W.to_z (at_width width w)) in
-      Array.sort a ~compare:Z.compare;
-      let b = Bytes.create (k * Array.length a) in
-      let n = ref 0 in
-      Array.iteri a ~f:(fun i z ->
-          if i = 0 || not (Z.equal z a.(i - 1)) then begin
-            for c = 0 to (k / 8) - 1 do
-              Stdlib.Bytes.set_int64_be b ((!n * k) + (8 * c))
-                (Z.to_int64 (Z.signed_extract z (64 * ((k / 8) - 1 - c)) 64))
-            done;
-            incr n
-          end);
-      { width; words = Stdlib.Bytes.sub_string b 0 (k * !n) }
-    end
+    let a = Array.map ws ~f:(at_width width) in
+    Array.sort a ~compare:W.compare;
+    let n = ref 0 in
+    Array.iteri a ~f:(fun i x ->
+        if i = 0 || not (W.equal x a.(!n - 1)) then begin
+          a.(!n) <- x;
+          incr n
+        end);
+    { width; words = (if !n = Array.length a then a else Array.sub a ~pos:0 ~len:!n) }
 
   let of_list ~(width : int) (l : W.t list) : t = of_array ~width (Array.of_list l)
 
-  let bottom (width : int) : t = { width; words = "" }
+  let bottom (width : int) : t = { width; words = [||] }
 
-  let singleton (w : W.t) : t = of_array ~width:(W.bitwidth w) [| w |]
+  let singleton (w : W.t) : t = { width = W.bitwidth w; words = [| W.unsigned w |] }
 
   (* The runs in ascending order, as [Pieces.runs_from_sorted_elements]
      builds them. *)
@@ -1024,27 +990,13 @@ module Exact = struct
 
   let card_exceeds (n : int) (t : t) : bool = count t > n
 
-  (* The records are big-endian at one size, so the byte order is the
-     numeric order. *)
-  let cmp_rec (k : int) (a : string) (i : int) (b : string) (j : int) : int =
-    if k = 8 then Stdlib.Int64.unsigned_compare (get64 a i) (get64 b j)
-    else
-      let rec go c =
-        if c = k then 0
-        else
-          let d = Char.compare a.[(i * k) + c] b.[(j * k) + c] in
-          if d <> 0 then d else go (c + 1)
-      in
-      go 0
-
   let elem (w : W.t) (t : t) : bool =
     W.bitwidth w = t.width
-    && (let probe = of_array ~width:t.width [| w |] in
-        let k = rec_size t.width in
+    && (let w = W.unsigned w in
         let rec search lo hi =
           lo < hi
           && (let mid = (lo + hi) / 2 in
-              let c = cmp_rec k t.words mid probe.words 0 in
+              let c = W.compare t.words.(mid) w in
               c = 0 || if c < 0 then search (mid + 1) hi else search lo mid)
         in
         search 0 (count t))
@@ -1052,30 +1004,30 @@ module Exact = struct
   (* The linear merge over two equal-width arrays, keeping the elements
      only in [a], in both, or only in [b] as asked. *)
   let merge ~(left : bool) ~(both : bool) ~(right : bool) (a : t) (b : t) : t =
-    let k = rec_size a.width in
     let na = count a and nb = count b in
-    let buf = Stdlib.Buffer.create (k * (na + nb)) in
-    let add s i = Stdlib.Buffer.add_substring buf s (i * k) k in
+    let out = Array.create ~len:(na + nb) (W.zero 1) in
+    let n = ref 0 in
+    let add x = out.(!n) <- x; incr n in
     let rec go i j =
-      if i = na then (if right then for j' = j to nb - 1 do add b.words j' done)
-      else if j = nb then (if left then for i' = i to na - 1 do add a.words i' done)
+      if i = na then (if right then for j' = j to nb - 1 do add b.words.(j') done)
+      else if j = nb then (if left then for i' = i to na - 1 do add a.words.(i') done)
       else
-        let c = cmp_rec k a.words i b.words j in
-        if c < 0 then (if left then add a.words i; go (i + 1) j)
-        else if c > 0 then (if right then add b.words j; go i (j + 1))
-        else (if both then add a.words i; go (i + 1) (j + 1))
+        let c = W.compare a.words.(i) b.words.(j) in
+        if c < 0 then (if left then add a.words.(i); go (i + 1) j)
+        else if c > 0 then (if right then add b.words.(j); go i (j + 1))
+        else (if both then add a.words.(i); go (i + 1) (j + 1))
     in
     go 0 0;
-    { width = a.width; words = Stdlib.Buffer.contents buf }
+    { width = a.width; words = Array.sub out ~pos:0 ~len:!n }
 
   let rewiden (width : int) (t : t) : t =
-    if t.width = width then t else of_list ~width (elements t)
+    if t.width = width then t else of_array ~width t.words
 
   let equal (a : t) (b : t) : bool =
-    a.width = b.width && String.equal a.words b.words
+    a.width = b.width && Array.equal W.equal a.words b.words
 
   (* A width mismatch follows the finite tier: the union holds both
-     payload sets at the wider width; the meet of distinct widths is
+     element sets at the wider width; the meet of distinct widths is
      empty; [diff] keeps the left set. *)
   let union (a : t) (b : t) : t =
     let w = Stdlib.max a.width b.width in
@@ -1097,22 +1049,15 @@ module Exact = struct
 
   (* The pointwise element image at [width]. *)
   let lift1 ~(width : int) (f : W.t -> W.t) (a : t) : t =
-    of_array ~width (Array.init (count a) ~f:(fun i -> f (nth a i)))
+    of_array ~width (Array.map a.words ~f)
 
   (* The Cartesian element image; [width] is the finite tier's per-op width
      rule: the wider side, or the left side for the shifts. *)
   let lift2 ?(width = fun w1 w2 -> Stdlib.max w1 w2)
       (f : W.t -> W.t -> W.t) (a : t) (b : t) : t =
-    let na = count a and nb = count b in
-    let eb = Array.init nb ~f:(nth b) in
-    let out = Array.create ~len:(na * nb) (W.zero 1) in
-    for i = 0 to na - 1 do
-      let x = nth a i in
-      for j = 0 to nb - 1 do
-        out.((i * nb) + j) <- f x eb.(j)
-      done
-    done;
-    of_array ~width:(width a.width b.width) out
+    let nb = count b in
+    of_array ~width:(width a.width b.width)
+      (Array.init (count a * nb) ~f:(fun k -> f a.words.(k / nb) b.words.(k mod nb)))
 
   let add = lift2 W.add
   let sub = lift2 W.sub
