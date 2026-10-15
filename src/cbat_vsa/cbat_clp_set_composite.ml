@@ -241,6 +241,7 @@ let is_infinite t = S.is_infinite (plain t)
 let is_ascending t = S.is_ascending (plain t)
 let is_descending t = S.is_descending (plain t)
 let is_circular t = S.is_circular (plain t)
+let base_facts = S.base_facts
 let stack_offsets t = S.stack_offsets (plain t)
 let vla_offsets t = S.vla_offsets (plain t)
 let stack_leaves t = List.map (S.stack_leaves (plain t)) ~f:(fun s -> Scalar s)

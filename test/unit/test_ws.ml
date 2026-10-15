@@ -537,7 +537,32 @@ let tests : unit Alcotest.test list =
                 Clp.elem (w64 0x100) offs
                 && not (Clp.elem (Cbat_word.of_int ~width:64 (-31)) offs)
               | None -> false)
-           | _ -> false))
+           | _ -> false));
+
+    (* The landmark translation works in the value's own line: a strided
+       counter keeps its stride, and a stack value stays on its line. *)
+    pin "WS-52" "landmark extrapolation keeps a stride and a stack line" (fun () ->
+        let stride8 n =
+          Ws.of_clp
+            (Clp.create ~width:64 ~step:(w64 8)
+               ~cardn:(Cbat_word.of_int ~width:65 n) (w64 0)) in
+        let old = stride8 8 and new_ = stride8 9 in
+        let entries =
+          [ { Cbat_landmarks.bound = w64 200; is_upper = true;
+              dist = Some 1; dist_p = Some 10 } ] in
+        (match Cbat_landmarks.extrapolate ~steps:2 ~old ~new_ ~entries with
+         | `Extrapolated d ->
+           check "WS-52.stride"
+             (Ws.stride d = 8 && Ws.min_elem d = Some (w64 0)
+             && Ws.max_elem d = Some (w64 80))
+         | `Widen -> check "WS-52.stride" false);
+        let sold = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 8)) in
+        let snew = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 16)) in
+        match Cbat_landmarks.extrapolate ~steps:2 ~old:sold ~new_:snew ~entries with
+        | `Extrapolated d ->
+          check "WS-52.stack"
+            (Option.equal Hike_origin.equal (Ws.origin d) (Some Hike_origin.Stack))
+        | `Widen -> check "WS-52.stack" false)
   ]
 
 let () = run "ws" tests

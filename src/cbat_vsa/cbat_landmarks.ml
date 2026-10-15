@@ -348,7 +348,51 @@ let clear_key (t : t) (h : Tid.t) (key : key) : unit =
     if List.is_empty rows then Hashtbl.remove t.rows h
     else Hashtbl.set t.rows ~key:h ~data:rows
 
-(* Extrapolate bounds toward landmarks; clamp at landmark and current bound. *)
+(* The value's own line: [Some base] when its offsets are translatable — a
+   fixed-base Stack/VLA line.  [None] defers (an unknown VLA base has no
+   entry-line position). *)
+let rel_line_base (o : Hike_origin.t) : Cbat_word.t option =
+  let f = Cbat_clp_set_composite.base_facts o in
+  if f.Hike_origin.certified > 0 then
+    Some (Cbat_word.of_int64 ~width:64 f.Hike_origin.base)
+  else None
+
+(* Extend the grid [base + i*step] to cover [lo,hi], keeping the step and
+   base congruence (the signed line).  None for a singleton (step 0). *)
+let extend_grid ~(width : int) ~(base : Cbat_word.t) ~(step : Cbat_word.t)
+    (lo : Cbat_word.t) (hi : Cbat_word.t) : Cbat_clp.t option =
+  if Cbat_word.is_zero step then None
+  else
+    let diff = Cbat_word.sub lo base in
+    let quot =
+      match Cbat_word.to_int64 diff, Cbat_word.to_int64 step with
+      | Ok di, Ok si when not (Stdlib.Int64.equal si 0L) ->
+        let q = Stdlib.Int64.div di si in
+        let q =
+          if Stdlib.Int64.compare (Stdlib.Int64.rem di si) 0L < 0
+          then Stdlib.Int64.pred q else q in
+        Cbat_word.of_int64 ~width:(Cbat_word.bitwidth diff) q
+      | _ -> Cbat_word.zero (Cbat_word.bitwidth diff) in
+    let base' = Cbat_word.add base (Cbat_word.mul quot step) in
+    let w1 = width + 1 in
+    let cw w = Cbat_word.cast Bil.UNSIGNED w1 w in
+    let cardn =
+      Cbat_word.add
+        (Cbat_word.div (cw (Cbat_word.sub hi base')) (cw step))
+        (Cbat_word.one w1) in
+    Some (Cbat_clp.create ~width ~step ~cardn base')
+
+(* The value's translatable progression in its own space. *)
+let value_progression (o : Hike_origin.t) (v : Cbat_clp_set_composite.t) :
+    Cbat_clp.t option =
+  match o with
+  | Hike_origin.Vla _ -> Cbat_clp_set_composite.vla_offsets v
+  | _ -> Cbat_clp_set_composite.stack_offsets v
+
+(* Extrapolate bounds toward landmarks; clamp at landmark and current
+   bound.  The translation works in the value's own line — a plain word's
+   absolute words, or a relative value's offsets — so a stride is kept and
+   a stack value stays on its key line. *)
 let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     (data_new : Cbat_clp_set_composite.t)
     (entries : lm_entry list) : Cbat_clp_set_composite.t =
@@ -362,8 +406,21 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
           let d = g * steps in
           if d > max_landmark_distance then max_landmark_distance else d))
     in
-    let lo_base = Option.value (Cbat_clp_set_composite.min_elem data_new) ~default:(Cbat_word.zero width) in
-    let hi_base = Option.value (Cbat_clp_set_composite.max_elem data_new) ~default:(Cbat_word.zero width) in
+    let rel =
+      match Cbat_clp_set_composite.origin data_new with
+      | Some o when Hike_origin.names_stack_line o -> rel_line_base o
+      | _ -> None in
+    let signed = Option.is_some rel in
+    let sgn w = if signed then Cbat_word.signed w else w in
+    let cmp a b = Cbat_word.compare (sgn a) (sgn b) in
+    let min_e =
+      if signed then Cbat_clp_set_composite.min_elem_signed
+      else Cbat_clp_set_composite.min_elem in
+    let max_e =
+      if signed then Cbat_clp_set_composite.max_elem_signed
+      else Cbat_clp_set_composite.max_elem in
+    let lo_base = Option.value (min_e data_new) ~default:(Cbat_word.zero width) in
+    let hi_base = Option.value (max_e data_new) ~default:(Cbat_word.zero width) in
     let extrap_lo =
       let lo' = List.filter entries ~f:(fun e -> not e.is_upper) in
       match lo' with
@@ -371,13 +428,13 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
       | _ ->
         let candidates = List.filter_map lo' ~f:(fun e ->
             let v = Cbat_word.sub lo_base (Cbat_word.of_int ~width (delta_of e)) in
-            let v = if Cbat_word.compare v lo_base > 0 then lo_base else v in
-            let v = if Cbat_word.compare v e.bound < 0 then e.bound else v in
-            let v = if Cbat_word.compare v lo_base > 0 then lo_base else v in
+            let v = if cmp v lo_base > 0 then lo_base else v in
+            let v = if cmp v e.bound < 0 then e.bound else v in
+            let v = if cmp v lo_base > 0 then lo_base else v in
             Some v)
         in
         List.fold candidates ~init:lo_base ~f:(fun acc v ->
-            if Cbat_word.compare v acc < 0 then v else acc)
+            if cmp v acc < 0 then v else acc)
     in
     let extrap_hi =
       let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
@@ -387,19 +444,45 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
         let candidates = List.filter_map hi' ~f:(fun e ->
             let v = Cbat_word.add hi_base (Cbat_word.of_int ~width (delta_of e)) in
             let v =
-              if Cbat_word.compare v hi_base < 0 then
+              if cmp v hi_base < 0 then
                 (* Overflow saturates. *)
                 Cbat_word.ones width
               else v in
-            let v = if Cbat_word.compare v e.bound > 0 then e.bound else v in
-            let v = if Cbat_word.compare v hi_base < 0 then hi_base else v in
+            let v = if cmp v e.bound > 0 then e.bound else v in
+            let v = if cmp v hi_base < 0 then hi_base else v in
             Some v)
         in
         List.fold candidates ~init:hi_base ~f:(fun acc v ->
-            if Cbat_word.compare v acc > 0 then v else acc)
+            if cmp v acc > 0 then v else acc)
     in
-    if Cbat_word.compare extrap_lo extrap_hi > 0 then data_new
-    else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width extrap_lo extrap_hi)
+    if cmp extrap_lo extrap_hi > 0 then data_new
+    else
+      match Cbat_clp_set_composite.origin data_new with
+      | Some o when Hike_origin.names_stack_line o -> (
+          match rel_line_base o, value_progression o data_new with
+          | Some b, Some p ->
+            let lo_off = Cbat_word.sub extrap_lo b in
+            let hi_off = Cbat_word.sub extrap_hi b in
+            let base =
+              Option.value (Cbat_clp.min_elem p) ~default:lo_off in
+            (match
+               extend_grid ~width ~base ~step:(Cbat_clp.step_of p) lo_off hi_off
+             with
+             | Some p' ->
+               Cbat_clp_set_composite.set_origin o
+                 (Cbat_clp_set_composite.stack_word p')
+             | None -> data_new)
+          | _ -> data_new)
+      | _ ->
+        (* A plain value: extend its grid in absolute words. *)
+        let step =
+          Cbat_word.of_int ~width (Cbat_clp_set_composite.stride data_new) in
+        let base =
+          Option.value (Cbat_clp_set_composite.min_elem data_new)
+            ~default:(Cbat_word.zero width) in
+        (match extend_grid ~width ~base ~step extrap_lo extrap_hi with
+         | Some p' -> Cbat_clp_set_composite.of_clp p'
+         | None -> data_new)
   end
 
 (* The extrapolation's own answer: the landmark translation at [old]'s
@@ -413,12 +496,14 @@ let extrapolate ~(steps : int) ~(old : Cbat_clp_set_composite.t)
     List.filter entries ~f:(fun e ->
         Cbat_word.bitwidth e.bound = Cbat_clp_set_composite.bitwidth old)
   in
-  (* A stack address extrapolates only in its offsets: the translation
-     below answers a plain interval, which would move it off the stack
-     key line. *)
-  let stack v = not (List.is_empty (Cbat_clp_set_composite.stack_leaves v)) in
+  (* A relative value with no translatable line (an unknown VLA base)
+     defers to the plain widen. *)
+  let unknown_line v =
+    match Cbat_clp_set_composite.origin v with
+    | Some o when Hike_origin.names_stack_line o -> Option.is_none (rel_line_base o)
+    | _ -> false in
   match entries with
-  | _ :: _ when stack old || stack new_ -> `Widen
+  | _ :: _ when unknown_line old || unknown_line new_ -> `Widen
   | [] ->
     `Extrapolated (Cbat_clp_set_composite.extrapolate_steps ~steps old new_)
   | _ ->

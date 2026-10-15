@@ -51,6 +51,10 @@ val extrapolate_steps : steps:int -> t -> t -> t
    RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
 
+(* The origin's facts, with a fixed-base VLA's base and certified count
+   derived (it inherits Stack's) — the base an origin's offsets add to. *)
+val base_facts : Origin.t -> Origin.facts
+
 (* A module address: its link-time word in its section. *)
 val module_address : int64 -> t
 
