@@ -145,7 +145,7 @@ let access_value ~ptr_cell ctx scope llvm_builder blk_tid def exp =
       | _, _, _, `Load (mem, addr, size)
         when ptr_cell
              && (match tls_classify ctx addr with Not_tls -> true | _ -> false) ->
-          tls_plain_load ~ptr_cell ctx scope llvm_builder blk_tid mem addr size
+          plain_load ~ptr_cell ctx scope llvm_builder blk_tid mem addr size
       | _ -> create_exp ctx scope llvm_builder blk_tid exp)
 
 let mem_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid def_tag def
@@ -238,23 +238,15 @@ and raw_addr_ptr ctx llvm_builder (a : Bil2llvm_value.t) =
           ctx.ptr_ty)
   | _ -> as_ptr llvm_builder a
 
-(* Coerces a value to the atomic op's width. *)
-let atomic_width ctx llvm_builder v bits =
-  let w = Llvm.integer_bitwidth (Llvm.type_of v) in
-  if w = bits then v
-  else if w > bits then
-    Llvm.build_trunc v (Llvm.integer_type ctx.llvm_ctx bits) "" llvm_builder
-  else
-    Llvm.build_zext v (Llvm.integer_type ctx.llvm_ctx bits) "" llvm_builder
-
 let create_atomic ctx scope llvm_builder blk_tid action : Bil2llvm_value.t =
   match action with
   | Atomic_value rhs -> create_exp ctx scope llvm_builder blk_tid rhs
   | Atomic_begin { kind; mem; addr; size } ->
     Bil2llvm_value.Int (
     let bits = Size.in_bits size in
-    let value exp = atomic_width ctx llvm_builder
-        (as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp)) bits in
+    let value exp =
+      let v = as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid exp) in
+      coerce_int_width ctx.llvm_ctx llvm_builder ~bits:(Bil2llvm_int.width v) v bits in
     let ptr = atomic_ptr ctx scope llvm_builder blk_tid mem addr in
     match kind with
     | Rmw (op, operand) ->

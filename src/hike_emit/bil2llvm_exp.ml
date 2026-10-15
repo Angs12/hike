@@ -41,9 +41,6 @@ let thread_pointer ctx llvm_builder =
   let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
   Llvm.build_call fty f [||] "hike_tp" llvm_builder
 
-(* The one memory node of an exp (a def's rhs holds at most one). *)
-type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
-
 let marker_of_size size =
   Hike_synth.accumulator ~addr_bits:(Size.in_bits size)
 
@@ -169,7 +166,7 @@ and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
       Bil2llvm_value.extract ~addr_bits llvm_builder hi lo (eval e)
   | Store (mem, addr, data, _, _) -> (
     match tls_classify ctx addr with
-    | Not_tls -> tls_plain_store ctx scope llvm_builder blk_tid mem addr data
+    | Not_tls -> plain_store ctx scope llvm_builder blk_tid mem addr data
     | cls ->
         let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
         let d = eval data in
@@ -177,7 +174,7 @@ and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
         d)
   | Load (mem, addr, _, size) -> (
     match tls_classify ctx addr with
-    | Not_tls -> tls_plain_load ctx scope llvm_builder blk_tid mem addr size
+    | Not_tls -> plain_load ctx scope llvm_builder blk_tid mem addr size
     | cls ->
         load_cell ctx llvm_builder ~ptr:false size
           (tls_ptr ctx scope llvm_builder blk_tid cls))
@@ -219,7 +216,7 @@ and tls_ptr ctx scope llvm_builder blk_tid cls =
 
 (* The generic memory arms an unclassified access keeps (split out of
    [create_exp]'s dispatch so the TLS arms read as one rule). *)
-and tls_plain_store ctx scope llvm_builder blk_tid mem addr data =
+and plain_store ctx scope llvm_builder blk_tid mem addr data =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let d = create_exp ctx scope llvm_builder blk_tid data in
   let dv = Bil2llvm_value.ll d in
@@ -234,7 +231,7 @@ and tls_plain_store ctx scope llvm_builder blk_tid mem addr data =
    | _ -> ignore (Bil2llvm_memory.store ctx llvm_builder dv a));
   d
 
-and tls_plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
+and plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
     addr size =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let raw () =
