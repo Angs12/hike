@@ -264,20 +264,24 @@ let image_address_ok (addr : wordset) (bits : int) : bool =
 let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
     ~(slots : Int64.Set.t)
     ~(endian : endian) ~(bits : int) (addr : wordset) : wordset option =
-  Base.List.fold (WordSet.iter addr) ~init:(Some [])
-    ~f:(fun acc a ->
-        Base.Option.bind acc ~f:(fun ws ->
-            Base.Option.bind (word_i64 a) ~f:(fun ai ->
-                if Core.Set.mem slots ai then None
-                else
-                  Base.Option.map
-                    (image_word img_bytes
-                       (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
-                       ~endian ~bits)
-                    ~f:(fun w -> w :: ws))))
-  |> Option.map ~f:(fun words ->
-         WordSet.of_list ~width:bits
-           (Base.List.dedup_and_sort words ~compare:Cbat_word.compare))
+  let exception Unreadable in
+  try
+    let words =
+      Cbat_clp.Exact.of_iter ~width:bits ~iter:(fun emit ->
+          List.iter (WordSet.iter addr) ~f:(fun a ->
+              match word_i64 a with
+              | None -> raise Unreadable
+              | Some ai ->
+                if Core.Set.mem slots ai then raise Unreadable;
+                match
+                  image_word img_bytes
+                    (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
+                    ~endian ~bits
+                with
+                | None -> raise Unreadable
+                | Some w -> emit w)) in
+    Some (WordSet.of_exact words)
+  with Unreadable -> None
 
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     (mv : Mem.t) : wordset option =

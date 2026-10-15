@@ -20,6 +20,7 @@ module Clp = Cbat_clp
 module P = Clp.Pieces
 module Exact = Clp.Exact
 module Origin = Hike_origin
+module Origin_map = Map.Make (Origin)
 
 type clp = Clp.t
 type word = Cbat_word.t
@@ -88,8 +89,6 @@ let hull_of_pieces (ps : P.t) : clp option =
   match P.to_list ps with
   | [] -> None
   | p :: rest -> Some (List.fold rest ~init:p ~f:Clp.union)
-
-let pieces_of_words ~width (l : word list) : P.t = P.of_list ~width l
 
 let pieces_of_finset (s : fset) : P.t = Exact.pieces s
 
@@ -291,23 +290,21 @@ and canonical (ps : t list) : t =
 
 and canonical_pool (ps : t list) : t =
   let alive = List.filter ps ~f:(fun q -> not (is_bottom q)) in
-  let rels =
-    List.filter_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
-  in
   (* One relative leaf per origin, in origin order: a union keeps every
      origin it was built from.  One merge is lossless and keeps the form
      canonical: an absolute leaf's offsets are its words (the plain
      pool). *)
-  let abs_rels, keep_rels =
-    List.partition_tf rels ~f:(fun (o, _) -> Origin.equal o Origin.Abs) in
-  let so_pool =
-    List.sort_and_group keep_rels ~compare:(fun (a, _) (b, _) -> Origin.compare a b)
-    |> List.map ~f:(fun grp ->
-        match grp with
-        | (o, x) :: rest -> (o, List.fold rest ~init:x ~f:(fun acc (_, y) -> P.union acc y))
-        | [] -> assert false)
-  in
-  let mixed_pool = List.map abs_rels ~f:snd in
+  let abs_rev, rel_pool =
+    List.fold ps ~init:([], Origin_map.empty) ~f:(fun (abs, rels) -> function
+        | Rel (Origin.Abs, x) -> x :: abs, rels
+        | Rel (o, x) ->
+          abs,
+          Map.update rels o ~f:(function
+              | None -> x
+              | Some prior -> P.union prior x)
+        | _ -> abs, rels) in
+  let so_pool = Map.to_alist rel_pool in
+  let mixed_pool = List.rev abs_rev in
   (match alive, so_pool with
   | [], (o, offs) :: _ ->
     (* The symbolic bottom keeps its origin: an empty offset set is
@@ -468,6 +465,8 @@ let of_list ~width l : t =
 let singleton w : t = Exact (Exact.singleton w)
 
 let of_clp (p : clp) : t = canonical [ Clp (P.of_progression p) ]
+
+let of_exact (s : Exact.t) : t = canonical [ Exact s ]
 
 let bottom i = Exact (Exact.bottom i)
 (* Shared per width: env reads and writes build their default top. *)
@@ -1271,10 +1270,11 @@ let plain_offsets (o : Origin.t) (p : t) : P.t option =
   | Clp ps when not (P.is_bottom ps) ->
     Some (P.translate ps (Cbat_word.neg base))
   | Exact s ->
-    let ws = List.map ~f:(fun w -> Cbat_word.sub w base) (Exact.iter s) in
-    (match ws with
-     | [] -> Some (P.bottom 64)
-     | _ -> Some (pieces_of_words ~width:64 ws))
+    Some
+      (Exact.pieces
+         (Exact.of_iter ~width:64 ~iter:(fun emit ->
+              List.iter (Exact.iter s) ~f:(fun w ->
+                  emit (Cbat_word.sub w base)))))
   | _ -> None
 
 
@@ -1319,7 +1319,11 @@ let certified_offset_image (origin : Origin.t) (f : word -> word) (offs : P.t) :
     let change_off o = Cbat_word.add o (Cbat_word.sub (f (Cbat_word.add base o)) (Cbat_word.add base o)) in
     match Cbat_word.to_int (P.cardinality offs) with
     | Ok n when n > 0 && n <= Utils.fin_set_size ->
-      Some (pieces_of_words ~width:64 (List.map (P.elements offs) ~f:change_off))
+      Some
+        (Exact.pieces
+           (Exact.of_iter ~width:64 ~iter:(fun emit ->
+                P.iter offs ~f:(fun p ->
+                    List.iter (Clp.iter p) ~f:(fun o -> emit (change_off o))))))
     | _ ->
       let delta r =
         let x = Cbat_word.add base (w64_of_i64 (Int64.of_int r)) in
@@ -1922,15 +1926,14 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
      union: a leaf's next iterate need not contain the old one (a frame
      walked from its seed loses offset 0), and a widen of incomparable
      iterates only joins.  A leaf only one side carries is kept. *)
-  let rel_widen r1 r2 : t list =
-    List.sort_and_group (List.map r1 ~f:fst @ List.map r2 ~f:fst) ~compare:Origin.compare
-    |> List.filter_map ~f:(fun grp ->
-        let o = List.hd_exn grp in
-        let find r = List.Assoc.find r o ~equal:Origin.equal in
-        match find r1, find r2 with
-        | Some a, Some b -> Some (Rel (o, fp a (P.union a b)))
-        | Some a, None | None, Some a -> Some (Rel (o, a))
-        | None, None -> None)
+  let rec rel_widen r1 r2 : t list =
+    match r1, r2 with
+    | [], rest | rest, [] -> List.map rest ~f:(fun (o, a) -> Rel (o, a))
+    | (o1, a) :: rest1, (o2, b) :: rest2 ->
+      let c = Origin.compare o1 o2 in
+      if c < 0 then Rel (o1, a) :: rel_widen rest1 r2
+      else if c > 0 then Rel (o2, b) :: rel_widen r1 rest2
+      else Rel (o1, fp a (P.union a b)) :: rel_widen rest1 rest2
   in
   match t1, t2 with
   | Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->

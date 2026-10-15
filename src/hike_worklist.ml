@@ -53,10 +53,13 @@ type frontier = {
   seen : (int64, origin) Core.Hashtbl.t;
   (* The symtab's entries, in their own order. *)
   symtab : int64 list;
+  (* Decode-root batches traverse addresses; solves keep discovery order. *)
+  symtab_addresses : Core.Int64.Set.t;
   (* Decode entries: the symtab's entries, then the discovered roots. *)
   mutable roots : int64 list;
   (* Code words a solve materialised, newest first. *)
   mutable found : int64 list;
+  mutable found_addresses : Core.Int64.Set.t;
   (* Resolved jump destinations: never roots of their own. *)
   mutable jumps : Core.Int64.Set.t;
 }
@@ -64,9 +67,13 @@ type frontier = {
 let frontier_create ~(subroutines : int64 list) : frontier =
   let symtab = Base.List.stable_dedup subroutines ~compare:Int64.compare in
   let seen = Core.Hashtbl.create (module Core.Int64) in
-  Base.List.iter symtab ~f:(fun a ->
-      Core.Hashtbl.set seen ~key:a ~data:Symtab);
-  { seen; symtab; roots = symtab; found = []; jumps = Core.Int64.Set.empty }
+  let symtab_addresses =
+    Base.List.fold symtab ~init:Core.Int64.Set.empty ~f:(fun addresses a ->
+        Core.Hashtbl.set seen ~key:a ~data:Symtab;
+        Core.Set.add addresses a)
+  in
+  { seen; symtab; symtab_addresses; roots = symtab; found = [];
+    found_addresses = Core.Int64.Set.empty; jumps = Core.Int64.Set.empty }
 
 (* Appends the addresses not yet decode entries; the first role wins, so
    a symtab entry never re-enters as a discovered root. *)
@@ -82,23 +89,30 @@ let frontier_add_roots f (addrs : int64 list) : unit =
 
 (* Prepends the code words a solve just materialised (newest first). *)
 let frontier_add_found f (ws : int64 list) : unit =
-  f.found <- Base.List.rev_append ws f.found
+  f.found <- Base.List.rev_append ws f.found;
+  f.found_addresses <-
+    Base.List.fold ws ~init:f.found_addresses ~f:Core.Set.add
 
-let frontier_set_found f (ws : int64 list) : unit = f.found <- ws
+let frontier_set_found f (ws : int64 list) : unit =
+  f.found <- ws;
+  f.found_addresses <-
+    Base.List.fold ws ~init:Core.Int64.Set.empty ~f:Core.Set.add
 
 let frontier_add_jump f (w : int64) : unit =
   f.jumps <- Core.Set.add f.jumps w
 
-(* Drains the candidate roots: resolved jumps and repeats removed, oldest
-   discovery first. *)
-let frontier_take_found f : int64 list =
+(* Drains the candidate roots in discovery and address order, with
+   resolved jumps and repeats removed from both views. *)
+let frontier_take_found f : int64 list * int64 list =
   let words =
     Base.List.rev f.found
     |> Base.List.filter ~f:(fun w -> not (Core.Set.mem f.jumps w))
     |> Base.List.stable_dedup ~compare:Int64.compare
   in
+  let addresses = Core.Set.to_list (Core.Set.diff f.found_addresses f.jumps) in
   f.found <- [];
-  words
+  f.found_addresses <- Core.Int64.Set.empty;
+  (words, addresses)
 
 type t = {
   proj : Project.t;
@@ -116,6 +130,8 @@ type t = {
   by_tid : (Tid.t, entry) Core.Hashtbl.t;
   (* External and intrinsic targets: name and summary. *)
   symbols : (Tid.t, string * S.t) Core.Hashtbl.t;
+  (* Published names supply deterministic declaration order. *)
+  mutable symbol_names : Tid.t Core.String.Map.t;
   (* Each lifted term tid's owner. *)
   owner : (Tid.t, int64) Core.Hashtbl.t;
   (* Whether a reached call is unresolved: every code word a body
@@ -193,7 +209,8 @@ let symbol t (label_name : string) : Tid.t =
             not (Base.List.mem t.abi.Hike_abi.noreturn_symbols name
                    ~equal:String.equal) }
     in
-    Core.Hashtbl.set t.symbols ~key:tid ~data:(name, summary)
+    Core.Hashtbl.set t.symbols ~key:tid ~data:(name, summary);
+    t.symbol_names <- Core.Map.set t.symbol_names ~key:name ~data:tid
   end;
   tid
 
@@ -662,6 +679,7 @@ let create proj ~file ~state ~subroutines : t =
     entries = Core.Hashtbl.create (module Core.Int64);
     by_tid = Core.Hashtbl.create (module Tid);
     symbols = Core.Hashtbl.create (module Tid);
+    symbol_names = Core.String.Map.empty;
     owner = Core.Hashtbl.create (module Tid);
     refused = false;
     order = [];
@@ -679,12 +697,11 @@ let in_text t (w : int64) : bool =
   | Some (lo, hi) -> Int64.compare w lo >= 0 && Int64.compare w hi <= 0
   | None -> false
 
-(* Solves each root, decoding the ones BAP has not taken as entries in
-   one scan first. *)
-let solve_roots t (addrs : int64 list) : unit =
+(* The producer's unique address traversal orders the decode batch;
+   [addrs] retains discovery order for the callee-first solves. *)
+let solve_roots t ~(addresses : int64 list) (addrs : int64 list) : unit =
   let fresh =
-    Base.List.dedup_and_sort ~compare:Int64.compare
-      (Base.List.filter addrs ~f:(fun a -> not (is_entry t a)))
+    Base.List.filter addresses ~f:(fun a -> not (is_entry t a))
   in
   if not (Base.List.is_empty fresh) then begin
     frontier_add_roots t.frontier fresh;
@@ -704,9 +721,9 @@ let functions t : (int64 * func) list =
    resolved jump destination is not one.  They are solved as roots until
    none is left. *)
 let rec close t : unit =
-  let words = frontier_take_found t.frontier in
+  let words, addresses = frontier_take_found t.frontier in
   if not (Base.List.is_empty words) then begin
-    solve_roots t words;
+    solve_roots t ~addresses words;
     close t
   end
 
@@ -727,12 +744,16 @@ let main_of t (f : func) : int64 option =
           | Ok ws -> (match bounded_words ws with Some [ w ] -> Some w | _ -> None)
           | Error _ -> None)
         | _ -> None)
-    |> Base.List.dedup_and_sort ~compare:Int64.compare
+    |> Base.List.fold ~init:`Empty ~f:(fun agreed a ->
+        match agreed with
+        | `Empty -> `One a
+        | `One b when Int64.equal a b -> agreed
+        | `One _ | `Conflict -> `Conflict)
   in
   match named with
-  | [ main ] -> Some main
-  | [] -> None
-  | _ ->
+  | `One main -> Some main
+  | `Empty -> None
+  | `Conflict ->
     Hike_diag.warn "discover: the entry's calls name different main addresses; no main";
     None
 
@@ -821,7 +842,7 @@ let facts t : Hike_kb.facts =
 let run (proj : Project.t) ~file ~state ~subroutines : result =
   let t = create proj ~file ~state ~subroutines in
   let entry = Hike_image.entry_point proj in
-  Base.Option.iter entry ~f:(fun a -> solve_roots t [ a ]);
+  Base.Option.iter entry ~f:(fun a -> solve_roots t ~addresses:[ a ] [ a ]);
   let main =
     match Base.Option.map entry ~f:(fun a -> (Core.Hashtbl.find_exn t.entries a).status) with
     | Some (Final (Function f)) -> main_of t f
@@ -841,7 +862,7 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
     |> Base.List.map ~f:snd
   in
   frontier_add_found t.frontier relocated;
-  Base.Option.iter main ~f:(fun a -> solve_roots t [ a ]);
+  Base.Option.iter main ~f:(fun a -> solve_roots t ~addresses:[ a ] [ a ]);
   close t;
   if Base.Option.is_none main
   || Base.List.exists (functions t) ~f:(fun (_, f) -> unresolved_call t f)
@@ -851,7 +872,10 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
     t.refused <- true;
     frontier_set_found t.frontier
       (Base.List.concat_map (functions t) ~f:(fun (_, f) -> materialised_words t f));
-    solve_roots t (Base.List.filter t.frontier.symtab ~f:(in_text t));
+    solve_roots t
+      ~addresses:(Core.Set.to_list
+          (Core.Set.filter t.frontier.symtab_addresses ~f:(in_text t)))
+      (Base.List.filter t.frontier.symtab ~f:(in_text t));
     close t
   end;
   let lifted =
@@ -865,9 +889,8 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
         then Term.set_attr sub Hike_stack_model.main_role () else sub)
   in
   let externals =
-    Core.Hashtbl.to_alist t.symbols
-    |> Base.List.sort ~compare:(fun (_, (a, _)) (_, (b, _)) -> String.compare a b)
-    |> Base.List.filter_map ~f:(fun (tid, (name, _)) ->
+    Core.Map.to_alist t.symbol_names
+    |> Base.List.filter_map ~f:(fun (name, tid) ->
         Base.Option.some_if (not (Hike_abi.is_intrinsic_name name))
           (Term.set_attr (Sub.create ~tid ~name ()) Term.synthetic ()))
   in

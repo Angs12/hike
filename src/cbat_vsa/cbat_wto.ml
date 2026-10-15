@@ -128,8 +128,7 @@ let scc_partition
 let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
     ~(pred : Tid.t -> Tid.t list) : comp list =
   if List.is_empty nodes then [] else
-  let rpo_index : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
-  begin
+  let rpo =
     let visited = ref Tid.Set.empty in
     let order = ref [] in
     let rec dfs (n : Tid.t) : unit =
@@ -140,38 +139,40 @@ let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
       end
     in
     List.iter nodes ~f:dfs;
-    List.iteri !order ~f:(fun i n -> Hashtbl.set rpo_index ~key:n ~data:i)
-  end;
-  let get_rpo (n : Tid.t) : int =
-    Hashtbl.find rpo_index n |> Option.value ~default:Int.max_value in
+    !order
+  in
   let has_self_loop (n : Tid.t) : bool =
     List.mem (succ n) n ~equal:Tid.equal in
-  let rec wto_rec (nodes : Tid.t list) : comp list =
+  let rec wto_rec (nodes : Tid.t list) (rpo : Tid.t list) : comp list =
     if List.is_empty nodes then [] else
       let node_set = Tid.Set.of_list nodes in
       let succ (n : Tid.t) : Tid.t list =
         List.filter (succ n) ~f:(fun m -> Core.Set.mem node_set m) in
       let pred (n : Tid.t) : Tid.t list =
         List.filter (pred n) ~f:(fun m -> Core.Set.mem node_set m) in
-      let sccs = scc_partition nodes succ pred in
-      (* Decorate each SCC with its minimal RPO once; sort on the key. *)
-      let key scc =
-        List.fold scc ~init:Int.max_value
-          ~f:(fun acc v -> Int.min acc (get_rpo v))
+      let sccs = Array.of_list (scc_partition nodes succ pred) in
+      let owners = Hashtbl.create (module Tid) in
+      Array.iteri sccs ~f:(fun i scc ->
+          List.iter scc ~f:(fun n -> Hashtbl.set owners ~key:n ~data:i));
+      let members = Array.create ~len:(Array.length sccs) [] in
+      (* The RPO producer supplies both component order and each head:
+         a component's first encountered member has its minimum RPO. *)
+      let component_order =
+        List.filter_map rpo ~f:(fun n ->
+            match Hashtbl.find owners n with
+            | None -> None
+            | Some i ->
+              let first = List.is_empty members.(i) in
+              members.(i) <- n :: members.(i);
+              Option.some_if first i)
       in
-      let sccs_sorted =
-        List.map sccs ~f:(fun scc -> (key scc, scc))
-        |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
-        |> List.map ~f:snd in
-      List.concat_map sccs_sorted ~f:(fun scc ->
-          match scc with
+      List.concat_map component_order ~f:(fun i ->
+          match List.rev members.(i) with
           | [v] when not (has_self_loop v) -> [Vertex v]
-          | _ ->
-            let head =
-              List.min_elt scc ~compare:(fun a b -> Int.compare (get_rpo a) (get_rpo b))
-              |> Option.value_exn in
-            let rest = List.filter scc ~f:(fun n -> not (Tid.equal n head)) in
-            let inner = wto_rec rest in
-            [SCC (head, inner)])
+          | head :: ordered_rest ->
+            let rest = List.filter sccs.(i) ~f:(fun n -> not (Tid.equal n head)) in
+            let inner = wto_rec rest ordered_rest in
+            [SCC (head, inner)]
+          | [] -> assert false)
   in
-  wto_rec nodes
+  wto_rec nodes rpo

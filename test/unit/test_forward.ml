@@ -254,7 +254,7 @@ let tests : unit Alcotest.test list =
     (* FWD-11: a bounded image-backed load denotes the exact image words. *)
     pin "FWD-11" "a bounded image-backed load denotes the exact image words"
       (fun () ->
-        let img_var, images, _, _, env_with_addrs, load32 = img_fixture in
+        let img_var, images, m, _, env_with_addrs, load32 = img_fixture in
         let word32 v = Cbat_word.of_word (Word.of_int64 ~width:32 v) in
         let env3 = env_with_addrs [ w64 0x4000; w64 0x4004; w64 0x4008 ] in
         protect
@@ -272,7 +272,24 @@ let tests : unit Alcotest.test list =
                   && Ws.elem (word32 0x5a1eL) ws && Int64.equal card 3L
               | Error _ -> false
             in
-            check "FWD-11" img1));
+            check "FWD-11" img1);
+        let bytes = Bytes.init 26 (fun i -> Char.chr (if i < 24 then 23 - i else 0)) in
+        let images =
+          [ { Vsa.img_lo = 0x4000L; img_hi = 0x4019L; img_bytes = bytes;
+              img_slots = Core.Int64.Set.empty } ] in
+        let env = env_with_addrs (List.init 26 (fun i -> w64 (0x4000 + i))) in
+        protect
+          ~set:(fun () -> Vsa.set_section_images images)
+          ~restore:(fun () -> Vsa.set_section_images [])
+          (fun () ->
+            let load8 = Bil.Load (Bil.Var m, Bil.Var img_var, LittleEndian, `r8) in
+            let expected =
+              Ws.of_clp (Clp.interval ~width:8
+                  (Cbat_word.of_int ~width:8 0) (Cbat_word.of_int ~width:8 23)) in
+            check "FWD-11.ordered-image-producer"
+              (match Vsa.Test_seam.denote_imm_exp load8 env with
+               | Ok ws -> Ws.equal ws expected
+               | Error _ -> false)));
 
     (* FWD-12: the same load with no threaded image keeps the abstract top. *)
     pin "FWD-12" "an image-backed load without images keeps the abstract value"

@@ -574,6 +574,22 @@ let tests : unit Alcotest.test list =
 
 
 
+    pin "CLP-117"
+      "difference of a wrapped finite progression equals the hull of its ascending survivors"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let prog base step n =
+          Clp.create ~width:8 ~step:(w8 step)
+            ~cardn:(Cbat_word.of_int ~width:9 n) (w8 base) in
+        let wrapped = prog 250 4 3 in
+        check "CLP-117.witness"
+          (Clp.equal (Clp.diff wrapped (Clp.singleton (w8 254)))
+             (Clp.of_list ~width:8 [ w8 2; w8 250 ]));
+        let tied = prog 128 64 4 in
+        check "CLP-117.tie"
+          (Clp.equal (Clp.diff tied (prog 64 128 2))
+             (Clp.of_list ~width:8 [ w8 0; w8 128 ])));
+
 
 
 

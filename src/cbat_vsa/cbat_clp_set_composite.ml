@@ -224,6 +224,7 @@ let keep_section ~old ~new_ = on_scalar (S.keep_section ~old:(plain old) ~new_:(
 let filter_addresses t ~decide = on_scalar (S.filter_addresses ~decide) t
 
 let of_list ~width l = Scalar (S.of_list ~width l)
+let of_exact s = Scalar (S.of_exact s)
 let singleton w = Scalar (S.singleton w)
 let of_clp p = Scalar (S.of_clp p)
 let module_address a = Scalar (S.module_address a)

@@ -281,6 +281,21 @@ let same_line (a : Key.t) (b : Key.t) : bool =
 let it_intersections (m : 'a IT.t) (k : Key.t) : (Key.t * 'a) Sequence.t =
   IT.intersections m k |> Sequence.filter ~f:(fun (k', _) -> same_line k k')
 
+(* Tree queries yield keys in order.  A cell spanning both wrapped query
+   windows occurs in both streams, with the same stored value. *)
+let merge_candidates (left : (Key.t * Val.t) list)
+    (right : (Key.t * Val.t) list) : (Key.t * Val.t) list =
+  let rec merge acc left right =
+    match left, right with
+    | [], rest | rest, [] -> List.rev_append acc rest
+    | ((lk, _) as l) :: ls, ((rk, _) as r) :: rs ->
+      let c = Key.compare lk rk in
+      if c < 0 then merge (l :: acc) ls right
+      else if c > 0 then merge (r :: acc) left rs
+      else merge (l :: acc) ls rs
+  in
+  merge [] left right
+
 let it_remove_intersections (m : 'a IT.t) (k : Key.t) : 'a IT.t =
   Sequence.fold (it_intersections m k) ~init:m ~f:(fun m (k', _) ->
       IT.remove m k')
@@ -602,8 +617,7 @@ let candidates (m : itree) (k : Key.t) (w : write) : (Key.t * Val.t) list =
     let whi = pt_add k.hi (Stdlib.Int64.pred w.n) in
     if Key.le wlo k.lo && Key.le k.hi whi then q wlo whi
     else
-      List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
-        (q wlo top_pt @ q zero_pt whi)
+      merge_candidates (q wlo top_pt) (q zero_pt whi)
 
 (* One store at one key.  Every cell whose bytes the store may write is
    resolved: a strong store (one point, the access's only address)
@@ -678,45 +692,43 @@ let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
 
 let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
     (ints : (Key.t * Val.t) list) : Val.t option =
-  if List.length ints < 2 then None
-  else
-    let sorted = List.sort ints ~compare:(fun (k1, _) (k2, _) ->
-        Key.compare_point (Key.lower k1) (Key.lower k2)) in
-    match sorted with
-    | [] -> None
-    | (first_k, first_v) :: _ ->
-      if not (Key.equal (Key.lower first_k) (Key.lower k)) then None
-      else
-        let first_w = WordSet.bitwidth (Val.data first_v) in
-        let first_end =
-          Stdlib.Int64.add (Key.lower first_k).pvalue
-            (Stdlib.Int64.of_int (first_w / addressable_width - 1)) in
-        let rec check_contiguous prev_end rest =
-          match rest with
-          | [] -> Some prev_end
-          | (next_k, next_v) :: rest' ->
-            let expected_start = Stdlib.Int64.succ prev_end in
-            if Stdlib.Int64.equal expected_start (Key.lower next_k).pvalue
-            then
-              let next_w = WordSet.bitwidth (Val.data next_v) in
-              let next_end =
-                Stdlib.Int64.add (Key.lower next_k).pvalue
-                  (Stdlib.Int64.of_int (next_w / addressable_width - 1)) in
-              check_contiguous next_end rest'
-            else None
+  (* Queries and their filters preserve key order, hence lower-point
+     order on the query's one origin. *)
+  match ints with
+  | [] | [ _ ] -> None
+  | (first_k, first_v) :: rest ->
+    if not (Key.equal (Key.lower first_k) (Key.lower k)) then None
+    else
+      let first_w = WordSet.bitwidth (Val.data first_v) in
+      let first_end =
+        Stdlib.Int64.add (Key.lower first_k).pvalue
+          (Stdlib.Int64.of_int (first_w / addressable_width - 1)) in
+      let rec check_contiguous prev_end rest =
+        match rest with
+        | [] -> Some prev_end
+        | (next_k, next_v) :: rest' ->
+          let expected_start = Stdlib.Int64.succ prev_end in
+          if Stdlib.Int64.equal expected_start (Key.lower next_k).pvalue
+          then
+            let next_w = WordSet.bitwidth (Val.data next_v) in
+            let next_end =
+              Stdlib.Int64.add (Key.lower next_k).pvalue
+                (Stdlib.Int64.of_int (next_w / addressable_width - 1)) in
+            check_contiguous next_end rest'
+          else None
+      in
+      match check_contiguous first_end rest with
+      | Some last_end when Stdlib.Int64.equal last_end (Key.upper k).pvalue ->
+        (* The cells concatenate in address order (little-endian: a
+           higher address is higher bits), so each keeps its lanes. *)
+        let datas = List.map ints ~f:(fun (_, v) -> Val.data v) in
+        let assembled =
+          match endian with
+          | LittleEndian -> List.reduce datas ~f:(fun lo hi -> WordSet.concat hi lo)
+          | BigEndian -> List.reduce datas ~f:WordSet.concat
         in
-        match check_contiguous first_end (List.tl_exn sorted) with
-        | Some last_end when Stdlib.Int64.equal last_end (Key.upper k).pvalue ->
-          (* The cells concatenate in address order (little-endian: a
-             higher address is higher bits), so each keeps its lanes. *)
-          let datas = List.map sorted ~f:(fun (_, v) -> Val.data v) in
-          let assembled =
-            match endian with
-            | LittleEndian -> List.reduce datas ~f:(fun lo hi -> WordSet.concat hi lo)
-            | BigEndian -> List.reduce datas ~f:WordSet.concat
-          in
-          Option.map assembled ~f:(fun data -> Val.create data endian)
-        | _ -> None
+        Option.map assembled ~f:(fun data -> Val.create data endian)
+      | _ -> None
 
 (* The starts a key claims, as a grid step (0: the one start [lo]): a
    strided key its grid, a hull key the width grid of its [bytes]-wide
@@ -803,8 +815,7 @@ let point_candidates (bits : int) (m : itree) (k : Key.t) :
   else
     let top_pt = { klo with pvalue = line_max klo.pwidth } in
     let zero_pt = { klo with pvalue = 0L } in
-    List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
-      (q back_lo top_pt @ q zero_pt khi)
+    merge_candidates (q back_lo top_pt) (q zero_pt khi)
 
 let containing_cell ((bits, endian) : Val.idx) (k : Key.t)
     (cands : (Key.t * Val.t) list) : Val.t option =
@@ -916,9 +927,9 @@ let precedes' (m1 : itree) (m2 : itree) : bool =
   end &&
   Seq.for_all m2_seq ~f: begin fun (k, v) ->
     (* Default precedes gaps. *)
-    (it_dominates m2 k ||
+    (it_dominates m1 k ||
      Val.precedes (Val.top (Val.get_idx v)) v) &&
-    Seq.for_all (it_intersections m2 k) ~f:begin fun (_,v') ->
+    Seq.for_all (it_intersections m1 k) ~f:begin fun (_,v') ->
       Val.precedes v' v
     end
   end

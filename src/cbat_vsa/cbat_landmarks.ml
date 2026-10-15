@@ -67,16 +67,16 @@ let kind_of_key (k : key) : string =
   match k with Word _ -> "word" | Cell _ -> "cell"
 
 #ifdef VSA_DEBUG
-let steps_census : (string, int) Hashtbl.t = Hashtbl.create (module String)
+let steps_census : int String.Map.t ref = ref String.Map.empty
 
 let bump_steps (k : string) : unit =
-  Hashtbl.update steps_census k ~f:(function Some n -> n + 1 | None -> 1)
+  steps_census :=
+    Map.update !steps_census k ~f:(function Some n -> n + 1 | None -> 1)
 
 let () =
   at_exit (fun () ->
-      Hashtbl.to_alist steps_census
-      |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
-      |> List.iter ~f:(fun (k, n) -> Printf.eprintf "hike-lm-steps: %s=%d\n%!" k n))
+      Map.iteri !steps_census ~f:(fun ~key:k ~data:n ->
+          Printf.eprintf "hike-lm-steps: %s=%d\n%!" k n))
 #endif
 
 (* One row per key at a head; a new entry appends, so the oldest entry is

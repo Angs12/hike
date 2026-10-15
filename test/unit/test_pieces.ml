@@ -481,6 +481,46 @@ let tests : unit Alcotest.test list =
                (P.of_list ~width:32 (Ex.elements overflow))
           && List.length (P.to_list (Ex.pieces overflow)) = 1));
 
+    pin "PCS-22"
+      "a producer's output is canonical when a late piece overlaps an \
+       earlier piece hidden behind an interleaved tail"
+      (fun () ->
+        let step10 n base =
+          P.of_progression
+            (Clp.create ~width:32 ~step:(w32 10)
+               ~cardn:(Cbat_word.of_int ~width:33 n) (w32 base)) in
+        let a =
+          P.union (P.union (P.singleton (w32 0)) (P.singleton (w32 1)))
+            (P.singleton (w32 10)) in
+        let b = step10 2 0 in
+        let sum = P.add a b in
+        let expected =
+          P.union (P.union (step10 2 0) (step10 2 1)) (step10 2 10) in
+        let disjoint =
+          let rec go = function
+            | x :: (y :: _ as rest) ->
+              not (P.overlap (P.of_progressions [ x ]) (P.of_progressions [ y ]))
+              && go rest
+            | _ -> true in
+          go (P.to_list sum) in
+        check "PCS-22.equal" (P.equal sum expected);
+        check "PCS-22.disjoint" disjoint;
+        check "PCS-22.count"
+          (Cbat_word.equal (P.cardinality sum) (P.cardinality expected)));
+
+    pin "PCS-23"
+      "difference removes every element of interleaved subtrahend pieces"
+      (fun () ->
+        let step10 base =
+          P.of_progression
+            (Clp.create ~width:32 ~step:(w32 10)
+               ~cardn:(Cbat_word.of_int ~width:33 2) (w32 base)) in
+        let removed = P.union (step10 0) (step10 1) in
+        let d = P.diff (prog32 ~lo:0 ~hi:100) removed in
+        check "PCS-23.removed"
+          (not_mem_all d (List.map w32 [ 0; 1; 10; 11 ]));
+        check "PCS-23.kept" (mem_all d (List.map w32 [ 2; 9; 12; 100 ])));
+
   ]
 
 let () = run "pieces" tests

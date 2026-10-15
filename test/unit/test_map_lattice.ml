@@ -240,6 +240,42 @@ let tests : unit Alcotest.test list =
         check "MAP-30.be-high" (Ws.equal (readbe (-8L)) (Ws.singleton (w32 0x11223344)));
         check "MAP-30.be-low" (Ws.equal (readbe (-4L)) (Ws.singleton (w32 0x55667788))));
 
+    pin "MAP-31"
+      "wrapped candidate windows deduplicate a spanning cell and keep the query's origin"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let byte n = Mem.Val.create (Ws.singleton (w8 n)) LittleEndian in
+        let read m k = Mem.Val.data (Mem.find (8, LittleEndian) m k) in
+        (* The cell intersects both windows of a point query near zero. *)
+        let spanning =
+          Mem.meet_add empty ~key:(range 0 0xFFFFFFFF) ~data:(byte 0x11) in
+        check "MAP-31.spanning"
+          (Ws.equal (read spanning (point 0)) (Ws.singleton (w8 0x11)));
+        let stored = Mem.add spanning ~key:(point 0) ~data:(byte 0x22) in
+        check "MAP-31.store"
+          (Ws.equal (read stored (point 0)) (Ws.singleton (w8 0x22)));
+        let stack = key_of (Ws.stack_word_i64 0L) in
+        let abs = key_of (Ws.singleton (w64 0)) in
+        let m =
+          Mem.top { Mem.addr_width = 64; addressable_width = 8 }
+          |> fun m -> Mem.add m ~key:stack ~data:(byte 0x33)
+          |> fun m -> Mem.add m ~key:abs ~data:(byte 0x44) in
+        check "MAP-31.origin"
+          (Ws.equal (read m stack) (Ws.singleton (w8 0x33))
+          && Ws.equal (read m abs) (Ws.singleton (w8 0x44))));
+
+    pin "MAP-32"
+      "precedes compares a cell of the right map against the left map's gaps and cells"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let byte n = Mem.Val.create (Ws.singleton (w8 n)) LittleEndian in
+        let top = Mem.top { Mem.addr_width = 64; addressable_width = 8 } in
+        let fact = Mem.add top ~key:(point 0) ~data:(byte 0x11) in
+        let other = Mem.add top ~key:(point 0) ~data:(byte 0x22) in
+        check "MAP-32.top-vs-fact" (not (Mem.precedes top fact));
+        check "MAP-32.fact-vs-top" (Mem.precedes fact top);
+        check "MAP-32.fact-vs-other" (not (Mem.precedes fact other)));
+
 
 
 

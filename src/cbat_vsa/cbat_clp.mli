@@ -141,6 +141,8 @@ module Exact : sig
   val bottom : int -> t
   val singleton : Cbat_word.t -> t
   val of_list : width:int -> Cbat_word.t list -> t
+  (* Compute an arbitrary image into an ordered, distinct set during production. *)
+  val of_iter : width:int -> iter:((Cbat_word.t -> unit) -> unit) -> t
   (* Strictly ascending, distinct, unsigned words at [width]. *)
   val of_sorted_list : width:int -> Cbat_word.t list -> t
   val is_bottom : t -> bool

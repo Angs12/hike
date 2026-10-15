@@ -39,6 +39,9 @@ val is_circular : t -> bool
 
 val of_clp : Cbat_clp.t -> t
 
+(* A produced exact set, promoted through the usual finite-tier budget. *)
+val of_exact : Cbat_clp.Exact.t -> t
+
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
 

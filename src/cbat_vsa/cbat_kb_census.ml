@@ -8,16 +8,13 @@ open Core
 (* [<slot>.<get|put>] for every hike KB slot, [seam.query.def] /
    [seam.query.nodef] for the denotation seam, and [domain.*] for the
    domain callbacks the KB invokes on a put. *)
-let counts : (string, int) Hashtbl.t = Hashtbl.create (module String)
+let counts : int String.Map.t ref = ref String.Map.empty
 
 let bump (key : string) : unit =
-  let n = Hashtbl.find counts key |> Option.value ~default:0 in
-  Hashtbl.set counts ~key ~data:(n + 1)
+  counts := Map.update !counts key ~f:(function Some n -> n + 1 | None -> 1)
 
 let dump () =
-  Hashtbl.to_alist counts
-  |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
-  |> List.iter ~f:(fun (key, n) ->
+  Map.iteri !counts ~f:(fun ~key ~data:n ->
          Printf.eprintf "hike-kb-census: %s=%d\n%!" key n)
 
 let () = at_exit dump

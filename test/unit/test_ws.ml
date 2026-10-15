@@ -176,7 +176,10 @@ let tests : unit Alcotest.test list =
         check "WS-32"
           (Ws.bitwidth left = 64 && Ws.bitwidth right = 64
           && Ws.equal left (Ws.stack_word_i64 1L)
-          && Ws.equal right (Ws.stack_word_i64 1L)));
+          && Ws.equal right (Ws.stack_word_i64 1L));
+        let run = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 3)) in
+        check "WS-32.permuted-certified-image"
+          (Ws.equal (Ws.logxor run (Ws.singleton (w64 2))) run));
 
     pin "WS-33"
       "UT1-42: the composite mixed-step meet is EXACT — {10,12,14,16,18} ∩ \
@@ -232,7 +235,12 @@ let tests : unit Alcotest.test list =
                 Stdlib.Int64.equal (Cbat_word.to_int64_exn mn) base
                 && Stdlib.Int64.equal (Cbat_word.to_int64_exn mx)
                   (Int64.add base 32L)
-              | None, _ | _, None -> false)));
+              | None, _ | _, None -> false));
+        let plain =
+          Ws.of_list ~width:64
+            (List.map q64 [ base; Int64.add base 16L; Int64.add base 32L ]) in
+        check "WS-35.wrapped-base-subtraction"
+          (Ws.equal (Ws.meet v plain) v));
 
     pin "WS-36"
       "a symbolic stack top is not the lattice top (structural equality; the map \
@@ -491,7 +499,25 @@ let tests : unit Alcotest.test list =
         check "WS-47.rip"
           (Ws.equal
              (Ws.join s (Ws.module_address 0x404000L))
-             (Ws.join (Ws.module_address 0x404000L) s)));
+             (Ws.join (Ws.module_address 0x404000L) s));
+        let frame = Ws.vla_frame tid in
+        let another = Ws.vla_frame (Tid.create ()) in
+        let repeated = Ws.set_origin (Ws.Origin.Vla tid) (Ws.stack_word_i64 8L) in
+        let left = Ws.join (Ws.join both another) repeated in
+        let right = Ws.join repeated (Ws.join another (Ws.join frame s)) in
+        check "WS-47.origin-pool-order"
+          (Ws.equal left right && List.length (Ws.stack_leaves left) = 3
+           && Ws.precedes frame left && Ws.precedes repeated left);
+        let empty_frame = Ws.diff frame frame in
+        let empty_another = Ws.diff another another in
+        let empty = Ws.join empty_frame empty_another in
+        let expected_origin =
+          match Ws.origin frame, Ws.origin another with
+          | Some a, Some b -> Some (if Hike_origin.compare a b < 0 then a else b)
+          | _ -> None in
+        check "WS-47.symbolic-bottom-order"
+          (Ws.is_bottom empty && Ws.origin empty = expected_origin
+           && Ws.equal empty (Ws.join empty_another empty_frame)));
 
     pin "WS-48" "arithmetic on a mixed value distributes over its leaves" (fun () ->
         let u = Ws.join (Ws.stack_word_i64 (-16L)) (Ws.singleton (w64 0)) in
@@ -513,11 +539,16 @@ let tests : unit Alcotest.test list =
         let u k = Ws.join (Ws.stack_word_i64 k) (Ws.singleton (w64 0)) in
         let w = Ws.widen_join (u (-16L)) (Ws.join (u (-16L)) (u (-8L))) in
         check "WS-50.leaf" (not (List.is_empty (Ws.stack_leaves w)));
-        check "WS-50.null" (Ws.elem (w64 0) w));
+        check "WS-50.null" (Ws.elem (w64 0) w);
+        let old = Ws.join (u (-16L)) (Ws.vla_frame (Tid.create ())) in
+        let next = Ws.join (u (-16L)) (Ws.vla_frame (Tid.create ())) in
+        check "WS-50.one-sided-origins"
+          (Ws.equal (Ws.widen_join old next) (Ws.join old next)));
 
     (* A walked pointer's next iterate need not contain the old offsets
        (a frame walked from its seed loses offset 0): the relative leaf
        still extrapolates instead of joining forever. *)
+
     pin "WS-51" "the relative-leaf widen extrapolates over incomparable iterates" (fun () ->
         let run base =
           Ws.stack_word

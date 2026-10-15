@@ -332,6 +332,14 @@ let split_wrapped (p : t) : t list =
   if not (is_wrapped p) then [ p ]
   else split_above (W.ones (bitwidth p)) p
 
+(* The elements in ascending unsigned order.  [iter] follows the
+   traversal, so a wrapped progression runs its high arc before its low
+   one; this emits the arcs by base. *)
+let iter_ascending (p : t) : W.t list =
+  match split_wrapped p with
+  | [ a; b ] when W.(>) (base_of a) (base_of b) -> iter b @ iter a
+  | arcs -> List.concat_map arcs ~f:iter
+
 (* The runs of one sign half: the non-negative elements first, the
    negative ones after.  Each run maps element-wise under a signed
    cast. *)
@@ -911,7 +919,7 @@ let diff (p1 : t) (p2 : t) : t =
         if W.gt_int (cardn_of p1) fin_set_size then p1
         else
           let survivors =
-            List.filter ~f:(fun x -> not (elem x p2)) (iter p1)
+            List.filter ~f:(fun x -> not (elem x p2)) (iter_ascending p1)
           in
           let hull = of_list ~width:(bitwidth p1) survivors in
           if W.equal (cardn_of hull)

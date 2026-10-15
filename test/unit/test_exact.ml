@@ -64,6 +64,34 @@ let tests : unit Alcotest.test list =
         let f64 = Ex.of_list ~width:64 [ w64 1; w64 2 ] in
         check "FS-10" ((not (Ex.equal f32 f64)) && not (Ex.equal f64 f32)));
 
+    pin "FS-11" "image production preserves unsigned order and uniqueness across word arms"
+      (fun () ->
+        List.iter
+          (fun width ->
+            let word z = Cbat_word.of_z z width in
+            let high = Z.shift_left Z.one (width - 1) in
+            let expected =
+              List.map word [ Z.zero; Z.one; Z.of_int 3; high; Z.succ high ] in
+            let input =
+              List.map word [ Z.succ high; Z.of_int 3; high; Z.zero; Z.one; high ] in
+            let image =
+              Ex.of_iter ~width ~iter:(fun emit -> List.iter emit input) in
+            check "FS-11.ordered"
+              (Ex.elements image = expected
+              && Ex.equal image (Ex.of_list ~width input)) )
+          [ 8; 63; 64; 128 ];
+        let at8 n = Cbat_word.of_int ~width:8 n in
+        let a = Ex.of_list ~width:8 (List.map at8 [ 0; 1; 7; 128; 255 ]) in
+        let b = Ex.of_list ~width:8 (List.map at8 [ 1; 3; 129 ]) in
+        let xor = Ex.logxor a b in
+        let concrete =
+          List.concat_map
+            (fun x -> List.map (fun y -> Cbat_word.logxor x y) (Ex.elements b))
+            (Ex.elements a) in
+        check "FS-11.xor"
+          (List.for_all (fun w -> Ex.elem w xor) concrete
+          && List.for_all (fun w -> List.mem w concrete) (Ex.elements xor)));
+
 
 
 
