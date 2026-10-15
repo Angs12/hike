@@ -50,7 +50,7 @@ module Abi = Hike_abi
 (* Only [Abi.sp] carries stack semantics; any other register's stack-ness is
    proven by the VSA, never by name. *)
 
-module Vsa = struct
+module Frame = struct
   open Core
 
   (* The ABSOLUTE position of the entry RSP on the segment line (the seeded
@@ -143,7 +143,7 @@ module Vsa = struct
     | _ -> false
 
 end
-include Vsa
+include Frame
 
 (* The storage a ptr-kind value lives in: a region or residue alloca of
    this sub, the caller frame base (the window), or a VLA. *)
