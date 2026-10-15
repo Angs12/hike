@@ -138,7 +138,7 @@ do_lift() {
         for name in "${pending[@]}"; do
             "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
         done
-        ok=$(( $(grep -c '^OK' "$LIFT_LOG") ))
+        ok=$((ok + $(grep -c '^OK' "$LIFT_LOG")))
     fi
     note "lift: $ok/$total emitted OK (details: $LIFT_LOG; timings: $TIMES)"
     [ "$ok" -eq "$total" ]

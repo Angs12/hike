@@ -31,6 +31,11 @@ if [ ! -f "$PROV" ] || ! cmp -s "$PROV" "$PLUGIN/.plugin_provenance"; then
 fi
 cp "$PROV" "$OUT/.plugin_provenance"
 
+if [ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]; then
+  echo "FATAL: no corpus at $CORPUS (run the corpus gate first)" >&2
+  exit 2
+fi
+
 : >"$OUT/diagnostics.txt"
 fail=0
 n=0

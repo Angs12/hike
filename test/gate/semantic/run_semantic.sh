@@ -138,7 +138,7 @@ for ll in "$IR"/out_*.ll; do
 					any_bisect=1
 					continue
 				}
-			llc -O0 -relocation-model=pic -filetype=obj "$OUT/${base}_bisect_$p.ll" -o "$OUT/${base}_bisect_$p.o" 2>/dev/null ||
+			hike_llc "$OUT/${base}_bisect_$p.ll" "$OUT/${base}_bisect_$p.o" -O0 -relocation-model=pic 2>/dev/null ||
 				{
 					bisect_line="$bisect_line $p(llc)"
 					any_bisect=1

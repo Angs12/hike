@@ -32,13 +32,13 @@
   bap-knowledge
   bap-main
   bitvec
-  bitvec-order
   bin_prot
   core
+  findlib
+  graphlib
   monads
-  hashcons
+  ogre
   zarith
-  str
   unix
   (ppx_bap :build)
   (alcotest :with-test)))

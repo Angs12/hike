@@ -43,7 +43,7 @@ stage() {
     provenance) need_provenance ;;
     corpus)     "$HERE/compile_corpus.sh" "$CORPUS" ;;
     lift)       need_provenance; "$HERE/run_corpus.sh" "$CORPUS" "$EMIT" ;;
-    allocas)    "$HERE/check_allocas.sh" "$EMIT" &&
+    allocas)    need_provenance; "$HERE/check_allocas.sh" "$EMIT" &&
                 python3 "$HERE/check_initializers.py" "$EMIT" "$CORPUS" ;;
     semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
     drive)      need_provenance; need_renderer
