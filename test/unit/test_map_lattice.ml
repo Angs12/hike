@@ -212,6 +212,34 @@ let tests : unit Alcotest.test list =
         check "MAP-29"
           (Ws.equal (Mem.Val.data (Mem.find (32, LittleEndian) m k)) (Ws.singleton (w32 2))));
 
+    pin "MAP-30"
+      "a read that starts inside a wider cell extracts the bytes at its offset: the high dword \
+       and byte 1 of a stored qword"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let k = key_of (Ws.stack_word_i64 (-8L)) in
+        let m =
+          Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 }) ~key:k
+            ~data:
+              (Mem.Val.create (Ws.singleton (w64 0x1122334455667788)) LittleEndian) in
+        let read bits off =
+          Mem.Val.data
+            (Mem.find (bits, LittleEndian) m (key_of (Ws.stack_word_i64 off))) in
+        check "MAP-30.low" (Ws.equal (read 32 (-8L)) (Ws.singleton (w32 0x55667788)));
+        check "MAP-30.high" (Ws.equal (read 32 (-4L)) (Ws.singleton (w32 0x11223344)));
+        check "MAP-30.byte1" (Ws.equal (read 8 (-7L)) (Ws.singleton (w8 0x77)));
+        check "MAP-30.byte7" (Ws.equal (read 8 (-1L)) (Ws.singleton (w8 0x11)));
+        (* Big-endian: the offset selects the bytes the other way round. *)
+        let mbe =
+          Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 }) ~key:k
+            ~data:
+              (Mem.Val.create (Ws.singleton (w64 0x1122334455667788)) BigEndian) in
+        let readbe off =
+          Mem.Val.data
+            (Mem.find (32, BigEndian) mbe (key_of (Ws.stack_word_i64 off))) in
+        check "MAP-30.be-high" (Ws.equal (readbe (-8L)) (Ws.singleton (w32 0x11223344)));
+        check "MAP-30.be-low" (Ws.equal (readbe (-4L)) (Ws.singleton (w32 0x55667788))));
+
 
 
 

@@ -18,3 +18,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | MAP-23 | opadd-f: a 64-bit {5} meets a 32-bit {5} cell via meet_poly (widened to 64, no crash) | textually invert the pinned contract in `Cbat_map_lattice` | pin FAILs under that inversion (re-demonstrated by review) |
 | MAP-25 | a top-valued `add` stores no binding (the equal-vs-top trap: `Val.top` must not be recorded as a cell) | store the cell unconditionally in `join_add` | pin FAILs: the added key is present |
 | MAP-26 | the key namespace is origin-aware: a Stack cell and an Abs cell at the same numeric hull are disjoint | drop the origin from the key's `equal` | pin FAILs: the two cells merge |
+| MAP-30 | a read that starts inside a wider point cell extracts the bytes at its offset (the high dword and byte 1 of a stored qword), when that cell is the sole overlap | drop the `containing_cell` fallback from `Mem.find'` | pin FAILs: the high dword and byte reads answer top |

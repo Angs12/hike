@@ -756,8 +756,75 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
     |> Option.value ~default:(Val.top i)
   | _ -> Val.top i
 
+(* A point read whose bytes lie inside one wider point cell that starts
+   before it: the high dword of a stored qword, byte 1 of a qword (the
+   same-start narrower read already extracts).  The containing cell's
+   bytes at the read's offset are the answer, but only when it is the
+   sole cell overlapping the read — any other overlap must join, which
+   this rule cannot do, so it answers top. *)
+let containing_cell ((bits, endian) : Val.idx) (m : itree) (k : Key.t) :
+    Val.t option =
+  if not (Key.equal (Key.lower k) (Key.upper k)) then None
+  else
+    let req_bytes = bits / addressable_width in
+    let klo = Key.lower k in
+    let qlo = klo.pvalue in
+    let khi =
+      { klo with
+        pvalue =
+          Stdlib.Int64.add qlo (Stdlib.Int64.of_int (req_bytes - 1)) } in
+    let back_lo = pt_add klo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
+    let q lo hi =
+      Seq.to_list (it_intersections m { k with Key.lo = lo; hi; step = 1 }) in
+    let cands =
+      if Key.le back_lo klo then q back_lo khi
+      else
+        let top_pt = { klo with pvalue = line_max klo.pwidth } in
+        let zero_pt = { klo with pvalue = 0L } in
+        List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Key.compare a b)
+          (q back_lo top_pt @ q zero_pt khi) in
+    (* Only a point cell has a determined byte extent; its bytes overlap
+       the read when the spans meet. *)
+    let overlaps ((c, v) : Key.t * Val.t) : bool =
+      if not (Key.equal (Key.lower c) (Key.upper c)) then true
+      else
+        let cbits, _ = Val.get_idx v in
+        let clo = (Key.lower c).pvalue in
+        let cbytes = Stdlib.Int64.of_int (cbits / addressable_width) in
+        Stdlib.Int64.compare clo khi.pvalue <= 0
+        && Stdlib.Int64.compare
+             (Stdlib.Int64.add clo (Stdlib.Int64.pred cbytes))
+             qlo >= 0 in
+    let contains ((c, v) : Key.t * Val.t) : Val.t option =
+      if not (Key.equal (Key.lower c) (Key.upper c)) then None
+      else
+        let cbits, cendian = Val.get_idx v in
+        if cbits < bits || not (Bitvector.compare_endian cendian endian = 0)
+        then None
+        else
+          let d_bytes =
+            Stdlib.Int64.to_int (Stdlib.Int64.sub qlo (Key.lower c).pvalue) in
+          if d_bytes < 0 || d_bytes + req_bytes > cbits / addressable_width
+          then None
+          else if d_bytes = 0 && Int.equal cbits bits then
+            (* The whole cell at its start: keep the value, origin and all. *)
+            Some v
+          else
+            let lo =
+              match endian with
+              | LittleEndian -> d_bytes * addressable_width
+              | BigEndian -> cbits - bits - (d_bytes * addressable_width) in
+            Some
+              (Val.create
+                 (WordSet.extract ~hi:(lo + bits - 1) ~lo (Val.data v))
+                 endian) in
+    (match List.filter cands ~f:overlaps with
+     | [ one ] -> contains one
+     | _ -> None)
+
 (* Values stored at a key: an assembly of narrower cells covering a
-   point read exactly, else the cells read on the key's grid. *)
+   point read exactly, a single containing wider cell it starts inside,
+   else the cells read on the key's grid. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
   let req_bytes = fst i / addressable_width in
@@ -773,7 +840,10 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   let ints_list = Seq.to_list (it_intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
-  | None -> read_cells i k (Seq.to_list (it_intersections m k))
+  | None -> (
+    match containing_cell i m k with
+    | Some v -> v
+    | None -> read_cells i k (Seq.to_list (it_intersections m k)))
 
 let find (i : Val.idx) (m : t) (k : Key.t) =
   Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
