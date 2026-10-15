@@ -1215,13 +1215,13 @@ let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     else if rel o1 then Wrap o1
     else if rel o2 then (match op with Sub -> Top | _ -> Wrap o2)
     else Materialise
-  | Logand ->
+  | Logand | Logor | Logxor ->
     if rel o1 && rel o2 then Top
     else if rel o1 then Wrap o1
     else if rel o2 then Wrap o2
     else Materialise
   | Mul | Div | Sdiv | Modulo | Smodulo
-  | Lshift | Rshift | Arshift | Logor | Logxor | Concat ->
+  | Lshift | Rshift | Arshift | Concat ->
     if rel o1 || rel o2 then Top else Materialise
 
 (* The Top rows' width: concat's result is the concatenated width. *)
@@ -1283,6 +1283,30 @@ let certified_image ~(origin : Origin.t) ~(width : int) (f : word -> word) (offs
          ~f:(fun o ->
              Cbat_word.cast Bil.UNSIGNED width (f (Cbat_word.add base o))))
   | _ -> top width
+
+(* [f]'s OFFSET image on the origin's own line: a bit op confined to the
+   certified bits changes each base+offset by an amount fixed by its
+   residue mod 2^certified, so the result stays on the line.  Enumerable
+   offsets map exactly; a non-enumerable set unions the translates of
+   every residue's change (sound — the change depends only on
+   o mod 2^certified). *)
+let certified_offset_image (origin : Origin.t) (f : word -> word) (offs : P.t) :
+    P.t option =
+  let base = w64_of_i64 ((base_facts origin).base) in
+  let c = (base_facts origin).certified in
+  if c <= 0 || c >= 64 then None
+  else
+    let change_off o = Cbat_word.add o (Cbat_word.sub (f (Cbat_word.add base o)) (Cbat_word.add base o)) in
+    match Cbat_word.to_int (P.cardinality offs) with
+    | Ok n when n > 0 && n <= Utils.fin_set_size ->
+      Some (pieces_of_words ~width:64 (List.map (P.elements offs) ~f:change_off))
+    | _ ->
+      let delta r =
+        let x = Cbat_word.add base (w64_of_i64 (Int64.of_int r)) in
+        Cbat_word.sub (f x) x in
+      Some
+        (List.fold (List.init (1 lsl c) ~f:delta) ~init:(P.bottom 64)
+           ~f:(fun acc d -> P.union acc (P.translate offs d)))
 
 
 (* The round-down mask class: [k = ~m] with [m = 2^s - 1] (all-ones is
@@ -1448,6 +1472,25 @@ let logand_rel (o : Origin.t) (offs : P.t) (plain : t) : t =
         else top 64)
   | None -> top 64
 
+(* OR/XOR with a constant below the certified bits: the result stays a
+   stack-line relative value with a residue-dependent offset map (the
+   identity for k = 0).  Any other constant (or a non-constant) answers
+   top — the uncertified base bits would leak. *)
+let logor_rel_xor (op : binop) (o : Origin.t) (offs : P.t) (plain : t) : t =
+  let certified_bits = (base_facts o).certified in
+  match singleton_of plain with
+  | Some k when Cbat_word.is_zero k -> canonical [ Rel (o, offs) ]
+  | Some k
+    when certified_bits >= 64
+         || (certified_bits > 0
+             && Cbat_word.leq_int k ((1 lsl certified_bits) - 1)) ->
+    let k64 = Cbat_word.cast Bil.UNSIGNED 64 k in
+    let f v = match op with Logor -> Cbat_word.logor v k64 | _ -> Cbat_word.logxor v k64 in
+    (match certified_offset_image o f offs with
+     | Some offs' -> canonical [ Rel (o, offs') ]
+     | None -> top 64)
+  | _ -> top 64
+
 let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
   match op with
   | Add | Sub ->
@@ -1478,6 +1521,14 @@ let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
       match t1, t2 with
       | Rel (o, offs), plain -> logand_rel o offs plain
       | plain, Rel (o, offs) -> logand_rel o offs plain
+      | _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2)))
+  | Logor | Logxor ->
+    (* A width mismatch is the coercion pass's contract violation: top. *)
+    if bitwidth t1 <> bitwidth t2 then top (Stdlib.max (bitwidth t1) (bitwidth t2))
+    else (
+      match t1, t2 with
+      | Rel (o, offs), plain -> logor_rel_xor op o offs plain
+      | plain, Rel (o, offs) -> logor_rel_xor op o offs plain
       | _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2)))
   | _ -> lift_binop op t1 t2
 
@@ -1617,6 +1668,14 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
     when bitwidth t2 < bitwidth t1
          && (match t2 with Rel _ | Many _ -> false | _ -> true) ->
     lift2 op t1 (lift1 (Cast (Bil.UNSIGNED, bitwidth t1)) t2)
+  (* The bitwise family zero-extends the narrower operand to the common
+     width: no mismatch survives to the certified-bit computation. *)
+  | Logand | Logor | Logxor
+    when bitwidth t1 <> bitwidth t2
+         && (match t1, t2 with Many _, _ | _, Many _ -> false | _ -> true) ->
+    let w = Stdlib.max (bitwidth t1) (bitwidth t2) in
+    let up t = if bitwidth t = w then t else lift1 (Cast (Bil.UNSIGNED, w)) t in
+    lift2 op (up t1) (up t2)
   (* A mixed value is the union of its leaves: every other op
      distributes over them, so each relative leaf takes its own origin's
      row. *)
@@ -1640,7 +1699,7 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
   | _ -> if
     (match op with
      | Mul | Div | Sdiv | Modulo | Smodulo | Lshift | Rshift | Arshift
-     | Logor | Logxor | Concat ->
+     | Concat ->
        has_relative t1 || has_relative t2
      | _ -> false)
   then top_w ()

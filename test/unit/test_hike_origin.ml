@@ -429,6 +429,18 @@ let ori_25 () =
          |> Base.Option.bind ~f:Vsa.Def_origin.def_origin)
      |> fun o -> Option.equal Origin.equal o (Some (Origin.Vla producer)))
 
+let ori_26 () =
+  let s k = Ws.stack_word_i64 k in
+  let c n = Ws.singleton (i2w n) in
+  check "OR with a certified constant stays on the stack line"
+    (Ws.equal (Ws.logor (s 0L) (c 7L)) (s 7L)
+    && Option.equal Origin.equal (Ws.origin (Ws.logor (s 0L) (c 7L)))
+         (Some Origin.Stack));
+  check "XOR with a certified constant stays on the stack line"
+    (Ws.equal (Ws.logxor (s 0L) (c 8L)) (s (-8L)));
+  check "OR with a constant above the certified bits answers top"
+    (Ws.is_top (Ws.logor (s 0L) (c 0x100L)))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -453,4 +465,7 @@ let () =
       pin "ORI-22" "all-origin memory round trips and alias namespaces" ori_22;
       pin "ORI-23" "rounding crosses base-residue block boundaries" ori_23;
       pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24;
-      pin "ORI-25" "the copy chain's producer opens the frame" ori_25 ]
+      pin "ORI-25" "the copy chain's producer opens the frame" ori_25;
+      pin "ORI-26"
+        "certified-bit OR/XOR of a stack value stays relative; above the certified bits it is top"
+        ori_26 ]

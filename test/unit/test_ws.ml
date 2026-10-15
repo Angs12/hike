@@ -189,7 +189,9 @@ let tests : unit Alcotest.test list =
 
 
 
-    pin "WS-32" "DOM-44: a blind stack binop keeps the wider operand width"
+    pin "WS-32"
+      "DOM-44: a bitwise op on a stack value zero-extends the narrower plain operand to the common \
+       width, then computes (no mismatched width survives)"
       (fun () ->
         let stack = Ws.stack_word_i64 0L in
         let plain = Ws.singleton (w32 1) in
@@ -197,7 +199,8 @@ let tests : unit Alcotest.test list =
         let right = Ws.logor plain stack in
         check "WS-32"
           (Ws.bitwidth left = 64 && Ws.bitwidth right = 64
-          && Ws.is_top left && Ws.is_top right));
+          && Ws.equal left (Ws.stack_word_i64 1L)
+          && Ws.equal right (Ws.stack_word_i64 1L)));
 
     pin "WS-33"
       "UT1-42: the composite mixed-step meet is EXACT — {10,12,14,16,18} ∩ \

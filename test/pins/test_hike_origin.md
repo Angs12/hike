@@ -27,3 +27,4 @@ fails under that inversion.
 
 | ORI-24 | relative difference uses exact shared offsets; a module-address subtrahend removes exactly its link-time words | subtract materialized relative hulls | disjoint Rip/VLA offsets or a plain value incorrectly become bottom |
 | ORI-25 | the copy chain (`RCX := RSP − RAX; RSP := RCX`): the producer opens the frame, so RCX and RSP both carry `Vla T_producer`; the SP def confirms it without opening a second allocation; an access through RCX is stamped `Vla T_producer` | in `vla_seed`, seed only defs whose lhs is SP | pin FAILs: RCX keeps a Stack value and the allocation is the SP def |
+| ORI-26 | certified-bit OR/XOR of a stack value stays on the stack line: `stack[0] \| 7 = stack[7]`, `stack[0] ^ 8 = stack[-8]`; a constant with bits above the certified count (`0x100`) answers top | route `Logor`/`Logxor` back to the hard top for a relative in `lift2`/`rel_table` | pin FAILs (OR/XOR of a stack value is top, or drops the origin) |

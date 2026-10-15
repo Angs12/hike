@@ -53,7 +53,7 @@ let ceilings : (string * int) list =
     ("composite.logor(fin,fin)", 430);
     ("composite.logxor(clp,clp)", 5750);
     ("composite.logxor(fin,fin)", 430);
-    ("composite.logxor(stack,fin)", 30);
+    ("composite.logxor(stack,fin)", 206);
     ("composite.lnot(clp)", 252);
     ("composite.lnot(fin)", 1164);
     ("composite.lnot(stack)", 30);
