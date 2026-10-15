@@ -710,9 +710,11 @@ let last_defs (blk : blk term) : def term Var.Map.t =
    behavior.  A cond whose denotation is the empty set is unreachable:
    no edge may run.  A live state that produces one is an analysis bug,
    and the decision seam says so loudly rather than widening the
-   guard. *)
+   guard.  Jumps after one that always runs are not denoted. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
+    if not reachable then Seq.Step.Done
+    else
     let cond =
       match denote_imm_exp (Jmp.cond jmp) env with
       | Ok c ->
@@ -725,7 +727,6 @@ let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
       | Error _ -> WordSet.top 1
     in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
-    if not reachable then Seq.Step.Done
-    else if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}
+    if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}
     else Seq.Step.Skip {state = can_fall_through}
   end
