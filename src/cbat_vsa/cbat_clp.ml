@@ -312,25 +312,29 @@ module Pieces = struct
     ( pair_growth (coalesce pi pj) pi pj,
       Cbat_word.equal (C.step_of pi) (C.step_of pj) )
 
-  (* The smallest-growth pair over [arr] (first in (i, j) order,
-     same-step preferred on ties), reading the costs from [cost]. *)
-  let best_pair (n : int) (cost : (Cbat_word.t * bool) option array array)
-    : (int * int) option =
-    let best = Stdlib.ref None in
-    for i = 0 to n - 1 do
-      for j = i + 1 to n - 1 do
-        let g, same_step = Option.value_exn cost.(i).(j) in
-        let better =
-          match !best with
-          | None -> true
-          | Some (_, _, gb, sb) ->
-            let c = Cbat_word.compare g gb in
-            c < 0 || (c = 0 && same_step && not sb)
-        in
-        if better then best := Some (i, j, g, same_step)
-      done
-    done;
-    Option.map !best ~f:(fun (i, j, _, _) -> (i, j))
+  (* The adjacent pairs of an ascending piece list of length [n], in
+     (i, j) order: neighbours, plus the circular pair (0, n-1) when it is
+     distinct.  Slot [k < n-1] is (k, k+1); slot [n-1] is (0, n-1), the
+     same pair as slot 0 when [n = 2]. *)
+  let adjacent_slots (n : int) : int list =
+    if n < 2 then []
+    else if n = 2 then [ 0 ]
+    else 0 :: (n - 1) :: List.init (n - 2) ~f:(fun k -> k + 1)
+
+  let slot_pair (n : int) (k : int) : int * int =
+    if k = n - 1 then (0, n - 1) else (k, k + 1)
+
+  (* The smallest-growth adjacent slot (first in (i, j) order, same-step
+     preferred on ties). *)
+  let best_slot (n : int) (cost : (Cbat_word.t * bool) array) : int option =
+    List.fold (adjacent_slots n) ~init:None ~f:(fun best k ->
+        let g, same_step = cost.(k) in
+        match best with
+        | None -> Some k
+        | Some b ->
+          let gb, sb = cost.(b) in
+          let c = Cbat_word.compare g gb in
+          if c < 0 || (c = 0 && same_step && not sb) then Some k else best)
 
   (* A union of at most [U.keep_exact_elements] elements stays exact
      runs: the cap bounds large unions, never a set the runs hold. *)
@@ -346,23 +350,27 @@ module Pieces = struct
     in
     go 0 ps
 
-  (* The cap repair: hull the smallest-growth pair until the list fits
-     [bound] or is within the exact budget.  A tier-boundary operation;
-     producers never cap. *)
+  (* The cap repair: hull the smallest-growth circularly adjacent pair
+     until the list fits [bound] or is within the exact budget.  The list
+     is ascending and disjoint, so only neighbours are candidates; a merge
+     re-costs only the slots whose pieces [merge_arc] produced.  A
+     tier-boundary operation; producers never cap. *)
   let cap_to (bound : int) (ps : t) : t =
     let over ps = List.length ps > bound && not (within_exact_budget ps) in
-    (* Pair costs persist across steps: a merge re-costs only the pairs
-       of the pieces [merge_arc] produced (the others are kept
-       physically), so the cap is O(n^2) costs, not O(n^3). *)
-    let rec go (arr : progression array)
-        (cost : (Cbat_word.t * bool) option array array) : t =
+    let slot_cost (arr : progression array) (k : int) : Cbat_word.t * bool =
+      let i, j = slot_pair (Stdlib.Array.length arr) k in
+      pair_cost arr.(i) arr.(j)
+    in
+    let rec go (arr : progression array) (cost : (Cbat_word.t * bool) array)
+      : t =
 #ifdef VSA_DEBUG
       census_cap ();
 #endif
       let n = Stdlib.Array.length arr in
-      match best_pair n cost with
+      match best_slot n cost with
       | None -> Stdlib.Array.to_list arr
-      | Some (i, j) ->
+      | Some k ->
+        let i, j = slot_pair n k in
         let hull = coalesce arr.(i) arr.(j) in
         let rest =
           List.filteri (Stdlib.Array.to_list arr) ~f:(fun k _ -> k <> i && k <> j) in
@@ -374,24 +382,26 @@ module Pieces = struct
             Stdlib.Array.find_index (fun q -> phys_equal q p) arr in
           let olds = Stdlib.Array.map old arr' in
           let n' = Stdlib.Array.length arr' in
+          let old_slot (oa : int) (ob : int) : int option =
+            if ob = oa + 1 then Some oa
+            else if oa = 0 && ob = n - 1 && n > 2 then Some (n - 1)
+            else None
+          in
           let cost' =
-            Stdlib.Array.init n' (fun a ->
-                Stdlib.Array.init n' (fun b ->
-                    if b <= a then None
-                    else
-                      match olds.(a), olds.(b) with
-                      | Some oa, Some ob when oa < ob -> cost.(oa).(ob)
-                      | _ -> Some (pair_cost arr'.(a) arr'.(b)))) in
+            Stdlib.Array.init n' (fun k ->
+                let a, b = slot_pair n' k in
+                match olds.(a), olds.(b) with
+                | Some oa, Some ob ->
+                  (match old_slot oa ob with
+                   | Some s -> cost.(s)
+                   | None -> slot_cost arr' k)
+                | _ -> slot_cost arr' k) in
           go arr' cost'
     in
     if not (over ps) then ps
     else
       let arr = Stdlib.Array.of_list ps in
-      let n = Stdlib.Array.length arr in
-      go arr
-        (Stdlib.Array.init n (fun a ->
-             Stdlib.Array.init n (fun b ->
-                 if b <= a then None else Some (pair_cost arr.(a) arr.(b)))))
+      go arr (Stdlib.Array.init (Stdlib.Array.length arr) (slot_cost arr))
 
   (* The producer finish: combine the already-ordered stream tail-only;
      the moment the accumulator leaves the exact budget it caps down to
