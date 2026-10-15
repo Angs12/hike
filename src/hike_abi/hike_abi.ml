@@ -125,6 +125,10 @@ let addr_size_bits target =
   if Theory.Target.is_unknown target then 0
   else Theory.Target.data_addr_size target
 
+(* The machine size word for [bits]-bit addresses. *)
+let addr_size_of_bits (bits : int) : [> `r32 | `r64 ] =
+  if bits <= 32 then `r32 else `r64
+
 let sp target =
   match Theory.Target.reg target stack_pointer with
   | Some v -> Var.reify v

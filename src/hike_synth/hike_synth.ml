@@ -36,7 +36,7 @@ type storage =
 type lane = Input | Output
 
 let mem_type addr_bits =
-  Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8)
+  Type.Mem (Hike_abi.addr_size_of_bits addr_bits, `r8)
 
 let var ~addr_bits kind =
   let name, typ = match kind with

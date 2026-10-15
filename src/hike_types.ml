@@ -582,7 +582,7 @@ let kind_census (prog : program term) : unit =
    it to LLVM `ptr`.  The address size is the target's, never a literal. *)
 let mem_type_of_target (target : Bap_core_theory.Theory.Target.t) : Type.t =
   let bits = Bap_core_theory.Theory.Target.bits target in
-  let addr_size = if bits <= 32 then `r32 else `r64 in
+  let addr_size = Hike_abi.addr_size_of_bits bits in
   Type.Mem (addr_size, `r8)
 
 (* Types each pointer SSA version [Mem]: a version has one def, so its
