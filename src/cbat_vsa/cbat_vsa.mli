@@ -225,7 +225,7 @@ module Test_seam : sig
   (* The walk's env-write sites, named for the counting refine. *)
   type write_site = Cbat_backward.write_site = Output_write | Input_write
 
-  (* T27 step 4: the address filter's element-level coverage tests: the
+  (* The address filter's element-level coverage tests: the
      piece's elements against a stored cell on [line] (with [bytes]-wide
      reads), and against the threaded section images. *)
   val piece_touches_cell :

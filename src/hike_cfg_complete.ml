@@ -267,9 +267,6 @@ let resolved_cases ~(denote : denote) ~(last_defs : def term Var.Map.t)
       then Some cases
       else None)
 
-(* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
-   The words share the selector's width, so the comparisons typecheck. *)
-(* [ws] is non-empty — a case group is built from at least one word. *)
 let true_cond : exp = Bil.Int (Word.one 1)
 
 let guard_of (j : jmp term) : exp option =
@@ -502,10 +499,6 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
     Term.filter_map blk_t sub ~f:(fun b ->
         Base.Option.some_if (Core.Set.mem reachable (Term.tid b)) b)
 
-(* The shape-only return canonicalization, for a sub whose fixpoint did
-   not converge: a target var whose reaching def loads the entry SP
-   cell.  This is the sanctioned pre-solution projection — the
-   denotation path supersedes it wherever a solution exists. *)
 (* The block that follows [blk] in [sub]'s term order: the false edge of a
    conditional goto whose block has no explicit one. *)
 let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =

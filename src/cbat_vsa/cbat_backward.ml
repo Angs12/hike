@@ -722,11 +722,6 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
 
 
 
-(* THE inverse denote: the per-node mirror of the forward transfer,
-   phrased as each node's inverse — a binop's subtraction pre-image, a
-   cast's extent widening, a leaf var's meet, a comparison's polarity
-   windows.  A node with no closed-form inverse takes identity; a
-   genuinely empty pre-image is the dead edge. *)
 (* The ONE pending-constraint map's entry: a constraint awaiting
    delivery to the producer that wrote it, keyed by what it constrains
    — a word var, or the byte range a load read.  A word entry dies at
@@ -837,19 +832,17 @@ let cell_meet_diff ~(ckey : string) ~(pre : wordset) ~(cstr : wordset)
 
 (* The cell key a backward meet may name: only a bounded address set
    denotes the cell a trace reads.  An unbounded address names no cell,
-   so its constraint must stay identity rather than narrow every cell. *)
-let bounded_cell_key (ws : wordset) : Mem.Key.t list =
-  if WordSet.is_top ws || WordSet.is_infinite ws then []
-  else Mem.Key.of_wordset ws
-
-(* The backward cell meet is sound only when every path reads the SAME
+   so its constraint must stay identity rather than narrow every cell.
+   The backward cell meet is sound only when every path reads the SAME
    cell: a single-point address, or a wider address set whose read bytes
    all lie inside one stored cell.  A read that can land on two cells
    reads a different one per path, so the read's value constraint is
-   path-local — meeting it into each cell would apply that constraint to
-   paths that never read the cell.  ADR 0025's join argument covers the
-   join (a load's value contains every contributing cell); it does not
-   license the meet back into each cell. *)
+   path-local.  ADR 0025's join argument covers the join (a load's value
+   contains every contributing cell); it does not license the meet back
+   into each cell. *)
+let bounded_cell_key (ws : wordset) : Mem.Key.t list =
+  if WordSet.is_top ws || WordSet.is_infinite ws then []
+  else Mem.Key.of_wordset ws
 
 (* A single-point key names one address (and so one cell on every path). *)
 let key_is_point (k : Mem.Key.t) : bool =

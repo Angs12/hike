@@ -213,9 +213,6 @@ let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
       | [] -> acc
       | _ :: tl -> pair js tl acc)
 
-(* Per-walk metrics: production builds see only the type and no-op
-   stubs below. *)
-
 (* The widen cycle's need set: the block SCC's variable SCCs (a
    singleton variable SCC needs itself iff self-looping; every
    multi-vertex variable SCC needs all its members). *)
@@ -734,7 +731,7 @@ module Test_seam = struct
   (* The walk's env-write sites, named for the counting refine. *)
   type write_site = Cbat_backward.write_site = Output_write | Input_write
 
-  (* T27 step 4: the address filter's element-level coverage tests. *)
+  (* The address filter's element-level coverage tests. *)
   let piece_touches_cell = Cbat_backward.piece_touches_cell
   let piece_touches_image = Cbat_backward.piece_touches_image
 end

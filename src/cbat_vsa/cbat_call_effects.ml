@@ -44,8 +44,9 @@ let range_of (ws : WordSet.t) : (word * word) option =
    (the allocation's own, the frame above) sit at/above that run's SP,
    and the callee reaches below its entry only.  An unbounded-above SP
    keeps nothing — the whole-memory top stays the sound fallback on
-   any doubt. *)
-(* Only Stack/Vla origins certify a frame-keep boundary or a
+   any doubt.
+
+   Only Stack/Vla origins certify a frame-keep boundary or a
    stack escape. An SP without that proof forces whole-memory top. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =

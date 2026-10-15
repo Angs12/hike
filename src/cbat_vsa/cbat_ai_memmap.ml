@@ -184,7 +184,6 @@ end = struct
   let reverse_seq : 'a seq -> 'a seq = Fn.compose Seq.of_list Seq.to_list_rev
 
 (* Values lowest address first. *)
-
 let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     let sz = if Bitvector.compare_endian e v.endian = 0 then sz else addressable_width in
     let w, e = get_idx v in
@@ -788,13 +787,6 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
     |> (function Some v -> v | None -> Val.top i)
   | _ -> Val.top i
 
-(* A point read whose bytes lie inside one wider point cell that starts
-   before it: the high dword of a stored qword, byte 1 of a qword (the
-   same-start narrower read already extracts).  The containing cell's
-   bytes at the read's offset are the answer, but only when it is the
-   sole cell overlapping the read — any other overlap must join, which
-   this rule cannot do, so it answers top. *)
-
 (* The last byte a [bits]-wide read at point [klo] covers. *)
 let read_end (bits : int) (klo : Key.point) : Key.point =
   { klo with
@@ -817,6 +809,12 @@ let point_candidates (bits : int) (m : itree) (k : Key.t) :
     let zero_pt = { klo with pvalue = 0L } in
     merge_candidates (q back_lo top_pt) (q zero_pt khi)
 
+(* A point read whose bytes lie inside one wider point cell that starts
+   before it: the high dword of a stored qword, byte 1 of a qword (the
+   same-start narrower read already extracts).  The containing cell's
+   bytes at the read's offset are the answer, but only when it is the
+   sole cell overlapping the read — any other overlap must join, which
+   this rule cannot do, so it answers top. *)
 let containing_cell ((bits, endian) : Val.idx) (k : Key.t)
     (cands : (Key.t * Val.t) list) : Val.t option =
   if not (Key.equal (Key.lower k) (Key.upper k)) then None
@@ -960,9 +958,6 @@ let equal (m1 : t) (m2 : t) : bool =
   assert(m1.width = m2.width);
   Option.equal equal' m1.itree m2.itree
 
-(* Join may grow the tree. *)
-
-
 (* Shared key walk for join, meet, and widen: the op takes the pair's
    key (the cell-landmark rows are keyed by it). *)
 let fold_keys (op : Key.t -> Val.t -> Val.t -> Val.t) (m1 : itree)
@@ -984,6 +979,7 @@ let fold_keys (op : Key.t -> Val.t -> Val.t -> Val.t) (m1 : itree)
     IT.add it key @@ op key d1 d2
   end
 
+(* Join may grow the tree. *)
 let join' (m1 : itree) (m2 : itree) : itree =
   coalesce (fold_keys (fun _ d1 d2 -> Val.join d1 d2) m1 m2)
 

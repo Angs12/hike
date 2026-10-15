@@ -633,11 +633,9 @@ let stack_bounds (t : t) : (int64 * int64) option =
       | _ -> None)
 
 
-(* Signed extrema: the projection is signed-positive, so its signed
-   and unsigned extrema agree; a set spanning the sign boundary has
-   no signed extremum. *)
 (* The signed extreme of one leaf; [dir] < 0 is the minimum, > 0 the
-   maximum.  A sign-spanning piece has no signed extreme on that side. *)
+   maximum.  A sign-spanning piece has no signed extreme on that side;
+   a signed-positive projection's signed and unsigned extrema agree. *)
 let signed_leaf ~(dir : int) (q : t) : word option =
   let pick (a, b) = if dir < 0 then a else b in
   let clamp = if dir < 0 then Stdlib.Int64.min_int else Stdlib.Int64.max_int in
@@ -877,17 +875,11 @@ end
 
 module Piece_binop = Binop (Piece_repr)
 
-(* The distributed arithmetic collapses to one progression: multi-piece
-   results churn the fixpoint -- the 4-piece cap is not associative
-   under repeated joins, and in-loop values oscillate between
-   incomparable capped forms (measured: five fresh fixpoint backstops on
-   du and expr).  The interior exclusion a piece union can hold is lost
-   here, not at the join; the widening's per-pair hull is where it is
-   lost for fixpoint values.  The collapse is the piece representation's
-   policy. *)
-(* Collapse a piece-union result to one progression (the distributed
-   arithmetic policy: multi-piece results churn the fixpoint -- the cap is
-   not associative under repeated joins). *)
+(* Collapse a piece-union result to one progression: the distributed
+   arithmetic policy, since multi-piece results churn the fixpoint (the
+   piece cap is not associative under repeated joins, and in-loop values
+   oscillate between incomparable capped forms).  The interior exclusion
+   a piece union can hold is lost here, not at the join. *)
 let piece_collapse (ps : P.t) : P.t =
   match P.to_list ps with
   (* [of_progression] returns a live unwrapped piece as itself. *)
@@ -1202,6 +1194,8 @@ let stride (t : t) : int =
      | Some s -> s
      | None -> 1)
 
+let origin_is_relative x = not (absolute_line x)
+
 (* THE per-op type table: what [op] yields when its operands meet at
    origins [o1] and [o2] (an absolute operand is [Origin.Abs]).
    [Wrap o] = the offsets stay relative at [o]; [Materialise] = the
@@ -1211,8 +1205,6 @@ let stride (t : t) : int =
    op by one row here.  A VLA frame never merges with [Stack] — its
    offsets are frame-relative, so a cross-origin op materialises through
    the base range (or tops). *)
-let origin_is_relative x = not (absolute_line x)
-
 let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     Hike_origin.rel_row =
   let rel x = origin_is_relative x in

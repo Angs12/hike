@@ -227,12 +227,6 @@ type ctx = {
 }
 
 
-(* The sub-local line: entry RSP at [entry], signed positions; the
-   return-address bytes are [entry, entry + word - 1], then Args. *)
-
-(* Bottom yields no portion; every reachable unknown address
-   contributes its full possible range to each space it may touch. *)
-
 (* Why an address denotated TOP: the denotation query itself failed, a
    stack-symbolic set with no surviving bounds, or a plain top — no
    stack basis and no rip proof (the heap). *)
@@ -531,8 +525,6 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
     m_def = def; m_width = width; m_store = store;
     m_identity = not p.pt_elig; m_callwin = false }
 
-(* The word cell an args-space span names: one slot only when the span
-   starts at/above the args base and both ends land in the same cell. *)
 (* The word cell of a promotable Args member: a def-backed, non-identity
    access wholly inside one word cell at/above the args base.  [None] for
    any other member — an identity claim (a TOP access) converts to its
@@ -562,8 +554,6 @@ let escape_members ~(sub : Tid.t) ~(env : env) ~(callwin : bool)
         m_def = None; m_width = 0; m_store = false; m_identity = true;
         m_callwin = callwin })
 
-(* Pure constant arithmetic — the address shape whose emission
-   evaluates to the exact native bits. *)
 (* The caller-window hull's slack above the call-time SP: pushes and
    alignment spillover the window must cover. *)
 let window_push_slop_words = 8
@@ -1651,17 +1641,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                     | Some _ -> census "rw.value.window"; acc
                                     | None -> census "rw.value.raw"; acc)
                                 | _ -> census "rw.value.raw"; acc)))))
-
-(* Every memory node of the expression re-points at [mem_var] — a
-   converted def keeps no model-memory node — and takes [addr] as its
-   address when the rewrite computed the storage-relative form.  The
-   override receives children unmapped, so it maps the address and
-   store data itself. *)
-(* Each call site's stored slot gains its [hike_argN] def binding the
-   caller's own slot ADDRESS: the store's address, which the rewrite
-   above already re-pointed at the caller's storage.  A partial store
-   passes its address too — the callee reads and writes the exact
-   bytes. *)
 
 let slot_arity ~(word : int) ~(entry : int64) (tree : sub_tree) : int =
   let arity =

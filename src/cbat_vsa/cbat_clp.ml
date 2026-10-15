@@ -341,7 +341,6 @@ module Pieces = struct
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
-  (* The runs of an already ascending element list. *)
   let runs_from_sorted_elements ~(width : int) (els : Cbat_word.t list)
     : progression list =
 #ifdef VSA_DEBUG

@@ -50,7 +50,6 @@ module Abi = Hike_abi
 (* Only [Abi.sp] carries stack semantics; any other register's stack-ness is
    proven by the VSA, never by name. *)
 
-(* The producer builds this record; the model and the emitter consume it. *)
 module Vsa = struct
   open Core
 
@@ -189,7 +188,7 @@ let mem_node_count (e : exp) : int = List.length (mem_nodes e)
 let reads_mem (e : exp) : bool =
   match mem_node_of e with Some _ -> true | None -> false
 
-(* Free vars of every Load mem in one rhs. *)
+(* The address and size of the rhs's memory access, if it has one. *)
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
   match mem_node_of e with
   | Some (`Load (_, a, s)) | Some (`Store (_, a, _, s)) -> Some (a, s)
@@ -510,7 +509,6 @@ let is_region_mem v =
   | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
   | _ -> false
 
-(* The region id a [stack_rN_mem] var names; [None] for any other var. *)
 type sec_comp = {
   comp_id : int;              (* the N in sec_comp_N (module-wide) *)
   sec_lo : int64;             (* the owning section's native span *)
@@ -533,8 +531,6 @@ let is_sec_comp_mem v =
   | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
   | _ -> false
 
-(* The component id a [sec_comp_N_mem] var names; [None] for any other
-   var. *)
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
       match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)

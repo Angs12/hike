@@ -55,8 +55,6 @@ let is_circular (p : t) : bool =
 let is_infinite (p : t) : bool =
   match p.dir with Finite -> false | _ -> true
 
-(* CLP from base stepping by step. *)
-
 let fit_to (width : int) (w : W.t) : W.t =
   if W.bitwidth w = width then W.unsigned w else W.extract_exn ~hi:(width - 1) w
 
@@ -859,7 +857,6 @@ let rec intersection (p1 : t) (p2 : t) : t =
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
-(* Difference; exact when one CLP, else identity. *)
 (* The remainder past a removed run [i] ending at [i_end], per the
    minuend's direction; [cardn] is the removed run's cardinality and
    [fallback] the survivor hull when no closed form applies. *)
@@ -902,6 +899,7 @@ let diff_finite (p1 : t) (i : t) (i_end : W.t) (cardn : W.t)
           | _ -> p1)
      | _ -> p1)
 
+(* Difference; exact when one CLP, else identity. *)
 let diff (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then p1
   else if is_bottom p1 then p1

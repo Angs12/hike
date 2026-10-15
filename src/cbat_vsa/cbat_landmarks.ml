@@ -122,9 +122,9 @@ let keys_at (t : t) (h : Tid.t) : key list =
    smallest distance, so a row grows only with the distinct boundaries its
    key is measured against — and the same-line acquisition guard is what
    keeps those stable.  A head that grinds to the visit budget is bounded
-   by that budget, not by a cap here. *)
+   by that budget, not by a cap here.
 
-(* The upsert: one entry per (bound, is_upper); a smaller distance wins and
+   The upsert: one entry per (bound, is_upper); a smaller distance wins and
    the history is preserved — only [advance] rotates it. *)
 let upsert (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   let same (e : lm_entry) =

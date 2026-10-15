@@ -83,14 +83,7 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
 (* ---- The one address map: every address def's value is its storage's
    base plus the storage-relative displacement. ---- *)
 
-(* Every var leaf's kind: [ `Static k ] an address whose offset is
-   provably k, [ `Addr ] an address whose offset is not static, [ `Int ]
-   a visible non-address (a runtime piece).  A var the denotation cannot
-   see is absent — unknown may be a pointer at emission, so it never
-   enters a displacement. *)
-(* One def's rewrite facts: the access's conversion (the mem re-point)
-   plus the storage-relative address forms — a value def's whole rhs,
-   an access def's mem-node address. *)
+(* Each binding's [hike_argN] def goes just before its storing def. *)
 let bind_site_args ~(addr_bits : int) (bindings : site_binding list)
     (blk : blk term) : blk term =
   Base.List.fold bindings ~init:blk ~f:(fun blk b ->
@@ -129,32 +122,22 @@ let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
                   (Vsa.WordSet.t, Type.error) Result.t)
     ~(lookup : int64 -> Tid.t option)
     (sub : sub term) : Tid.t option Tid.Map.t =
-  let resolved = ref Tid.Map.empty in
   Term.enum blk_t sub
-  |> Seq.iter ~f:(fun blk ->
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
       Term.enum jmp_t blk
-      |> Seq.iter ~f:(fun j ->
+      |> Seq.fold ~init:acc ~f:(fun acc j ->
           match Jmp.kind j with
           | Call c -> (
               match Call.target c with
               | Indirect texp -> (
                   match denote ~blk texp with
-                  | Error _ ->
-                      resolved :=
-                        Core.Map.set !resolved ~key:(Term.tid j) ~data:None
+                  | Error _ -> Core.Map.set acc ~key:(Term.tid j) ~data:None
                   | Ok ws ->
-                      resolved :=
-                        Core.Map.set !resolved ~key:(Term.tid j)
-                          ~data:(Hike_resolve.resolve_target ~lookup ws))
-              | Direct _ -> ())
-          | _ -> ()));
-  !resolved
+                      Core.Map.set acc ~key:(Term.tid j)
+                        ~data:(Hike_resolve.resolve_target ~lookup ws))
+              | Direct _ -> acc)
+          | _ -> acc))
 
-(* The promotion rewrite: the sub gains its promoted parameters as
-   real BIR args, the sites' outgoing stores gain [hike_argN] defs,
-   and singleton-resolved indirect targets become direct.
-   Fixed-signature subs (the intrinsics, @main) get no callee-side
-   rewrite; the caller side runs for every sub. *)
 (* The caller side: a resolved target becomes direct; the jmp keeps
    its tid, guard, and tag. *)
 let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
@@ -168,6 +151,11 @@ let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
               | _ -> j)
           | _ -> j))
 
+(* The promotion rewrite: the sub gains its promoted parameters as
+   real BIR args, the sites' outgoing stores gain [hike_argN] defs,
+   and singleton-resolved indirect targets become direct.
+   Fixed-signature subs (the intrinsics, @main) get no callee-side
+   rewrite; the caller side runs for every sub. *)
 let promote_sub ~(addr_bits : int) (facts : facts)
     (sub : sub term) : sub term =
   let with_signature sub =
@@ -186,9 +174,6 @@ let promote_sub ~(addr_bits : int) (facts : facts)
   resolve_targets ~resolved:facts.prom_resolved (with_signature sub)
 
 
-(* The promoted slots' arity: one per word cell the tree's Arg_slot
-   members name, derived from each member's own address — the binding is
-   never the unit. *)
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
    products. *)

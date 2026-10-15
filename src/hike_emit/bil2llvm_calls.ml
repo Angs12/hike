@@ -573,9 +573,6 @@ let create_external_boundary ctx scope llvm_builder blk_tid sub name =
   | _ -> ();
   create_return ctx scope blk_tid llvm_builder sub
 
-(* The indirect tail's resolution debug; thunk-guarded like the
-   completion's trace. *)
-
 let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
   let call = call_exn j in
   match Call.target call with

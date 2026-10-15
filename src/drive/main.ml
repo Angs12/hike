@@ -24,8 +24,6 @@ let setup_gc () =
            minor_heap_size = 2 * 1024 * 1024;
            major_heap_increment = 64 * 1024 * 1024 }
 
-(* Whether the lifted program defines a function: an empty module is a
-   refusal, never an output. *)
 (* An error's own message, without the backtrace BAP attaches. *)
 let message err =
   match Core.Error.sexp_of_t err with
@@ -35,6 +33,8 @@ let message err =
   | Sexplib0.Sexp.List (Sexplib0.Sexp.Atom m :: _) -> m
   | sexp -> Sexplib0.Sexp.to_string sexp
 
+(* Whether the lifted program defines a function: an empty module is a
+   refusal, never an output. *)
 let defines_code proj =
   Term.enum sub_t (Project.program proj)
   |> Seq.exists ~f:(fun sub -> not (Seq.is_empty (Term.enum blk_t sub)))

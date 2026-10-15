@@ -1,9 +1,9 @@
-(* The block/jmp split: a 3+-jmp direct-goto series becomes one block per
-   jmp — piece 1 keeps the tid, defs, phis, and attrs; every piece carries
+(* The block/jmp split: a multi-jmp series of direct gotos and calls
+   becomes one block per jmp — piece 1 keeps the tid, defs, phis, and attrs; every piece carries
    an explicit Goto to the next.  The guards' false edges are already
    explicit by then (the completion writes them), so the BIR's edges are
    the jmps themselves: every later pass (the emitter included) reads the
-   BIR, never a term order.  A series that is not all direct gotos stays
+   BIR, never a term order.  A series with any other jmp stays
    whole, named on the channel. *)
 
 open Bap.Std
