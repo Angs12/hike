@@ -945,9 +945,10 @@ let meet = intersection
 
 
 let widen_join (p1 : t) (p2 : t) : t =
-  (* Widening needs an ascending chain; bottom-to-singleton widens to
-     top. *)
-  if is_bottom p1 then top (bitwidth p2)
+  (* From bottom the new iterate is itself the widening step; the later
+     iterates carry the extrapolation.  Answering top would drop a real
+     bound the first widening is meant to keep. *)
+  if is_bottom p1 then p2
   else if subset p1 p2 then
     if equal p1 p2 then p1 else
     let width = bitwidth p2 in
@@ -970,7 +971,7 @@ let widen_join (p1 : t) (p2 : t) : t =
   else join p1 p2
 
 let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
-  if is_bottom p1 then top (bitwidth p2)
+  if is_bottom p1 then p2
   else if subset p1 p2 then
     if equal p1 p2 then p1
     else if steps < 0 then widen_join p1 p2

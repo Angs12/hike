@@ -830,7 +830,7 @@ module Pieces = struct
       (b : t) : t =
     match a, b with
     | [], [] -> []
-    | [], _ -> [ C.top (width_of b) ]
+    | [], _ -> b
     | _, [] -> a
     | _ ->
       (* The origin tag: [true] is the old iterate [a]. *)

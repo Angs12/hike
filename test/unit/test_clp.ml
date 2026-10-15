@@ -142,11 +142,13 @@ let tests : unit Alcotest.test list =
 
 
 
-    pin "CLP-26" "CLP18: widen_join p p = p; widen_join bottom {5} = top"
+    pin "CLP-26" "CLP18: widen_join p p = p; widen_join bottom {5} = {5} (the new iterate)"
       (fun () ->
         let s5 = Clp.create (w32 5) in
         check "CLP-26"
-          (Clp.equal (Clp.widen_join s5 s5) s5 && Clp.is_top (Clp.widen_join (Clp.bottom 32) s5)));
+          (Clp.equal (Clp.widen_join s5 s5) s5
+          && Clp.equal (Clp.widen_join (Clp.bottom 32) s5) s5
+          && Clp.equal (Clp.extrapolate_steps ~steps:3 (Clp.bottom 32) s5) s5));
 
     pin "CLP-27"
       "W1: [0,9] \\ [3,5] — the interior run is two pieces, not one CLP: the identity (the sound \

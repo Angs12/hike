@@ -405,6 +405,15 @@ let tests : unit Alcotest.test list =
           && P.elem (w32 5) nearest && P.elem (w32 40) nearest
           && not (P.elem (w32 15) nearest)));
 
+    pin "PCS-20"
+      "widening from bottom is the new iterate, not top (the piece union and the landmark step)"
+      (fun () ->
+        let five = P.singleton (w32 5) in
+        let w = P.widen_join (P.bottom 32) five in
+        check "PCS-20.widen" (P.equal w five && not (P.is_top w));
+        let e = P.extrapolate_steps ~steps:2 (P.bottom 32) five in
+        check "PCS-20.extrapolate" (P.equal e five && not (P.is_top e)));
+
   ]
 
 let () = run "pieces" tests
