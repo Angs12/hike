@@ -70,30 +70,6 @@ let tests : unit Alcotest.test list =
 
 
 
-    (* The sampled-pair overlap loop: one pin, aggregate over the pairs. *)
-    pin "WS-10" "property WordSet.overlap vs meet is_bottom (7 sampled pairs)"
-      (fun () ->
-        let pairs : (Ws.t * Ws.t) list =
-          [
-            (Ws.of_list ~width:32 [ w32 1; w32 2 ], Ws.of_list ~width:32 [ w32 2; w32 3 ]);
-            (Ws.of_list ~width:32 [ w32 1 ], Ws.of_list ~width:32 [ w32 2 ]);
-            (Ws.top 32, Ws.of_list ~width:32 [ w32 5 ]);
-            ( Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 1; Cbat_word.of_int ~width:8 2 ],
-              Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 3 ] );
-            ( Ws.of_clp (Clp.create (w32 0) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)),
-              Ws.of_clp (Clp.create (w32 1) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)) );
-            (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 10; w32 20 ]);
-            (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 20; w32 30 ]);
-          ]
-        in
-        check "WS-10"
-          (List.for_all
-             (fun (a, b) -> Ws.overlap a b = not (Ws.is_bottom (Ws.meet a b)))
-             pairs));
-
-
-
-
 
     pin "WS-13"
       "property m6 overlap = not is_bottom o meet enumerated (300 random equal-width trials, \
@@ -124,7 +100,7 @@ let tests : unit Alcotest.test list =
           | _ -> (Ws.singleton (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
         in
         for _i = 1 to 300 do
-          let w = [| 3; 5; 8 |].(Random.int 3) in
+          let w = [| 3; 5; 8; 32 |].(Random.int 4) in
           let a, ta = rand_ws w in
           let b, tb = rand_ws w in
           if Ws.bitwidth a = Ws.bitwidth b then begin

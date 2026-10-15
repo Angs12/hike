@@ -1,6 +1,6 @@
 # Pins — test_forward
 
-Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-26`),
+Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-27`),
 migrating `test_cbat/test_forward.ml`.  Every source `check` site outside the
 Call_effects family is carried as one pin; none retired.  The `CE1`…`CE10`
 source checks are owned by `test/unit/test_call_effects.ml` and are not

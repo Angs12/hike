@@ -1,6 +1,6 @@
 # test_model pins
 
-Module `test/unit/test_model.ml` (ids `MOD-01`..`MOD-39`), migrating
+Module `test/unit/test_model.ml` (ids `MOD-01`..`MOD-48`), migrating
 `test_cbat/test_model.ml`.  Every source `check`/`check_bound` site is carried
 as one pin, in source order across the six entry points
 (`run_producer_record`, `run_layout`, `run_stl_rewrite`, `run_emitter_shapes`,

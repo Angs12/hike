@@ -1,7 +1,7 @@
 # Pins — test_split_blocks
 
 Module: `test/unit/test_split_blocks.ml` (group `split_blocks`, ids
-`SBLK-01`…`SBLK-08`).  Production mechanism: `src/hike_split_blocks.ml`
+`SBLK-03`…`SBLK-08`).  Production mechanism: `src/hike_split_blocks.ml`
 (the `hike-split-blocks` pass, chained after `hike-sections`) — it
 materializes every guard's implicit fallthrough as an explicit `Goto`
 and splits a 3+-jmp direct-goto series into pieces, each carrying an

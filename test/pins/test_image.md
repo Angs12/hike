@@ -1,7 +1,7 @@
 # Pins: Hike_image
 
 Module `src/hike_image.ml` (interface `src/hike_image.mli`).
-One row per pin in `test/unit/test_image.ml` (ids `IMG-01`..`IMG-08`).
+One row per pin in `test/unit/test_image.ml` (ids `IMG-02`..`IMG-08`; `IMG-01` is retired).
 
 The module reads the ELF image the solve consumes.  A section whose words
 the loader's relocation facts name is not its static image, so the pinned
@@ -19,7 +19,6 @@ the pinned branch, and the pin's exact assertion fails under it.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| IMG-01 | RETIRED with its subject: the RELA byte-parse (`rela_rows`) is gone — `relative_values` reads the loader's `llvm:relative-relocation-addend` Ogre fact (`r_offset`, `r_addend`, one row per `R_X86_64_RELATIVE` entry, emitted by `bap_llvm`'s `llvm_elf_loader.hpp`). The fact's red state is the integration chain: without the loader's rows the substituted images lose their RELATIVE words and the lift's diagnostics/semantics move. | run against a `bap-llvm` built before the addend emit (the query answers empty) | the corpus lift's diagnostic/emission profile shifts; semantics stay sound (the abstract-read fallback) |
 | IMG-02 | a RELATIVE word takes its runtime value, an externally-relocated word is dropped, the rest keep the file bytes; the section splits into the runs no dropped word interrupts. | leave the external word in place (drop the `dropped.(off+k) <- true` marking). | IMG-02 red: one fragment covers the whole section, so the fragment count and the word asserts fail. |
 | IMG-03 | a section whose every word is externally relocated yields no image; a relocation-free section is its own bytes. | as IMG-02 (never mark a dropped byte). | IMG-03 red: the all-external section yields a fragment instead of `[]`. |
 

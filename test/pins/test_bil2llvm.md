@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-57`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-59`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
