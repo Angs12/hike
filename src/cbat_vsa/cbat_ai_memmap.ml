@@ -59,6 +59,9 @@ module Val : sig
   val is_top : t -> bool
   val is_bottom : t -> bool
 
+  (* [equal v (top (get_idx v))]: the lattice top, not a symbolic one. *)
+  val equal_top : t -> bool
+
   val join_at : idx -> t -> t -> t
   val meet_at : idx -> t -> t -> t
 
@@ -111,7 +114,16 @@ end = struct
 
   let lift (f : WordSet.t -> WordSet.t) (v : t) : t = {data = lift_in f v; endian = v.endian}
 
-  let top (w, e : idx) : t = {data = WordSet.top w; endian = e}
+  (* Shared per width and endianness: every gap and coalesce builds one. *)
+  let top_tbl (endian : endian) : t array =
+    Array.init 257 ~f:(fun w -> {data = WordSet.top (max w 1); endian})
+  let top_le = top_tbl LittleEndian
+  let top_be = top_tbl BigEndian
+
+  let top (w, e : idx) : t =
+    if w > 0 && w < Array.length top_le then
+      (match e with LittleEndian -> top_le.(w) | BigEndian -> top_be.(w))
+    else {data = WordSet.top w; endian = e}
   let bottom (w, e : idx) : t = {data = WordSet.bottom w; endian = e}
 
   
@@ -145,6 +157,9 @@ end = struct
 
 
   let is_top = lift_in WordSet.is_top
+
+  let equal_top (v : t) : bool =
+    WordSet.equal v.data (WordSet.top (WordSet.bitwidth v.data))
   let is_bottom = lift_in WordSet.is_bottom
 
   let pp ppf (v : t) =
@@ -293,7 +308,7 @@ let bottom (i : idx) : t =
 let coalesce (it : itree) : itree =
   IT.to_sequence it
   |> Seq.fold ~init:(IT.empty, None) ~f:(fun (acc, pending) (k, v) ->
-      if Val.equal v (Val.top (Val.get_idx v))
+      if Val.equal_top v
       then (acc, pending) (* drop top *)
       else match pending with
         | None -> (acc, Some (k, v))
@@ -985,7 +1000,7 @@ let meet (m1 : t) (m2 : t) : t =
 
 let pp ppf (m : t) : unit =
   let itree = Option.map m.itree ~f:(IT.filter ~f:(fun d ->
-      not (Val.equal d (Val.top (Val.get_idx d))))) in
+      not (Val.equal_top d))) in
   match itree with
   | None -> Format.fprintf ppf "unreachable"
   | Some t ->
