@@ -42,8 +42,9 @@ let arcs2 (f : t -> t -> t) (p1 : t) (p2 : t) : t =
       ~f:(fun acc (q1, q2) ->
           let r = f q1 q2 in
           match acc with None -> Some r | Some a -> Some (union a r))
-    |> Option.value
-         ~default:(bottom (Stdlib.max (bitwidth p1) (bitwidth p2)))
+    |> function
+    | Some r -> r
+    | None -> bottom (Stdlib.max (bitwidth p1) (bitwidth p2))
 
 let add_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
@@ -73,8 +74,9 @@ let add (p1 : t) (p2 : t) : t = arcs2 add_core p1 p2
 
 let neg (p : t) : t =
   (* Any point works as the infinite base. *)
-  Option.value_map (finite_end p) ~default:(bottom (bitwidth p))
-    ~f:(fun e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p))
+  match finite_end p with
+  | None -> bottom (bitwidth p)
+  | Some e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p)
 
 let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 

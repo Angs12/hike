@@ -192,13 +192,16 @@ let precedes (a : t) (b : t) : bool =
   | _ -> S.precedes (plain a) (plain b)
 
 let equal (a : t) (b : t) : bool =
+  phys_equal a b ||
   match a, b with
   | Scalar a, Scalar b -> S.equal a b
   | Lanes a, Lanes b -> List.equal S.equal a b
   | _ -> false
 
 let get_idx (t : t) : idx = match t with Scalar s -> S.get_idx s | Lanes _ -> bitwidth t
-let top (i : idx) : t = Scalar (S.top i)
+let top_cache : t array = Array.init 257 ~f:(fun i -> Scalar (S.top (Int.max i 1)))
+let top (i : idx) : t =
+  if i > 0 && i < Array.length top_cache then top_cache.(i) else Scalar (S.top i)
 let bottom (i : idx) : t = Scalar (S.bottom i)
 
 (* A lane value prints high lane first, as BIL writes a concat. *)

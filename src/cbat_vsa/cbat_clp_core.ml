@@ -228,12 +228,13 @@ let finite_end (p : t) : W.t option =
 
 
 let lnot (p : t) : t =
-  Option.value_map (finite_end p) ~default:(bottom (bitwidth p))
-    ~f:(fun e ->
-        match p.dir with
-        | Ascending -> {p with base = W.lnot p.base; dir = Descending}
-        | Descending -> {p with base = W.lnot p.base; dir = Ascending}
-        | Finite | Circular -> {p with base = W.lnot e})
+  match finite_end p with
+  | None -> bottom (bitwidth p)
+  | Some e ->
+    match p.dir with
+    | Ascending -> {p with base = W.lnot p.base; dir = Descending}
+    | Descending -> {p with base = W.lnot p.base; dir = Ascending}
+    | Finite | Circular -> {p with base = W.lnot e}
 
 
 let iter (p : t) : W.t list =

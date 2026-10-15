@@ -758,7 +758,7 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
     when equal total (List.fold claims ~init:0L ~f:(fun a (_, n) -> add a n)) ->
     List.filter_map claims ~f:(fun (v, n) -> Option.some_if (compare n 0L > 0) v)
     |> List.reduce ~f:Val.join
-    |> Option.value ~default:(Val.top i)
+    |> (function Some v -> v | None -> Val.top i)
   | _ -> Val.top i
 
 (* A point read whose bytes lie inside one wider point cell that starts
@@ -859,7 +859,7 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
       read_cells i k cell_ints)
 
 let find (i : Val.idx) (m : t) (k : Key.t) =
-  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
+  match m.itree with None -> Val.bottom i | Some t -> find' i t k
 
 (* Index of values at a key. *)
 let find_idx' (m : itree) (k : Key.t) : Val.idx =

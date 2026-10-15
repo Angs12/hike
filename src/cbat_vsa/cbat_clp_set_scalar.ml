@@ -471,7 +471,13 @@ let singleton w : t = Exact (Exact.singleton w)
 let of_clp (p : clp) : t = canonical [ Clp (P.of_progression p) ]
 
 let bottom i = Exact (Exact.bottom i)
-let top i = canonical [ Clp (P.top i) ]
+(* Shared per width: env reads and writes build their default top. *)
+let top_cache : t array =
+  Array.init 257 ~f:(fun i -> canonical [ Clp (P.top (Int.max i 1)) ])
+
+let top i =
+  if i > 0 && i < Array.length top_cache then top_cache.(i)
+  else canonical [ Clp (P.top i) ]
 
 (* One leaf, or the [Many] pieces. *)
 let leaves (t : t) : t list = match t with Many ps -> ps | q -> [ q ]
@@ -751,6 +757,7 @@ let rec iter (t : t) : word list =
 (* The fixpoint's convergence check calls this on every var of every
    visit: the leaf arms avoid the derived compare's list machinery. *)
 let rec equal (t1 : t) (t2 : t) : bool =
+  phys_equal t1 t2 ||
   match t1, t2 with
   | Clp a, Clp b -> P.equal a b
   | Exact a, Exact b -> Exact.equal a b

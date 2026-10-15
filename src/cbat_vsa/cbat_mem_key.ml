@@ -192,7 +192,9 @@ let of_wordset (p : WordSet.t) : t list =
       List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:(fun q ->
           if WordSet.Clp.is_bottom q then None
           else
-            Some (Option.value (of_piece origin q) ~default:(whole_line origin))))
+            match of_piece origin q with
+            | Some _ as k -> k
+            | None -> Some (whole_line origin)))
 
 (* Hull of both inputs.  Same-origin only: coalesce never unions across
    origins (the cells stay separate). *)

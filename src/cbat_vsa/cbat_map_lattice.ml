@@ -131,11 +131,11 @@ module Make_indexed_from_map
      remove it.  [equal] is structural: a symbolic top (a stack-segment
      value) is not the lattice top and stays. *)
   let op_add op (m : map) ~key:key ~data:data : t =
-    let old_data =
-      Option.value ~default:(L.top (L.get_idx data)) (Map.find m key) in
+    let top = L.top (L.get_idx data) in
+    let old_data = match Map.find m key with Some v -> v | None -> top in
     let v = op data old_data in
     Option.return
-      (if L.equal v (L.top (L.get_idx v)) then Map.remove m key
+      (if L.equal v top then Map.remove m key
        else Map.set m ~key ~data:v)
 
   let join_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
@@ -152,11 +152,10 @@ module Make_indexed_from_map
     | Some m -> op_add (fun x _ -> x) m ~key ~data
 
   let find' (idx : idx) (m : map) (k : K.t) : L.t =
-    Option.value ~default:(L.top idx) (Map.find m k)
+    match Map.find m k with Some v -> v | None -> L.top idx
 
   let find idx (t : t) (k : K.t) : L.t =
-    Option.value_map t ~default:(L.bottom idx)
-      ~f:(fun m -> find' idx m k)
+    match t with None -> L.bottom idx | Some m -> find' idx m k
 
   (* Enumerate stored bindings. *)
   let fold (t : t) ~init ~f =
@@ -185,6 +184,7 @@ module Make_indexed_from_map
       ~f:(fun m1 -> Option.value_map t2 ~default:false ~f:(precedes' m1))
 
   let equal' (e1 : map) (e2 : map) : bool =
+    Stdlib.( == ) e1 e2 ||
     fold2_both (function
         | `Both (a, b) -> L.equal a b
         | `Left a -> L.equal a (L.top (L.get_idx a))

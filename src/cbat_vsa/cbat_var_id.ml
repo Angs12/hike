@@ -25,19 +25,20 @@ let grow (i : int) : unit =
     virtuals := resize !virtuals false
   end
 
+(* Every env op interns: the hit path allocates nothing. *)
 let rec intern (v : var) : int =
-  match Core.Hashtbl.find ids v with
-  | Some i -> i
-  | None ->
-    let i = !next in
-    incr next;
-    grow i;
-    Core.Hashtbl.set ids ~key:v ~data:i;
-    (!vars).(i) <- Some v;
-    (!virtuals).(i) <- Hike_synth.is_temporary v;
-    (* The base's id serves the keep/need tests; a base var is itself. *)
-    (!bases).(i) <- intern (Var.base v);
-    i
+  Core.Hashtbl.find_and_call ids v ~if_found:Fun.id ~if_not_found:add_new
+
+and add_new (v : var) : int =
+  let i = !next in
+  incr next;
+  grow i;
+  Core.Hashtbl.set ids ~key:v ~data:i;
+  (!vars).(i) <- Some v;
+  (!virtuals).(i) <- Hike_synth.is_temporary v;
+  (* The base's id serves the keep/need tests; a base var is itself. *)
+  (!bases).(i) <- intern (Var.base v);
+  i
 
 let find (v : var) : int option = Core.Hashtbl.find ids v
 let var_of (i : int) : var = Core.Option.value_exn (!vars).(i)
