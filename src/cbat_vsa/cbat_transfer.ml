@@ -355,6 +355,34 @@ let load_value ~(addr : wordset) ~(endian : endian) ~(bits : int) (mv : Mem.t) :
          ~init:(Mem.find (bits, endian) mv k0 |> Mem.Val.data)
          ~f:(fun acc k -> WordSet.join acc (Mem.find (bits, endian) mv k |> Mem.Val.data)))
 
+(* The kind [e] denotes when its evaluation cannot fail: [`Word] or
+   [`Mem], from the expression's shape and variable types alone.  [None]
+   for anything that may fail or whose kind depends on values (Store,
+   Ite, Let): those are evaluated in full. *)
+let rec static_kind (e : exp) : [ `Word | `Mem ] option =
+  let word e = match static_kind e with Some `Word -> true | _ -> false in
+  match e with
+  | Bil.Var v ->
+    (match Var.typ v with
+     | Type.Imm _ -> Some `Word
+     | Type.Mem _ -> Some `Mem
+     | Type.Unk -> None)
+  | Bil.Int _ -> Some `Word
+  | Bil.BinOp (_, a, b) | Bil.Concat (a, b) ->
+    if word a && word b then Some `Word else None
+  | Bil.UnOp (_, a) | Bil.Cast (_, _, a) | Bil.Extract (_, _, a) ->
+    if word a then Some `Word else None
+  | Bil.Load (m, a, _, _) ->
+    (match static_kind m with
+     | Some `Mem when word a -> Some `Word
+     | _ -> None)
+  | Bil.Unknown (_, Type.Imm _) -> Some `Word
+  | Bil.Unknown (_, Type.Mem _) -> Some `Mem
+  | Bil.Unknown (_, Type.Unk) | Bil.Store _ | Bil.Ite _ | Bil.Let _ -> None
+
+let b1_set = WordSet.singleton Cbat_word.b1
+let b0_set = WordSet.singleton Cbat_word.b0
+
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
@@ -421,11 +449,19 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
            ~f:(fun mv key -> Mem.store mv ~strong ~key ~data)
   | Bil.Ite (cond, yes, no) ->
     denote_exp cond env >>= val_as_imm >>= fun condv ->
-    denote_exp yes env >>= fun yesv ->
-    denote_exp no env >>= fun nov ->
-    if WordSet.equal condv (WordSet.singleton (Cbat_word.b1)) then return yesv
-    else if WordSet.equal condv (WordSet.singleton Cbat_word.b0) then return nov
-    else val_join yesv nov
+    (* A decided condition evaluates the taken branch; the other runs
+       only when it could fail, so its error still surfaces. *)
+    let check b =
+      if Option.is_some (static_kind b) then return ()
+      else denote_exp b env >>| fun _ -> () in
+    if WordSet.equal condv b1_set then
+      denote_exp yes env >>= fun yesv -> check no >>= fun () -> return yesv
+    else if WordSet.equal condv b0_set then
+      check yes >>= fun () -> denote_exp no env
+    else
+      denote_exp yes env >>= fun yesv ->
+      denote_exp no env >>= fun nov ->
+      val_join yesv nov
   | Bil.Extract (hi, lo, e) ->
     denote_exp e env >>= val_as_imm >>= fun v ->
     return_imm @@ WordSet.extract ~hi ~lo v

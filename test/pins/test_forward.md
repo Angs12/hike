@@ -1,6 +1,6 @@
 # Pins — test_forward
 
-Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-27`),
+Module: `test/unit/test_forward.ml` (group `forward`, ids `FWD-01`…`FWD-28`),
 migrating `test_cbat/test_forward.ml`.  Every source `check` site outside the
 Call_effects family is carried as one pin; none retired.  The `CE1`…`CE10`
 source checks are owned by `test/unit/test_call_effects.ml` and are not
@@ -44,3 +44,4 @@ produces (re-demonstrated whenever the cited mechanism changes).  Production
 | FWD-27 | EQ/NEQ on same-origin stack singletons compare by offsets: `p == p` is true, `p == (p−8)` is false and its NEQ true. | Drop the `rel_singleton` arm from `compare_eq` (fall back to the saturated overlap test). | FWD-27 FAILs: `p == p` is `{0,1}` and `p == (p−8)` is `{0,1}`. |
 | FWD-19 | a stored band pointer reloads with its band (the store→load round trip keeps the origin). | textually invert the pinned contract in `Cbat_transfer` | pin FAILs under that inversion (re-demonstrated by review) |
 | FWD-20 | a sub's VLA frames survive another sub's solve. | textually invert the pinned contract in `Cbat_transfer` | pin FAILs under that inversion (re-demonstrated by review) |
+| FWD-28 | an Ite with a decided condition returns the taken branch's value and still reports the untaken branch's type error; an undecided condition joins both. | Drop the `check` of the untaken branch (treat every untaken branch as total). | FWD-28.error-kept FAILs: the decided Ite over an `Unk` variable returns a value. |

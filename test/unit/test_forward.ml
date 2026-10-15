@@ -565,6 +565,31 @@ let tests : unit Alcotest.test list =
           (Ws.equal (denote (Bil.BinOp (Bil.EQ, Bil.Var p, Bil.Var q))) bfalse);
         check "FWD-27.neq-distinct"
           (Ws.equal (denote (Bil.BinOp (Bil.NEQ, Bil.Var p, Bil.Var q))) btrue));
+
+    pin "FWD-28"
+      "an Ite with a decided condition returns the taken branch and still reports the untaken \
+       branch's type error; an undecided condition joins both"
+      (fun () ->
+        let lit n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let one = Bil.Int (Cbat_word.to_word (Cbat_word.b1)) in
+        let zero = Bil.Int (Cbat_word.to_word (Cbat_word.b0)) in
+        let bad = Bil.Var (Var.create "fwd28_unk" Type.Unk) in
+        let c = v1 "fwd28_c" in
+        let denote e env = Vsa.Test_seam.denote_imm_exp e env in
+        let is_val e n =
+          match denote e AI.top with
+          | Ok ws -> Ws.equal ws (Ws.singleton (w64 n))
+          | Error _ -> false in
+        check "FWD-28.taken"
+          (is_val (Bil.Ite (one, lit 7, lit 9)) 7
+          && is_val (Bil.Ite (zero, lit 7, lit 9)) 9);
+        check "FWD-28.error-kept"
+          (Result.is_error (denote (Bil.Ite (one, lit 7, bad)) AI.top)
+          && Result.is_error (denote (Bil.Ite (zero, bad, lit 9)) AI.top));
+        check "FWD-28.undecided-joins"
+          (match denote (Bil.Ite (Bil.Var c, lit 7, lit 9)) AI.top with
+           | Ok ws -> Ws.equal ws (Ws.join (Ws.singleton (w64 7)) (Ws.singleton (w64 9)))
+           | Error _ -> false));
   ]
 
 let () = run "forward" tests
