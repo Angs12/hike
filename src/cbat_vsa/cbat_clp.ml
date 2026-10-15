@@ -307,17 +307,19 @@ module Pieces = struct
         else Cbat_word.cast Bil.UNSIGNED w1 (Cbat_word.sub lo_j hi_i)
       | _ -> Cbat_word.ones w1
 
-  (* The smallest-growth pair, same-step preferred on ties. *)
-  let choose_pair (ps : progression list)
-    : (progression * progression list) option =
-    let arr = Stdlib.Array.of_list ps in
-    let n = Stdlib.Array.length arr in
+  (* A pair's cap cost: the hull's growth, and whether the steps agree. *)
+  let pair_cost (pi : progression) (pj : progression) : Cbat_word.t * bool =
+    ( pair_growth (coalesce pi pj) pi pj,
+      Cbat_word.equal (C.step_of pi) (C.step_of pj) )
+
+  (* The smallest-growth pair over [arr] (first in (i, j) order,
+     same-step preferred on ties), reading the costs from [cost]. *)
+  let best_pair (n : int) (cost : (Cbat_word.t * bool) option array array)
+    : (int * int) option =
     let best = Stdlib.ref None in
     for i = 0 to n - 1 do
       for j = i + 1 to n - 1 do
-        let g = pair_growth (coalesce arr.(i) arr.(j)) arr.(i) arr.(j) in
-        let same_step =
-          Cbat_word.equal (C.step_of arr.(i)) (C.step_of arr.(j)) in
+        let g, same_step = Option.value_exn cost.(i).(j) in
         let better =
           match !best with
           | None -> true
@@ -328,12 +330,7 @@ module Pieces = struct
         if better then best := Some (i, j, g, same_step)
       done
     done;
-    match !best with
-    | None -> None
-    | Some (i, j, _, _) ->
-      let hull = coalesce arr.(i) arr.(j) in
-      let rest = List.filteri ps ~f:(fun k _ -> k <> i && k <> j) in
-      Some (hull, rest)
+    Option.map !best ~f:(fun (i, j, _, _) -> (i, j))
 
   (* A union of at most [U.keep_exact_elements] elements stays exact
      runs: the cap bounds large unions, never a set the runs hold. *)
@@ -352,31 +349,61 @@ module Pieces = struct
   (* The cap repair: hull the smallest-growth pair until the list fits
      [bound] or is within the exact budget.  A tier-boundary operation;
      producers never cap. *)
-  let rec cap_to (bound : int) (ps : t) : t =
-    if List.length ps > bound && not (within_exact_budget ps) then begin
+  let cap_to (bound : int) (ps : t) : t =
+    let over ps = List.length ps > bound && not (within_exact_budget ps) in
+    (* Pair costs persist across steps: a merge re-costs only the pairs
+       of the pieces [merge_arc] produced (the others are kept
+       physically), so the cap is O(n^2) costs, not O(n^3). *)
+    let rec go (arr : progression array)
+        (cost : (Cbat_word.t * bool) option array array) : t =
 #ifdef VSA_DEBUG
       census_cap ();
 #endif
-      match choose_pair ps with
-      | Some (hull, rest) -> cap_to bound (merge_arc rest hull)
-      | None -> ps
-    end
-    else ps
+      let n = Stdlib.Array.length arr in
+      match best_pair n cost with
+      | None -> Stdlib.Array.to_list arr
+      | Some (i, j) ->
+        let hull = coalesce arr.(i) arr.(j) in
+        let rest =
+          List.filteri (Stdlib.Array.to_list arr) ~f:(fun k _ -> k <> i && k <> j) in
+        let ps' = merge_arc rest hull in
+        if not (over ps') then ps'
+        else
+          let arr' = Stdlib.Array.of_list ps' in
+          let old (p : progression) : int option =
+            Stdlib.Array.find_index (fun q -> phys_equal q p) arr in
+          let olds = Stdlib.Array.map old arr' in
+          let n' = Stdlib.Array.length arr' in
+          let cost' =
+            Stdlib.Array.init n' (fun a ->
+                Stdlib.Array.init n' (fun b ->
+                    if b <= a then None
+                    else
+                      match olds.(a), olds.(b) with
+                      | Some oa, Some ob when oa < ob -> cost.(oa).(ob)
+                      | _ -> Some (pair_cost arr'.(a) arr'.(b)))) in
+          go arr' cost'
+    in
+    if not (over ps) then ps
+    else
+      let arr = Stdlib.Array.of_list ps in
+      let n = Stdlib.Array.length arr in
+      go arr
+        (Stdlib.Array.init n (fun a ->
+             Stdlib.Array.init n (fun b ->
+                 if b <= a then None else Some (pair_cost arr.(a) arr.(b)))))
 
-  (* The producer finish: combine the already-ordered stream tail-only,
-     capping the accumulator the moment it exceeds [max_pieces] so
-     `choose_pair` only ever sees [max_pieces + 1] pieces.  The accumulator
-     is descending, so the cap step re-assembles the hull (ascending) and
-     flips it back.  A wrapped hull falls back to the general placement.
-     No sort: the caller ordered its own output. *)
+  (* The producer finish: combine the already-ordered stream tail-only;
+     the moment the accumulator leaves the exact budget it caps down to
+     [max_pieces], so every later step caps at most [max_pieces + 1]
+     pieces.  The accumulator is descending, so the cap runs on its
+     reverse and flips back.  A wrapped hull falls back to the general
+     placement.  No sort: the caller ordered its own output. *)
   let finish (ps : progression list) : t =
     let cap_desc acc =
       if List.length acc <= U.max_pieces || within_exact_budget (List.rev acc)
       then acc
-      else
-        match choose_pair (List.rev acc) with
-        | Some (hull, rest) -> List.rev (merge_arc rest hull)
-        | None -> acc
+      else List.rev (cap_to U.max_pieces (List.rev acc))
     in
     let r =
       let rec go acc = function
