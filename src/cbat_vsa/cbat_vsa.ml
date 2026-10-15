@@ -67,7 +67,6 @@ exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
 type vsa_sol = (tid, AI.t) Solution.t
 
 
-let default_entry () : AI.t = AI.top
 
 (* The sub's entry block: the first block in term order among the block
    graph's roots (the start node's successors).  A term can carry several
@@ -89,7 +88,7 @@ let entry_block_of (sub : sub term) : blk term option =
 let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = entry_block_of sub in
-  let entry_state = Option.value ~default:(default_entry ()) entry in
+  let entry_state = Option.value ~default:AI.top entry in
   Cbat_transfer.set_sp_var abi.Hike_abi.sp;
   (* The default entry seeds the SP with the SYMBOLIC SEGMENT BASE:
      every SP-derived address denotes [StackOff]; explicit fixture
@@ -252,7 +251,7 @@ let compute_need ~def_reads
           if List.mem succs v ~equal:Var.equal then
             Core.Set.add need v
           else need
-        | vs when List.length vs > 1 ->
+        | _ :: _ :: _ as vs ->
           List.fold vs ~init:need ~f:(fun need v ->
               Core.Set.add need v)
         | _ -> need)

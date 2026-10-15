@@ -98,8 +98,7 @@ let denote_jump
       match Call.return c with
       | None -> AI.bottom
       | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
-      | Some (Indirect _)
-      | Some (Direct _) ->
+      | Some _ ->
         (* Calls abstract; every caller's def is denoted.  A blocked
            callee has no summary yet: nothing flows past it. *)
         let site_callee =
@@ -112,13 +111,14 @@ let denote_jump
         match site_callee with
         | Cbat_call_effects.Blocked -> AI.bottom
         | Cbat_call_effects.Summary summary ->
-          let _written_lanes, pushed =
+          let _, pushed =
             match Core.Map.find rctx.rc_blocks (Term.tid b) with
             | Some bf -> bf.bf_call_facts
             | None -> failwith "hike: no call facts for block (rctx)"
           in
           call_site_transfer ~summary ~pushed
     in
+    let leads () = if env_leads ~target rel then env else AI.bottom in
     let env_res =
       match Jmp.kind jmp with
       | Int _ ->
@@ -131,10 +131,9 @@ let denote_jump
           (* A resolved transfer is the intra-sub jump the concrete
              machine performs: FULL IDENTITY — no callee effects; any
              other target is unreachable. *)
-          (if env_leads ~target rel then env else AI.bottom)
+          leads ()
         | None -> inspect_call c)
-      | Goto (Direct _) | Ret (Direct _) ->
-        (if env_leads ~target rel then env else AI.bottom)
+      | Goto (Direct _) | Ret (Direct _) -> leads ()
       | Goto (Indirect _)
       | Ret (Indirect _) -> env in
     AI.join acc env_res in

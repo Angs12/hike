@@ -1081,11 +1081,11 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
               if Cbat_word.(<) q_lo h_lo then
                 Cbat_clp.split_at_n q (Cbat_word.pred h_lo)
               else (Cbat_clp.bottom (Cbat_clp.bitwidth q), q) in
-            let _mid, right =
+            let right =
               match Cbat_clp.min_elem q with
               | Some q_lo' when Cbat_word.(<=) q_lo' h_hi ->
-                Cbat_clp.split_at_n q h_hi
-              | _ -> (Cbat_clp.bottom (Cbat_clp.bitwidth q), q) in
+                snd (Cbat_clp.split_at_n q h_hi)
+              | _ -> q in
             [ left; right ]
           | _ -> [ q ] in
         (* The bulk partition: [hits] are the covered elements (each a
@@ -1331,12 +1331,9 @@ let rec constrain_operands ~(env : AI.t)
     then
       let env = constrain_operands ~env ~cells ~nonneg ~landmarks a produced in
       constrain_operands ~env ~cells ~nonneg ~landmarks b produced
-    else if WordSet.elem Cbat_word.b0 produced
-            && not (WordSet.elem Cbat_word.b1 produced)
-    then
+    else
       (* AND = false: which operand is false is unknown — identity. *)
       env
-    else env
   | Bil.BinOp (Bil.OR, a, b) when WordSet.bitwidth produced = 1 ->
     (* OR = false constrains both operands to false. *)
     if WordSet.elem Cbat_word.b0 produced
@@ -1374,10 +1371,9 @@ let rec constrain_operands ~(env : AI.t)
          | _ -> env in
        (match denote_imm_exp a env, denote_imm_exp b env with
         | Ok a_ws, Ok b_ws ->
-          (match operand_constraints op produced a_ws b_ws with
-           | a', b' ->
-             let env = deliver a a' env in
-             deliver b b' env)
+          (let a', b' = operand_constraints op produced a_ws b_ws in
+           let env = deliver a a' env in
+           deliver b b' env)
         | _ -> env))
   | Bil.Unknown _ -> env
 
@@ -1465,9 +1461,6 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
 let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
     (cond : exp) : AI.t =
   constrain_operands ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
-
-(* Var→constraint map; a constraint is consumed at its var's def. *)
-type live_map = wordset Var.Map.t
 
 (* A produced-width dummy for mem defs: their constraint derivation reads
    the pending map, never the width. *)

@@ -145,22 +145,16 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
         let b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
-        let p =
-          Llvm.build_fcmp Llvm.Fcmp.Olt
-            (bitcast_to_fp llvm_builder a src_fp_ty)
-            (bitcast_to_fp llvm_builder b src_fp_ty)
-            "" llvm_builder
-        in
-        p
+        Llvm.build_fcmp Llvm.Fcmp.Olt
+          (bitcast_to_fp llvm_builder a src_fp_ty)
+          (bitcast_to_fp llvm_builder b src_fp_ty)
+          "" llvm_builder
     | ISNAN ->
         let x = arg_value 0 in
         let w = Bil2llvm_int.width x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
         let xf = bitcast_to_fp llvm_builder x src_fp_ty in
-        let p =
-          Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
-        in
-        p
+        Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
     | FSQRT ->
         let x = arg_value 0 in
         let w = Bil2llvm_int.width x in

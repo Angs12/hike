@@ -249,16 +249,11 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
             match f.Sections.fr_rhs with
             | Some rhs -> Def.with_rhs d rhs
             | None ->
-                let d =
-                  Hike_synth_addr.rewrite_storage ~addr_bits ~conv:f.Sections.fr_conv ~bits:f.Sections.fr_bits
-                    ?addr:f.Sections.fr_addr d
-                in
                 (* The conversion names the address's own alloca; carry
                    it on the def so the emitter materializes into that
                    region, never the operand's. *)
-                match f.Sections.fr_conv with
-                | Sections.Conv_region _ | Sections.Conv_window -> d
-                | Sections.Conv_slot _ | Sections.Conv_global _ | Sections.Keep -> d)
+                Hike_synth_addr.rewrite_storage ~addr_bits ~conv:f.Sections.fr_conv ~bits:f.Sections.fr_bits
+                  ?addr:f.Sections.fr_addr d)
 
       method! map_blk blk =
         let blk = super#map_blk blk in
