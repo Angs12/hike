@@ -100,6 +100,24 @@ let tests : unit Alcotest.test list =
 
 
 
+    pin "FS-12" "N6: filter calls f once per element in order and returns the source when all survive"
+      (fun () ->
+        let at8 n = Cbat_word.of_int ~width:8 n in
+        let a = Ex.of_list ~width:8 (List.map at8 [ 1; 4; 7; 200 ]) in
+        let seen = ref [] in
+        let same = Ex.filter a ~f:(fun w -> seen := w :: !seen; true) in
+        check "FS-12.all"
+          (same == a && List.rev !seen = Ex.elements a);
+        seen := [];
+        let odd =
+          Ex.filter a ~f:(fun w -> seen := w :: !seen;
+                          Cbat_word.to_int_exn w mod 2 = 1) in
+        check "FS-12.some"
+          (List.rev !seen = Ex.elements a
+          && Ex.elements odd = List.map at8 [ 1; 7 ]
+          && Ex.is_bottom (Ex.filter a ~f:(fun _ -> false))));
+
+
 
 
   ]

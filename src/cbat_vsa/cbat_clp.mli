@@ -145,6 +145,9 @@ module Exact : sig
   val of_iter : width:int -> iter:((Cbat_word.t -> unit) -> unit) -> t
   (* Strictly ascending, distinct, unsigned words at [width]. *)
   val of_sorted_list : width:int -> Cbat_word.t list -> t
+  (* The elements [f] accepts, [f] called once per element in ascending
+     order; the set itself when every element survives. *)
+  val filter : t -> f:(Cbat_word.t -> bool) -> t
   val is_bottom : t -> bool
   (* A one-element set's pieces: [create] makes every singleton
      canonical, so they are the ones [Pieces.of_list] would build. *)

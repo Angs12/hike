@@ -15,3 +15,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | FS-09 | FS8: extract/cast/concat width sanity | textually invert the pinned contract in `Cbat_clp.Exact` | pin FAILs under that inversion (re-demonstrated by review) |
 | FS-10 | FS9 (delta #1): equal on width-mismatched sets is false (no assert) | textually invert the pinned contract in `Cbat_clp.Exact` | pin FAILs under that inversion (re-demonstrated by review) |
 | FS-11 | image producers emit ascending distinct unsigned arrays across Small/W64/Big, including nonmonotone bit images | reverse the Patricia branch emission or retain duplicate leaves | explicit expected order/count and concrete XOR membership reject the inversion |
+| FS-12 | N6: filter calls the verdict once per element in order; the source itself returns when every element survives | make `filter` rebuild the array or skip the callback on a kept element | the physical-identity and call-order assertions reject it |

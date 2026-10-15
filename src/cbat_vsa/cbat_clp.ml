@@ -923,6 +923,24 @@ module Exact = struct
 
   let bottom (width : int) : t = { width; words = [||] }
 
+  (* The survivors of one ascending pass, calling [f] once per element;
+     the source itself when every element survives. *)
+  let filter (t : t) ~(f : W.t -> bool) : t =
+    let n = count t in
+    let rec first_drop i =
+      if i = n then n else if f t.words.(i) then first_drop (i + 1) else i in
+    let d = first_drop 0 in
+    if d = n then t
+    else begin
+      let out = Array.create ~len:(n - 1) t.words.(0) in
+      Array.blit ~src:t.words ~src_pos:0 ~dst:out ~dst_pos:0 ~len:d;
+      let k = ref d in
+      for i = d + 1 to n - 1 do
+        if f t.words.(i) then (out.(!k) <- t.words.(i); incr k)
+      done;
+      { t with words = Array.sub out ~pos:0 ~len:!k }
+    end
+
   let singleton (w : W.t) : t = { width = W.bitwidth w; words = [| W.unsigned w |] }
 
   (* The runs in ascending order, as [Pieces.runs_from_sorted_elements]

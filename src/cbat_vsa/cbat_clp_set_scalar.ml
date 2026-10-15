@@ -1116,15 +1116,15 @@ let filter_addresses (t : t)
   | Clp ps ->
     Option.value_map (filter Origin.Abs ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
   | Exact s ->
-    let width = Exact.bitwidth s in
-    Exact (Exact.of_sorted_list ~width
-      (List.filter (Exact.iter s) ~f:(fun w ->
-           match decide Origin.Abs (Clp.singleton w) with
-           | `Drop -> false
-           | `Keep | `Split -> true
-           | `Parts parts ->
-             List.exists parts ~f:(fun (q, verdict) ->
-                 match verdict with `Keep -> Clp.elem w q | `Drop -> false))))
+    let kept =
+      Exact.filter s ~f:(fun w ->
+          match decide Origin.Abs (Clp.singleton w) with
+          | `Drop -> false
+          | `Keep | `Split -> true
+          | `Parts parts ->
+            List.exists parts ~f:(fun (q, verdict) ->
+                match verdict with `Keep -> Clp.elem w q | `Drop -> false)) in
+    if phys_equal kept s then t else Exact kept
 
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)
@@ -1419,10 +1419,7 @@ let meet_plain (t1 : t) (t2 : t) : t =
     match q1, q2 with
     | Exact s1, Exact s2 -> [ Exact (Exact.intersection s1 s2) ]
     | Exact s, Clp ps | Clp ps, Exact s ->
-      [ Exact
-          (Exact.of_list ~width:(Exact.bitwidth s)
-             (List.filter (Exact.iter s)
-                ~f:(fun w -> P.elem w ps))) ]
+      [ Exact (Exact.filter s ~f:(fun w -> P.elem w ps)) ]
     | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
     | _ -> []
   in
@@ -1781,10 +1778,7 @@ let rec diff (t1 : t) (t2 : t) : t =
         match q1, q2 with
         | Exact s1, Exact s2 -> [ Exact (Exact.diff s1 s2) ]
         | Exact s, Clp ps ->
-          [ Exact
-              (Exact.of_list ~width:(Exact.bitwidth s)
-                 (List.filter (Exact.iter s)
-                    ~f:(fun w -> not (P.elem w ps)))) ]
+          [ Exact (Exact.filter s ~f:(fun w -> not (P.elem w ps))) ]
         | Clp ps, Exact s -> [ Clp (P.diff ps (pieces_of_finset s)) ]
         | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
         | _ -> []
