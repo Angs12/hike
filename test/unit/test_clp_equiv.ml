@@ -700,7 +700,7 @@ let run_sweep () : int * int * int =
      a small exact [Exact] value and a [Clp]-represented progression meet
      in [op_pair]'s mixed arm, where a non-commutative op must keep each
      operand on its own side.  Both orders are swept against the concrete
-     oracle.  The progression's count exceeds [fin_set_size] (10) so
+     oracle.  The progression's count exceeds [fin_set_size] so
      canonicalization keeps it a Clp rather than demoting it to an Exact
      value, and stays small enough to enumerate. *)
   let comp_elems (p : Ws.t) : Cbat_word.t list option =
@@ -732,8 +732,8 @@ let run_sweep () : int * int * int =
   in
   (* (base, step, count); count > [fin_set_size] keeps the Clp. *)
   let comp_clp_shapes (w : int) : (Z.t * Z.t * int) list =
-    [ (Z.zero, Z.one, 12); (Z.zero, Z.of_int 2, 12); (Z.one, Z.one, 12)
-    ; (Z.sub (Z.shift_left Z.one w) (Z.of_int 12), Z.one, 12) ]
+    [ (Z.zero, Z.one, 20); (Z.zero, Z.of_int 2, 20); (Z.one, Z.one, 20)
+    ; (Z.sub (Z.shift_left Z.one w) (Z.of_int 20), Z.one, 20) ]
   in
   CKL.iter comp_widths ~f:(fun w ->
       CKL.iter (comp_ex_vals w) ~f:(fun b1 ->

@@ -91,7 +91,8 @@ val address_groups : t -> (Origin.t * Cbat_clp.Pieces.t) list
    to the whole progression; [`Split`] hands it back to the bisection;
    [`Parts parts`] replaces it by the listed pieces with their verdicts,
    without recursion (elements no piece covers are dropped, so a bulk
-   decider lists what it keeps). *)
+   decider lists what it keeps). The listed pieces are non-bottom, non-wrapping,
+   ordered by unsigned minimum, and contain only elements of the input. *)
 type address_verdict =
   [ `Keep | `Drop | `Split | `Parts of (Cbat_clp.t * [ `Keep | `Drop ]) list ]
 

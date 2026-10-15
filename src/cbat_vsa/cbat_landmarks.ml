@@ -100,6 +100,10 @@ let with_widening_head (t : t) (head : Tid.t option) (f : unit -> 'a) : 'a =
   t.widening_at_head <- head;
   Fun.protect ~finally:(fun () -> t.widening_at_head <- prev) f
 
+(* Whether a cycle head is being widened; outside one, no observation
+   records anything. *)
+let in_cycle (t : t) : bool = Option.is_some t.widening_at_head
+
 (* The row [key] holds at [head], if any. *)
 let find_row (t : t) (h : Tid.t) (key : key) : row option =
   Option.bind (Hashtbl.find t.rows h)

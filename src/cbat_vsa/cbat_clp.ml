@@ -268,70 +268,48 @@ module Pieces = struct
     let r = C.union pi pj in
     if C.is_wrapped r then C.infinite (C.base_of r, C.step_of r) else r
 
-  (* A union of at most [U.keep_exact_elements] elements stays exact
-     runs: the cap bounds large unions, never a set the runs hold. *)
-  let within_exact_budget (ps : progression list) : bool =
-    let budget = U.keep_exact_elements in
-    let rec go n = function
-      | [] -> true
-      | p :: rest ->
-        (not (C.is_infinite p))
-        && (match Cbat_word.to_int (C.cardinality p) with
-            | Ok k -> n + k <= budget && go (n + k) rest
-            | Error _ -> false)
-    in
-    go 0 ps
+  (* A union of at most [U.max_pieces] pieces is kept as it is; a larger
+     one is a single hull piece. *)
+  let within_budget (ps : progression list) : bool =
+    List.length ps <= U.max_pieces
 
-  (* The cap repair: hull the last two pieces until the list fits [bound]
-     or is within the exact budget.  The list is ascending and disjoint,
-     so the hull covers only the top of the list.  A tier-boundary
-     operation; producers never cap. *)
-  let cap_to (bound : int) (ps : t) : t =
-    let over ps = List.length ps > bound && not (within_exact_budget ps) in
-    let rec go (ps : t) : t =
-      if not (over ps) then ps
-      else
-        match List.rev ps with
-        | last :: prev :: below ->
+  (* The one-piece hull of a union that leaves the budget.  A hull that
+     traverses the wrap circulates to its circular grid. *)
+  let hull (ps : progression list) : t =
+    match ps with
+    | [] -> []
+    | p :: rest ->
 #ifdef VSA_DEBUG
-          census_cap ();
+      census_cap ();
 #endif
-          go (merge_arc (List.rev below) (coalesce prev last))
-        | _ -> ps
-    in
-    go ps
+      [ List.fold rest ~init:p ~f:coalesce ]
 
-  (* The producer finish: combine the already-ordered stream tail-only;
-     the moment the accumulator leaves the exact budget it caps down to
-     [max_pieces], so every later step caps at most [max_pieces + 1]
-     pieces.  The accumulator is descending, so the cap runs on its
-     reverse and flips back.  A wrapped hull falls back to the general
-     placement.  No sort: the caller ordered its own output. *)
+  let cap (ps : t) : t = if within_budget ps then ps else hull ps
+
+  (* The producer finish: combine the already-ordered stream tail-only,
+     then collapse a union past the budget to its hull.  A wrapped hull
+     falls back to the general placement.  No sort: the caller ordered
+     its own output. *)
   let finish (ps : progression list) : t =
-    let cap_desc acc =
-      if List.length acc <= U.max_pieces || within_exact_budget (List.rev acc)
-      then acc
-      else List.rev (cap_to U.max_pieces (List.rev acc))
-    in
     let r =
       let rec go acc = function
         | [] -> `Done (List.rev acc)
         | p :: rest -> (
           match acc with
-          | [] -> go (cap_desc [ p ]) rest
+          | [] -> go [ p ] rest
           | q :: tl ->
             if overlap_exact p q then begin
               let r = C.union p q in
-              if C.is_wrapped r then `Wrap else go (cap_desc (r :: tl)) rest
+              if C.is_wrapped r then `Wrap else go (r :: tl) rest
             end
             else (
               match adjacent_merge q p with
-              | Some r -> go (cap_desc (r :: tl)) rest
-              | None -> go (cap_desc (p :: acc)) rest))
+              | Some r -> go (r :: tl) rest
+              | None -> go (p :: acc) rest))
       in
       match go [] ps with
-      | `Done ps -> ps
-      | `Wrap -> cap_to U.max_pieces (assemble ps)
+      | `Done ps -> cap ps
+      | `Wrap -> cap (assemble ps)
     in
 #ifdef VSA_DEBUG
     census_len (List.length r);
@@ -339,6 +317,17 @@ module Pieces = struct
     r
 
   let of_progression (p : progression) : t = finish (ordered [ p ])
+
+  (* Merge two producers' ascending streams without combining or capping. *)
+  let merge_progressions a b = List.merge a b ~compare:compare_piece
+
+  (* The producer supplies disjoint, ascending, non-wrapping live pieces. *)
+  let of_progressions (ps : progression list) : t =
+#ifdef VSA_DEBUG
+    assert (List.is_sorted ps ~compare:compare_piece);
+    assert (List.for_all ps ~f:(fun p -> not (C.is_bottom p || C.is_wrapped p)));
+#endif
+    finish ps
 
   (* Maximal constant-difference runs of a sorted element list; each run
      is one exact progression (a wrapped run over-approximates). *)
@@ -878,6 +867,15 @@ module Exact = struct
 
   let of_list ~(width : int) (l : W.t list) : t = of_array ~width (Array.of_list l)
 
+  (* The producer has already normalized, ordered and deduplicated [l]. *)
+  let of_sorted_list ~(width : int) (l : W.t list) : t =
+    let words = Array.of_list l in
+#ifdef VSA_DEBUG
+    assert (Array.for_all words ~f:(fun w -> W.bitwidth w = width));
+    assert (Array.is_sorted_strictly words ~compare:W.compare);
+#endif
+    { width; words }
+
   let bottom (width : int) : t = { width; words = [||] }
 
   let singleton (w : W.t) : t = { width = W.bitwidth w; words = [| W.unsigned w |] }
@@ -890,6 +888,25 @@ module Exact = struct
 
   let point_pieces (t : t) : Pieces.t option =
     if count t = 1 then Some (to_pieces t) else None
+
+  (* The same elements as a canonical piece union.  The array is strictly
+     ascending at [width], so its runs are ascending, disjoint and
+     non-wrapping: only the budget combines. *)
+  let pieces (t : t) : Pieces.t =
+    let runs = to_pieces t in
+    if List.length runs <= Cbat_vsa_utils.max_pieces then runs
+    else Pieces.hull runs
+
+  (* Piece minima ascend, but strided pieces can interleave.  Merge their
+     ascending element streams to preserve the array's order. *)
+  let of_pieces ~(width : int) (ps : Pieces.t) : t =
+#ifdef VSA_DEBUG
+    assert (List.for_all ps ~f:(fun p -> Cbat_clp_core.bitwidth p = width));
+#endif
+    of_sorted_list ~width
+      (List.fold_right ps ~init:[] ~f:(fun p acc ->
+           List.merge (Cbat_clp_core.iter p) acc ~compare:W.compare)
+       |> List.remove_consecutive_duplicates ~equal:W.equal)
 
   let bitwidth (t : t) : int = t.width
   let get_idx (t : t) : int = t.width

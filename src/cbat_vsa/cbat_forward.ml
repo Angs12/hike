@@ -74,6 +74,7 @@ let denote_jump
       ~f:(fun dc ->
         Cbat_backward.acquire_unsat ~entry:env
           ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
+          ~cache:(rctx : Cbat_runctx.refine_ctx).rc_prefix
           ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
           env b dc);
     let env =

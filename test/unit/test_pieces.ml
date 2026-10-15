@@ -47,7 +47,8 @@ let tests : unit Alcotest.test list =
 
 
     pin "PCS-04"
-      "the cap: five pieces hull to four by merging the last two, sound"
+      "the budget: a union of at most max_pieces pieces keeps every piece, \
+       whatever their size; a larger one is its single hull piece, sound"
       (fun () ->
         let a = P.singleton (w32 0) in
         let b = P.of_progression (int32 ~lo:10 ~hi:20) in
@@ -55,11 +56,19 @@ let tests : unit Alcotest.test list =
         let d = P.of_progression (int32 ~lo:1000 ~hi:1010) in
         let e = P.of_progression (int32 ~lo:10000 ~hi:10100) in
         let u = P.union (P.union (P.union (P.union a b) c) d) e in
-        check "PCS-04"
-          (List.length (P.to_list u) = 4
+        check "PCS-04.within"
+          (List.length (P.to_list u) = 5
           && mem_all u (List.map w32 [ 0; 10; 20; 100; 110; 1000; 1010; 10000; 10100 ])
-          && P.elem (w32 5000) u
-          && not_mem_all u (List.map w32 [ 5; 50; 500 ])));
+          && not_mem_all u (List.map w32 [ 5; 50; 500; 5000 ]));
+        let runs n = List.init n (fun i -> int32 ~lo:(i * 100) ~hi:((i * 100) + 2)) in
+        check "PCS-04.boundary"
+          (List.length (P.to_list (P.of_progressions (runs 64))) = 64);
+        let many = P.of_progressions (runs 65) in
+        check "PCS-04.over"
+          (List.length (P.to_list many) = 1
+          && mem_all many
+               (List.concat_map (fun i -> List.map w32 [ i * 100; (i * 100) + 2 ])
+                  (List.init 65 Fun.id))));
 
     pin "PCS-05"
       "the widening pairing: the overlapping couple widens, an unmatched \
@@ -413,6 +422,64 @@ let tests : unit Alcotest.test list =
         check "PCS-20.widen" (P.equal w five && not (P.is_top w));
         let e = P.extrapolate_steps ~steps:2 (P.bottom 32) five in
         check "PCS-20.extrapolate" (P.equal e five && not (P.is_top e)));
+
+    pin "PCS-21"
+      "the tier conversions equal the list builders: an exact \
+       set's pieces and a piece union's elements equal what Pieces.of_list \
+       and Exact.of_list build, across runs, scatter and a cap overflow"
+      (fun () ->
+        Random.init 20261015;
+        let sets width =
+          let top = (1 lsl width) - 1 in
+          let wd = Cbat_word.of_int ~width in
+          let run lo step n = List.init n (fun i -> lo + (i * step)) in
+          let scattered n = List.init n (fun _ -> Random.int (min (top + 1) ((1 lsl 30) - 1))) in
+          List.map (List.map wd)
+            [ [ 0 ]; [ top ]; [ 0; top ]; run 3 1 12; run 0 4 9;
+              run 1 2 5 @ run 40 3 4 @ [ 90; 91; 92 ];
+              (* separated runs *)
+              List.concat_map (fun k -> [ k * 20; (k * 20) + 7 ]) (List.init 12 Fun.id);
+              scattered 6; scattered 16; scattered 40 ]
+        in
+        let random_sets width =
+          let top = (1 lsl width) - 1 in
+          List.init 100 (fun _ ->
+              let n = 2 + Random.int 220 in
+              let span = 1 + Random.int top in
+              List.init n (fun _ -> Cbat_word.of_int ~width (Random.int (span + 1))))
+        in
+        List.iter
+          (fun width ->
+            List.iter
+              (fun l ->
+                let e = Ex.of_list ~width l in
+                let slow = P.of_list ~width (Ex.elements e) in
+                check "PCS-21.pieces" (P.equal (Ex.pieces e) slow);
+                check "PCS-21.of_pieces"
+                  (Ex.equal (Ex.of_pieces ~width slow)
+                     (Ex.of_list ~width (P.elements slow))))
+              (sets width @ random_sets width))
+          [ 8; 16 ];
+        let interleaved =
+          P.union
+            (P.of_progression
+               (Clp.create ~width:32 ~step:(w32 4)
+                  ~cardn:(Cbat_word.of_int ~width:33 3) (w32 0)))
+            (P.singleton (w32 2)) in
+        let exact = Ex.of_pieces ~width:32 interleaved in
+        check "PCS-21.interleaved"
+          (Ex.equal exact (Ex.of_list ~width:32 (List.map w32 [ 0; 2; 4; 8 ]))
+          && Ex.elem (w32 2) exact);
+        let overflow =
+          Ex.of_list ~width:32
+            (List.concat_map
+               (fun i -> List.map w32 [ i * 100; (i * 100) + 1; (i * 100) + 2 ])
+               (List.init 65 Fun.id)) in
+        check "PCS-21.overflow"
+          (List.length (Ex.to_pieces overflow) = 65
+          && P.equal (Ex.pieces overflow)
+               (P.of_list ~width:32 (Ex.elements overflow))
+          && List.length (P.to_list (Ex.pieces overflow)) = 1));
 
   ]
 

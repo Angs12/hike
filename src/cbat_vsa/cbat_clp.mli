@@ -73,6 +73,10 @@ module Pieces : sig
   val elements : t -> Cbat_word.t list
 
   val of_progression : progression -> t
+  (* Merge ascending progression streams, without combining or capping. *)
+  val merge_progressions : progression list -> progression list -> progression list
+  (* Build from disjoint, ascending, non-wrapping, non-bottom progressions. *)
+  val of_progressions : progression list -> t
   val of_list : width:int -> Cbat_word.t list -> t
   val singleton : Cbat_word.t -> t
   val top : int -> t
@@ -100,9 +104,6 @@ module Pieces : sig
   val union : t -> t -> t
   val intersection : t -> t -> t
   val diff : t -> t -> t
-  (* The tier's cap: hull to <= [bound] pieces.  A tier-boundary
-     operation; producers never cap. *)
-  val cap_to : int -> t -> t
   val join : t -> t -> t
   val meet : t -> t -> t
   val widen_join : t -> t -> t
@@ -130,7 +131,7 @@ module Pieces : sig
 end
 
 (* The exact finite element set as an uncapped flat ascending array of
-   words (ADR 0036).  No budget and no [max_pieces] cap — the caller's
+   words (ADR 0036).  No budget — the caller's
    canonical promotion applies the budget.  [to_pieces] is the run view. *)
 module Exact : sig
   type t [@@deriving bin_io, sexp, compare]
@@ -140,10 +141,16 @@ module Exact : sig
   val bottom : int -> t
   val singleton : Cbat_word.t -> t
   val of_list : width:int -> Cbat_word.t list -> t
+  (* Strictly ascending, distinct, unsigned words at [width]. *)
+  val of_sorted_list : width:int -> Cbat_word.t list -> t
   val is_bottom : t -> bool
   (* A one-element set's pieces: [create] makes every singleton
      canonical, so they are the ones [Pieces.of_list] would build. *)
   val point_pieces : t -> Pieces.t option
+  (* The same elements as a canonical piece union. *)
+  val pieces : t -> Pieces.t
+  (* The elements of a piece union at their common [width]. *)
+  val of_pieces : width:int -> Pieces.t -> t
 
   val bitwidth : t -> int
   val cardinality : t -> Cbat_word.t

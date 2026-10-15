@@ -91,10 +91,7 @@ let hull_of_pieces (ps : P.t) : clp option =
 
 let pieces_of_words ~width (l : word list) : P.t = P.of_list ~width l
 
-let pieces_of_finset (s : fset) : P.t =
-  match Exact.point_pieces s with
-  | Some ps -> ps
-  | None -> pieces_of_words ~width:(Exact.bitwidth s) (Exact.iter s)
+let pieces_of_finset (s : fset) : P.t = Exact.pieces s
 
 let clp_of_finset fs : clp =
   let width = Exact.bitwidth fs in
@@ -250,7 +247,7 @@ let line_offsets (o : Origin.t) (offs : P.t) : P.t =
    tier cap is needed here. *)
 let small_tier (cps : P.t) : t =
   if P.is_top cps || P.card_exceeds Utils.fin_set_size cps then Clp cps
-  else Exact (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
+  else Exact (Exact.of_pieces ~width:(P.bitwidth cps) cps)
 
 (* A relative value's plain twin: the exact hull as a step-1 piece. *)
 let rec to_plain (t : t) : t =
@@ -383,7 +380,7 @@ and canonical_pool (ps : t list) : t =
       | Some cps, None
         when (not (P.is_bottom cps)) && not (P.is_top cps)
              && not (P.card_exceeds Utils.fin_set_size cps)
-        -> None, Some (Exact.of_list ~width:(P.bitwidth cps) (P.elements cps))
+        -> None, Some (Exact.of_pieces ~width:(P.bitwidth cps) cps)
       | c, f -> c, f
     in
     (* A bottom relative leaf drops against live pieces. *)
@@ -901,16 +898,15 @@ let piece_collapse (ps : P.t) : P.t =
     | Some p -> P.of_progression p
     | None -> ps
 
-(* The pairwise product stays within [max_pieces^2] pairs: past it, the
+(* The pairwise product stays within [max_pieces] pairs: past it, the
    wider operand enters as its hull (sound). *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   let na = List.length (P.to_list a) and nb = List.length (P.to_list b) in
   let a, b =
-    if na * nb <= Utils.max_pieces * Utils.max_pieces then (a, b)
+    if na * nb <= Utils.max_pieces then (a, b)
     else if na >= nb then (piece_collapse a, b)
     else (a, piece_collapse b) in
-  let r = Piece_binop.binop op a b in
-  if P.card_exceeds Utils.keep_exact_elements r then piece_collapse r else r
+  Piece_binop.binop op a b
 
 module Fs_repr = struct
   type t = fset
@@ -1084,26 +1080,36 @@ type address_verdict =
 
 let filter_addresses (t : t)
     ~(decide : Origin.t -> clp -> address_verdict) : t =
+  (* Visit the upper half first so consing preserves ascending order. *)
   let rec bisect line acc (p : clp) =
     match decide line p with
     | `Keep -> p :: acc
     | `Drop -> acc
     | `Split ->
       (match halves p with
-       | Some (a, b) -> bisect line (bisect line acc a) b
+       | Some (a, b) -> bisect line (bisect line acc b) a
        | None -> p :: acc)
     | `Parts parts ->
-      List.fold parts ~init:acc ~f:(fun acc (q, verdict) ->
+      List.fold_right parts ~init:acc ~f:(fun (q, verdict) acc ->
           match verdict with `Keep -> q :: acc | `Drop -> acc) in
+  let rec merge_streams = function
+    | [] -> []
+    | [ ps ] -> ps
+    | streams ->
+      let rec pairs = function
+        | a :: b :: rest -> P.merge_progressions a b :: pairs rest
+        | rest -> rest in
+      merge_streams (pairs streams) in
   let filter line (ps : P.t) : P.t option =
     let progs = P.to_list ps in
     if List.exists progs ~f:Clp.is_infinite then None
     else
       let kept =
-        List.fold progs ~init:[] ~f:(fun acc p ->
-            List.fold (Clp.split_wrapped p) ~init:acc ~f:(bisect line)) in
-      Some (List.fold kept ~init:(P.bottom (P.bitwidth ps))
-              ~f:(fun acc p -> P.join acc (P.of_progression p))) in
+        (* Source grids can interleave; merge their survivor streams. *)
+        List.concat_map progs ~f:(fun p ->
+            List.map (Clp.split_wrapped p) ~f:(bisect line []))
+        |> merge_streams in
+      Some (P.of_progressions kept) in
   match t with
   | Rel (Origin.Vla _, _) | Many _ -> t
   | Rel (o, ps) ->
@@ -1112,14 +1118,14 @@ let filter_addresses (t : t)
     Option.value_map (filter Origin.Abs ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
   | Exact s ->
     let width = Exact.bitwidth s in
-    of_list ~width
+    Exact (Exact.of_sorted_list ~width
       (List.filter (Exact.iter s) ~f:(fun w ->
            match decide Origin.Abs (Clp.singleton w) with
            | `Drop -> false
            | `Keep | `Split -> true
            | `Parts parts ->
              List.exists parts ~f:(fun (q, verdict) ->
-                 match verdict with `Keep -> Clp.elem w q | `Drop -> false)))
+                 match verdict with `Keep -> Clp.elem w q | `Drop -> false))))
 
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)

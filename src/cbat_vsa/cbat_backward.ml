@@ -1126,17 +1126,41 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                   List.concat_map qs ~f:(fun q ->
                       if Cbat_clp.is_bottom (Cbat_clp.intersection q h) then [ q ]
                       else subtract_run q h)) in
-            let kept =
+            let merge_words a b =
+              let rec go acc a b =
+                match a, b with
+                | [], rest | rest, [] -> List.rev_append acc rest
+                | x :: xs, y :: ys ->
+                  let c = Cbat_word.compare x y in
+                  if c < 0 then go (x :: acc) xs b
+                  else if c > 0 then go (y :: acc) a ys
+                  else go (x :: acc) xs ys in
+              go [] a b in
+            let rec merge_streams = function
+              | [] -> []
+              | [ ws ] -> ws
+              | streams ->
+                let rec pairs = function
+                  | a :: b :: rest -> merge_words a b :: pairs rest
+                  | rest -> rest in
+                merge_streams (pairs streams) in
+            (* Coverage ranges may overlap: merge their ordered grids
+               before reading each covered address once. *)
+            let covered =
               List.concat_map small ~f:(fun h ->
-                  List.filter (Cbat_clp.iter h) ~f:(fun x ->
-                      singleton_keep line (Cbat_clp.singleton x))) in
+                  List.map (Cbat_clp.split_wrapped h) ~f:Cbat_clp.iter)
+              |> merge_streams in
+            let kept =
+              List.filter covered ~f:(fun x ->
+                  singleton_keep line (Cbat_clp.singleton x)) in
             let width = Cbat_word.bitwidth hi in
             let kept_runs =
-              Cbat_clp.Exact.to_pieces (Cbat_clp.Exact.of_list ~width kept) in
+              Cbat_clp.Exact.to_pieces (Cbat_clp.Exact.of_sorted_list ~width kept) in
             let parts =
-              List.filter_map rest ~f:(fun q ->
-                  if Cbat_clp.is_bottom q then None else Some (q, `Keep))
-              @ List.map kept_runs ~f:(fun q -> (q, `Keep)) in
+              Cbat_clp.Pieces.merge_progressions
+                (List.filter rest ~f:(fun q -> not (Cbat_clp.is_bottom q)))
+                kept_runs
+              |> List.map ~f:(fun q -> (q, `Keep)) in
             `Parts parts in
         let decide line p =
           match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
@@ -1735,16 +1759,20 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
    distance as the enclosing WTO cycle's widening landmark (words and
    memory cells alike). *)
 let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
+    ~(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
-  (* The raw walk pushes the disabled cond's constraints through the
-     producers so the empty meets land on the counters. *)
-  let constrained = constrain_edge ~env ~landmarks disabled in
-  if not (AI.equal constrained AI.bottom) then begin
-    let seeds = cond_seeds ~env:constrained disabled in
-    ignore
-      (walk ~locus:observer_locus ~entry ~landmarks ~witness ~seeds
-         constrained blk)
+  (* Outside a cycle no observation records, so the walk has no effect. *)
+  if Cbat_landmarks.in_cycle landmarks then begin
+    (* The raw walk pushes the disabled cond's constraints through the
+       producers so the empty meets land on the counters. *)
+    let constrained = constrain_edge ~env ~landmarks disabled in
+    if not (AI.equal constrained AI.bottom) then begin
+      let seeds = cond_seeds ~env:constrained disabled in
+      ignore
+        (walk ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
+           constrained blk)
+    end
   end
 
 let refine_edge_inline

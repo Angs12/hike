@@ -98,3 +98,7 @@ val extrapolate :
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a
+
+(* Whether a cycle head is being widened; outside one, no observation
+   records anything. *)
+val in_cycle : t -> bool

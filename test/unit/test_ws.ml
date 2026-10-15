@@ -91,9 +91,9 @@ let tests : unit Alcotest.test list =
               (* Random progression. *)
               let base = Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
               let step = Cbat_word.of_int ~width:w (1 + Random.int 3) in
-              let c = if Random.bool () then 1 + Random.int 6 else 11 + Random.int 30 in
+              let c = if Random.bool () then 1 + Random.int 6 else 17 + Random.int 30 in
               ( Ws.of_clp (Clp.create base ~step ~cardn:(Cbat_word.of_int ~width:(w + 1) c)),
-                if c <= 10 (* Utils.fin_set_size *) then `fs else `clp )
+                if c <= 16 (* Utils.fin_set_size *) then `fs else `clp )
           | 2 ->
               (* Top (demotes by width). *)
               (Ws.top w, if w <= 3 then `fs else `clp)
@@ -428,8 +428,8 @@ let tests : unit Alcotest.test list =
        pieces without recursion — one decision covers a whole dense run, \
        and the kept elements match the bisected reference"
       (fun () ->
-        let dense = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 15)) in
-        let split = w32 7 in
+        let dense = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 31)) in
+        let split = w32 15 in
         let below p =
           match Clp.min_elem p with
           | Some lo -> Cbat_word.(<=) lo split
@@ -438,7 +438,7 @@ let tests : unit Alcotest.test list =
         let parts_decide _line p =
           Stdlib.incr parts_calls;
           if Cbat_word.gt_int (Clp.cardinality p) 1 then
-            (* The covered run [0,15]: keep its lower half, drop its
+            (* The covered run [0,31]: keep its lower half, drop its
                upper half; the verdicts apply as listed. *)
             let a, b = Clp.split_at_n p split in
             `Parts [ (a, `Keep); (b, `Drop) ]
@@ -455,7 +455,27 @@ let tests : unit Alcotest.test list =
         check "WS-46.equal"
           (List.for_all
              (fun x -> Ws.elem (w32 x) by_parts = Ws.elem (w32 x) by_bisect)
-             (List.init 16 Fun.id)));
+             (List.init 32 Fun.id));
+        let grid =
+          Ws.stack_word
+            (Clp.create ~width:64 ~step:(w64 4)
+               ~cardn:(Cbat_word.of_int ~width:65 8) (w64 0)) in
+        let point n = Ws.stack_word (Clp.singleton (w64 n)) in
+        let interleaved = Ws.union grid (point 2) in
+        let filtered =
+          Ws.filter_addresses interleaved ~decide:(fun _ p ->
+              if Clp.elem (w64 0) p then
+                `Parts [ (Clp.singleton (w64 24), `Keep) ]
+              else `Keep) in
+        check "WS-46.interleaved-parts-order"
+          (Ws.equal filtered (Ws.union (point 2) (point 24)));
+        let split_filtered =
+          Ws.filter_addresses interleaved ~decide:(fun _ p ->
+              if Cbat_word.gt_int (Clp.cardinality p) 1 then `Split
+              else if Clp.elem (w64 24) p || Clp.elem (w64 2) p then `Keep
+              else `Drop) in
+        check "WS-46.interleaved-split-order"
+          (Ws.equal split_filtered filtered));
 
     (* A stack address joined with NULL is a stack address or NULL: the
        stack leaf keeps its line and offsets beside the plain leaf. *)
