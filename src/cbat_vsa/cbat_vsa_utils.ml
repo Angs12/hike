@@ -33,8 +33,6 @@ let fin_set_size : int = 10
 (* Max progressions in a canonical piece union. *)
 let max_pieces : int = 4
 
-(* Integer division rounding up. *)
-
 open !Core
 open Bap.Std
 

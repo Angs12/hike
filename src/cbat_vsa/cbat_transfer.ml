@@ -15,9 +15,6 @@ module Word_ops = Cbat_word
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
-(* The target's word size, as the origin refinement reads it. *)
-let word_bytes () : int = if !addr_bits_ref > 0 then !addr_bits_ref / 8 else 8
-
 (* The SP var the VLA rebase anchors on; set at the solve entry next
    to the address bits. *)
 let sp_var_ref : var option ref = ref None
@@ -353,12 +350,6 @@ let load_value ~(addr : wordset) ~(endian : endian) ~(bits : int) (mv : Mem.t) :
        Base.List.fold ks'
          ~init:(Mem.find (bits, endian) mv k0 |> Mem.Val.data)
          ~f:(fun acc k -> WordSet.join acc (Mem.find (bits, endian) mv k |> Mem.Val.data)))
-
-(* Some image holds a byte of [lo, hi] on the absolute line. *)
-let image_overlaps ~(lo : int64) ~(hi : int64) : bool =
-  Base.List.exists !section_images_ref ~f:(fun { img_lo; img_hi; _ } ->
-      Stdlib.Int64.unsigned_compare lo img_hi <= 0
-      && Stdlib.Int64.unsigned_compare img_lo hi <= 0)
 
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in

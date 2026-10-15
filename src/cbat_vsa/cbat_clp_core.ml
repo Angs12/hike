@@ -296,7 +296,6 @@ let min_elem (p : t) : W.t option =
   | Descending ->
     if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
 
-(* Max signed element. *)
 let is_wrapped (p : t) : bool =
   if is_infinite p || is_bottom p then false
   else
@@ -782,9 +781,6 @@ let step1_intersection (width : int) (p1 : t) (p2 : t) : t option =
         end
       end
   | _ -> None
-
-(* A wrapped Finite piece: its traversal wraps, so its finite_end sits
-   below its base. *)
 
 let rec intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)

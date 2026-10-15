@@ -50,7 +50,6 @@ let t_load_exp addr = Bil.Load (Bil.Var t_m, addr, LittleEndian, `r64)
 (* The guard-window fixture: the virtual compared vars and the mem var. *)
 let s_t = Var.create ~is_virtual:true ~fresh:false "s_t" (Type.Imm 32)
 let s_u = Var.create ~is_virtual:true ~fresh:false "s_u" (Type.Imm 32)
-let s_m = Var.create ~is_virtual:false ~fresh:false "s_m" (Type.Mem (`r32, `r8))
 
 let s_w32_of_env env v = AI.find_word 32 env (Var.base v)
 

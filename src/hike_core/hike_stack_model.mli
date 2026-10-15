@@ -118,7 +118,6 @@ val jmp_input_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val blk_boundary_reads : blk term -> Var.Set.t
 (* The FP call site's argument temp ([intrinsic:xN[:width]]). *)
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
-val jmp_target_reads : jmp term -> Var.Set.t
 val def_writes : def term -> Var.Set.t
 val phi_writes : phi term -> Var.Set.t
 val blk_free_vars : blk term -> Var.Set.t
@@ -213,7 +212,6 @@ val is_sec_comp_mem : var -> bool
 (* The tid-name sanitization. *)
 val sanitize_tid_name : string -> string
 
-val sub_map : program term -> sub term Tid.Map.t
 val sub_reads : abi:Abi.t -> sub term -> Var.Set.t
 val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 

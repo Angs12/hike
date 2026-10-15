@@ -30,8 +30,6 @@ module WordEnv = Cbat_map_lattice.Make_indexed_val (VarKey) (Ws)
 (* The shared bench row carries an optional key-count column. *)
 type row = Probe_common.bench_row
 
-let measure = Probe_common.bench_measure
-
 (* Exact minor words allocated since start; [Gc.minor_words] advances per
    allocation, unlike [Gc.quick_stat]'s counter which advances at minor
    GCs on OCaml 5. *)

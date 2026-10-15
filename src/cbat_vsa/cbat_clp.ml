@@ -72,7 +72,7 @@ module Pieces = struct
   module A = Cbat_clp_arith
   module U = Cbat_vsa_utils
 
-  (* Max progressions in a canonical piece union (the tier's cap bound). *)
+  (* The union's bit width (its pieces' common width). *)
   let width_of (ps : t) : int =
     match ps with [] -> 0 | p :: _ -> C.bitwidth p
 

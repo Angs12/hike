@@ -127,7 +127,6 @@ let tests : unit Alcotest.test list =
     pin "FP-29" "hlt maps to FHLT and emits unreachable"
       (fun () -> fp_assert "intrinsic:hlt" Bil2llvm_fp.FHLT);
 
-    (* FP-30: rows NOT in the table must not map. *)
     (* FP-36..FP-40: the table rows the "one pin per row" set had missed.  A
        dropped row degrades to a CORRECT soft-float call, so the semantic
        gate cannot see it — these five were a live hole. *)
@@ -142,9 +141,6 @@ let tests : unit Alcotest.test list =
     pin "FP-40" "cast_sfloat_rne_ieee754_binary_32 maps to SFLOAT and emits sitofp"
       (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" (Bil2llvm_fp.SFLOAT 32));
 
-
-
-    (* FP-31: fadd_64 also pins the no-soft-float-call half of the contract. *)
 
 
     (* FP-32: a caller of an unmapped name is a loud failure — the
@@ -198,9 +194,6 @@ let tests : unit Alcotest.test list =
           && contains_substring ir_rbx "sitofp i64"
           && not (contains_substring ir_rbp "sitofp i32")
           && not (contains_substring ir_rbx "sitofp i32")));
-
-    (* FP-34: the by-construction i32 case — the lifter's own extract chain. *)
-
 
     (* FP-35: a converted operand temp (its load re-pointed at a region mem
        var) materializes against the region's alloca, never the raw model

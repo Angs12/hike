@@ -491,23 +491,6 @@ let blk_boundary_reads (blk : blk term) : Var.Set.t =
            if is_mem lhs || is_fp_operand_temp lhs then Core.Set.add acc lhs
            else acc)
 
-let jmp_target_reads (j : jmp term) : Var.Set.t =
-  match Jmp.kind j with
-  | Goto (Indirect e) | Ret (Indirect e) -> Exp.free_vars e
-  | Call c ->
-    let target =
-      match Call.target c with
-      | Indirect e -> Exp.free_vars e
-      | Direct _ -> Var.Set.empty
-    in
-    let ret =
-      match Call.return c with
-      | Some (Indirect e) -> Exp.free_vars e
-      | Some (Direct _) | None -> Var.Set.empty
-    in
-    Core.Set.union target ret
-  | Goto (Direct _) | Ret (Direct _) | Int _ -> Var.Set.empty
-
 let def_writes (d : def term) : Var.Set.t = Var.Set.singleton (Def.lhs d)
 let phi_writes (p : phi term) : Var.Set.t = Var.Set.singleton (Phi.lhs p)
 
@@ -553,12 +536,6 @@ let is_sec_comp_mem v =
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
       match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)
-
-(* The program's subs keyed by tid. *)
-let sub_map (prog : program term) : sub term Tid.Map.t =
-  Term.enum sub_t prog
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-      Core.Map.set m ~key:(Term.tid s) ~data:s)
 
 (* The vars a sub reads, including the ABI boundary of each transfer. *)
 let sub_reads ~(abi : Abi.t) (s : sub term) : Var.Set.t =
