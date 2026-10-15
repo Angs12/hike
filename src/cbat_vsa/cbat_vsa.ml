@@ -594,21 +594,17 @@ let rec static_graph_vsa
       true
     end)
   in
-  (* The queue pops the lowest WTO position. *)
-  let pos (v : Tid.t) : int =
-    Option.value ~default:Int.max_value
-      (Core.Map.find smry.Cbat_wto.pos_of v) in
   (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
-     completely, and changes enqueue Tid-CFG successors. *)
-  (* WTO-priority buckets: pos -> the blocks at that position.  A
-     block's position is static, so enqueue is one bucket insert and
-     pop_min reads the least non-empty bucket. *)
-  let pending : Tid.Set.t Int.Map.t ref = ref Int.Map.empty in
+     completely, and changes enqueue Tid-CFG successors.  The queue pops
+     the lowest WTO position, whose block is unique: [pending] holds one
+     block per position, and [unplaced] the blocks outside the WTO,
+     which pop last in Tid order. *)
+  let pending : Tid.t Int.Map.t ref = ref Int.Map.empty in
+  let unplaced : Tid.Set.t ref = ref Tid.Set.empty in
   let enqueue t =
-    pending :=
-      Core.Map.update !pending (pos t) ~f:(function
-          | None -> Core.Set.singleton (module Tid) t
-          | Some set -> Core.Set.add set t)
+    match Core.Map.find smry.Cbat_wto.pos_of t with
+    | Some p -> pending := Core.Map.set !pending ~key:p ~data:t
+    | None -> unplaced := Core.Set.add !unplaced t
   in
   (* Entry itself is never seeded: init_sol pre-seeds its state. *)
   Option.iter (entry_block_of s) ~f:(fun entry ->
@@ -624,14 +620,15 @@ let rec static_graph_vsa
   Core.Set.iter wake ~f:(fun b -> succs b |> List.iter ~f:enqueue);
   let pop_min () =
     match Core.Map.min_elt !pending with
-    | None -> None
-    | Some (p, set) ->
-      let v = Core.Set.choose_exn set in
-      let rest = Core.Set.remove set v in
-      pending :=
-        (if Core.Set.is_empty rest then Core.Map.remove !pending p
-         else Core.Map.set !pending ~key:p ~data:rest);
-      Some v in
+    | Some (p, v) ->
+      pending := Core.Map.remove !pending p;
+      Some v
+    | None ->
+      (match Core.Set.min_elt !unplaced with
+       | None -> None
+       | Some v ->
+         unplaced := Core.Set.remove !unplaced v;
+         Some v) in
   let rec stabilize_worklist () =
     match pop_min () with
     | None -> ()
