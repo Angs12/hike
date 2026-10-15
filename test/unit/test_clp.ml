@@ -549,6 +549,23 @@ let tests : unit Alcotest.test list =
           && Clp.max_elem r3 = Some (w32 0x7F)
           && Clp.equal r3 odd_image));
 
+    pin "CLP-116"
+      "modulo by a divisor of the stride is the base's singleton residue; a non-dividing divisor \
+       keeps the sound residue hull"
+      (fun () ->
+        let grid base =
+          Clp.create ~width:32 ~step:(w32 8)
+            ~cardn:(Cbat_word.of_int ~width:33 101) (w32 base) in
+        check "CLP-116.divides-zero"
+          (Clp.equal (Clp.modulo (grid 0) (Clp.singleton (w32 4))) (Clp.singleton (w32 0)));
+        check "CLP-116.divides-base"
+          (Clp.equal (Clp.modulo (grid 1) (Clp.singleton (w32 4))) (Clp.singleton (w32 1)));
+        check "CLP-116.divides-full"
+          (Clp.equal (Clp.modulo (grid 0) (Clp.singleton (w32 8))) (Clp.singleton (w32 0)));
+        check "CLP-116.nondivides"
+          (Clp.subset (Clp.of_list ~width:32 [ w32 0; w32 1; w32 2 ])
+             (Clp.modulo (grid 0) (Clp.singleton (w32 3)))));
+
 
 
 

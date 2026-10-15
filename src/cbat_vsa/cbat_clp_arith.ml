@@ -803,7 +803,11 @@ let modulo_core (p1 : t) (p2 : t) : t =
       (match min_elem p1, max_elem p1 with
        | Some lo, Some hi when W.equal kmin kmax ->
          let k = kmin in
-         if W.equal (W.div lo k) (W.div hi k)
+         if W.is_zero (W.modulo (step_of p1) k) then
+           (* The stride is a multiple of k: every element shares the
+              base's residue, so the image is the singleton. *)
+           create (W.modulo (base_of p1) k)
+         else if W.equal (W.div lo k) (W.div hi k)
          then interval ~width (W.modulo lo k) (W.modulo hi k)
          else interval ~width (W.zero width) (W.pred k)
        | _ ->
