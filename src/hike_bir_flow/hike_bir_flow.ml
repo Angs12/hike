@@ -12,9 +12,7 @@ let apply_term ~def ~phi ~jmp state = function
   | `Phi p -> phi state p
   | `Jmp j -> jmp state j
 
-let apply_block ~equal ~rev ~def ~phi ~jmp (blk : blk term) state =
-  let elts = Blk.elts blk |> Seq.to_list in
-  let elts = if rev then List.rev elts else elts in
+let apply_block ~equal ~def ~phi ~jmp elts state =
   let rec close state =
     let next =
       List.fold elts ~init:state ~f:(apply_term ~def ~phi ~jmp)
@@ -28,12 +26,14 @@ let run ~(graph : Graphs.Tid.t) ~(sub : sub term) ~rev ~initial ~default
   let blocks =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun blocks blk ->
-           Core.Map.set blocks ~key:(Term.tid blk) ~data:blk)
+           let elts = Blk.elts blk |> Seq.to_list in
+           Core.Map.set blocks ~key:(Term.tid blk)
+             ~data:(if rev then List.rev elts else elts))
   in
   let transfer tid state =
     match Core.Map.find blocks tid with
     | None -> state
-    | Some blk -> apply_block ~equal ~rev ~def ~phi ~jmp blk state
+    | Some elts -> apply_block ~equal ~def ~phi ~jmp elts state
   in
   let start = if rev then Graphs.Tid.exit else Graphs.Tid.start in
   let fixed =
