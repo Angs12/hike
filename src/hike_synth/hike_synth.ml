@@ -9,6 +9,7 @@ type temporary = Comparison | Load | Refinement | Binding
 
 type kind =
   | K_addr of int64
+  | K_thread_addr of int64
   | K_slot of int
   | K_argument of int
   | K_window
@@ -39,6 +40,7 @@ let mem_type addr_bits =
 let var ~addr_bits kind =
   let name, typ = match kind with
     | K_addr a -> Printf.sprintf "hike_synth_%Lx" a, Type.Imm addr_bits
+    | K_thread_addr a -> Printf.sprintf "hike_thread_%Lx" a, Type.Imm addr_bits
     | K_slot i -> Printf.sprintf "hike_slot%d" i, mem_type addr_bits
     | K_argument i -> Printf.sprintf "hike_arg%d" i, mem_type addr_bits
     | K_window -> "hike_window", Type.Imm addr_bits
@@ -79,6 +81,7 @@ let bytes_kind_of_storage = function
 let base ~addr_bits storage = var ~addr_bits (base_kind_of_storage storage)
 let bytes ~addr_bits storage = var ~addr_bits (bytes_kind_of_storage storage)
 let module_addr ~addr_bits a = var ~addr_bits (K_addr a)
+let thread_addr ~addr_bits a = var ~addr_bits (K_thread_addr a)
 
 let fp_lane ~addr_bits lane i =
   match lane with
@@ -117,6 +120,9 @@ let kind_of_var v =
   if Base.String.is_prefix n ~prefix:"hike_synth_" then
     Base.Option.bind (Base.String.chop_prefix n ~prefix:"hike_synth_")
       ~f:(fun h -> Option.map (fun a -> K_addr a) (Int64.of_string_opt ("0x" ^ h)))
+  else if Base.String.is_prefix n ~prefix:"hike_thread_" then
+    Base.Option.bind (Base.String.chop_prefix n ~prefix:"hike_thread_")
+      ~f:(fun h -> Option.map (fun a -> K_thread_addr a) (Int64.of_string_opt ("0x" ^ h)))
   else if Base.String.is_prefix n ~prefix:"hike_slot" then
     family n ~prefix:"hike_slot" ~suffix:"" (fun i -> K_slot i)
   else if Base.String.is_prefix n ~prefix:"hike_arg" then
@@ -199,6 +205,7 @@ let memory_kind = function
 
 type classification =
   | Module_addr of int64
+  | Thread_addr of int64
   | Storage of storage
   | Bytes of storage
   | Env_register of var
@@ -210,6 +217,7 @@ let classify tbl v =
   | Some k -> (
     match k with
     | K_addr a -> Some (Module_addr a)
+    | K_thread_addr a -> Some (Thread_addr a)
     | K_region _ | K_window | K_global _ | K_slot _ | K_argument _ ->
       Base.Option.map (storage_of_kind k) ~f:(fun s -> Storage s)
     | K_region_memory _ | K_window_memory | K_global_memory _ ->
@@ -222,7 +230,7 @@ let classify tbl v =
 
 let is_base_var tbl v =
   match classify tbl v with
-  | Some (Module_addr _ | Storage _) -> true
+  | Some (Module_addr _ | Thread_addr _ | Storage _) -> true
   | _ -> false
 
 (* Every var the table knows, with its classification: the emitter's
@@ -235,11 +243,14 @@ let bindings tbl =
 let is_memory_var tbl v =
   match classify tbl v with Some (Bytes _) -> true | _ -> false
 
-let is_module_addr_var tbl v =
-  match classify tbl v with Some (Module_addr _) -> true | _ -> false
+let is_address_var tbl v =
+  match classify tbl v with Some (Module_addr _ | Thread_addr _) -> true | _ -> false
 
 let module_addr_of tbl v =
   match classify tbl v with Some (Module_addr a) -> Some a | _ -> None
+
+let thread_addr_of tbl v =
+  match classify tbl v with Some (Thread_addr a) -> Some a | _ -> None
 
 let env_of tbl v =
   match classify tbl v with Some (Env_register v) -> Some v | _ -> None

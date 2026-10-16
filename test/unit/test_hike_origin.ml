@@ -27,13 +27,13 @@ let ori_01 () =
 let ori_02 () =
   let all =
     [ Origin.Abs;
-      Origin.Stack;
+      Origin.Stack; Origin.Fs;
       Origin.Rip Hike_section.Rodata ]
   in
   List.iter all ~f:(fun o ->
       let n = Origin.name o in
       check (sprintf "name %s nonempty" n) (String.length n > 0));
-  check "three origins" (List.length all = 3)
+  check "four origins" (List.length all = 4)
 
 (* The accessor's name answer, for the pin asserts. *)
 let origin_name (o : Origin.t option) : string option =
@@ -94,7 +94,7 @@ let ori_18 () =
 
 let ori_19 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata;
+    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata;
       Origin.Rip Hike_section.Data ]
   in
   let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
@@ -156,7 +156,7 @@ let ori_20 () =
 
 let ori_22 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata ] in
+    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ] in
   let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
   let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
   let cell = key (Ws.singleton (i2w 0x1000L)) in
@@ -253,6 +253,89 @@ let ori_27 () =
              Clp.elem (i2w (-4128L)) offs && Clp.elem (i2w (-4112L)) offs
              && not (Clp.elem (i2w (-4120L)) offs))))
 
+let ori_28 () =
+  let m = memv "ori28_mem" and p = v64 "ori28_pointer" in
+  let q = v64 "ori28_reloaded" and out = v64 "ori28_value" in
+  let w n = Bil.Int (Cbat_word.to_word (i2w n)) in
+  let slot = Bil.BinOp (Bil.MINUS, Bil.Var abi.sp, w 8L) in
+  let sub = straight_sub "ori28"
+      [ Def.create p (Bil.Load (Bil.Var m, Bil.Var abi.thread_pointer,
+                                LittleEndian, `r64));
+        Def.create p (Bil.BinOp (Bil.MINUS, Bil.Var p, w 8L));
+        Def.create m (Bil.Store (Bil.Var m, slot, Bil.Var p, LittleEndian, `r64));
+        Def.create q (Bil.Load (Bil.Var m, slot, LittleEndian, `r64));
+        Def.create out (Bil.Load (Bil.Var m, Bil.Var q, LittleEndian, `r64)) ] in
+  let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
+  let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  let defs = Term.enum blk_t stamped |> Seq.concat_map ~f:(Term.enum def_t)
+      |> Seq.to_list in
+  List.iter defs ~f:(fun d ->
+      check ("FS origin survives at " ^ Var.name (Def.lhs d))
+        (Option.equal String.equal
+           (origin_name (Vsa.Def_origin.def_origin d))
+           (Some (if Var.same (Def.lhs d) q then "stack" else "fs"))
+         || Var.same (Def.lhs d) m));
+  let blk = Option.value_exn (Term.first blk_t sub) in
+  let _, state = Core.Map.find_exn envs (Term.tid blk) in
+  let pointer = AI.find_word 64 state q in
+  check "FS pointers use their own memory namespace"
+    (match Ws.address_groups pointer with
+     | [(o, offs)] -> String.equal (Origin.name o) "fs"
+                     && Clp.elem (i2w (-8L)) offs
+     | _ -> false)
+
+let ori_29 () =
+  let fs k = Ws.set_origin Origin.Fs (Ws.stack_word_i64 k) in
+  let p = fs (-8L) and zero = Ws.singleton (i2w 0L) in
+  let mixed = Ws.union p zero in
+  check "an unknown FS base supplies no absolute bounds or enumeration"
+    (Option.is_none (Ws.min_elem mixed) && Option.is_none (Ws.max_elem mixed)
+     && Option.is_none (Ws.min_elem_signed mixed)
+     && Option.is_none (Ws.enumerate ~cap:64 p));
+  check "plain constraints cannot remove FS offsets using an invented base"
+    (Ws.equal (Ws.meet p zero) p && Ws.equal (Ws.diff p zero) p
+     && Ws.equal (Ws.diff p (Ws.module_address 0L)) p
+     && Ws.is_bottom (Ws.meet p (Ws.bottom 64)));
+  check "a mixed union and widening keep the FS memory line"
+    (List.exists (Ws.address_groups (Ws.widen_join mixed (Ws.union (fs (-16L)) zero)))
+       ~f:(fun (o, _) -> Origin.equal o Origin.Fs));
+  check "a shared FS base cancels in pointer subtraction"
+    (Ws.equal (Ws.sub (fs (-8L)) (fs (-16L))) (Ws.singleton (i2w 8L)));
+  let root = Bil.Var (Hike.Synth.thread_addr ~addr_bits:64 0L) in
+  check "same-origin pointer equality compares offsets"
+    (match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.EQ, root, root)) AI.top with
+     | Ok v -> Ws.equal v (Ws.singleton Cbat_word.b1)
+     | Error _ -> false)
+
+let ori_30 () =
+  let m = memv "ori30_mem" and p = v64 "ori30_pointer" in
+  let sub = fst (sub_of "ori30"
+      [ [], [(1, fun target -> Jmp.create (Call
+          (Call.create ~target:(Direct (Tid.for_name "ori30_foreign"))
+             ~return:(Direct target) ())))];
+        [Def.create p (Bil.Load (Bil.Var m, Bil.Var abi.thread_pointer,
+                                 LittleEndian, `r64))], [(0, mk_ret)] ]) in
+  let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
+  let envs, _ = Vsa.stamp_envs_of_sol ~sol sub in
+  check "a foreign call preserves FS and its self-pointer load"
+    (Core.Map.exists envs ~f:(fun (_, post) ->
+         Option.equal String.equal (origin_name (Ws.origin (AI.find_word 64 post p)))
+           (Some "fs")))
+
+let ori_31 () =
+  let m = memv "ori31_mem" in
+  let p = Ws.set_origin Origin.Fs (Ws.stack_word_i64 0L) in
+  let data = Ws.singleton (i2w 42L) in
+  let key = List.hd_exn (Mem.Key.of_wordset p) in
+  let mv = Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
+      ~key ~data:(Mem.Val.create data LittleEndian) in
+  let env = AI.add_memory AI.top ~key:m ~data:mv in
+  let exp = Bil.Load (Bil.Var m,
+      Bil.Var (Hike.Synth.thread_addr ~addr_bits:64 0L), LittleEndian, `r64) in
+  check "a stored self cell takes precedence over the ABI default"
+    (match Vsa.Test_seam.denote_imm_exp exp env with
+     | Ok v -> Ws.equal v data | Error _ -> false)
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -279,4 +362,8 @@ let () =
         ori_26;
       pin "ORI-27"
         "a set-valued SP with a fixed decrement stays on the Stack origin"
-        ori_27 ]
+        ori_27;
+      pin "ORI-28" "FS self pointer survives arithmetic and a stack spill" ori_28;
+      pin "ORI-29" "FS algebra keeps symbolic bases out of absolute constraints" ori_29;
+      pin "ORI-30" "the ABI thread pointer survives a foreign call" ori_30;
+      pin "ORI-31" "an explicit TCB self-cell write overrides its default" ori_31 ]

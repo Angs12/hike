@@ -131,12 +131,13 @@ let checked_add (a : int64) (b : int64) : int64 option = checked_add3 a 0L b
 let absolute_line (o : Origin.t) : bool =
   match o with
   | Origin.Abs | Origin.Rip _ -> true
-  | Origin.Stack -> false
+  | Origin.Stack | Origin.Fs -> false
 
 (* The exact hull [base + offs_lo, base + offs_hi]; a missing
    direction clamps to the origin's materialisation bound — a
    relative claim stays in its origin's extent. *)
 let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
+  if Origin.equal o Origin.Fs then None else
   let f = Origin.facts o in
   let floor = Stdlib.Int64.add f.Origin.base f.Origin.lo in
   let ceil = Stdlib.Int64.add f.Origin.base f.Origin.hi in
@@ -495,6 +496,9 @@ let rec cardinality (t : t) : word =
      base is the fixed 0, no segment multiplies. *)
   | Rel ((Origin.Abs | Origin.Rip _), offs) -> P.cardinality offs
   | Rel (Origin.Stack, offs) -> stack_cardinality offs
+  | Rel (Origin.Fs, offs) ->
+    if P.is_bottom offs then Cbat_word.zero 65
+    else Cbat_word.lshift (Cbat_word.one 65) (Cbat_word.of_int ~width:65 64)
   | Many ps ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
     List.fold ps ~init:(Cbat_word.zero width) ~f:(fun acc q ->
@@ -525,11 +529,18 @@ let leaf_bound ~(lower : bool) (q : t) : word option =
   | Exact s -> if lower then Exact.min_elem s else Exact.max_elem s
   | Many _ -> None
 
+let rec has_fs = function
+  | Rel (Origin.Fs, _) -> true
+  | Many ps -> List.exists ps ~f:has_fs
+  | _ -> false
+
 let min_elem (t : t) : word option =
-  extremum (leaf_bound ~lower:true) (Cbat_word.min_by ~signed:false) t
+  if has_fs t then None else
+    extremum (leaf_bound ~lower:true) (Cbat_word.min_by ~signed:false) t
 
 let max_elem (t : t) : word option =
-  extremum (leaf_bound ~lower:false) (Cbat_word.max_by ~signed:false) t
+  if has_fs t then None else
+    extremum (leaf_bound ~lower:false) (Cbat_word.max_by ~signed:false) t
 
 (* Stack-family extrema on the entry-relative offset line. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
@@ -584,6 +595,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
         Cbat_word.keep_better ~better acc r)
   in
   match q with
+  | Rel (Origin.Fs, _) -> None
   | Rel (o, offs) -> via_offsets_base (Origin.facts o).base offs
   | Clp ps -> via_pieces ps
   | Exact s ->
@@ -591,7 +603,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
   | Many _ -> None
 
 let extremum_signed ~(dir : int) (t : t) : word option =
-  extremum (signed_leaf ~dir) (signed_better ~dir) t
+  if has_fs t then None else extremum (signed_leaf ~dir) (signed_better ~dir) t
 
 let min_elem_signed (t : t) : word option = extremum_signed ~dir:(-1) t
 let max_elem_signed (t : t) : word option = extremum_signed ~dir:1 t
@@ -626,6 +638,7 @@ let rec elem w (t : t) =
    8 MiB of elements. *)
 let rec iter (t : t) : word list =
   match t with
+  | Rel (Origin.Fs, _) -> invalid_arg "WordSet.iter: a symbolic FS base is not enumerable"
   (* An absolute-line value enumerates its offsets as they are. *)
   | Rel (o, offs) when absolute_line o -> P.elements offs
   | Rel (o, offs) ->
@@ -883,6 +896,9 @@ let stack_offsets (t : t) : P.t option =
     Some (hull_or_bottom offs)
   | _ -> None
 
+let relative_offsets (t : t) : P.t option =
+  match t with Rel (_, offs) -> Some offs | _ -> None
+
 (* The stack-line leaves of a value (itself when it is one): the stack
    addresses the value may hold, one leaf per stack-line origin. *)
 let stack_leaves (t : t) : t list =
@@ -893,7 +909,7 @@ let stack_leaves (t : t) : t list =
    origin still rides the value; only the key line is coarsened. *)
 let key_line (o : Origin.t) : Origin.t =
   match o with
-  | Origin.Stack -> Origin.Stack
+  | Origin.Stack | Origin.Fs -> o
   | Origin.Rip _ | Origin.Abs -> Origin.Abs
 
 (* Memory keys retain the carried origin's line; plain values stay
@@ -1238,6 +1254,7 @@ let join_plain (t1 : t) (t2 : t) : t =
    line. *)
 let materialise2 (op : binop) (t1 : t) (t2 : t) : t =
   match op, t1, t2 with
+  | Meet, _, _ when has_fs t1 || has_fs t2 -> join_plain t1 t2
   | Sub, Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
     canonical [ Clp (P.sub a b) ]
   | Meet, Rel (o1, a), Rel (o2, b)
@@ -1257,6 +1274,9 @@ let generic (op : binop) (t1 : t) (t2 : t) : t =
    translate into the offsets on the fixed base. *)
 let meet_rel (t1 : t) (t2 : t) : t =
   let meet_offs o a plain =
+    if Origin.equal o Origin.Fs then
+      if is_bottom plain then bottom 64 else Rel (o, a)
+    else
     match plain_offsets o plain with
     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
     | None -> canonical [ Rel (o, P.bottom 64) ]
@@ -1545,10 +1565,12 @@ let rec diff (t1 : t) (t2 : t) : t =
   | _, Rel (Origin.Abs, offs) -> diff t1 (Clp offs)
   | Rel (o1, a), Rel (o2, b)
     when Origin.equal o1 o2
-         || Int64.equal (Origin.facts o1).base (Origin.facts o2).base ->
+         || (absolute_line o1 && absolute_line o2
+             && Int64.equal (Origin.facts o1).base (Origin.facts o2).base) ->
     canonical [ Rel (o1, P.diff a b) ]
   | _, Rel (Origin.Rip _, b) -> diff t1 (rip_plain b)
   | _, Rel _ -> t1
+  | Rel (Origin.Fs, _), _ -> t1
   | Rel (o, offs), plain ->
     (match plain_offsets o plain with
      | Some constraint_ -> canonical [ Rel (o, P.diff offs constraint_) ]

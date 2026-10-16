@@ -466,13 +466,14 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         let general_keep line (p : Cbat_clp.t) : bool =
           let one =
             match line with
-            | Hike_origin.Stack -> WordSet.stack_word (Cbat_clp.Pieces.of_progression p)
+            | Hike_origin.Stack | Hike_origin.Fs ->
+              WordSet.set_origin line (WordSet.stack_word (Cbat_clp.Pieces.of_progression p))
             | _ -> WordSet.of_clp (Cbat_clp.Pieces.of_progression p) in
           not (drops (load_value ~addr:one ~endian ~bits mv)) in
         let singleton_keep line (p : Cbat_clp.t) : bool =
           let point =
             match line, Cbat_clp.min_elem p with
-            | Hike_origin.Stack, _ | _, None -> None
+            | (Hike_origin.Stack | Hike_origin.Fs), _ | _, None -> None
             | _, Some x when Cbat_word.bitwidth x <> 64 -> None
             | _, Some x ->
               Base.Option.bind (Cbat_word.to_int64_opt x)
@@ -589,7 +590,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                | _ -> None)
             | _ -> None in
           match line with
-          | Hike_origin.Stack -> None
+          | Hike_origin.Stack | Hike_origin.Fs -> None
           | _ when width <> 64 || bits > 64 -> None
           | _ ->
             let runs =

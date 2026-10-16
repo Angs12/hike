@@ -7,6 +7,7 @@ open Bap.Std
 type t =
   | Abs  (* no origin: the absolute piece union *)
   | Stack  (* the sub's entry SP — the caller's frame is Stack at/above the entry word *)
+  | Fs  (* the ABI thread pointer; offsets are signed TLS/TCB byte offsets *)
   | Rip of Hike_section.t
   (* a module address into that section: offsets are link-time words *)
 [@@deriving bin_io, sexp, compare]
@@ -51,11 +52,14 @@ let facts (t : t) : facts =
       lo = Stdlib.Int64.neg stack_span;
       hi = stack_span }
   | Rip _ -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
+  | Fs -> { base = 0L; certified = 0;
+            lo = Stdlib.Int64.min_int; hi = Stdlib.Int64.max_int }
 
 let name (t : t) : string =
   match t with
   | Abs -> "abs"
   | Stack -> "stack"
+  | Fs -> "fs"
   | Rip _ -> "rip"
 
 (* The D10 namespace test: does an origin name the model's stack line.
@@ -63,7 +67,7 @@ let name (t : t) : string =
 let names_stack_line (t : t) : bool =
   match t with
   | Stack -> true
-  | Abs | Rip _ -> false
+  | Abs | Rip _ | Fs -> false
 
 (* The program's section map: the section each module address lies in.
    Installed once per program from the loaded image. *)

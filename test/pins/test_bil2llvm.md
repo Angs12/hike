@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-59`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-63`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -56,3 +56,4 @@ is the pin's point, not its subject.
 | EMIT-61 | a bounded sub emits no cursor helper, and an alloca frame past a page carries `probe-stack`. | drop `frame_probes`, or emit the helpers for every sub | EMIT-61 red: the attribute or helper text differs |
 | EMIT-58 | a pointer masked by an integer stays a pointer (`ptrmask`); a pointer difference is an integer. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
 | EMIT-62 | a loop body listed before its head in term order still reads the head's phi, not undef. | create phis per block as bodies emit, or emit bodies in term order | EMIT-62 red: no phi, or `undef` in the IR |
+| EMIT-63 | FS origin survives a loaded thread pointer and stack spill; TLS resolution turns the derived address into a synthetic address emitted through the TLS block. | omit `Hike_tls.rewrite_program` | the final load has no synthetic TLS address and emits no `threadlocal.address` |

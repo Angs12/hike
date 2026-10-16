@@ -32,6 +32,7 @@ module Cfg_complete = Hike_cfg_complete
 (** Indirect-target resolution, read from the target's denotation. *)
 module Resolve = Hike_resolve
 module Rip = Hike_rip
+module Tls = Hike_tls
 module Synth = Hike_synth
 
 (** Dead-code elimination. *)

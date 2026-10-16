@@ -13,6 +13,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (program : program term) : result =
   let program = Hike_split_blocks.materialize ~facts program in
   let addr_bits = Hike_abi.addr_size_bits facts.target in
+  let program = Hike_tls.rewrite_program ~addr_bits ~tls ~denote:facts.denote program in
   (* A copy-relocated slot's bytes are externally owned: the access keeps
      its absolute address so the emitter's relocation path renders it. *)
   let slots =

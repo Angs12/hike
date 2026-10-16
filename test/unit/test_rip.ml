@@ -24,6 +24,7 @@ let tests = [
        let env = Base.List.hd_exn Hike.Abi.x86_64_sysv.env_regs in
        let families = [
          Synth.module_addr ~addr_bits:64 0x4010L;
+         Synth.thread_addr ~addr_bits:64 (-8L);
          Synth.base ~addr_bits:64 (Synth.Slot 2);
          Synth.base ~addr_bits:64 (Synth.Argument 3);
          Synth.base ~addr_bits:64 Synth.Window;

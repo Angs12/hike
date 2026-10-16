@@ -119,8 +119,11 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
        even though the saturated stack cardinality hides it (LT already
        reads the same line through plain_bounds). *)
     let rel_singleton (v : wordset) : (Hike_origin.t * Cbat_word.t) option =
-      match WordSet.origin v, WordSet.offset_extrema v with
-      | Some o, Some (lo, hi) when Cbat_word.equal lo hi -> Some (o, lo)
+      match WordSet.origin v, WordSet.relative_offsets v with
+      | Some o, Some offs ->
+        (match Cbat_clp.Pieces.min_elem_signed offs, Cbat_clp.Pieces.max_elem_signed offs with
+         | Some lo, Some hi when Cbat_word.equal lo hi -> Some (o, lo)
+         | _ -> None)
       | _ -> None in
     match rel_singleton v1, rel_singleton v2 with
     | Some (o1, a), Some (o2, b) when Hike_origin.equal o1 o2 ->
@@ -418,6 +421,18 @@ let image_point_reader ~(endian : endian) ~(bits : int) (mv : Mem.t) :
    relative value reads back with its origin, and multi-cell joins merge
    per the algebra. *)
 let load_value ~(addr : wordset) ~(endian : endian) ~(bits : int) (mv : Mem.t) : wordset =
+  (* The ABI TCB self cell holds the thread pointer, including after a
+     foreign call has invalidated ordinary memory facts. *)
+  if bits = WordSet.bitwidth addr
+     && not (Mem.is_bottom mv)
+     && Option.equal Hike_origin.equal (WordSet.origin addr) (Some Hike_origin.Fs)
+     && Option.value_map (WordSet.relative_offsets addr) ~default:false
+          ~f:(fun offs -> Cbat_clp.Pieces.equal offs
+              (Cbat_clp.Pieces.singleton (Cbat_word.zero bits)))
+     && not (Mem.has_cell_in mv ~origin:Hike_origin.Fs
+               ~lo:(Cbat_word.zero bits)
+               ~hi:(Cbat_word.of_int ~width:bits (bits / 8 - 1)))
+  then addr else
   match section_image_load ~addr ~endian ~bits mv with
   | Some ws -> ws
   | None ->
@@ -467,7 +482,11 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
        | Some a ->
          return_imm (WordSet.singleton
                        (Cbat_word.of_int64 ~width:bitwidth a))
-       | None -> return_imm @@ AI.find_word bitwidth env v)
+       | None ->
+         match Hike_synth.thread_addr_of Hike_synth.empty v with
+         | Some off -> return_imm (WordSet.set_origin Hike_origin.Fs
+                                    (WordSet.stack_word_i64 off))
+         | None -> return_imm @@ AI.find_word bitwidth env v)
     | Type.Mem (addr_i, addressable_size) ->
       let k = mem_idx addr_i addressable_size in
       return_mem @@ AI.find_memory k env v

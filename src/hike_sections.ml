@@ -391,7 +391,11 @@ let range_of_denotation ~(word : int)
       ~f:(fun a -> Base.Option.map
           (Hike_synth_addr.of_address ~addr_bits:(Model.word_bits word) ~regions a)
           ~f:(fun _ -> a)) in
-  if Vsa.WordSet.is_bottom ws then
+  if Base.Option.equal Hike_origin.equal (Vsa.WordSet.origin ws)
+       (Some Hike_origin.Fs) then
+    (* TLS/TCB bytes live on their own origin line, outside these storages. *)
+    None, []
+  else if Vsa.WordSet.is_bottom ws then
     (* A def-anchored bottom is the refinement's empty meet, not a
        reachability proof — the def's block is CFG-reachable.  The
        access keeps its memory form: the raw-address emission is

@@ -83,6 +83,23 @@ let storage_origin ctx v : int64 option =
 let value ctx scope llvm_builder blk_tid v : Bil2llvm_value.t option =
   let classified = Hike_synth.classify ctx.synth v in
   match classified with
+  | Some (Hike_synth.Thread_addr off) ->
+    let ptr, off =
+      match !(ctx.tls) with
+      | Some (block, tls) when off >= tls.tls_base
+                              && off < Int64.add tls.tls_base tls.tls_memsz ->
+        let fty = Llvm.function_type ctx.ptr_ty [|ctx.ptr_ty|] in
+        let f = Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module in
+        let p = Llvm.build_call fty f [|block|] "tls_addr" llvm_builder in
+        p, Int64.add (Int64.sub off tls.tls_base) (Int64.of_int tls.tls_prefix)
+      | _ ->
+        let fty = Llvm.function_type ctx.ptr_ty [||] in
+        let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
+        Llvm.build_call fty f [||] "hike_tp" llvm_builder, off in
+    let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
+    let p = Bil2llvm_ptr.offset ~addr_bits:ctx.addr_bits llvm_builder ptr
+        (Llvm.const_of_int64 ty off false) in
+    Some (Bil2llvm_value.Int (Llvm.build_ptrtoint p ty "tls_value" llvm_builder))
   | Some (Hike_synth.Module_addr a) ->
     let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
     Some

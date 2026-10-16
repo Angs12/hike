@@ -98,6 +98,8 @@ let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
       AI.add_word entry_state
         ~key:(Var.base abi.Hike_abi.sp)
         ~data:(WordSet.stack_word_i64 0L)
+      |> fun e -> AI.add_word e ~key:(Var.base abi.Hike_abi.thread_pointer)
+          ~data:(WordSet.set_origin Hike_origin.Fs (WordSet.stack_word_i64 0L))
     | Some e -> e in
   let set_init sb = Map.set empty_map ~key:(Term.tid sb) ~data:entry_state in
   let base_map = Option.value_map ~default:empty_map ~f:set_init msb in
@@ -144,7 +146,7 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
 let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
     Int.Set.t =
   let regs =
-    abi.Hike_abi.sp :: abi.Hike_abi.callee_saved
+    abi.Hike_abi.sp :: abi.Hike_abi.thread_pointer :: abi.Hike_abi.callee_saved
     |> Var.Set.of_list in
   let virt =
     Term.enum blk_t s

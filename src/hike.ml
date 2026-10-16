@@ -15,6 +15,7 @@ module Cfg_complete = Hike_cfg_complete
 
 module Resolve = Hike_resolve
 module Rip = Hike_rip
+module Tls = Hike_tls
 module Synth = Hike_synth
 module Dce = Hike_dce
 module Jump = Hike_jump

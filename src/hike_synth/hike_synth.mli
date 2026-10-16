@@ -27,6 +27,7 @@ type lane = Input | Output
     lane, or a transient value.  One function answers every consumer. *)
 type classification =
   | Module_addr of int64
+  | Thread_addr of int64
   | Storage of storage
   | Bytes of storage
   | Env_register of var
@@ -46,6 +47,7 @@ val bindings : table -> (var * classification) list
 val base : addr_bits:int -> storage -> var
 val bytes : addr_bits:int -> storage -> var
 val module_addr : addr_bits:int -> int64 -> var
+val thread_addr : addr_bits:int -> int64 -> var
 val fp_lane : addr_bits:int -> lane -> int -> var
 val environment : var -> var
 val accumulator : addr_bits:int -> var
@@ -58,8 +60,9 @@ val is_temporary : Var.t -> bool
 (* A base operand: a module address or a storage base, never a cell. *)
 val is_base_var : table -> var -> bool
 val is_memory_var : table -> var -> bool
-val is_module_addr_var : table -> var -> bool
+val is_address_var : table -> var -> bool
 val module_addr_of : table -> var -> int64 option
+val thread_addr_of : table -> var -> int64 option
 val env_of : table -> var -> var option
 val storage_of : table -> var -> storage option
 val index_of : table -> var -> int option

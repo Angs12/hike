@@ -323,6 +323,6 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
              ~default:Var.Set.empty))
   |> Core.Set.filter ~f:(fun v ->
          not (Hike_abi.is_sp abi (Var.base v))
-         && not (Hike_synth.is_module_addr_var Hike_synth.empty v)
+         && not (Hike_synth.is_address_var Hike_synth.empty v)
          && match Var.typ v with Type.Mem _ -> false | _ -> true)
   |> Core.Set.to_list

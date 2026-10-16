@@ -316,6 +316,43 @@ let tests : unit Alcotest.test list =
            && contains_substring ir "i64 40"
            && contains_substring ir "load i64"));
 
+    pin "EMIT-63" "FS origins resolve loaded and spilled TLS pointers before emission"
+      (fun () ->
+        let abi = Hike.Abi.x86_64_sysv in
+        let m = memv "tls_derived_mem" and p = v64 "tls_derived_p" in
+        let q = v64 "tls_derived_q" and out = v64 "tls_derived_out" in
+        let w n = Bil.Int (Word.of_int ~width:64 n) in
+        let slot = Bil.BinOp (Bil.MINUS, Bil.Var abi.sp, w 8) in
+        let sub = straight_sub "tls_derived"
+            [ Def.create p (Bil.Load (Bil.Var m, Bil.Var abi.thread_pointer,
+                                      LittleEndian, `r64));
+              Def.create p (Bil.BinOp (Bil.MINUS, Bil.Var p, w 8));
+              Def.create m (Bil.Store (Bil.Var m, slot, Bil.Var p, LittleEndian, `r64));
+              Def.create q (Bil.Load (Bil.Var m, slot, LittleEndian, `r64));
+              Def.create out (Bil.Load (Bil.Var m, Bil.Var q, LittleEndian, `r64)) ] in
+        let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
+        let envs, sub = Vsa.stamp_envs_of_sol ~sol sub in
+        let facts = Hike.Kb.build ~block_envs:envs ~lookup:(fun _ -> None)
+            ~block_addrs:Addr.Map.empty ~target:Theory.Target.unknown in
+        let tls = Some { Hike_spec.tls_lo = 0x5000L; tls_memsz = 8L;
+                         tls_align = 8; tls_base = -8L; tls_prefix = 0;
+                         tls_image = Bytes.make 8 '\000' } in
+        let prog = Hike.Tls.rewrite_program ~addr_bits:64 ~tls
+            ~denote:facts.denote (Program.create ~subs:[sub] ()) in
+        let sub = Option.get (Term.first sub_t prog) in
+        let last = Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
+            |> Seq.to_list |> List.rev |> List.hd in
+        check "the reloaded pointer resolves through its carried FS origin"
+          (match Def.rhs last with
+           | Bil.Load (_, Bil.Var v, _, _) ->
+             Var.equal v (Hike.Synth.thread_addr ~addr_bits:64 (-8L))
+           | _ -> false);
+        let ir = emit_ir_spec { empty_spec with spec_tls = tls } [sub] in
+        check "TLS pointers materialize through the emitted block"
+          (contains_substring ir "@llvm.threadlocal.address(ptr @hike_tls_block)");
+        check "thread address constants never become signature inputs"
+          (not (contains_substring ir "i64 %hike_thread_")));
+
     (* ROWS-COUNT: the resolved dispatch's emitter views — one incoming
        per rendered edge. *)
 

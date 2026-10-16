@@ -66,6 +66,9 @@ val stack_word_i64 : int64 -> t
    symbolic arm; a plain in-band set is None. *)
 val stack_offsets : t -> Cbat_clp.Pieces.t option
 
+(** The offset pieces of any single-origin relative value. *)
+val relative_offsets : t -> Cbat_clp.Pieces.t option
+
 (* The stack-line leaves of a value (itself when it is one): the stack
    addresses the value may hold, one leaf per stack-line origin. *)
 val stack_leaves : t -> t list
