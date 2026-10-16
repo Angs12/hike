@@ -167,7 +167,7 @@ let tests : unit Alcotest.test list =
         let frags =
           Img.substitute_relocated_words ~bytes ~lo ~hi:0x101fL
             ~relocated:[ 0x1008L; 0x1010L ]
-            ~relative:[ (0x1008L, 0xdeadbeefL) ]
+            ~relative:[ (0x1008L, 0xdeadbeefL) ] ~word:8
         in
         check "IMG-02 fragments" (List.length frags = 2);
         match frags with
@@ -187,11 +187,11 @@ let tests : unit Alcotest.test list =
         let bytes = section_bytes [ 0x1L; 0x2L ] in
         check "IMG-03 dropped"
           (Img.substitute_relocated_words ~bytes ~lo ~hi:0x200fL
-             ~relocated:[ 0x2000L; 0x2008L ] ~relative:[]
+             ~relocated:[ 0x2000L; 0x2008L ] ~relative:[] ~word:8
           = []);
         let frags =
           Img.substitute_relocated_words ~bytes ~lo ~hi:0x200fL
-            ~relocated:[] ~relative:[]
+            ~relocated:[] ~relative:[] ~word:8
         in
         check "IMG-03 identity"
           (match frags with

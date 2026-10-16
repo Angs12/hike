@@ -527,6 +527,18 @@ let to_int64 (t : t) : int64 Core.Or_error.t =
   | W64 (x, _, _) -> Ok x
   | Big _ -> Core.Or_error.try_with (fun () -> to_int64_exn t)
 
+let le_int64 (bytes : Bytes.t) ~(off : int) ~(len : int) : int64 =
+  let b k =
+    if off + k < Bytes.length bytes
+    then Int64.of_int (Char.code (Bytes.get bytes (off + k)))
+    else 0L
+  in
+  let rec go acc k =
+    if k = len then acc
+    else go (Int64.logor acc (Int64.shift_left (b k) (8 * k))) (k + 1)
+  in
+  go 0L 0
+
 let to_int64_opt (t : t) : int64 option =
   match t with
   | Small (v, _, _) -> Some (Int64.of_int v)

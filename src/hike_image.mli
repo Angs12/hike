@@ -35,6 +35,7 @@ val substitute_relocated_words :
   hi:int64 ->
   relocated:int64 list ->
   relative:(int64 * int64) list ->
+  word:int ->
   (Bytes.t * int64 * int64) list
 
 (** The never-written runtime ranges with their access: read-only

@@ -149,21 +149,7 @@ let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
 (* The little-endian word assembler: the [len] bytes at [off] (bytes
    past the image read 0). *)
 let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
-  (* Shifts fold little-endian bytes; bytes past the image read zero. *)
-  let b k =
-    if off + k < Bytes.length arr
-    then Int64.of_int (Char.code (Bytes.get arr (off + k)))
-    else 0L
-  in
-  let rec go acc k =
-    if k = len then acc
-    else
-      let acc' =
-        if k = 0 then b 0 else Stdlib.Int64.logor acc (Stdlib.Int64.shift_left (b k) (8 * k))
-      in
-      go acc' (k + 1)
-  in
-  go 0L 0
+  Cbat_word.le_int64 arr ~off ~len
 
 (* The relocation rule shared by section and TLS images. *)
 let image_word ctx llvm_ctx llvm_module ~word ~arr ~base_addr off =

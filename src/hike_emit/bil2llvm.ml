@@ -387,15 +387,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             let rec go off acc =
               if off + wb > n then acc
               else
-                let w =
-                  Base.List.fold (Base.List.init wb ~f:(fun i -> i)) ~init:0L
-                    ~f:(fun v i ->
-                      Stdlib.Int64.logor v
-                        (Stdlib.Int64.shift_left
-                           (Stdlib.Int64.of_int
-                              (Char.code (Bytes.get bytes (off + i))))
-                           (8 * i)))
-                in
+                let w = Cbat_word.le_int64 bytes ~off ~len:wb in
                 go (off + wb)
                   (if is_start w then Core.Set.add acc w else acc)
             in

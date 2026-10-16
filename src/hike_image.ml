@@ -120,7 +120,7 @@ let relative_values (proj : Project.t) ~(bias : int64) : (int64 * int64) list
    finds no image and stays abstract. *)
 let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
     ~(hi : int64) ~(relocated : int64 list) ~(relative : (int64 * int64) list)
-    : (Bytes.t * int64 * int64) list =
+    ~(word : int) : (Bytes.t * int64 * int64) list =
   let len = Bytes.length bytes in
   if Base.List.is_empty relocated then [ (bytes, lo, hi) ]
   else begin
@@ -133,7 +133,7 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
             Base.List.Assoc.find relative ~equal:Int64.equal a
           with
           | Some v ->
-            for k = 0 to 7 do
+            for k = 0 to word - 1 do
               if off + k < len then
                 Bytes.set out (off + k)
                   (Char.chr
@@ -143,7 +143,7 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
                            0xffL)))
             done
           | None ->
-            for k = 0 to 7 do
+            for k = 0 to word - 1 do
               if off + k < len then dropped.(off + k) <- true
             done);
     let rec runs i acc =
@@ -247,6 +247,7 @@ let get_section_images (proj : Project.t) ~(page : int64) :
   let bias = get_bias proj in
   let relative = relative_values proj ~bias in
   let relocated = get_relocated_words proj in
+  let word = (Hike_abi.of_target (Project.target proj)).Hike_abi.word in
   Project.memory proj |> Memmap.to_sequence
   |> Seq.filter_map ~f:(fun (mem, v) ->
       match Value.get Image.section v with
@@ -262,7 +263,7 @@ let get_section_images (proj : Project.t) ~(page : int64) :
       in
       Seq.of_list
         (substitute_relocated_words ~bytes ~lo ~hi ~relocated:sites
-           ~relative))
+           ~relative ~word))
   |> Seq.concat_map ~f:(fun img -> Seq.of_list (clip_image img readonly))
   |> Seq.to_list
 
