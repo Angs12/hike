@@ -965,8 +965,8 @@ let piece_touches_image_bounds ~(fits : (Stdlib.Int64.t * Stdlib.Int64.t) list)
         Cbat_clp.Pieces.overlap qp
           (Cbat_clp.Pieces.of_progression
              (Cbat_clp.interval ~width:w
-                (Cbat_word.of_word (Word.of_int64 ~width:w fit_lo))
-                (Cbat_word.of_word (Word.of_int64 ~width:w fit_hi)))))
+                (Cbat_word.of_int64 ~width:w fit_lo)
+                (Cbat_word.of_int64 ~width:w fit_hi))))
 
 let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
   match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
@@ -1038,7 +1038,7 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
            | Hike_origin.Abs ->
              List.iter image_fits ~f:(fun (fit_lo, fit_hi) ->
                  let word (v : Stdlib.Int64.t) : Cbat_word.t =
-                   Cbat_word.of_word (Word.of_int64 ~width:w v) in
+                   Cbat_word.of_int64 ~width:w v in
                  ranges :=
                    (Cbat_clp.interval ~width:w (word fit_lo) (word fit_hi), false)
                    :: !ranges)

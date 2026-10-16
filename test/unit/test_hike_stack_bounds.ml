@@ -31,15 +31,6 @@ let some_pair_w (o : (Cbat_word.t * Cbat_word.t) option)
 
 let tests : unit Alcotest.test list =
   [
-    pin "HSB-01" "i64_opt: a width-64 word is representable (the high bit reads signed)"
-      (fun () ->
-        check "HSB-01"
-          (Hsb.i64_opt (w64 5) = Some 5L
-          && Hsb.i64_opt (wof64 (-8L)) = Some (-8L)
-          && Hsb.i64_opt ones64 = Some (-1L)));
-
-
-
     pin "HSB-03" "position_pair: representable offsets map to base + offset"
       (fun () ->
         check "HSB-03"

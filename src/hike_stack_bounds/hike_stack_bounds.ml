@@ -9,17 +9,13 @@ open Core
 module Ws = Cbat_clp_set_composite
 module Clp = Cbat_clp
 
-let i64_opt (w : Cbat_word.t) : int64 option =
-  Cbat_word.to_int64_opt w
-
 (* Ceiling division of sizes: an empty size spans no elements. *)
 let cdiv (x : int) (y : int) : int = (x + y - 1) / y
 
 let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
     : (int64 * int64) option =
   let open Base.Option in
-  i64_opt lo >>= fun lo ->
-  i64_opt hi >>= fun hi ->
+  Cbat_word.int64_pair lo hi >>= fun (lo, hi) ->
   Cbat_clp_set_composite.position_of_offset lo >>= fun lo ->
   Cbat_clp_set_composite.position_of_offset hi >>= fun hi ->
   Some (lo, hi)
@@ -38,9 +34,7 @@ let unsigned_bounds (ws : Ws.t) : (int64 * int64) option =
   let open Base.Option in
   Ws.min_elem ws >>= fun lo ->
   Ws.max_elem ws >>= fun hi ->
-  i64_opt lo >>= fun lo ->
-  i64_opt hi >>= fun hi ->
-  Some (lo, hi)
+  Cbat_word.int64_pair lo hi
 
 (* An unbounded direction extends to the scope bound; a wrapped or
    circular hull covers the whole scope. *)

@@ -91,6 +91,9 @@ val to_int64_exn : t -> int64
 val to_int64 : t -> int64 Core.Or_error.t
 val to_int64_opt : t -> int64 option
 
+(* Both bounds as int64, or none when either does not fit. *)
+val int64_pair : t -> t -> (int64 * int64) option
+
 (* The little-endian value of [len] bytes at [off]; bytes past the end
    read as zero. *)
 val le_int64 : Bytes.t -> off:int -> len:int -> int64

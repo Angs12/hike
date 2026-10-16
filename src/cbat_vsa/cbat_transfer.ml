@@ -236,7 +236,7 @@ let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
       in
       go 0 0L
     in
-    Some (Cbat_word.of_word (Word.of_int64 ~width:bits v))
+    Some (Cbat_word.of_int64 ~width:bits v)
 
 (* An address set the image rule can enumerate exactly. *)
 let image_load_card_cap = 64
@@ -312,7 +312,7 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
             | None -> None
             | Some { img_lo; img_bytes; img_slots; _ } ->
               let last_w =
-                Cbat_word.of_word (Word.of_int64 ~width:64 last)
+                Cbat_word.of_int64 ~width:64 last
               in
               if
                 Mem.has_cell_in mv
@@ -392,7 +392,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
        | Some a when bitwidth = 64 -> return_imm (WordSet.module_address a)
        | Some a ->
          return_imm (WordSet.singleton
-                       (Cbat_word.of_word (Word.of_int64 ~width:bitwidth a)))
+                       (Cbat_word.of_int64 ~width:bitwidth a))
        | None -> return_imm @@ AI.find_word bitwidth env v)
     | Type.Mem (addr_i, addressable_size) ->
       let k = mem_idx addr_i addressable_size in
@@ -489,10 +489,7 @@ let offset_bounds (ws : wordset) : (int64 * int64) option =
   match WordSet.stack_offsets ws with
   | Some offs -> (
       match WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs with
-      | Some lo, Some hi -> (
-          match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-          | Ok lo, Ok hi -> Some (lo, hi)
-          | _ -> None)
+      | Some lo, Some hi -> Cbat_word.int64_pair lo hi
       | _ -> None)
   | None -> None
 
@@ -500,10 +497,7 @@ let offset_bounds (ws : wordset) : (int64 * int64) option =
 let vla_bounds (ws : wordset) : (int64 * int64) option =
   Option.bind (WordSet.vla_offsets ws) ~f:(fun offs ->
       match WordSet.Clp.min_elem_signed offs, WordSet.Clp.max_elem_signed offs with
-      | Some lo, Some hi -> (
-          match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-          | Ok lo, Ok hi -> Some (lo, hi)
-          | _ -> None)
+      | Some lo, Some hi -> Cbat_word.int64_pair lo hi
       | _ -> None)
 
 (* The VLA event: a value that descends from SP by a non-singleton

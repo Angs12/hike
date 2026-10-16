@@ -108,8 +108,8 @@ val widen_join_op : (Key.t -> Val.t -> Val.t -> Val.t) -> t -> t -> t
 (* Keep cells at key >= [keep_lo] outside [escape]. *)
 val call_keep :
   t ->
-  keep_lo:Bap.Std.word ->
-  escape:(Bap.Std.word * Bap.Std.word) list -> t
+  keep_lo:Cbat_word.t ->
+  escape:(Cbat_word.t * Cbat_word.t) list -> t
 
 (* Whether the map is the bottom map (no tree, no reads). *)
 val is_bottom : t -> bool

@@ -37,10 +37,10 @@ let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
               match (a', b') with
               | Bil.Int x, Bil.Int y -> (
                   match
-                    (Cbat_word.to_int64 (Cbat_word.of_word x),
-                     Cbat_word.to_int64 (Cbat_word.of_word y))
+                    Cbat_word.int64_pair (Cbat_word.of_word x)
+                      (Cbat_word.of_word y)
                   with
-                  | Ok x', Ok y' ->
+                  | Some (x', y') ->
                       Some
                         (w64
                            ((match op with
@@ -71,12 +71,12 @@ let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
 let base_plus (base : var) ~(rel : int64) (disp : exp) : exp =
   match disp with
   | Bil.Int w -> (
-      match Cbat_word.to_int64 (Cbat_word.of_word w) with
-      | Ok k ->
+      match Cbat_word.to_int64_opt (Cbat_word.of_word w) with
+      | Some k ->
           let k = Stdlib.Int64.sub k rel in
           if Stdlib.Int64.equal k 0L then Bil.Var base
           else Bil.BinOp (Bil.PLUS, Bil.Var base, w64 k)
-      | Error _ -> Bil.BinOp (Bil.PLUS, Bil.Var base, disp))
+      | None -> Bil.BinOp (Bil.PLUS, Bil.Var base, disp))
   | _ ->
       Bil.BinOp
         (Bil.PLUS, Bil.Var base, Bil.BinOp (Bil.MINUS, disp, w64 rel))

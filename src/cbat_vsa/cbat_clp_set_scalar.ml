@@ -50,9 +50,6 @@ let stack_base = (Origin.facts Origin.Stack).base
    stack claim covers at most [stack_span] bytes. *)
 let stack_span = Origin.stack_span
 
-let w64_of_i64 (i : int64) : Cbat_word.t =
-  Cbat_word.of_word (Word.of_int64 ~width:64 i)
-
 (* ---------------- leaf views (total over [Many]) ---------------- *)
 
 let rec bitwidth (t : t) : int =
@@ -104,18 +101,18 @@ let clp_of_finset fs : clp =
 let stack_word (offs : Clp.t) : t = Rel (Origin.Stack, P.of_progression offs)
 
 let stack_word_i64 (k : int64) : t =
-  Rel (Origin.Stack, P.singleton (w64_of_i64 k))
+  Rel (Origin.Stack, P.singleton (Cbat_word.of_int64 k))
 
 (* A module address: its link-time word in its section; an address
    outside every section stays a plain word. *)
 let module_address (a : int64) : t =
   match Origin.Regions.of_address a with
-  | Some r -> Rel (Origin.Rip r, P.singleton (w64_of_i64 a))
-  | None -> Exact (Exact.singleton (w64_of_i64 a))
+  | Some r -> Rel (Origin.Rip r, P.singleton (Cbat_word.of_int64 a))
+  | None -> Exact (Exact.singleton (Cbat_word.of_int64 a))
 
 (* A fresh VLA frame: offset 0 is the allocation base (the post-move SP). *)
 let vla_frame (tid : Tid.t) : t =
-  Rel (Origin.Vla tid, P.singleton (w64_of_i64 0L))
+  Rel (Origin.Vla tid, P.singleton (Cbat_word.of_int64 0L))
 
 (* a + b + c with int64 overflow check. *)
 let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
@@ -158,13 +155,12 @@ let absolute_line (o : Origin.t) : bool =
    frame-relative: its base is the allocation's, and an unknown base has
    no entry-line position (top). *)
 let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
-  let k_int w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
   match o with
   | Origin.Vla tid -> (
     match vla_base_range tid with
     | Some (blo, bhi) -> (
-      match Option.bind (P.min_elem offs) ~f:k_int,
-            Option.bind (P.max_elem offs) ~f:k_int with
+      match Option.bind (P.min_elem offs) ~f:Cbat_word.to_int64_opt,
+            Option.bind (P.max_elem offs) ~f:Cbat_word.to_int64_opt with
       | Some klo, Some khi -> (
         match checked_add3 stack_base blo klo, checked_add3 stack_base bhi khi with
         | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
@@ -175,18 +171,14 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
     let f = Origin.facts o in
     let floor = Stdlib.Int64.add f.Origin.base f.Origin.lo in
     let ceil = Stdlib.Int64.add f.Origin.base f.Origin.hi in
-    let side = function
-      | Some w ->
-        (match Cbat_word.to_int64 w with
-         | Ok v -> checked_add3 f.Origin.base 0L v
-         | Error _ -> None)
-      | None -> None
-    in
+    let side w =
+      Option.bind (Cbat_word.to_int64_opt w)
+        ~f:(fun v -> checked_add3 f.Origin.base 0L v) in
     let lo = match P.min_elem offs with
-      | Some w -> side (Some w)
+      | Some w -> side w
       | None -> Some floor in
     let hi = match P.max_elem offs with
-      | Some w -> side (Some w)
+      | Some w -> side w
       | None -> Some ceil in
     match lo, hi with
     | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
@@ -218,12 +210,12 @@ let offsets_signed_extrema (offs : P.t)
 let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
   match vla_base_range tid, offsets_signed_extrema offs with
   | Some (blo, bhi), Some (lo, hi) -> (
-    match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-    | Ok klo, Ok khi -> (
+    match Cbat_word.int64_pair lo hi with
+    | Some (klo, khi) -> (
       match checked_add3 blo 0L klo, checked_add3 bhi 0L khi with
       | Some l, Some h when Stdlib.Int64.compare h l >= 0 -> Some (l, h)
       | _ -> None)
-    | _ -> None)
+    | None -> None)
   | _ -> None
 
 (* A stack-line value's offsets on the entry line, the Stack key line
@@ -234,7 +226,7 @@ let line_offsets (o : Origin.t) (offs : P.t) : P.t =
   | Origin.Vla tid -> (
     match vla_entry_hull tid offs with
     | Some (lo, hi) ->
-      P.of_progression (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))
+      P.of_progression (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))
     | None -> P.top 64)
   | Origin.Stack | Origin.Rip _ | Origin.Abs -> offs
 
@@ -258,7 +250,7 @@ let rec to_plain (t : t) : t =
        when Stdlib.Int64.compare cmin 0L >= 0
             && Stdlib.Int64.compare cmax cmin >= 0 ->
        Clp (P.of_progression
-              (Clp.interval ~width:64 (w64_of_i64 cmin) (w64_of_i64 cmax)))
+              (Clp.interval ~width:64 (Cbat_word.of_int64 cmin) (Cbat_word.of_int64 cmax)))
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
@@ -534,7 +526,7 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
     match q with
     | Rel (o, offs) ->
       (match plain_bounds o offs with
-       | Some (cmin, cmax) -> Some (w64_of_i64 cmin, w64_of_i64 cmax)
+       | Some (cmin, cmax) -> Some (Cbat_word.of_int64 cmin, Cbat_word.of_int64 cmax)
        | None -> None)
     | Clp ps -> pair (P.min_elem ps) (P.max_elem ps)
     | Exact s -> pair (Exact.min_elem s) (Exact.max_elem s)
@@ -596,7 +588,7 @@ let min_elem (t : t) : word option =
        match q with
        | Rel (o, offs) when absolute_line o -> P.min_elem offs
        | Rel (o, offs) ->
-         Option.map (plain_bounds o offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
+         Option.map (plain_bounds o offs) ~f:(fun (cmin, _) -> Cbat_word.of_int64 cmin)
        | Clp ps -> P.min_elem ps
        | Exact s -> Exact.min_elem s
        | Many _ -> None)
@@ -609,7 +601,7 @@ let max_elem (t : t) : word option =
        match q with
        | Rel (o, offs) when absolute_line o -> P.max_elem offs
        | Rel (o, offs) ->
-         Option.map (plain_bounds o offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
+         Option.map (plain_bounds o offs) ~f:(fun (_, cmax) -> Cbat_word.of_int64 cmax)
        | Clp ps -> P.max_elem ps
        | Exact s -> Exact.max_elem s
        | Many _ -> None)
@@ -621,16 +613,13 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   match t with
   | Rel (Origin.Vla tid, offs) ->
     Option.map (vla_entry_hull tid offs) ~f:(fun (lo, hi) ->
-        (w64_of_i64 lo, w64_of_i64 hi))
+        (Cbat_word.of_int64 lo, Cbat_word.of_int64 hi))
   | Rel (o, offs) when Origin.names_stack_line o -> offsets_signed_extrema offs
   | _ -> None
 
 let stack_bounds (t : t) : (int64 * int64) option =
   (* Stack-origin extrema on the offset line. *)
-  Option.bind (offset_extrema t) ~f:(fun (lo, hi) ->
-      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-      | Ok loi, Ok hii -> Some (loi, hii)
-      | _ -> None)
+  Option.bind (offset_extrema t) ~f:(fun (lo, hi) -> Cbat_word.int64_pair lo hi)
 
 
 (* The signed extreme of one leaf; [dir] < 0 is the minimum, > 0 the
@@ -647,10 +636,9 @@ let signed_leaf ~(dir : int) (q : t) : word option =
     Option.bind (offsets_signed_extrema offs)
       ~f:(fun ex ->
         Option.bind (checked_add3 base 0L
-                       (match Cbat_word.to_int64 (pick ex) with
-                        | Ok v -> v
-                        | Error _ -> clamp))
-          ~f:(fun v -> Some (w64_of_i64 v)))
+                       (Option.value (Cbat_word.to_int64_opt (pick ex))
+                          ~default:clamp))
+          ~f:(fun v -> Some (Cbat_word.of_int64 v)))
   in
   let via_pieces ps =
     List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
@@ -716,11 +704,11 @@ let rec elem w (t : t) =
   | Rel (o, offs) ->
     (match plain_bounds o offs with
      | Some (cmin, cmax) ->
-       (match Cbat_word.to_int64 w with
-        | Ok wi ->
+       (match Cbat_word.to_int64_opt w with
+        | Some wi ->
           Stdlib.Int64.compare wi cmin >= 0
           && Stdlib.Int64.compare wi cmax <= 0
-        | _ -> false)
+        | None -> false)
      | None -> not (is_bottom t))
   | Clp ps ->
     (* [P.elem] asserts equal widths; a mismatched query is not a member. *)
@@ -738,14 +726,14 @@ let rec iter (t : t) : word list =
       match checked_add3 stack_base blo 0L with
       | Some abs ->
         List.map (P.elements offs)
-          ~f:(fun w -> Cbat_word.add (w64_of_i64 abs) w)
+          ~f:(fun w -> Cbat_word.add (Cbat_word.of_int64 abs) w)
       | None -> [])
     | None -> [])
   (* An absolute-line value enumerates its offsets as they are. *)
   | Rel (o, offs) when absolute_line o -> P.elements offs
   | Rel (o, offs) ->
     List.map (P.elements offs)
-      ~f:(fun w -> Cbat_word.add (w64_of_i64 (Origin.facts o).base) w)
+      ~f:(fun w -> Cbat_word.add (Cbat_word.of_int64 (Origin.facts o).base) w)
   | Clp ps -> P.elements ps
   | Exact s -> Exact.iter s
   | Many ps -> List.concat_map ps ~f:iter
@@ -1000,7 +988,7 @@ let stack_offsets (t : t) : Clp.t option =
        base has no entry-line position (the sound fallback). *)
     match vla_entry_hull tid offs with
     | Some (lo, hi) ->
-      Some (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))
+      Some (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))
     | None -> None)
   | Rel (o, offs) when Origin.names_stack_line o ->
     (match hull_of_pieces offs with
@@ -1046,7 +1034,7 @@ let rec address_groups (t : t) : (Origin.t * P.t) list =
     | Some (lo, hi) ->
       [ (Origin.Stack,
          P.of_progression
-           (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))) ]
+           (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))) ]
     | None -> [ (Origin.Stack, P.top 64) ])
   | Rel (o, offs) -> [ (key_line o, offs) ]
   | Clp ps -> [ (Origin.Abs, ps) ]
@@ -1290,7 +1278,7 @@ let singleton_of (q : t) : word option =
 
 (* [f] over the offsets while enumerable; top past the budget. *)
 let certified_image ~(origin : Origin.t) ~(width : int) (f : word -> word) (offs : P.t) : t =
-  let base = w64_of_i64 ((base_facts origin).base) in
+  let base = Cbat_word.of_int64 ((base_facts origin).base) in
   match Cbat_word.to_int (P.cardinality offs) with
   | Ok n when n > 0 && n <= Utils.fin_set_size ->
     of_list ~width
@@ -1308,7 +1296,7 @@ let certified_image ~(origin : Origin.t) ~(width : int) (f : word -> word) (offs
 let certified_offset_image (origin : Origin.t) (f : word -> word) (offs : P.t) :
     P.t option =
   let facts = base_facts origin in
-  let base = w64_of_i64 facts.base in
+  let base = Cbat_word.of_int64 facts.base in
   let c = facts.certified in
   if c <= 0 || c >= 64 then None
   else
@@ -1324,7 +1312,7 @@ let certified_offset_image (origin : Origin.t) (f : word -> word) (offs : P.t) :
                     List.iter (Clp.iter p) ~f:(fun o -> emit (change_off o))))))
     | _ ->
       let delta r =
-        let x = Cbat_word.add base (w64_of_i64 (Int64.of_int r)) in
+        let x = Cbat_word.add base (Cbat_word.of_int64 (Int64.of_int r)) in
         Cbat_word.sub (f x) x in
       Some
         (List.fold (List.init (1 lsl c) ~f:delta) ~init:(P.bottom 64)
@@ -2032,22 +2020,13 @@ let offset_runs (t : t) : (int64 * int64) list =
           | Origin.Vla tid -> vla_entry_hull tid (P.of_progression g)
           | _ ->
             Option.bind (offsets_signed_extrema (P.of_progression g))
-              ~f:(fun (lo, hi) ->
-                match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-                | Ok lo, Ok hi -> Some (lo, hi)
-                | _ -> None)
+              ~f:(fun (lo, hi) -> Cbat_word.int64_pair lo hi)
         in
         Option.bind bounds ~f:(fun (lo, hi) ->
             match position_of_offset lo, position_of_offset hi with
             | Some lo, Some hi -> Some (lo, hi)
             | _ -> None))
   | _ -> []
-
-let int64_pair_of (lo : Cbat_word.t) (hi : Cbat_word.t)
-    : (int64 * int64) option =
-  match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-  | Ok lo, Ok hi -> Some (lo, hi)
-  | _ -> None
 
 (* Split over ABSOLUTE positions: entirely at/above the entry RSP ->
    Caller; entirely below -> Range; otherwise Mixed.  The unbounded
@@ -2069,12 +2048,12 @@ let classify (t : t) : kind =
     let bounds =
       match offset_extrema t with
       | Some (lo, hi) ->
-        Base.Option.bind (int64_pair_of lo hi) ~f:(fun (lo, hi) ->
+        Base.Option.bind (Cbat_word.int64_pair lo hi) ~f:(fun (lo, hi) ->
             Base.Option.bind (position_of_offset lo) ~f:(fun lo ->
                 Base.Option.map (position_of_offset hi) ~f:(fun hi -> (lo, hi))))
       | None ->
         (match min_elem t, max_elem t with
-         | Some lo, Some hi -> int64_pair_of lo hi
+         | Some lo, Some hi -> Cbat_word.int64_pair lo hi
          | _ -> None)
     in
     match bounds with

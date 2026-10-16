@@ -23,17 +23,16 @@ let indirect_callee ~(lookup : int64 -> Tid.t option)
   | Ok ws ->
     (match WordSet.enumerate ~cap:1 ws with
      | Some [ target ] ->
-       (match Cbat_word.to_int64 target with
-        | Ok v -> Option.value_map (lookup v) ~default:(Summary None) ~f:callee
-        | Error _ -> Summary None)
+       (match Cbat_word.to_int64_opt target with
+        | Some v -> Option.value_map (lookup v) ~default:(Summary None) ~f:callee
+        | None -> Summary None)
      | _ -> Summary None)
 
 (* Segment-relative bounds of a stack value; None when no bound exists.
    [key_extent] is the shared key-space clamp — the same rule the
    sections' attribution uses. *)
-let range_of (ws : WordSet.t) : (word * word) option =
-  Option.map (Hike_stack_bounds.key_extent ws) ~f:(fun (lo, hi) ->
-      (Cbat_word.to_word lo, Cbat_word.to_word hi))
+let range_of (ws : WordSet.t) : (Cbat_word.t * Cbat_word.t) option =
+  Hike_stack_bounds.key_extent ws
 
 (* The frame-keep boundary and the escape ranges are KEY-space:
    stack-derived cells key by segment offsets, foreign cells by their
@@ -62,23 +61,15 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     else
       match WordSet.stack_offsets rsp with
       | Some offs -> (
-          let int64_of w =
-            match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
-          in
-          let bound w =
-            Option.bind w ~f:(fun x ->
-                Option.map (int64_of x) ~f:(fun off ->
-                    Word.of_int64 ~width:64 off))
-          in
           match WordSet.origin rsp with
           | Some (WordSet.Origin.Vla tid) -> (
             (* Keep from the allocation's base; an unknown base cannot
                place the frame — the top fallback. *)
             match WordSet.Origin.Vla_seed.extent tid with
             | Some { WordSet.Origin.base_lo = Some blo; _ } ->
-              bound (Some (Cbat_word.of_int64 ~width:64 blo))
+              Some (Cbat_word.of_int64 blo)
             | _ -> None)
-          | _ -> bound (WordSet.Clp.max_elem offs))
+          | _ -> WordSet.Clp.max_elem offs)
       | None -> None
   in
   (* The escape list: each escape's stack-line leaves (a mixed value's

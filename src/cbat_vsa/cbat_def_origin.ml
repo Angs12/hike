@@ -59,23 +59,21 @@ let with_origin (o : Origin.t) (d : def term) : def term =
    value reads Abs — the sound fallback. *)
 let routable_origin (v : WordSet.t) : Origin.t =
   match WordSet.origin v with
-  | Some (Origin.Vla tid as o) -> (
+  | Some (Origin.Vla tid as o) ->
+    let in_gate =
       match WordSet.vla_offsets v, Origin.Vla_seed.extent tid with
       | Some offs, Some e -> (
           match WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs with
-          | Some lo, Some hi -> (
-              match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-              | Ok klo, Ok khi ->
-                if
-                  Stdlib.Int64.compare klo e.Origin.off_lo >= 0
-                  && (match e.Origin.off_hi with
-                      | None -> true
-                      | Some h -> Stdlib.Int64.compare khi h < 0)
-                then o
-                else Origin.Abs
-              | _ -> Origin.Abs)
-          | _ -> Origin.Abs)
-      | _ -> Origin.Abs)
+          | Some lo, Some hi ->
+            Option.map (Cbat_word.int64_pair lo hi) ~f:(fun (klo, khi) ->
+                Int64.compare klo e.Origin.off_lo >= 0
+                && (match e.Origin.off_hi with
+                    | None -> true
+                    | Some h -> Int64.compare khi h < 0))
+          | _ -> None)
+      | _ -> None
+    in
+    if Option.value in_gate ~default:false then o else Origin.Abs
   | Some o -> o
   | None -> Origin.Abs
 
@@ -85,20 +83,18 @@ let origin_of_def_value (v : WordSet.t) : Origin.t = routable_origin v
    node's ADDRESS (where the traffic lands, for a load and a store
    alike); a non-memory def's is its value's. *)
 let stamp_origin ~(before : AI.t) (d : def term) (after : AI.t) : def term =
-  match mem_addr_of (Def.rhs d) with
-  | Some addr ->
-    let o =
-      match denote_imm_exp addr before with
-      | Ok ws -> origin_of_def_value ws
-      | Error _ -> Origin.Abs
-    in
-    Hike_def_slot.put def_origin_d (Some o) d
-  | None ->
-    let width =
-      match Var.typ (Def.lhs d) with
-      | Type.Imm n -> n
-      | _ -> 64
-    in
-    let v = AI.find_word width after (Def.lhs d) in
-    let o = origin_of_def_value v in
-    Hike_def_slot.put def_origin_d (Some o) d
+  let o =
+    match mem_addr_of (Def.rhs d) with
+    | Some addr -> (
+        match denote_imm_exp addr before with
+        | Ok ws -> origin_of_def_value ws
+        | Error _ -> Origin.Abs)
+    | None ->
+      let width =
+        match Var.typ (Def.lhs d) with
+        | Type.Imm n -> n
+        | _ -> 64
+      in
+      origin_of_def_value (AI.find_word width after (Def.lhs d))
+  in
+  Hike_def_slot.put def_origin_d (Some o) d

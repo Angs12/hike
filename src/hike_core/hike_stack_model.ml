@@ -63,7 +63,7 @@ module Frame = struct
   let singleton_pair (lo : Cbat_word.t option) (hi : Cbat_word.t option)
       : int64 option =
     match lo, hi with
-    | Some lo, Some hi when Cbat_word.equal lo hi -> i64_opt lo
+    | Some lo, Some hi when Cbat_word.equal lo hi -> Cbat_word.to_int64_opt lo
     | _ -> None
 
   let args_base ~(entry : int64) ~(word : int) : int64 =

@@ -546,6 +546,11 @@ let to_int64_opt (t : t) : int64 option =
   | Big (z, _, _) when Z.numbits z <= 64 -> Some (Z.to_int64_unsigned z)
   | Big _ -> None
 
+let int64_pair (lo : t) (hi : t) : (int64 * int64) option =
+  match to_int64_opt lo, to_int64_opt hi with
+  | Some lo, Some hi -> Some (lo, hi)
+  | _ -> None
+
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 
 (* The BAP<->VSA boundary moves BITS through [Bitvec]'s bignum

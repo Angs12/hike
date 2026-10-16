@@ -37,7 +37,7 @@ module Key = struct
      [pwidth]/[pvalue] pair is exactly a [pwidth]-bit word. *)
   let hull (k : t) : Cbat_word.t * Cbat_word.t =
     let word (p : point) : Cbat_word.t =
-      Cbat_word.of_word (Word.of_int64 ~width:p.pwidth p.pvalue) in
+      Cbat_word.of_int64 ~width:p.pwidth p.pvalue in
     word (lower k), word (upper k)
 end
 
@@ -417,14 +417,15 @@ let meet_range_keep (m : t) ~key ~data : t =
    which the callee cannot reach (it keeps); a plain (absolute) or rip
    cell names no stack line and the callee may clobber any non-stack
    memory (it drops). *)
-let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
+let call_keep (m : t) ~(keep_lo : Cbat_word.t)
+    ~(escape : (Cbat_word.t * Cbat_word.t) list) : t =
   match m.itree with
   | None -> m
   | Some it ->
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
-        Option.map2 (Key.of_word (Cbat_word.of_word lo))
-          (Key.of_word (Cbat_word.of_word hi)) ~f:(fun lo hi -> (lo, hi)))) in
-    let keep_lo_pt = Key.of_word (Cbat_word.of_word keep_lo) in
+        Option.map2 (Key.of_word lo) (Key.of_word hi)
+          ~f:(fun lo hi -> (lo, hi)))) in
+    let keep_lo_pt = Key.of_word keep_lo in
     match keep_lo_pt, escape_pts with
     | Some keep_lo_pt, Some escape_pts ->
       let in_escape (k : Key.t) : bool =
