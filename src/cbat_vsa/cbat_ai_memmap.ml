@@ -686,13 +686,12 @@ let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
       | Some last_end when Stdlib.Int64.equal last_end (Key.upper k).pvalue ->
         (* The cells concatenate in address order (little-endian: a
            higher address is higher bits), so each keeps its lanes. *)
-        let datas = List.map ints ~f:(fun (_, v) -> Val.data v) in
-        let assembled =
+        let cat =
           match endian with
-          | LittleEndian -> List.reduce datas ~f:(fun lo hi -> WordSet.concat hi lo)
-          | BigEndian -> List.reduce datas ~f:WordSet.concat
+          | LittleEndian -> fun lo (_, v) -> WordSet.concat (Val.data v) lo
+          | BigEndian -> fun hi (_, v) -> WordSet.concat hi (Val.data v)
         in
-        Option.map assembled ~f:(fun data -> Val.create data endian)
+        Some (Val.create (List.fold rest ~init:(Val.data first_v) ~f:cat) endian)
       | _ -> None
 
 (* The starts a key claims, as a grid step (0: the one start [lo]): a
@@ -745,12 +744,22 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
         else None)
   in
   let total = if equal qs 0L then 1L else succ (unsigned_div (sub qhi qlo) qs) in
-  match Option.all (List.map cells ~f:claim) with
-  | Some claims
-    when equal total (List.fold claims ~init:0L ~f:(fun a (_, n) -> add a n)) ->
-    List.filter_map claims ~f:(fun (v, n) -> Option.some_if (compare n 0L > 0) v)
-    |> List.reduce ~f:Val.join
-    |> (function Some v -> v | None -> Val.top i)
+  (* One pass: stop at the first cell off the grid; join the claiming
+     cells' values in cell order. *)
+  let rec go count joined = function
+    | [] -> if equal count total then Some joined else None
+    | cell :: rest -> (
+      match claim cell with
+      | None -> None
+      | Some (v, n) ->
+        let joined =
+          if compare n 0L > 0 then
+            Some (match joined with None -> v | Some j -> Val.join j v)
+          else joined in
+        go (add count n) joined rest)
+  in
+  match go 0L None cells with
+  | Some (Some v) -> v
   | _ -> Val.top i
 
 (* The last byte a [bits]-wide read at point [klo] covers. *)
@@ -824,9 +833,13 @@ let containing_cell ((bits, endian) : Val.idx) (k : Key.t)
               (Val.create
                  (WordSet.extract ~hi:(lo + bits - 1) ~lo (Val.data v))
                  endian) in
-    (match List.filter cands ~f:overlaps with
-     | [ one ] -> contains one
-     | _ -> None)
+    let rec sole found = function
+      | [] -> Option.bind found ~f:contains
+      | cell :: rest ->
+        if not (overlaps cell) then sole found rest
+        else if Option.is_some found then None
+        else sole (Some cell) rest in
+    sole None cands
 
 (* Values stored at a key: an assembly of narrower cells covering a
    point read exactly, a single containing wider cell it starts inside,
