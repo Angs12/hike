@@ -92,7 +92,7 @@ let[@inline] mkzw (z : Z.t) (w : int) (s : bool) : t =
 
 let[@inline] mkz (z : Z.t) (w : int) : t = mkzw z w false
 
-let of_z (z : Z.t) (w : int) : t = mkzw z w false
+let of_z = mkz
 
 (* The int64 lane serves every operation at [w <= 64] whose operands
    carry no [Big] (a [Big] operand has a mismatched width). *)

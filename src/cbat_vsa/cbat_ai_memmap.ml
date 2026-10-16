@@ -54,7 +54,6 @@ module Val : sig
 
   val data : t -> WordSet.t
 
-  val idx_equal : idx -> idx -> bool
 
   val is_top : t -> bool
   val is_bottom : t -> bool
@@ -105,9 +104,6 @@ end = struct
 
   let get_idx (v : t) : idx = WordSet.bitwidth v.data, v.endian
 
-  let idx_equal (w1, e1 : idx) (w2, e2 : idx) : bool =
-    w1 = w2 && (w1 <= addressable_width || Bitvector.compare_endian e1 e2 = 0)
-
   let lift_in (f : WordSet.t -> 'a) (v : t) : 'a = f v.data
 
   let lift (f : WordSet.t -> WordSet.t) (v : t) : t = {data = lift_in f v; endian = v.endian}
@@ -126,12 +122,12 @@ end = struct
 
   
   let equal v1 v2 =
-    if idx_equal (get_idx v1) (get_idx v2)
+    if Idx.equal (get_idx v1) (get_idx v2)
     then WordSet.equal v1.data v2.data
     else false
 
   let precedes v1 v2 =
-    if idx_equal (get_idx v1) (get_idx v2)
+    if Idx.equal (get_idx v1) (get_idx v2)
     then WordSet.precedes v1.data v2.data
     else false
 
@@ -139,7 +135,7 @@ end = struct
      bottom/top at the max width. *)
   let lift_idx ~(mismatch : int -> WordSet.t)
       (op : WordSet.t -> WordSet.t -> WordSet.t) (v1 : t) (v2 : t) : t =
-    if idx_equal (get_idx v1) (get_idx v2)
+    if Idx.equal (get_idx v1) (get_idx v2)
     then {data = op v1.data v2.data; endian = v1.endian}
     else {data = mismatch (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
           endian = v1.endian}
@@ -204,14 +200,6 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
   let op_at_seq op (sz, e : idx) (v1 : t) (v2 : t) : WordSet.t seq =
     let sz1, _ = get_idx v1 in
     let sz2, _ = get_idx v2 in
-    if
-      sz1 = sz && sz2 = sz
-      && Bitvector.compare_endian e v1.endian = 0
-      && Bitvector.compare_endian e v2.endian = 0
-    then
-      (* Same width: direct. *)
-      Seq.singleton (op v1.data v2.data)
-    else
     let seq1 = cast_seq (sz, e) v1 in
     let seq2 = cast_seq (sz, e) v2 in
     let seq_len = Hike_stack_bounds.cdiv (max sz1 sz2) sz in
@@ -747,7 +735,7 @@ let read_cells ((bits, endian) as i : Val.idx) (k : Key.t)
   let claim ((c, v) : Key.t * Val.t) : (Val.t * int64) option =
     let cbits, cendian = Val.get_idx v in
     let value =
-      if Int.equal cbits bits && Val.idx_equal (cbits, cendian) i then Some v
+      if Int.equal cbits bits && Val.Idx.equal (cbits, cendian) i then Some v
       else if cbits > bits && Bitvector.compare_endian cendian endian = 0 then
         let lo = match endian with LittleEndian -> 0 | BigEndian -> cbits - bits in
         Some (Val.create (WordSet.extract ~hi:(lo + bits - 1) ~lo (Val.data v)) endian)
