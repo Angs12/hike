@@ -976,10 +976,12 @@ let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
    elements, each read by the forward load and dropped iff its value, on
    the constraint's own origin, misses [produced].  [None] when nothing is
    excluded, or everything is (the leaf rule's identity). *)
-let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
+let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
     ~(endian : endian) ~(size : Size.t) (produced : wordset) : wordset option =
   let bits = Size.in_bits size in
-  match mem, denote_imm_exp addr env with
+  let denoted =
+    match denoted with Some d -> d | None -> denote_imm_exp addr env in
+  match mem, denoted with
   | Bil.Var m, Ok aws
     when bits mod 8 = 0 && WordSet.bitwidth produced = bits
          && not (WordSet.is_top aws || WordSet.is_infinite aws || WordSet.is_bottom aws) -> (
@@ -997,17 +999,36 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         (* The singleton rule: the address value of the one-element
            piece [p]; a known read whose value, on this constraint's own
            origin, misses [produced], drops its address. *)
-        let singleton_keep line (p : Cbat_clp.t) : bool =
+        let drops (v : wordset) : bool =
+          Option.equal Hike_origin.equal (WordSet.origin v)
+            (WordSet.origin produced)
+          && Cbat_word.is_zero (WordSet.cardinality (WordSet.meet v produced)) in
+        let read_image = image_point_reader ~endian ~bits mv in
+        (* An image word's verdict depends on its value alone. *)
+        let image_drops : (int64, bool) Hashtbl.t = Hashtbl.create (module Int64) in
+        let image_keep (raw : int64) : bool =
+          not
+            (Hashtbl.find_or_add image_drops raw ~default:(fun () ->
+                 drops
+                   (WordSet.singleton
+                      (Cbat_word.of_word (Word.of_int64 ~width:bits raw))))) in
+        let general_keep line (p : Cbat_clp.t) : bool =
           let one =
             match line with
             | Hike_origin.Stack -> WordSet.stack_word p
             | _ -> WordSet.of_clp p in
-          let v = load_value ~addr:one ~endian ~bits mv in
-          not
-            (Option.equal Hike_origin.equal (WordSet.origin v)
-               (WordSet.origin produced)
-             && Cbat_word.is_zero
-                  (WordSet.cardinality (WordSet.meet v produced))) in
+          not (drops (load_value ~addr:one ~endian ~bits mv)) in
+        let singleton_keep line (p : Cbat_clp.t) : bool =
+          let point =
+            match line, Cbat_clp.min_elem p with
+            | Hike_origin.Stack, _ | _, None -> None
+            | _, Some x when Cbat_word.bitwidth x <> 64 -> None
+            | _, Some x ->
+              Base.Option.bind (Cbat_word.to_int64_opt x)
+                ~f:(read_image ~cell_free:false) in
+          match point with
+          | Some raw -> image_keep raw
+          | None -> general_keep line p in
         (* The read-start ranges a covered element's read can touch, as
            the element-level tests build them: the same-line cell hulls
            each shifted back by the read width (the span prefilter is
@@ -1084,6 +1105,81 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
            whose coverage yields no ranges is kept whole ([`Keep`], the
            sound identity). *)
         let enum_bound = 4096 in
+        (* The coverage runs as integer progressions (low, step, count,
+           span free of stored cells), for 64-bit addresses below 2^61
+           off the stack line; [None] sends the partition to the word
+           path. *)
+        let int_runs line (small : Cbat_clp.t list) ~(width : int) :
+            (int * int * int * int * bool) list option =
+          let limit = Stdlib.Int64.shift_left 1L 61 in
+          let small_int w =
+            match Cbat_word.to_int64_opt w with
+            | Some v when Stdlib.Int64.compare v 0L >= 0
+                          && Stdlib.Int64.compare v limit < 0 ->
+              Some (Stdlib.Int64.to_int v)
+            | _ -> None in
+          let run piece =
+            match
+              Cbat_clp.min_elem piece, Cbat_clp.max_elem piece,
+              small_int (Cbat_clp.cardinality piece)
+            with
+            | Some lo_w, Some hi_w, Some card ->
+              (match small_int lo_w, small_int hi_w with
+               | Some lo, Some hi ->
+                 let step = if card = 1 then 1 else
+                     Option.value (small_int (Cbat_clp.step_of piece)) ~default:0 in
+                 if step > 0 && lo + (card - 1) * step = hi then
+                   let last = Cbat_word.of_int ~width (hi + nb - 1) in
+                   Some (lo, step, card, hi,
+                         not (Mem.has_cell_in mv ~origin:Hike_origin.Abs
+                                ~lo:lo_w ~hi:last))
+                 else None
+               | _ -> None)
+            | _ -> None in
+          match line with
+          | Hike_origin.Stack -> None
+          | _ when width <> 64 || bits > 64 -> None
+          | _ ->
+            let runs =
+              List.concat_map small ~f:(fun h ->
+                  List.map (Cbat_clp.split_wrapped h) ~f:run) in
+            if List.for_all runs ~f:Option.is_some then
+              Some (List.filter_map runs ~f:Fn.id)
+            else None in
+        (* The ordered union of the runs' addresses that survive the
+           singleton rule, each read once. *)
+        let sweep_runs line runs : Cbat_word.t list =
+          let runs = Array.of_list runs in
+          let k = Array.length runs in
+          let idx = Array.create ~len:k 0 in
+          let kept = Stdlib.ref [] in
+          let continue = Stdlib.ref true in
+          while !continue do
+            let m = Stdlib.ref Stdlib.max_int in
+            for j = 0 to k - 1 do
+              let lo, step, card, _, _ = runs.(j) in
+              if idx.(j) < card then m := Int.min !m (lo + idx.(j) * step)
+            done;
+            if !m = Stdlib.max_int then continue := false
+            else begin
+              let m = !m in
+              let free = Stdlib.ref false in
+              for j = 0 to k - 1 do
+                let lo, step, card, hi, span_free = runs.(j) in
+                if span_free && lo <= m && m <= hi then free := true;
+                if idx.(j) < card && lo + idx.(j) * step = m then
+                  idx.(j) <- idx.(j) + 1
+              done;
+              let keep =
+                match read_image ~cell_free:!free (Stdlib.Int64.of_int m) with
+                | Some raw -> image_keep raw
+                | None ->
+                  general_keep line
+                    (Cbat_clp.singleton (Cbat_word.of_int ~width:64 m)) in
+              if keep then kept := Cbat_word.of_int ~width:64 m :: !kept
+            end
+          done;
+          List.rev !kept in
         let partition (line : Hike_origin.t) (p : Cbat_clp.t)
             ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) ~(last : Cbat_word.t) =
           let hits =
@@ -1107,17 +1203,20 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                   List.concat_map qs ~f:(fun q ->
                       if Cbat_clp.is_bottom (Cbat_clp.intersection q h) then [ q ]
                       else subtract_run q h)) in
-            (* Coverage ranges may overlap: merge their ordered grids
-               before reading each covered address once. *)
-            let covered =
-              List.concat_map small ~f:(fun h ->
-                  List.map (Cbat_clp.split_wrapped h) ~f:Cbat_clp.iter)
-              |> Cbat_vsa_utils.merge_balanced
-                   ~merge:(Cbat_vsa_utils.merge_dedup ~compare:Cbat_word.compare) in
-            let kept =
-              List.filter covered ~f:(fun x ->
-                  singleton_keep line (Cbat_clp.singleton x)) in
             let width = Cbat_word.bitwidth hi in
+            let kept =
+              match int_runs line small ~width with
+              | Some runs -> sweep_runs line runs
+              | None ->
+                (* Coverage ranges may overlap: merge their ordered grids
+                   before reading each covered address once. *)
+                let covered =
+                  List.concat_map small ~f:(fun h ->
+                      List.map (Cbat_clp.split_wrapped h) ~f:Cbat_clp.iter)
+                  |> Cbat_vsa_utils.merge_balanced
+                       ~merge:(Cbat_vsa_utils.merge_dedup ~compare:Cbat_word.compare) in
+                List.filter covered ~f:(fun x ->
+                    singleton_keep line (Cbat_clp.singleton x)) in
             let kept_runs =
               Cbat_clp.Exact.to_pieces (Cbat_clp.Exact.of_sorted_list ~width kept) in
             let parts =
@@ -1148,6 +1247,18 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         if WordSet.is_bottom kept || WordSet.equal kept aws then None else Some kept
     | Type.Imm _ | Type.Unk -> None)
   | _ -> None
+
+(* Whether evaluating [e] reads memory (a load, or a memory-valued
+   subterm). *)
+let rec reads_memory (e : exp) : bool =
+  match e with
+  | Bil.Var v -> (match Var.typ v with Type.Mem _ -> true | _ -> false)
+  | Bil.Int _ -> false
+  | Bil.Load _ | Bil.Store _ | Bil.Unknown _ -> true
+  | Bil.BinOp (_, a, b) | Bil.Concat (a, b) -> reads_memory a || reads_memory b
+  | Bil.UnOp (_, a) | Bil.Cast (_, _, a) | Bil.Extract (_, _, a) -> reads_memory a
+  | Bil.Ite (c, t, f) -> reads_memory c || reads_memory t || reads_memory f
+  | Bil.Let (_, a, b) -> reads_memory a || reads_memory b
 
 let rec constrain_operands ~(env : AI.t)
     ?(cells : pending list ref = ref [])
@@ -1217,16 +1328,25 @@ let rec constrain_operands ~(env : AI.t)
      | Ok _ | Error _ -> env)
   | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
   | Bil.Load (m, a, en, s) ->
-    let addr_cstr = load_address_constraint ~env ~mem:m ~addr:a ~endian:en ~size:s produced in
+    (* An address that reads no memory denotes the same before and after
+       the cell step (which only writes the memory), so one denotation
+       serves the whole arm. *)
+    let denoted = denote_imm_exp a env in
+    let stable = not (reads_memory a) in
+    let addr_cstr =
+      load_address_constraint ~denoted ~env ~mem:m ~addr:a ~endian:en ~size:s
+        produced in
     (* The cell fact meets the env's memory and threads to the store
        that wrote it; the entry carries the touched byte range (the
        address denotation expanded by the read size) and the read's
        endianness, so the store match compares the read's whole
        shape. *)
-    let env = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
+    let env =
+      constrain_cell_on_trace ~denoted ~landmarks ~env ~mem:m ~addr:a ~size:s
+        ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       (match Var.typ mv, denote_imm_exp a env with
+       (match Var.typ mv, if stable then denoted else denote_imm_exp a env with
         | Type.Mem (ai, asz), Ok aws ->
           let mv_mem = AI.find_memory (mem_idx ai asz) env mv in
           List.iter (backward_cell_keys mv_mem aws ~bytes:(Size.in_bytes s))
@@ -1379,14 +1499,16 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending list ref)
    concrete hulls; identity on doubt.  Each fan-out key runs the one
    leaf rule; the write-back is the piecewise meet whose empty piece
    keeps its cell. *)
-and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
+and constrain_cell_on_trace ?denoted ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
     ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
   match mem with
   | Bil.Var m ->
     (match Var.typ m with
      | Type.Mem (addr_i, addressable_size) ->
        let k = mem_idx addr_i addressable_size in
-       (match denote_imm_exp addr env with
+       (match
+          (match denoted with Some d -> d | None -> denote_imm_exp addr env)
+        with
         | Error _ -> env
         | Ok addr_ws ->
           let res_size = Size.in_bits size in

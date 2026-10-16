@@ -211,8 +211,8 @@ let with_images (imgs : section_image list) (f : unit -> 'a) : 'a =
 
 (* The image's [bits]-bit word at byte offset [off], assembled in the
    load's endianness; [None] when the bytes leave the array. *)
-let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
-    ~(bits : int) : Cbat_word.t option =
+let image_raw (bytes : Bytes.t) (off : int) ~(endian : endian)
+    ~(bits : int) : int64 option =
   let nb = bits / 8 in
   if
     bits <= 0 || bits > 64 || bits mod 8 <> 0 || off < 0
@@ -220,23 +220,39 @@ let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
   then None
   else
     let v =
-      let rec go i acc =
-        if i >= nb then acc
-        else
-          let b = Stdlib.Int64.of_int (Char.to_int (Bytes.get bytes (off + i))) in
-          let acc' =
-            match endian with
-            | LittleEndian ->
-              Stdlib.Int64.logor acc (Stdlib.Int64.shift_left b (8 * i))
-            | BigEndian ->
-              Stdlib.Int64.logor acc
-                (Stdlib.Int64.shift_left b (8 * (nb - 1 - i)))
-          in
-          go (i + 1) acc'
-      in
-      go 0 0L
+      let le = match endian with LittleEndian -> true | BigEndian -> false in
+      match nb with
+      | 1 -> Stdlib.Int64.of_int (Stdlib.Bytes.get_uint8 bytes off)
+      | 2 ->
+        Stdlib.Int64.of_int
+          (if le then Stdlib.Bytes.get_uint16_le bytes off
+           else Stdlib.Bytes.get_uint16_be bytes off)
+      | 4 ->
+        let x =
+          if le then Stdlib.Bytes.get_int32_le bytes off
+          else Stdlib.Bytes.get_int32_be bytes off in
+        Stdlib.Int64.logand (Stdlib.Int64.of_int32 x) 0xFFFF_FFFFL
+      | 8 ->
+        if le then Stdlib.Bytes.get_int64_le bytes off
+        else Stdlib.Bytes.get_int64_be bytes off
+      | _ ->
+        let rec go i acc =
+          if i >= nb then acc
+          else
+            let b = Stdlib.Int64.of_int (Char.to_int (Bytes.get bytes (off + i))) in
+            let sh = match endian with
+              | LittleEndian -> 8 * i
+              | BigEndian -> 8 * (nb - 1 - i) in
+            go (i + 1) (Stdlib.Int64.logor acc (Stdlib.Int64.shift_left b sh))
+        in
+        go 0 0L
     in
-    Some (Cbat_word.of_int64 ~width:bits v)
+    Some v
+
+let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
+    ~(bits : int) : Cbat_word.t option =
+  Option.map (image_raw bytes off ~endian ~bits) ~f:(fun v ->
+      Cbat_word.of_int64 ~width:bits v)
 
 (* An address set the image rule can enumerate exactly. *)
 let image_load_card_cap = 64
@@ -282,6 +298,34 @@ let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
     Some (WordSet.of_exact words)
   with Unreadable -> None
 
+let image_holding (img : section_image) ~(lo : int64) ~(last : int64) : bool =
+  Stdlib.Int64.unsigned_compare lo img.img_lo >= 0
+  && Stdlib.Int64.unsigned_compare last img.img_hi <= 0
+
+(* The one image that backs the whole read span [lo_a, hi_a + nb - 1]
+   when no stored cell intersects the access extent: [read] then runs on
+   it.  [None] when the span wraps, no image holds it, or a cell
+   intersects it. *)
+let in_one_image ~(find : lo:int64 -> last:int64 -> section_image option)
+    ~(mn_w : Cbat_word.t Lazy.t)
+    ~(origin : Hike_origin.t option) ~(lo_a : int64) ~(hi_a : int64)
+    ?(cell_free = false) ~(nb : int) (mv : Mem.t)
+    ~(read : section_image -> 'a option) : 'a option =
+  let last = Stdlib.Int64.add hi_a (Stdlib.Int64.of_int (nb - 1)) in
+  if Stdlib.Int64.unsigned_compare last hi_a < 0 then None
+  else
+    match find ~lo:lo_a ~last with
+    | None -> None
+    | Some img ->
+      let last_w = Cbat_word.of_int64 ~width:64 last in
+      if
+        (not cell_free)
+        && Mem.has_cell_in mv
+             ~origin:(WordSet.key_line (Option.value origin ~default:WordSet.Origin.Abs))
+             ~lo:(Lazy.force mn_w) ~hi:last_w
+      then None
+      else read img
+
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     (mv : Mem.t) : wordset option =
   (* A live (non-bottom) memory reads top where no cell covers the
@@ -298,32 +342,14 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
         match
           Base.Option.bind mn_w ~f:Cbat_word.to_int64_opt, Base.Option.bind mx_w ~f:Cbat_word.to_int64_opt
         with
-        | Some lo_a, Some hi_a -> (
-          let nb = bits / 8 in
-          let last = Stdlib.Int64.add hi_a (Stdlib.Int64.of_int (nb - 1)) in
-          if Stdlib.Int64.unsigned_compare last hi_a < 0 then None
-          else
-            match
-              Base.List.find images
-                ~f:(fun { img_lo; img_hi; _ } ->
-                  Stdlib.Int64.unsigned_compare lo_a img_lo >= 0
-                  && Stdlib.Int64.unsigned_compare last img_hi <= 0)
-            with
-            | None -> None
-            | Some { img_lo; img_bytes; img_slots; _ } ->
-              let last_w =
-                Cbat_word.of_int64 ~width:64 last
-              in
-              if
-                Mem.has_cell_in mv
-                  ~origin:
-                    (WordSet.key_line
-                       (Option.value (WordSet.origin addr)
-                          ~default:WordSet.Origin.Abs))
-                  ~lo:(Option.value_exn mn_w) ~hi:last_w
-              then None
-              else if
-                Cbat_word.gt_int (WordSet.cardinality addr) image_load_card_cap
+        | Some lo_a, Some hi_a ->
+          in_one_image
+            ~find:(fun ~lo ~last ->
+                Base.List.find images ~f:(image_holding ~lo ~last))
+            ~mn_w:(Lazy.from_val (Option.value_exn mn_w))
+            ~origin:(WordSet.origin addr) ~lo_a ~hi_a ~nb:(bits / 8) mv
+            ~read:(fun { img_lo; img_bytes; img_slots; _ } ->
+              if Cbat_word.gt_int (WordSet.cardinality addr) image_load_card_cap
               then None
               else
                 (* Every enumerated address lies inside the hull, whose
@@ -332,6 +358,35 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
                 read_image_words ~img_bytes ~img_lo ~slots:img_slots
                   ~endian ~bits addr)
         | _ -> None
+
+(* The reader of [section_image_load]'s raw image word at one plain
+   address for a fixed memory and read shape: [None] where that arm
+   refuses.  The point twin of the general read: it skips building the
+   singleton set, and remembers the image the last read hit.  [cell_free]
+   asserts that no stored cell touches the read's extent. *)
+let image_point_reader ~(endian : endian) ~(bits : int) (mv : Mem.t) :
+    cell_free:bool -> int64 -> int64 option =
+  let images = !section_images_ref in
+  if Mem.is_bottom mv || bits <= 0 || bits > 64 || List.is_empty images then
+    fun ~cell_free:_ _ -> None
+  else
+    let hint = ref (List.hd_exn images) in
+    let find ~lo ~last =
+      if image_holding !hint ~lo ~last then Some !hint
+      else
+        match Base.List.find images ~f:(image_holding ~lo ~last) with
+        | Some img as r -> hint := img; r
+        | None -> None in
+    fun ~cell_free a ->
+      in_one_image ~find
+        ~mn_w:(lazy (Cbat_word.of_int64 ~width:64 a))
+        ~origin:None ~lo_a:a ~hi_a:a ~cell_free ~nb:(bits / 8) mv
+        ~read:(fun { img_lo; img_bytes; img_slots; _ } ->
+          if Core.Set.mem img_slots a then None
+          else
+            image_raw img_bytes
+              (Stdlib.Int64.to_int (Stdlib.Int64.sub a img_lo))
+              ~endian ~bits)
 
 (* The value a read of [bits] at [addr] produces in [mv]: the image
    words where one image backs the whole set, else the join of the cells

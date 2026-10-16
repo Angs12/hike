@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-111`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-112`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -101,6 +101,7 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-109 | the AND-mask pre-image of `x land k <= vhi` keeps every satisfying `x`: the upper bound is the largest submask of `k` at most `vhi` with every unmasked bit set (`(x&1)<=2` keeps `0xff`; `(x&5)<=2` keeps `0xfb`, drops `0xfc`) | restore the `vhi lor lnot k` bound in `operand_constraints` | `0xff` is dropped from `(x&1)<=2` |
 | BK-110 | `~(a \| b)`: `complete_cond` pushes NOT through OR (De Morgan), and the `constrain_operands` OR=false row constrains both operands — an edge `~(CF \| ZF)` drives CF and ZF to `{0}` on both the pushed and the raw form | restore `negated_cond`'s `_ -> Bil.UnOp (Bil.NOT, e)` for OR and drop the OR=false row | CF and ZF stay `{0,1}` (no refinement) |
 | BK-111 | a seedless observer (disabled cond with no constrained var) skips the walk and builds no def-prefix chain; a cond bounding a var does | drop the empty-seed guard in `acquire_unsat` | `BK-111.seedless` FAILs (the prefix chain is cached) |
+| BK-112 | the per-address image read agrees with the general read: endianness, a loader-owned slot (kept as unknown) and a stored cell over the image decide which of {0, 8} survive the guard `x = 20`. | In `cbat_backward.ml`, make the point read ignore the load endianness or the stored-cell guard. | the matching BK-112 case FAILs (the survivor pair flips). |
 | BK-87 | A4 table — syntactic `x` cast-UNSIGNED: the compared var is defined by `Cast(UNSIGNED,64,t)`; the exit edge stays live and the head cell keeps the cast's reachable values. | textually invert the pinned contract in `test/unit/test_backward.ml` | pin FAILs under that inversion (re-demonstrated by review) |
 | BK-88 | A4 table — syntactic `x` extract-hull: the compared var is `Extract(31,16,t)` (the top half-word); the exit edge stays live. | textually invert the pinned contract in `test/unit/test_backward.ml` | pin FAILs under that inversion (re-demonstrated by review) |
 | BK-89 | A4 table — range `x` cast-UNSIGNED: the guard's operand is `Cast(UNSIGNED,64,t)`. | textually invert the pinned contract in `test/unit/test_backward.ml` | pin FAILs under that inversion (re-demonstrated by review) |

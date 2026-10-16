@@ -2034,6 +2034,60 @@ let tests : unit Alcotest.test list =
         check "BK-111.seeded"
           (observe
              (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (s_r32 5))))));
+
+    (* The singleton rule reads each covered address through the point
+       path; it must agree with the general read on endianness, loader
+       slots and overlay precedence. *)
+    pin "BK-112"
+      "the per-address image read agrees with the general read: endianness, \
+       a loader-owned slot (kept as unknown) and a stored cell over the \
+       image decide which of {0, 8} survive the guard x = 20"
+      (fun () ->
+        let survivors ~tag ~endian ~slots ~store second =
+          let m = memv ("w112_m" ^ tag) in
+          let i = v64 ("w112_i" ^ tag) in
+          let x = wr_v32 ("w112_x" ^ tag) and zf = v1 ("w112_zf" ^ tag) in
+          let img_bytes = Bytes.make 16 '\000' in
+          Bytes.set img_bytes 0 (Char.chr 20);
+          (match second with
+           | `Le20 -> Bytes.set img_bytes 8 (Char.chr 20)
+           | `Be20 -> Bytes.set img_bytes 11 (Char.chr 20)
+           | `Zero -> ());
+          let images =
+            [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x400FL; img_bytes;
+                img_slots = Core.Int64.Set.of_list slots } ] in
+          let addr k = Bil.Int (Cbat_word.to_word (w64 k)) in
+          let out =
+            Vsa.with_images images (fun () ->
+                wr_refine ("w112" ^ tag) m zf
+                  ((if store then
+                      [ Def.create m
+                          (Bil.Store (Bil.Var m, addr 0x4008,
+                                      Bil.Int (Cbat_word.to_word (w32 7)),
+                                      LittleEndian, `r32)) ]
+                    else [])
+                   @ [ Def.create i
+                         (Bil.BinOp (Bil.AND, Bil.Var (v64 "RDI"), addr 8));
+                       Def.create x
+                         (Bil.Load (Bil.Var m,
+                                    Bil.BinOp (Bil.PLUS, addr 0x4000, Bil.Var i),
+                                    endian, `r32));
+                       Def.create zf
+                         (Bil.BinOp (Bil.EQ, Bil.Var x,
+                                     Bil.Int (Cbat_word.to_word (w32 20)))) ]))
+          in
+          let iv = AI.find_word 64 out (Var.base i) in
+          (Ws.elem (w64 0) iv, Ws.elem (w64 8) iv) in
+        let pair = Alcotest.(pair bool bool) in
+        Alcotest.check pair "BK-112.little" (true, false)
+          (survivors ~tag:"a" ~endian:LittleEndian ~slots:[] ~store:false `Be20);
+        Alcotest.check pair "BK-112.big" (false, true)
+          (survivors ~tag:"b" ~endian:BigEndian ~slots:[] ~store:false `Be20);
+        Alcotest.check pair "BK-112.slot" (true, true)
+          (survivors ~tag:"c" ~endian:LittleEndian ~slots:[ 0x4008L ] ~store:false
+             `Zero);
+        Alcotest.check pair "BK-112.cell-wins" (true, false)
+          (survivors ~tag:"d" ~endian:LittleEndian ~slots:[] ~store:true `Le20));
   ]
 
 let () = run "backward" tests
