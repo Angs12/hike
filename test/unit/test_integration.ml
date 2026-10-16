@@ -35,6 +35,9 @@ let vsk_diamond () : sub term * tid * tid * tid * var =
 let lw_var = v64 "lm_word"
 let lw = Cbat_landmarks.Word lw_var
 
+let observe_meet lm ~key ~p ~cstr =
+  Cbat_landmarks.observe_unsat lm ~key ~p ~cstr ~m:(Ws.meet p cstr)
+
 let tests : unit Alcotest.test list =
   [
     (* R10b: every elementwise AND of enumerated operands lands in the
@@ -1369,7 +1372,7 @@ let tests : unit Alcotest.test list =
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:lw
+              (observe_meet lm ~key:lw
                  ~p:(Ws.singleton (w64 0))
                  ~cstr:(Ws.singleton (Cbat_word.of_int64 Stdlib.Int64.min_int))));
         check "LM distance: the 2^63 difference reads the cap"
@@ -1390,7 +1393,7 @@ let tests : unit Alcotest.test list =
         let p = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 16)) in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:lw ~p
+              (observe_meet lm ~key:lw ~p
                  ~cstr:(Ws.singleton (w64 4))));
         check
           "LM acquisition: a stack-symbolic value against a plain word is no landmark"
@@ -1405,7 +1408,7 @@ let tests : unit Alcotest.test list =
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:lw
+              (observe_meet lm ~key:lw
                  ~p:(Ws.singleton (w64 (-99999)))
                  ~cstr:(Ws.singleton (w64 0))));
         check_bound "LM distance: the recorded distance is 99999"
@@ -1460,12 +1463,12 @@ let tests : unit Alcotest.test list =
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             (* p = [0,100] narrowed to [50,100]: a lower landmark at 49. *)
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:lw
+              (observe_meet lm ~key:lw
                  ~p:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 100)))
                  ~cstr:(Ws.of_clp (Clp.interval ~width:32 (w32 50) (w32 100))));
             (* A closer narrowing on the same boundary: [60,100]. *)
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:lw
+              (observe_meet lm ~key:lw
                  ~p:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 100)))
                  ~cstr:(Ws.of_clp (Clp.interval ~width:32 (w32 60) (w32 100)))));
         (* The first reading: 10 (0 -> 49 is 49 steps? distance p_min=0 to

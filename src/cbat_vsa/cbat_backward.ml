@@ -153,49 +153,48 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
   if WordSet.bitwidth a_ws <> width || WordSet.bitwidth b_ws <> width
   then None, None
   else
+    (* The extrema pairs, forced by the arms that read them. *)
+    let v_extrema = lazy (WordSet.min_elem cstr, WordSet.max_elem cstr) in
+    let a_extrema = lazy (WordSet.min_elem a_ws, WordSet.max_elem a_ws) in
+    let b_extrema = lazy (WordSet.min_elem b_ws, WordSet.max_elem b_ws) in
+    let b_single =
+      lazy (match Lazy.force b_extrema with
+          | Some k, Some k' when Cbat_word.(=) k k' -> Some k
+          | _ -> None) in
     let wrap_limit (k : Cbat_word.t) : Cbat_word.t = Cbat_word.div (Cbat_word.ones width) k in
     let operand_bounded (limit : Cbat_word.t) : bool =
-      match WordSet.max_elem a_ws with
+      match snd (Lazy.force a_extrema) with
       | Some m -> Cbat_word.(<=) m limit
       | None -> false in
     let ceil_div (k : Cbat_word.t) (x : Cbat_word.t) : Cbat_word.t =
       let q = Cbat_word.div x k in
       let r = Cbat_word.modulo x k in
       if Cbat_word.is_zero r then q else Cbat_word.succ q in
-    (* The constraint's and the right operand's extrema, computed
-       once; every arm opens with the pair it needs. *)
-    let v_extrema = (WordSet.min_elem cstr, WordSet.max_elem cstr) in
-    let a_extrema = (WordSet.min_elem a_ws, WordSet.max_elem a_ws) in
-    let b_extrema = (WordSet.min_elem b_ws, WordSet.max_elem b_ws) in
-    let b_single =
-      match b_extrema with
-      | Some k, Some k' when Cbat_word.(=) k k' -> Some k
-      | _ -> None in
     match op with
     | Bil.PLUS ->
-      (match v_extrema with
+      (match Lazy.force v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (fst b_extrema) (snd b_extrema)
+         let a' = Option.map2 (fst (Lazy.force b_extrema)) (snd (Lazy.force b_extrema))
              ~f:(fun bmin bmax ->
                hull ~wrapping:true width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)) |> Option.join in
-         let b' = Option.map2 (fst a_extrema) (snd a_extrema)
+         let b' = Option.map2 (fst (Lazy.force a_extrema)) (snd (Lazy.force a_extrema))
              ~f:(fun amin amax ->
                hull ~wrapping:true width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)) |> Option.join in
          a', b'
        | _ -> None, None)
     | Bil.MINUS ->
-      (match v_extrema with
+      (match Lazy.force v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (fst b_extrema) (snd b_extrema)
+         let a' = Option.map2 (fst (Lazy.force b_extrema)) (snd (Lazy.force b_extrema))
              ~f:(fun bmin bmax ->
                hull ~wrapping:true width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)) |> Option.join in
-         let b' = Option.map2 (fst a_extrema) (snd a_extrema)
+         let b' = Option.map2 (fst (Lazy.force a_extrema)) (snd (Lazy.force a_extrema))
              ~f:(fun amin amax ->
                hull ~wrapping:true width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)) |> Option.join in
          a', b'
        | _ -> None, None)
     | Bil.TIMES ->
-      (match v_extrema, b_single with
+      (match Lazy.force v_extrema, Lazy.force b_single with
        | (Some vlo, Some vhi), Some k ->
          (match Cbat_word.to_int k with
           | Ok kk when kk > 0 && operand_bounded (wrap_limit k) ->
@@ -206,7 +205,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.LSHIFT ->
-      (match v_extrema, b_extrema with
+      (match Lazy.force v_extrema, Lazy.force b_extrema with
        | (Some vlo, Some vhi), (Some smin, Some smax) ->
          (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
@@ -219,7 +218,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.RSHIFT | Bil.ARSHIFT ->
-      (match v_extrema, b_extrema with
+      (match Lazy.force v_extrema, Lazy.force b_extrema with
        | (Some vlo, Some vhi), (Some smin, Some smax) ->
          (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
@@ -237,7 +236,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.DIVIDE ->
-      (match v_extrema, b_extrema with
+      (match Lazy.force v_extrema, Lazy.force b_extrema with
        | (Some vlo, Some vhi), (Some kmin, Some kmax) ->
          (match Cbat_word.to_int kmin, Cbat_word.to_int kmax with
           | Ok kmin_i, Ok kmax_i when kmin_i > 0 && kmin_i <= kmax_i ->
@@ -254,7 +253,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.SDIVIDE ->
-      (match v_extrema, b_single with
+      (match Lazy.force v_extrema, Lazy.force b_single with
        | (Some vlo, Some vhi), Some k when width <= 32 ->
          (match Cbat_word.to_int k with
           | Ok kk when kk > 0 ->
@@ -277,7 +276,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
          pre-image is exact; AND bounds the operand below by the
          constraint ([x >= x land k]) and above by the largest masked
          value the constraint admits with every unmasked bit set. *)
-      (match b_single with
+      (match Lazy.force b_single with
        | Some k ->
          if Cbat_word.is_zero k then
            (match op with
@@ -293,7 +292,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             | Bil.XOR ->
               Some (WordSet.logxor cstr (WordSet.singleton k)), None
             | Bil.AND ->
-              (match v_extrema with
+              (match Lazy.force v_extrema with
                | Some vlo, Some vhi -> (
                  match
                    hull ~wrapping:false width vlo
@@ -762,8 +761,8 @@ let leaf_meet ~(landmarks : Cbat_landmarks.t) ~(key : Cbat_landmarks.key)
     ~(write : wordset -> 'st -> 'st) (cstr : wordset) (st : 'st) : 'st =
   if WordSet.bitwidth cur <> WordSet.bitwidth cstr then st
   else begin
-    ignore (Cbat_landmarks.observe_unsat landmarks ~key ~p:cur ~cstr);
     let m = meet cur cstr in
+    ignore (Cbat_landmarks.observe_unsat landmarks ~key ~p:cur ~cstr ~m);
     if Cbat_word.is_zero (WordSet.cardinality m) then st
     else if (not (WordSet.precedes m cur)) || WordSet.equal m cur then st
     else write m st
@@ -1482,12 +1481,15 @@ type walk_state = {
    fire on the way, so its constraints apply as given and no path is
    claimed dead. *)
 type locus = {
-  at_def : post:wordset -> cstr:wordset -> wordset option;
+  at_def : post:(unit -> wordset) -> cstr:wordset -> wordset option;
   invert_mem : pending list -> bool;
   record_output : walk_state -> def term -> wordset -> unit;
-  record_reads : walk_state -> def term -> pending list -> unit;
+  record_reads :
+    walk_state -> def term -> before:pending list -> after:pending list -> unit;
   harvest : walk_state -> base:AI.t -> env:AI.t -> rhs:exp -> unit;
-  replay : walk_state -> entry:AI.t -> blk term -> AI.t -> AI.t;
+  replay :
+    walk_state -> entry:AI.t -> prefix:(def term * AI.t * AI.t) list ->
+    AI.t -> AI.t;
 }
 
 (* A word fact through the one leaf rule's write discipline: an empty
@@ -1539,7 +1541,7 @@ let meet_cell ~(landmarks : Cbat_landmarks.t option) (st : AI.t) (p : pending) :
    the entry; a fact equal to the replayed value writes nothing. *)
 let writer_locus ~(on_write : write_site -> unit) : locus =
   let at_def ~post ~cstr =
-    let m = WordSet.meet cstr post in
+    let m = WordSet.meet cstr (post ()) in
     if Cbat_word.is_zero (WordSet.cardinality m) then None else Some m
   in
   let invert_mem (ps : pending list) =
@@ -1549,7 +1551,14 @@ let writer_locus ~(on_write : write_site -> unit) : locus =
   let record_output (st : walk_state) (d : def term) (c : wordset) =
     st.outputs := Core.Map.set !(st.outputs) ~key:(Term.tid d) ~data:c
   in
-  let record_reads (st : walk_state) (d : def term) (ps : pending list) =
+  let record_reads (st : walk_state) (d : def term) ~(before : pending list)
+      ~(after : pending list) =
+    (* The cells this def's loads pushed. *)
+    let ps =
+      List.filter after ~f:(fun p ->
+          match p with
+          | PC _ -> not (List.exists before ~f:(phys_equal p))
+          | PW _ -> false) in
     if not (List.is_empty ps) then
       st.reads := Core.Map.update !(st.reads) (Term.tid d)
           ~f:(fun old -> ps @ Option.value old ~default:[])
@@ -1569,7 +1578,8 @@ let writer_locus ~(on_write : write_site -> unit) : locus =
                                 | PC _ -> true)
         | _ -> ())
   in
-  let replay (st : walk_state) ~(entry : AI.t) (blk : blk term) (_edge : AI.t) =
+  let replay (st : walk_state) ~(entry : AI.t)
+      ~(prefix : (def term * AI.t * AI.t) list) (_edge : AI.t) =
     (* What no def consumed holds at the block's inputs. *)
     let inputs =
       List.fold !(st.pending) ~init:entry ~f:(fun acc p ->
@@ -1581,12 +1591,13 @@ let writer_locus ~(on_write : write_site -> unit) : locus =
 #endif
             meet_cell ~landmarks:(Some st.landmarks) acc p)
     in
-    Term.enum def_t blk
-    |> Seq.fold ~init:inputs ~f:(fun acc d ->
+    (* A def entered in its cached pre-state keeps the cached post; the
+       first state a meet changes is denoted afresh from there on. *)
+    List.fold_right prefix ~init:inputs ~f:(fun (d, pre, post) acc ->
         let acc =
           List.fold (Core.Map.find_multi !(st.reads) (Term.tid d)) ~init:acc
             ~f:(meet_cell ~landmarks:None) in
-        let acc = denote_def d acc in
+        let acc = if phys_equal acc pre then post else denote_def d acc in
         match Core.Map.find !(st.outputs) (Term.tid d) with
         | Some c ->
           meet_word ~on_write:(fun () -> on_write Output_write) acc (Def.lhs d) c
@@ -1599,9 +1610,42 @@ let observer_locus : locus =
   { at_def = (fun ~post:_ ~cstr -> Some cstr);
     invert_mem = (fun _ -> false);
     record_output = (fun _ _ _ -> ());
-    record_reads = (fun _ _ _ -> ());
+    record_reads = (fun _ _ ~before:_ ~after:_ -> ());
     harvest = (fun _ ~base:_ ~env:_ ~rhs:_ -> ());
-    replay = (fun _ ~entry:_ _ edge -> edge) }
+    replay = (fun _ ~entry:_ ~prefix:_ edge -> edge) }
+
+(* A block's def chain with its pre/post states, positionally, in
+   reverse def order.  It depends only on (block, entry state): the
+   solve ctx caches the last denotation physically. *)
+let cached_prefix
+    (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
+    (blk : blk term) (entry : AI.t) : (def term * AI.t * AI.t) list =
+  let compute () =
+    Term.enum def_t blk
+    |> Seq.fold ~init:(entry, [])
+      ~f:(fun (st, acc) d ->
+          let post = denote_def d st in
+          (post, (d, st, post) :: acc))
+    |> snd
+  in
+  match cache with
+  | Some c ->
+    (match Core.Map.find !c (Term.tid blk) with
+     | Some (e0, pref) when phys_equal e0 entry -> pref
+     | _ ->
+       let pref = compute () in
+       c := Core.Map.set !c ~key:(Term.tid blk) ~data:(entry, pref);
+       pref)
+  | None -> compute ()
+
+(* The block's postcondition from the same fold that fills the prefix
+   cache, so the guard walk does not denote the chain again. *)
+let denote_defs_cached
+    (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
+    (blk : blk term) (entry : AI.t) : AI.t =
+  match cached_prefix (Some cache) blk entry with
+  | [] -> entry
+  | (_, _, post) :: _ -> post
 
 let walk ~(locus : locus)
     ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
@@ -1613,28 +1657,7 @@ let walk ~(locus : locus)
   (* The walked block's IN state, handed in by the caller — no
      solution lookup, no snapshot copy. *)
   let blk_state = entry in
-  (* Each def paired with its pre- and post-state, positionally;
-     reverse def order.  The chain depends only on (block, entry
-     state): the solve ctx caches the last denotation physically. *)
-  let prefixed =
-    let compute () =
-      Term.enum def_t blk
-      |> Seq.fold ~init:(blk_state, [])
-        ~f:(fun (st, acc) d ->
-            let post = denote_def d st in
-            (post, (d, st, post) :: acc))
-      |> snd
-    in
-    match cache with
-    | Some c ->
-      (match Core.Map.find !c (Term.tid blk) with
-       | Some (e0, pref) when phys_equal e0 blk_state -> pref
-       | _ ->
-         let pref = compute () in
-         c := Core.Map.set !c ~key:(Term.tid blk) ~data:(blk_state, pref);
-         pref)
-    | None -> compute ()
-  in
+  let prefixed = cached_prefix cache blk blk_state in
   (* The ONE pending map: the seeds are its word entries (each seed's
      constraint is the edge state's own value for the var); the loads
      push the cell entries. *)
@@ -1666,11 +1689,7 @@ let walk ~(locus : locus)
         (Def.rhs d) cstr'
     in
     (* The cells this def's loads read hold the read constraint here. *)
-    locus.record_reads st d
-      (List.filter !cells ~f:(fun p ->
-           match p with
-           | PC _ -> not (List.exists before ~f:(phys_equal p))
-           | PW _ -> false));
+    locus.record_reads st d ~before ~after:!cells;
     locus.harvest st ~base:ce ~env:env' ~rhs:(Def.rhs d)
   in
   let walk_word_def (d, pre, post) =
@@ -1681,8 +1700,7 @@ let walk ~(locus : locus)
        | Some (PW (_, cstr), rest) ->
          (* The def consumes its var's constraint, whatever it says. *)
          cells := rest;
-         let post_v = AI.find_word w post v in
-         (match locus.at_def ~post:post_v ~cstr with
+         (match locus.at_def ~post:(fun () -> AI.find_word w post v) ~cstr with
           | None ->
             (* The produced value cannot satisfy the constraint: it
                does not hold before this def. *)
@@ -1697,7 +1715,7 @@ let walk ~(locus : locus)
     | Type.Unk -> ()
   in
   List.iter prefixed ~f:walk_word_def;
-  locus.replay st ~entry:blk_state blk env
+  locus.replay st ~entry:blk_state ~prefix:prefixed env
 
 (* The walk's seeds: the cond's own constrained vars — every free var
    the guard bounds.  A seed's constraint is the state's own value for

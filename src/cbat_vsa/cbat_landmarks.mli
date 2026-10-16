@@ -50,10 +50,10 @@ val equal_arm : arm -> arm -> bool
 val head_arm : t -> Tid.t -> arm
 
 (* Record an excluded behavior's boundary at the enclosing head; [true]
-   when a landmark was recorded. *)
+   when a landmark was recorded.  [m] is [meet p cstr]. *)
 val observe_unsat :
   t -> key:key -> p:Cbat_clp_set_composite.t -> cstr:Cbat_clp_set_composite.t ->
-  bool
+  m:Cbat_clp_set_composite.t -> bool
 
 (* Entries recorded for [key] at [head]. *)
 val entries : t -> Tid.t -> key -> lm_entry list

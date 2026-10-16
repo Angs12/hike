@@ -225,9 +225,10 @@ let record_narrowed (t : t) ~(head : Tid.t) ~(key : key)
    different coordinate line is a category mismatch, not a behavior, and
    its "boundary" travels with the state.  Then the discarded region is the
    landmark, whether the meet emptied the prior set or trimmed it.  [true]
-   when one was recorded. *)
+   when one was recorded.  [m] is the caller's [meet p cstr]. *)
 let observe_unsat (t : t) ~(key : key)
-    ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : bool =
+    ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t)
+    ~(m : Cbat_clp_set_composite.t) : bool =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr
   then false
   else
@@ -238,7 +239,6 @@ let observe_unsat (t : t) ~(key : key)
     | Some h ->
       if not (same_line p cstr) then false
       else
-        let m = Cbat_clp_set_composite.meet p cstr in
         if not (Cbat_clp_set_composite.is_bottom m) then
           record_narrowed t ~head:h ~key ~p ~m
         else record_excluded t ~head:h ~key ~p ~cstr

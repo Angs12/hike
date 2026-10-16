@@ -45,7 +45,9 @@ type refine_ctx = {
      per visit instead of once per edge. *)
   rc_post : (AI.t * AI.t) Tid.Map.t ref;
   (* The walked block's def chain with its pre/post states, keyed
-     physically by the entry state the chain was denoted from. *)
+     physically by the entry state the chain was denoted from: the
+     postcondition fold, the writer and the observer all enter with the
+     block's IN state, so one chain serves them. *)
   rc_prefix : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref;
   (* The run's convention facts (Hike_abi is the one home): the sp var
      the walk anchors on, the call-written register lanes, and the

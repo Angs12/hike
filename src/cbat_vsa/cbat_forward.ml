@@ -72,7 +72,7 @@ let denote_jump
        arm. *)
     Option.iter (Core.Map.find disabled (Term.tid jmp))
       ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~entry:env
+        Cbat_backward.acquire_unsat ~entry
           ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
           ~cache:(rctx : Cbat_runctx.refine_ctx).rc_prefix
           ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
@@ -161,7 +161,10 @@ let denote_block
        match Core.Map.find !(rctx.Cbat_runctx.rc_post) source with
        | Some (e0, p0) when phys_equal e0 env -> p0
        | _ ->
-         let p = denote_defs b env in
+         let p =
+           if Core.Map.mem edge_conds source then
+             Cbat_backward.denote_defs_cached rctx.Cbat_runctx.rc_prefix b env
+           else denote_defs b env in
          rctx.Cbat_runctx.rc_post :=
            Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
          p
