@@ -347,6 +347,11 @@ let stack_offset_portions ~(extents : (int64 * int64) list) ~(word : int)
 (* Case 2: a plain address. An unbounded ascending set's minimum names its
    section; the remaining bounded sets split across the data spans,
    with a resolved address basis where one span owns the occupied extent. *)
+(* [x] lies in the unsigned span [lo, hi]. *)
+let in_span ~(lo : int64) ~(hi : int64) (x : int64) : bool =
+  Stdlib.Int64.unsigned_compare lo x <= 0
+  && Stdlib.Int64.unsigned_compare x hi <= 0
+
 let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
     ~(entry : int64) ~(spans : data_span list) ~(basis : int64 option) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
@@ -362,8 +367,7 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
         if Option.is_some basis then
           match
             Base.List.find spans ~f:(fun d ->
-                Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
-                && Stdlib.Int64.unsigned_compare lo d.ds_hi <= 0)
+                in_span ~lo:d.ds_lo ~hi:d.ds_hi lo)
           with
           | Some d ->
             ( None,
@@ -393,8 +397,7 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
            an access reaching one has no conversion proof. *)
         let at_slot (d, plo, phi) =
           Base.List.exists d.ds_slots ~f:(fun s ->
-              Stdlib.Int64.unsigned_compare plo s <= 0
-              && Stdlib.Int64.unsigned_compare s phi <= 0)
+              in_span ~lo:plo ~hi:phi s)
         in
         let elig =
           Option.is_some basis && whole_in_one
@@ -715,8 +718,7 @@ let region_bytes (k : range) : int64 =
 let in_whole_span (whole : data_span list) (s : sec) (pos : int64) : bool =
   match span_of whole s with
   | Some d ->
-    Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
-    && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0
+    in_span ~lo:d.ds_lo ~hi:d.ds_hi pos
   | None -> false
 
 
@@ -730,8 +732,7 @@ let whole_spans_of (spans : data_span list) (bindings : (range * member list) li
         then
           Option.bind (span_of spans k.lo.p_sec)
             ~f:(fun d ->
-              if Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_lo >= 0
-                 && Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_hi <= 0
+              if in_span ~lo:d.ds_lo ~hi:d.ds_hi k.lo.p_pos
               then Some d else None)
         else None)
   in
@@ -829,8 +830,7 @@ let owning_data_binding (tree : data_tree) (c : int64) :
   Tree.lookup tree (point Rodata c)
   |> Seq.find_map ~f:(fun (k, rs) ->
          if
-           Stdlib.Int64.unsigned_compare c k.lo.p_pos >= 0
-           && Stdlib.Int64.unsigned_compare c k.hi.p_pos <= 0
+           in_span ~lo:k.lo.p_pos ~hi:k.hi.p_pos c
          then (
            match rs.storage with
            | Data_region id ->
