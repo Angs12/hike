@@ -32,6 +32,12 @@ val max : point -> point -> point
 val is_zero : point -> bool
 val succ : point -> point
 
+(* The last point of a [w]-bit line. *)
+val mask : int -> int64
+
+(* [p] moved [n] along its line, wrapping. *)
+val add : point -> int64 -> point
+
 val of_word : Cbat_word.t -> point option
 val upper : t -> point
 val lower : t -> point

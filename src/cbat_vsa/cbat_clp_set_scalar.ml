@@ -85,6 +85,10 @@ let stack_cardinality (offs : P.t) : word =
 let hull_of_pieces (ps : P.t) : clp option =
   List.reduce (P.to_list ps) ~f:Clp.union
 
+(* The hull, or the empty piece at [width] when there is none. *)
+let hull_or_bottom ~(width : int) (ps : P.t) : clp =
+  Option.value (hull_of_pieces ps) ~default:(Clp.bottom width)
+
 let pieces_of_finset (s : fset) : P.t = Exact.pieces s
 
 let clp_of_finset fs : clp =
@@ -122,6 +126,8 @@ let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
     if Bool.equal (pos ab) (pos c) && not (Bool.equal (pos abc) (pos ab))
     then None
     else Some abc
+
+let checked_add (a : int64) (b : int64) : int64 option = checked_add3 a 0L b
 
 (* The allocation base's entry-line (segment-relative) range, known only
    when the SP-before and the size bound it. *)
@@ -171,7 +177,7 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
     let ceil = Stdlib.Int64.add f.Origin.base f.Origin.hi in
     let side w =
       Option.bind (Cbat_word.to_int64_opt w)
-        ~f:(fun v -> checked_add3 f.Origin.base 0L v) in
+        ~f:(fun v -> checked_add f.Origin.base v) in
     let lo = match P.min_elem offs with
       | Some w -> side w
       | None -> Some floor in
@@ -207,11 +213,19 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
   | Some (blo, bhi), Some (lo, hi) -> (
     match Cbat_word.int64_pair lo hi with
     | Some (klo, khi) -> (
-      match checked_add3 blo 0L klo, checked_add3 bhi 0L khi with
+      match checked_add blo klo, checked_add bhi khi with
       | Some l, Some h when Stdlib.Int64.compare h l >= 0 -> Some (l, h)
       | _ -> None)
     | None -> None)
   | _ -> None
+
+(* The step-1 piece over the int64 position range [lo, hi]. *)
+let line_interval (lo : int64) (hi : int64) : clp =
+  Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi)
+
+(* The VLA value's entry-line hull as a piece. *)
+let vla_line_piece (tid : Tid.t) (offs : P.t) : clp option =
+  Option.map (vla_entry_hull tid offs) ~f:(fun (lo, hi) -> line_interval lo hi)
 
 (* A stack-line value's offsets on the entry line, the Stack key line
    every stack-line origin shares: a VLA frame shifts by its allocation
@@ -219,9 +233,8 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
 let line_offsets (o : Origin.t) (offs : P.t) : P.t =
   match o with
   | Origin.Vla tid -> (
-    match vla_entry_hull tid offs with
-    | Some (lo, hi) ->
-      P.of_progression (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))
+    match vla_line_piece tid offs with
+    | Some p -> P.of_progression p
     | None -> P.top 64)
   | Origin.Stack | Origin.Rip _ | Origin.Abs -> offs
 
@@ -244,8 +257,7 @@ let rec to_plain (t : t) : t =
      | Some (cmin, cmax)
        when Stdlib.Int64.compare cmin 0L >= 0
             && Stdlib.Int64.compare cmax cmin >= 0 ->
-       Clp (P.of_progression
-              (Clp.interval ~width:64 (Cbat_word.of_int64 cmin) (Cbat_word.of_int64 cmax)))
+       Clp (P.of_progression (line_interval cmin cmax))
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
@@ -277,6 +289,7 @@ and canonical (ps : t list) : t =
 
 and canonical_pool (ps : t list) : t =
   let alive = List.filter ps ~f:(fun q -> not (is_bottom q)) in
+  let max_width = List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q)) in
   (* One relative leaf per origin, in origin order: a union keeps every
      origin it was built from.  One merge is lossless and keeps the form
      canonical: an absolute leaf's offsets are its words (the plain
@@ -298,12 +311,7 @@ and canonical_pool (ps : t list) : t =
        still a relative value (its consumers span the full key line). *)
     Rel (o, offs)
   | [], [] ->
-    (match ps with
-     | [] -> Exact (Exact.bottom 1)
-     | _ ->
-       let w =
-         List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q)) in
-       Exact (Exact.bottom w))
+    Exact (Exact.bottom max_width)
   | _ ->
     let clps =
       List.append mixed_pool
@@ -346,7 +354,8 @@ and canonical_pool (ps : t list) : t =
     in
     (* Contained pieces drop: an Exact leaf covered by the Clp leaf adds
        no element, and a Clp leaf covered by the Exact is that Exact.
-       Both would double-count the overlap in [cardinality]. *)
+       Both would double-count the overlap in [cardinality].  A lone
+       small Clp leaf then takes its exact twin. *)
     let clp_piece, fs_piece =
       match clp_piece, fs_piece with
       | Some cps, Some fss
@@ -384,9 +393,7 @@ and canonical_pool (ps : t list) : t =
      | [] ->
        (* No leaf survived: a bottom at the widest input, never an empty
           [Many] (which would carry width 0). *)
-       Exact
-         (Exact.bottom
-            (List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q))))
+       Exact (Exact.bottom max_width)
      | ps -> Many ps))
 
 
@@ -572,31 +579,23 @@ let extremum (leaf : t -> word option)
   in
   go None t
 
+(* One leaf's unsigned lower or upper bound. *)
+let leaf_bound ~(lower : bool) (q : t) : word option =
+  match q with
+  | Rel (o, offs) when absolute_line o ->
+    if lower then P.min_elem offs else P.max_elem offs
+  | Rel (o, offs) ->
+    Option.map (plain_bounds o offs) ~f:(fun (cmin, cmax) ->
+        Cbat_word.of_int64 (if lower then cmin else cmax))
+  | Clp ps -> if lower then P.min_elem ps else P.max_elem ps
+  | Exact s -> if lower then Exact.min_elem s else Exact.max_elem s
+  | Many _ -> None
+
 let min_elem (t : t) : word option =
-  extremum
-    (fun q ->
-       match q with
-       | Rel (o, offs) when absolute_line o -> P.min_elem offs
-       | Rel (o, offs) ->
-         Option.map (plain_bounds o offs) ~f:(fun (cmin, _) -> Cbat_word.of_int64 cmin)
-       | Clp ps -> P.min_elem ps
-       | Exact s -> Exact.min_elem s
-       | Many _ -> None)
-    (Cbat_word.min_by ~signed:false)
-    t
+  extremum (leaf_bound ~lower:true) (Cbat_word.min_by ~signed:false) t
 
 let max_elem (t : t) : word option =
-  extremum
-    (fun q ->
-       match q with
-       | Rel (o, offs) when absolute_line o -> P.max_elem offs
-       | Rel (o, offs) ->
-         Option.map (plain_bounds o offs) ~f:(fun (_, cmax) -> Cbat_word.of_int64 cmax)
-       | Clp ps -> P.max_elem ps
-       | Exact s -> Exact.max_elem s
-       | Many _ -> None)
-    (Cbat_word.max_by ~signed:false)
-    t
+  extremum (leaf_bound ~lower:false) (Cbat_word.max_by ~signed:false) t
 
 (* Stack-family extrema on the entry-relative offset line. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
@@ -626,7 +625,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
   let via_offsets_base base offs =
     Option.bind (offsets_signed_extrema offs)
       ~f:(fun ex ->
-        Option.bind (checked_add3 base 0L
+        Option.bind (checked_add base
                        (Option.value (Cbat_word.to_int64_opt (pick ex))
                           ~default:clamp))
           ~f:(fun v -> Some (Cbat_word.of_int64 v)))
@@ -658,7 +657,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
     match vla_base_range tid with
     | Some (blo, bhi) -> (
       let base = if dir < 0 then blo else bhi in
-      match checked_add3 stack_base base 0L with
+      match checked_add stack_base base with
       | Some abs -> via_offsets_base abs offs
       | None -> None)
     | None -> None)
@@ -707,7 +706,7 @@ let rec iter (t : t) : word list =
   | Rel (Origin.Vla tid, offs) -> (
     match vla_base_range tid with
     | Some (blo, _) -> (
-      match checked_add3 stack_base blo 0L with
+      match checked_add stack_base blo with
       | Some abs ->
         List.map (P.elements offs)
           ~f:(fun w -> Cbat_word.add (Cbat_word.of_int64 abs) w)
@@ -736,8 +735,7 @@ let rec equal (t1 : t) (t2 : t) : bool =
   | _ -> false
 
 let overlap (t1 : t) (t2 : t) : bool =
-  let hull (ps : P.t) : clp =
-    match hull_of_pieces ps with Some p -> p | None -> Clp.bottom 1 in
+  let hull = hull_or_bottom ~width:1 in
   let leaf_pair q1 q2 =
     match q1, q2 with
     | Exact s1, Exact s2 -> Exact.overlap s1 s2
@@ -970,14 +968,9 @@ let stack_offsets (t : t) : Clp.t option =
   | Rel (Origin.Vla tid, offs) -> (
     (* The frame-relative offsets shifted onto the entry line; an unknown
        base has no entry-line position (the sound fallback). *)
-    match vla_entry_hull tid offs with
-    | Some (lo, hi) ->
-      Some (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))
-    | None -> None)
+    vla_line_piece tid offs)
   | Rel (o, offs) when Origin.names_stack_line o ->
-    (match hull_of_pieces offs with
-     | Some p -> Some p
-     | None -> Some (Clp.bottom 64))
+    Some (hull_or_bottom ~width:64 offs)
   | _ -> None
 
 (* The stack-line leaves of a value (itself when it is one): the stack
@@ -990,9 +983,7 @@ let stack_leaves (t : t) : t list =
 let vla_offsets (t : t) : Clp.t option =
   match t with
   | Rel (Origin.Vla _, offs) ->
-    (match hull_of_pieces offs with
-     | Some p -> Some p
-     | None -> Some (Clp.bottom 64))
+    Some (hull_or_bottom ~width:64 offs)
   | _ -> None
 
 (* The memory-key coordinate line.  A stack access can land inside a
@@ -1014,11 +1005,8 @@ let rec address_groups (t : t) : (Origin.t * P.t) list =
     (* The memory key is the entry-line address: the frame-relative
        offsets shift by the allocation base's range; an unknown base
        keys the whole stack line (a stack access can land in the VLA). *)
-    match vla_entry_hull tid offs with
-    | Some (lo, hi) ->
-      [ (Origin.Stack,
-         P.of_progression
-           (Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi))) ]
+    match vla_line_piece tid offs with
+    | Some p -> [ (Origin.Stack, P.of_progression p) ]
     | None -> [ (Origin.Stack, P.top 64) ])
   | Rel (o, offs) -> [ (key_line o, offs) ]
   | Clp ps -> [ (Origin.Abs, ps) ]
@@ -1097,8 +1085,8 @@ let stride (t : t) : int =
         let s = Clp.step_of p in
         if List.for_all rest ~f:(fun q -> Cbat_word.equal (Clp.step_of q) s)
         then
-          (match Cbat_word.to_int64 s with
-           | Ok i
+          (match Cbat_word.to_int64_opt s with
+           | Some i
              when Stdlib.Int64.compare i 1L > 0
                   && Stdlib.Int64.compare i
                        (Stdlib.Int64.of_int Stdlib.max_int) <= 0 ->
@@ -1112,54 +1100,27 @@ let stride (t : t) : int =
     | Exact s ->
       (match Exact.iter s with
        | [] | [ _ ] -> Some 1
-       | w1 :: rest ->
-         let rec common_diff prev d = function
-           | [] -> d
-           | w :: tl ->
-             let d' = Cbat_word.sub w prev in
-             if Cbat_word.is_zero d' then None
-             else
-               match d with
-               | None -> common_diff w (Some d') tl
-               | Some d0 ->
-                 if Cbat_word.equal d0 d' then common_diff w d tl else None
-         in
-         (match common_diff w1 None rest with
-          | Some d ->
-            (match Cbat_word.to_int64 d with
-             | Ok i ->
-               let v = Stdlib.Int64.to_int i in
-               if v > 1 then Some v else Some 1
-             | Error _ -> Some 1)
-          | None -> Some 1))
+       | _ :: rest as ws ->
+         let diffs =
+           List.map2_exn (List.drop_last_exn ws) rest
+             ~f:(fun a b -> Cbat_word.sub b a) in
+         (match List.all_equal diffs ~equal:Cbat_word.equal with
+          | Some d when not (Cbat_word.is_zero d) ->
+            (match Cbat_word.to_int64_opt d with
+             | Some i -> Some (Stdlib.max 1 (Stdlib.Int64.to_int i))
+             | None -> Some 1)
+          | _ -> Some 1))
     | Many _ -> None
   in
   match t with
   | Many ps ->
-    (match List.map ps ~f:leaf_stride with
-     | [] -> 1
-     | strides ->
-       if List.for_all strides ~f:(function Some _ -> true | None -> false)
-       then
-         let s =
-           match
-             List.find strides ~f:(function
-               | Some _ -> true | None -> false)
-           with
-           | Some (Some s) -> s
-           | _ -> 1
-         in
-         if
-           List.for_all strides ~f:(function
-             | Some s' -> Stdlib.( = ) s s'
-             | None -> false)
-         then s
-         else 1
-       else 1)
-  | q ->
-    (match leaf_stride q with
-     | Some s -> s
-     | None -> 1)
+    (match
+       List.all_equal (List.map ps ~f:leaf_stride)
+         ~equal:(Option.equal Int.equal)
+     with
+     | Some (Some s) -> s
+     | _ -> 1)
+  | q -> Option.value (leaf_stride q) ~default:1
 
 let origin_is_relative x = not (absolute_line x)
 
@@ -1476,11 +1437,7 @@ let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
   match op with
   | Add | Sub ->
     let f = match op with Sub -> Clp.sub | _ -> Clp.add in
-    let hull (ps : P.t) : clp =
-      match hull_of_pieces ps with
-      | Some p -> p
-      | None -> Clp.bottom 64
-    in
+    let hull = hull_or_bottom ~width:64 in
     let hull_of_plain (q : t) : clp option =
       match q with
       | Clp ps -> hull_of_pieces ps
@@ -1982,7 +1939,7 @@ let is_unbounded_span (lo : int64) (hi : int64) : bool =
   Int64.equal lo Stdlib.Int64.min_int && Int64.equal hi Stdlib.Int64.max_int
 
 (* Overflow-checked absolute position of one frame offset. *)
-let position_of_offset (o : int64) : int64 option =  checked_add3 stack_base 0L o
+let position_of_offset (o : int64) : int64 option =  checked_add stack_base o
 
 (* The per-progression [min, max] positions of a stack-symbolic value's
    offsets — the disjoint runs the attribution clips per run instead of

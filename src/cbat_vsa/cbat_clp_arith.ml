@@ -46,8 +46,9 @@ let arcs2 (f : t -> t -> t) (p1 : t) (p2 : t) : t =
 let add_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
-    | Some w -> top w
-    | None -> let sz = bitwidth p1 in
+  | Some w -> top w
+  | None ->
+  let sz = bitwidth p1 in
   match finite_end p1 with
   | None -> bottom sz
   | Some e1 ->
@@ -80,8 +81,9 @@ let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 let mul_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
-    | Some w -> top w
-    | None -> let sz = bitwidth p1 in
+  | Some w -> top w
+  | None ->
+  let sz = bitwidth p1 in
   (* Empty operand gives bottom. *)
   match finite_end p1 with
   | None -> bottom sz
@@ -245,8 +247,9 @@ let logxor_ops (o1 : xor_operand) (o2 : xor_operand) : t =
   let p1 = o1.xp and p2 = o2.xp in
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
-    | Some w -> top w
-    | None -> let width = bitwidth p1 in
+  | Some w -> top w
+  | None ->
+  let width = bitwidth p1 in
   let two = create (W.of_int 2 ~width) in
   let np1 = o1.xnp and np2 = o2.xnp in
   (* The four ANDs share their operands: [p1] feeds the first and fourth,
@@ -386,6 +389,10 @@ let lshift (p1 : t) (p2 : t) : t =
     (fun a b -> union_all ~width:(bitwidth a) (lshift_parts a b))
     p1 p2
 
+(* The same base, step and cardinality read at [width]. *)
+let rewidth ~(width : int) (p : t) : t =
+  create ~width (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
+
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
   (* Widths match after coercion. *)
   let _, b1twos = factor_2s (base_of p1) in
@@ -406,12 +413,8 @@ let rec rshift_parts (p1 : t) (p2 : t) : t list =
   if sz1 <> sz2 then
     (* Mixed widths coerce to max. *)
     let w = Stdlib.max sz1 sz2 in
-    let ext_zero (p : t) : t =
-      create ~width:w (base_of p) ~step:(step_of p) ~cardn:(cardn_of p) in
-    List.map (rshift_parts (ext_zero p1) (ext_zero p2))
-      ~f:(fun shifted ->
-        create ~width:sz1 (base_of shifted) ~step:(step_of shifted)
-          ~cardn:(cardn_of shifted))
+    List.map (rshift_parts (rewidth ~width:w p1) (rewidth ~width:w p2))
+      ~f:(rewidth ~width:sz1)
   else
   let p1 = unwrap p1 in
   let p2 = unwrap p2 in
@@ -453,7 +456,7 @@ let rec arshift_parts (p1 : t) (p2 : t) : t list =
       | Some mn, Some mx ->
         if W.(<) mx halfw then
           (* Non-negative: identity. *)
-          create ~width:w (base_of p1) ~step:(step_of p1) ~cardn:(cardn_of p1)
+          rewidth ~width:w p1
         else if W.(>=) mn halfw then
           (* Negative: shift base. *)
           create ~width:w (W.add (W.extract_exn ~hi:(w - 1) (base_of p1)) d)
@@ -464,11 +467,8 @@ let rec arshift_parts (p1 : t) (p2 : t) : t list =
       | _ -> top sz1 in
     if is_top p1' then [ top sz1 ]
     else
-      let p2' =
-        create ~width:w (base_of p2) ~step:(step_of p2) ~cardn:(cardn_of p2) in
-      List.map (arshift_parts p1' p2') ~f:(fun shifted ->
-        create ~width:sz1 (base_of shifted) ~step:(step_of shifted)
-          ~cardn:(cardn_of shifted))
+      List.map (arshift_parts p1' (rewidth ~width:w p2))
+        ~f:(rewidth ~width:sz1)
   else
   let zero = W.zero sz1 in
   (* True set drives sign classification. *)
@@ -673,8 +673,9 @@ let concat (p1 : t) (p2 : t) : t =
 let div_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
-    | Some w -> top w
-    | None -> let width = bitwidth p1 in
+  | Some w -> top w
+  | None ->
+  let width = bitwidth p1 in
   let open Monads.Std.Monad.Option.Syntax in
   (match begin
     min_elem p1 >>= fun min_e1 ->
@@ -710,8 +711,9 @@ let smod_word (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
 let sdiv_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
-    | Some w -> top w
-    | None -> let width = bitwidth p1 in
+  | Some w -> top w
+  | None ->
+  let width = bitwidth p1 in
   (* Infinite operand gives unbounded quotient. *)
   if is_infinite p1 || is_infinite p2 then top width
   else
@@ -748,15 +750,8 @@ let sdiv_core (p1 : t) (p2 : t) : t =
       let maxmax = sdiv_word max_e1 max_e2 in
       let maxmin = sdiv_word max_e1 min_e2 in
       (* The hull is the signed-order interval (it may wrap). *)
-      let h = half width in
-      let scmp a b =
-        match W.(>=) a h, W.(>=) b h with
-        | true, false -> -1
-        | false, true -> 1
-        | _ -> W.compare a b
-      in
-      let lesser a b = if scmp a b <= 0 then a else b in
-      let greater a b = if scmp a b >= 0 then a else b in
+      let lesser a b = if signed_le width a b then a else b in
+      let greater a b = if signed_le width b a then a else b in
       let lo = lesser (lesser (lesser minmax minmin) maxmax) maxmin in
       let hi = greater (greater (greater minmax minmin) maxmax) maxmin in
       let step = W.one width in

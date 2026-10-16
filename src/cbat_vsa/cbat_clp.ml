@@ -668,15 +668,20 @@ module Pieces = struct
     | _ -> produce (fun emit ->
         List.iter a ~f:(fun pa -> List.iter b ~f:(fun pb -> emit (f pa pb))))
 
-  (* Each pair produces its result arcs directly into the ordered image. *)
+  (* The non-wrapping arcs of every piece, in order. *)
+  let iter_arcs (ps : t) ~(f : progression -> unit) : unit =
+    List.iter ps ~f:(fun p -> List.iter (C.split_wrapped p) ~f)
+
+  (* Each arc produces its result arcs directly into the ordered image. *)
+  let map_parts (f : progression -> progression list) (ps : t) : t =
+    produce (fun emit -> iter_arcs ps ~f:(fun q -> List.iter (f q) ~f:emit))
+
+  (* Each pair of arcs likewise. *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
     produce (fun emit ->
-        List.iter a ~f:(fun pa ->
-            List.iter (C.split_wrapped pa) ~f:(fun qa ->
-                List.iter b ~f:(fun pb ->
-                    List.iter (C.split_wrapped pb) ~f:(fun qb ->
-                        List.iter (f qa qb) ~f:emit)))))
+        iter_arcs a ~f:(fun qa ->
+            iter_arcs b ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
 
   let add = lift2 A.add
   let sub = lift2 A.sub
@@ -715,19 +720,11 @@ module Pieces = struct
       (match hi with None -> true | Some h -> Stdlib.Int.equal h (w - 1))
       && (match lo with None | Some 0 -> true | Some _ -> false) in
     if full then ps
-    else
-      produce (fun emit ->
-          List.iter ps ~f:(fun p ->
-              List.iter (C.split_wrapped p) ~f:(fun q ->
-                  List.iter (A.extract_parts ?hi ?lo q) ~f:emit)))
+    else map_parts (A.extract_parts ?hi ?lo) ps
 
   let cast c sz (ps : t) : t =
     if Stdlib.Int.equal sz (bitwidth ps) then ps
-    else
-      produce (fun emit ->
-          List.iter ps ~f:(fun p ->
-              List.iter (C.split_wrapped p) ~f:(fun q ->
-                  List.iter (A.cast_parts c sz q) ~f:emit)))
+    else map_parts (A.cast_parts c sz) ps
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
     if Cbat_word.is_zero delta then ps
@@ -1007,8 +1004,16 @@ module Exact = struct
     if a.width <> b.width then a
     else merge ~left:true ~both:false ~right:false a b
 
+  (* A common element: one linear pass that stops at the first. *)
   let overlap (a : t) (b : t) : bool =
-    a.width = b.width && not (is_bottom (intersection a b))
+    let na = count a and nb = count b in
+    a.width = b.width
+    && (let rec go i j =
+          i < na && j < nb
+          && (let c = W.compare a.words.(i) b.words.(j) in
+              c = 0 || if c < 0 then go (i + 1) j else go i (j + 1))
+        in
+        go 0 0)
 
   (* [a] is a subset of [b]: one linear pass over the sorted arrays. *)
   let precedes (a : t) (b : t) : bool =

@@ -127,33 +127,26 @@ let top (i : int) : t =
       t
   else infinite (W.zero i, W.one i)
 
-let create_ascending ~width ~base ~step : t =
+(* A ray from [base] by [step]; [num_steps] counts the steps to the
+   domain edge in the ray's direction. *)
+let ray ~dir ~width ~base ~step (num_steps : W.t -> W.t -> W.t) : t =
   assert (width > 0);
   let base' = fit_to width base in
   let step' = fit_to width step in
   if W.is_zero step' then create ~width base'
   else
-    let max_wd = W.ones width in
-    let diff = W.sub max_wd base' in
-    let num_steps = W.div diff step' in
-    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
+    let cardn = W.succ (W.extract_exn ~hi:width (num_steps base' step')) in
     if is_one cardn then create ~width base'
     else if W.is_zero cardn then bottom width
     else if W.equal cardn (dom_size ~width:(width + 1) width) then top width
-    else { base = base'; step = step'; cardn; dir = Ascending }
+    else { base = base'; step = step'; cardn; dir }
+
+let create_ascending ~width ~base ~step : t =
+  ray ~dir:Ascending ~width ~base ~step (fun base' step' ->
+      W.div (W.sub (W.ones width) base') step')
 
 let create_descending ~width ~base ~step : t =
-  assert (width > 0);
-  let base' = fit_to width base in
-  let step' = fit_to width step in
-  if W.is_zero step' then create ~width base'
-  else
-    let num_steps = W.div base' step' in
-    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
-    if is_one cardn then create ~width base'
-    else if W.is_zero cardn then bottom width
-    else if W.equal cardn (dom_size ~width:(width + 1) width) then top width
-    else { base = base'; step = step'; cardn; dir = Descending }
+  ray ~dir:Descending ~width ~base ~step W.div
 
 let cardn_from_bounds base step e : W.t =
   let width = W.bitwidth base in
@@ -622,35 +615,34 @@ let solve_point ~lower ~lo1 ~s1 ~lo2 ~s2 ~bound =
         let step = if Z.compare step limit >= 0 then Z.zero else step in
         Some (W.of_z x width, W.of_z step width))
 
-let solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound =
-  solve_point ~lower:true ~lo1 ~s1 ~lo2 ~s2 ~bound:min_bound
-
-let solve_last_point_le ~lo1 ~s1 ~lo2 ~s2 ~max_bound =
-  solve_point ~lower:false ~lo1 ~s1 ~lo2 ~s2 ~bound:max_bound
-
 let solve_grid_interval ~width ~lo1 ~s1 ~lo2 ~s2 ~min_bound ~max_bound : t =
   if W.(>) min_bound max_bound then bottom width
   else
-    match solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound with
+    match solve_point ~lower:true ~lo1 ~s1 ~lo2 ~s2 ~bound:min_bound with
     | Some (base, step) when W.(<=) base max_bound ->
       create ~width base ~step ~cardn:(cardn_from_bounds base step max_bound)
     | _ -> bottom width
 
 let solve_ascending_ascending ~width (p1 : t) (p2 : t) ~min_bound : t =
-  match solve_first_point_ge ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound with
+  match solve_point ~lower:true ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~bound:min_bound with
   | None -> bottom width
   | Some (base, step) -> create_ascending ~width ~base ~step
 
 let solve_descending_descending ~width (p1 : t) (p2 : t) ~max_bound : t =
-  match solve_last_point_le ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~max_bound with
+  match solve_point ~lower:false ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~bound:max_bound with
   | None -> bottom width
   | Some (base, step) -> create_descending ~width ~base ~step
 
-let solve_ascending_circular ~width (asc : t) (circ : t) : t =
-  solve_ascending_ascending ~width asc circ ~min_bound:asc.base
-
-let solve_descending_circular ~width (desc : t) (circ : t) : t =
-  solve_descending_descending ~width desc circ ~max_bound:desc.base
+(* A ray with a finite piece: the ray extends to the finite piece's
+   near end, on the grid both share. *)
+let union_ray_finite ~width ~ascending (ray : t) (fin : t) : t =
+  let step = common_step (ray.base, ray.step) (fin.base, step_of fin) in
+  if ascending then
+    let lo = Option.value (min_elem fin) ~default:fin.base in
+    create_ascending ~width ~base:(W.min ray.base lo) ~step
+  else
+    let hi = Option.value (max_elem fin) ~default:fin.base in
+    create_descending ~width ~base:(W.max ray.base hi) ~step
 
 (* Union; same width expected.  The finite arm's hull is MODULAR: the
    grid step divides both steps and every endpoint's modular distance
@@ -694,26 +686,10 @@ let rec union (p1 : t) (p2 : t) : t =
       let base = W.max p1.base p2.base in
       let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
       create_descending ~width ~base ~step
-    | Ascending, Finite ->
-      let lo2 = Option.value (min_elem p2) ~default:p2.base in
-      let base = W.min p1.base lo2 in
-      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
-      create_ascending ~width ~base ~step
-    | Finite, Ascending ->
-      let lo1 = Option.value (min_elem p1) ~default:p1.base in
-      let base = W.min lo1 p2.base in
-      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
-      create_ascending ~width ~base ~step
-    | Descending, Finite ->
-      let hi2 = Option.value (max_elem p2) ~default:p2.base in
-      let base = W.max p1.base hi2 in
-      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
-      create_descending ~width ~base ~step
-    | Finite, Descending ->
-      let hi1 = Option.value (max_elem p1) ~default:p1.base in
-      let base = W.max hi1 p2.base in
-      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
-      create_descending ~width ~base ~step
+    | Ascending, Finite -> union_ray_finite ~width ~ascending:true p1 p2
+    | Finite, Ascending -> union_ray_finite ~width ~ascending:true p2 p1
+    | Descending, Finite -> union_ray_finite ~width ~ascending:false p1 p2
+    | Finite, Descending -> union_ray_finite ~width ~ascending:false p2 p1
     | _ ->
       let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
       infinite (base_of p1, step)
@@ -832,10 +808,10 @@ let rec intersection (p1 : t) (p2 : t) : t =
               solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound:p1.base ~max_bound:p2.base
           | Descending, Ascending -> intersection p2 p1
           | Ascending, Circular ->
-            solve_ascending_circular ~width p1 p2
+            solve_ascending_ascending ~width p1 p2 ~min_bound:p1.base
           | Circular, Ascending -> intersection p2 p1
           | Descending, Circular ->
-            solve_descending_circular ~width p1 p2
+            solve_descending_descending ~width p1 p2 ~max_bound:p1.base
           | Circular, Descending -> intersection p2 p1
           | Finite, Circular ->
             (match min_elem p1, max_elem p1 with

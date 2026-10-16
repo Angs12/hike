@@ -490,15 +490,6 @@ let val_bytes (v : Val.t) : int =
    per word, so only an access that splits unevenly can exceed it. *)
 let max_cell_bytes = 64
 
-(* The last point of a [w]-bit line. *)
-let line_max (w : int) : int64 =
-  if w >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L w)
-
-(* [p] moved [n] along its line, wrapping. *)
-let pt_add (p : Key.point) (n : int64) : Key.point =
-  let v = Stdlib.Int64.add p.pvalue n in
-  { p with pvalue = (if p.pwidth >= 64 then v else Stdlib.Int64.logand v (line_max p.pwidth)) }
-
 (* [b - a] on [a]'s line, signed. *)
 let sdist (a : Key.point) (b : Key.point) : int64 =
   let d = Stdlib.Int64.sub b.pvalue a.pvalue in
@@ -512,10 +503,13 @@ let sdist (a : Key.point) (b : Key.point) : int64 =
    measure) writes anywhere on the line. *)
 type write = { w_lo : Key.point; span : int64; wstep : int64; n : int64 }
 
+module I = Stdlib.Int64
+
+let ( <. ) a b = I.compare a b < 0
+let ( <=. ) a b = I.compare a b <= 0
+
 (* Whether some write's bytes meet [x, x+cb-1], [x] relative to [w_lo]. *)
 let touches (w : write) (x : int64) (cb : int64) : bool =
-  let module I = Stdlib.Int64 in
-  let ( <. ) a b = I.compare a b < 0 and ( <=. ) a b = I.compare a b <= 0 in
   w.span <. 0L
   || 0L <=. I.add x (I.pred cb)
      && x <=. I.add w.span (I.pred w.n)
@@ -542,8 +536,6 @@ type cell_fate =
   { kept : Key.t list; one : int64 option; same_grid : Key.t option }
 
 let cell_fate (w : write) ((k', v') : Key.t * Val.t) : cell_fate =
-  let module I = Stdlib.Int64 in
-  let ( <. ) a b = I.compare a b < 0 and ( <=. ) a b = I.compare a b <= 0 in
   let none = { kept = []; one = None; same_grid = None } in
   let cb = I.of_int (val_bytes v') in
   let x0 = sdist w.w_lo k'.lo in
@@ -557,7 +549,7 @@ let cell_fate (w : write) ((k', v') : Key.t * Val.t) : cell_fate =
     let count = I.succ (I.div cspan g) in
     let i0 = I.max 0L (cdiv (I.sub (I.sub 1L cb) x0) g) in
     let i1 = I.min (I.pred count) (fdiv (I.sub (I.add w.span (I.pred w.n)) x0) g) in
-    let start i = pt_add k'.lo (I.mul i g) in
+    let start i = Key.add k'.lo (I.mul i g) in
     let piece lo hi = { k' with Key.lo; hi } in
     if i1 <. i0 then { none with kept = [ k' ] }
     else
@@ -584,12 +576,12 @@ let cell_fate (w : write) ((k', v') : Key.t * Val.t) : cell_fate =
    last byte, and the window may wrap the line's end. *)
 let candidates (m : itree) (k : Key.t) (w : write) : (Key.t * Val.t) list =
   let q lo hi = Seq.to_list (it_intersections m { k with Key.lo; hi; step = 1 }) in
-  let top_pt = { k.lo with pvalue = line_max k.lo.pwidth } in
+  let top_pt = { k.lo with pvalue = Key.mask k.lo.pwidth } in
   let zero_pt = { k.lo with pvalue = 0L } in
   if Stdlib.Int64.compare w.span 0L < 0 then q zero_pt top_pt
   else
-    let wlo = pt_add k.lo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
-    let whi = pt_add k.hi (Stdlib.Int64.pred w.n) in
+    let wlo = Key.add k.lo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
+    let whi = Key.add k.hi (Stdlib.Int64.pred w.n) in
     if Key.le wlo k.lo && Key.le k.hi whi then q wlo whi
     else
       merge_candidates (q wlo top_pt) (q zero_pt whi)
@@ -615,7 +607,7 @@ let store_one ~(strong : bool) (m : itree) (width : int) ~(key : Key.t)
   let cands = candidates m key w in
   let rest = List.fold cands ~init:m ~f:(fun m (k', _) -> IT.remove m k') in
   let add_val it k v = if Val.is_top v then it else IT.add it k v in
-  let at x = { key with Key.lo = pt_add key.lo x; hi = pt_add key.lo x; step = 1 } in
+  let at x = { key with Key.lo = Key.add key.lo x; hi = Key.add key.lo x; step = 1 } in
   let it, merged =
     List.fold cands ~init:(rest, None) ~f:(fun (it, merged) (k', v') ->
         let f = cell_fate w (k', v') in
@@ -665,6 +657,11 @@ let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
   Option.value_map ~default (Seq.next ints) ~f:(fun ((_, hd), tl) ->
       f hd ints tl)
 
+(* The last byte a stored cell covers. *)
+let cell_last_byte (k : Key.t) (v : Val.t) : int64 =
+  Stdlib.Int64.add (Key.lower k).pvalue
+    (Stdlib.Int64.of_int (WordSet.bitwidth (Val.data v) / addressable_width - 1))
+
 let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
     (ints : (Key.t * Val.t) list) : Val.t option =
   (* Queries and their filters preserve key order, hence lower-point
@@ -674,10 +671,7 @@ let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
   | (first_k, first_v) :: rest ->
     if not (Key.equal (Key.lower first_k) (Key.lower k)) then None
     else
-      let first_w = WordSet.bitwidth (Val.data first_v) in
-      let first_end =
-        Stdlib.Int64.add (Key.lower first_k).pvalue
-          (Stdlib.Int64.of_int (first_w / addressable_width - 1)) in
+      let first_end = cell_last_byte first_k first_v in
       let rec check_contiguous prev_end rest =
         match rest with
         | [] -> Some prev_end
@@ -685,11 +679,7 @@ let try_assemble_cells ((_, endian) : Val.idx) (k : Key.t)
           let expected_start = Stdlib.Int64.succ prev_end in
           if Stdlib.Int64.equal expected_start (Key.lower next_k).pvalue
           then
-            let next_w = WordSet.bitwidth (Val.data next_v) in
-            let next_end =
-              Stdlib.Int64.add (Key.lower next_k).pvalue
-                (Stdlib.Int64.of_int (next_w / addressable_width - 1)) in
-            check_contiguous next_end rest'
+            check_contiguous (cell_last_byte next_k next_v) rest'
           else None
       in
       match check_contiguous first_end rest with
@@ -776,12 +766,12 @@ let point_candidates (bits : int) (m : itree) (k : Key.t) :
     (Key.t * Val.t) list =
   let klo = Key.lower k in
   let khi = read_end bits klo in
-  let back_lo = pt_add klo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
+  let back_lo = Key.add klo (Stdlib.Int64.of_int (1 - max_cell_bytes)) in
   let q lo hi =
     Seq.to_list (it_intersections m { k with Key.lo = lo; hi; step = 1 }) in
   if Key.le back_lo klo then q back_lo khi
   else
-    let top_pt = { klo with pvalue = line_max klo.pwidth } in
+    let top_pt = { klo with pvalue = Key.mask klo.pwidth } in
     let zero_pt = { klo with pvalue = 0L } in
     merge_candidates (q back_lo top_pt) (q zero_pt khi)
 

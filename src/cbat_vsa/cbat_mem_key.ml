@@ -47,15 +47,14 @@ let is_zero (p : point) : bool = Stdlib.Int64.equal p.pvalue 0L
 let mask (w : int) : int64 =
     if w >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L w)
 
-(* Wrapping successor/predecessor. *)
-let succ (p : point) : point =
-    {pwidth = p.pwidth;
-     pvalue = if p.pwidth >= 64 then Stdlib.Int64.succ p.pvalue
-              else Stdlib.Int64.logand (Stdlib.Int64.succ p.pvalue) (mask p.pwidth)}
-let pred (p : point) : point =
-    {pwidth = p.pwidth;
-     pvalue = if p.pwidth >= 64 then Stdlib.Int64.pred p.pvalue
-              else Stdlib.Int64.logand (Stdlib.Int64.pred p.pvalue) (mask p.pwidth)}
+(* [p] moved [n] along its line, wrapping. *)
+let add (p : point) (n : int64) : point =
+  let v = Stdlib.Int64.add p.pvalue n in
+  { p with
+    pvalue = (if p.pwidth >= 64 then v else Stdlib.Int64.logand v (mask p.pwidth)) }
+
+let succ (p : point) : point = add p 1L
+let pred (p : point) : point = add p (-1L)
 
 (* Point from an address word. *)
 let of_word (w : Cbat_word.t) : point option =
@@ -105,14 +104,7 @@ let combined_step (k1 : t) (k2 : t) : int =
 let expand (k : t) ~(bytes : int) : t =
   if bytes <= 1 then k
   else
-    let n = Stdlib.Int64.of_int (bytes - 1) in
-    let hi =
-      { k.hi with
-        pvalue =
-          if k.hi.pwidth >= 64 then Stdlib.Int64.add k.hi.pvalue n
-          else Stdlib.Int64.logand (Stdlib.Int64.add k.hi.pvalue n) (mask k.hi.pwidth) }
-    in
-    { k with hi }
+    { k with hi = add k.hi (Stdlib.Int64.of_int (bytes - 1)) }
 
 (* Whether every point [p] claims is also claimed by [k]: a step-1
    key claims its whole hull; a strided key claims its grid only. *)
@@ -127,11 +119,7 @@ let covers (k : t) (p : t) : bool =
    wrap one bound past the other. *)
 let shift (k : t) ~(bytes : int) : t option =
   let n = Stdlib.Int64.of_int bytes in
-  let mv (p : point) : point =
-    let v = Stdlib.Int64.add p.pvalue n in
-    { p with pvalue = (if p.pwidth >= 64 then v else Stdlib.Int64.logand v (mask p.pwidth)) }
-  in
-  let lo = mv k.lo and hi = mv k.hi in
+  let lo = add k.lo n and hi = add k.hi n in
   if le lo hi then Some { k with lo; hi } else None
 
 (* Sub-range of one owner key: the owner's stride carries. *)
