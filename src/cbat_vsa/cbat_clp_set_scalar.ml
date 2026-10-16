@@ -1507,7 +1507,7 @@ let blind_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) (t : t) : t =
 (* The unary op ADT: the certified-nibble family over one operand.
    [Extract] carries hi as written (the [Some 63] identity test reads
    the option, not the default) and the defaulted lo. *)
-type unop =
+type unop = Cbat_preimage.unop =
   | Lnot
   | Neg
   | Extract of int option * int
@@ -2017,3 +2017,151 @@ let enumerate ~(cap : int) (t : t) : word list option =
 #endif
     Some (iter t)
 
+
+(* Inverse dispatch mirrors the forward dispatch. Representation kernels
+   operate on values; origins are interpreted only here. *)
+let inverse_pieces = function
+  | Clp p -> p
+  | Exact s -> Exact.pieces s
+  | q -> (
+      match to_plain q with
+      | Clp p -> p
+      | Exact s -> Exact.pieces s
+      | _ -> P.top (bitwidth q))
+
+let inverse_meet a b =
+  if is_bottom b then bottom (bitwidth a) else intersection a b
+
+let inverse_plain1 op ~arg ~result =
+  match (arg, result) with
+  | Exact a, Exact r -> Exact (Exact.backward1 op ~arg:a ~result:r)
+  | _ ->
+      Clp
+        (P.backward1 op ~arg:(inverse_pieces arg)
+           ~result:(inverse_pieces result))
+
+let inverse_plain2 op ~left ~right ~result =
+  match (left, right, result) with
+  | Exact a, Exact b, Exact r when Exact.count a * Exact.count b <= 4096 ->
+      let x, y = Exact.backward2 op ~left:a ~right:b ~result:r in
+      (Exact x, Exact y)
+  | _ ->
+      let x, y =
+        P.backward2 op ~left:(inverse_pieces left) ~right:(inverse_pieces right)
+          ~result:(inverse_pieces result)
+      in
+      (Clp x, Clp y)
+
+let backward1 op ~arg ~result =
+  if
+    (not (is_bottom arg || is_bottom result))
+    && not
+         (Cbat_preimage.valid1 op ~arg:(bitwidth arg) ~result:(bitwidth result))
+  then arg
+  else
+    let module I = Cbat_preimage in
+    let one a r =
+      if
+        bitwidth a = bitwidth r
+        &&
+        match op with
+        | I.Cast (_, n) -> n = bitwidth a
+        | I.Extract (Some hi, 0) -> hi + 1 = bitwidth a
+        | _ -> false
+      then intersection a r
+      else
+        match a with
+        | Rel (o, p) when absolute_line o ->
+            inverse_meet a (inverse_plain1 op ~arg:(Clp p) ~result:(to_plain r))
+        | Rel (o, p) ->
+            let certified = (base_facts o).certified in
+            let safe =
+              match op with
+              | I.Cast ((Bil.LOW | Bil.UNSIGNED), n) -> n <= certified
+              | I.Extract (hi, _) ->
+                  Option.value hi ~default:(bitwidth a - 1) < certified
+              | _ -> false
+            in
+            if not safe then a
+            else
+              let base = Cbat_word.of_int64 ~width:64 (base_facts o).base in
+              let shifted = P.translate p base in
+              let narrowed =
+                P.backward1 op ~arg:shifted ~result:(inverse_pieces r)
+              in
+              Rel
+                (o, P.intersection p (P.translate narrowed (Cbat_word.neg base)))
+        | _ -> inverse_plain1 op ~arg:a ~result:r
+    in
+    let answer =
+      canonical
+        (List.concat_map (leaves arg) ~f:(fun a ->
+             List.map (leaves result) ~f:(fun r -> one a r)))
+    in
+    if is_bottom answer then bottom (bitwidth arg) else answer
+
+let backward2 op ~left ~right ~result =
+  if
+    (not (is_bottom left || is_bottom right || is_bottom result))
+    && not
+         (Cbat_preimage.valid2 op ~left:(bitwidth left) ~right:(bitwidth right)
+            ~result:(bitwidth result))
+  then (left, right)
+  else
+    let module I = Cbat_preimage in
+    let one a b r =
+      match (a, b, r, op) with
+      | Rel (o, x), Rel (p, y), _, I.Op Bil.MINUS when Origin.equal o p ->
+          let u, v = inverse_plain2 op ~left:(Clp x) ~right:(Clp y) ~result:r in
+          (Rel (o, inverse_pieces u), Rel (p, inverse_pieces v))
+      | Rel (o, x), Rel (p, y), _, I.Op ((Bil.EQ | Bil.NEQ) as cmp)
+        when Origin.equal o p ->
+          let u, v =
+            inverse_plain2 (I.Op cmp) ~left:(Clp x) ~right:(Clp y) ~result:r
+          in
+          (Rel (o, inverse_pieces u), Rel (p, inverse_pieces v))
+      | Rel (o, x), (Clp _ | Exact _), Rel (p, z), I.Op (Bil.PLUS | Bil.MINUS)
+        when Origin.equal o p ->
+          let u, v = inverse_plain2 op ~left:(Clp x) ~right:b ~result:(Clp z) in
+          (Rel (o, inverse_pieces u), v)
+      | (Clp _ | Exact _), Rel (o, y), Rel (p, z), I.Op Bil.PLUS
+        when Origin.equal o p ->
+          let u, v = inverse_plain2 op ~left:a ~right:(Clp y) ~result:(Clp z) in
+          (u, Rel (o, inverse_pieces v))
+      | _, _, _, I.Op ((Bil.EQ | Bil.NEQ) as cmp) -> (
+          let has0 = elem Cbat_word.b0 r and has1 = elem Cbat_word.b1 r in
+          if has0 && has1 then (a, b)
+          else if not (has0 || has1) then
+            (bottom (bitwidth a), bottom (bitwidth b))
+          else if Bool.equal has1 (Poly.equal cmp Bil.EQ) then
+            let shared = intersection a b in
+            (inverse_meet a shared, inverse_meet b shared)
+          else
+            ( (match singleton_of b with
+              | Some k -> diff a (singleton k)
+              | None -> a),
+              match singleton_of a with
+              | Some k -> diff b (singleton k)
+              | None -> b ))
+      | _ when has_relative a || has_relative b || has_relative r ->
+          (* Unknown base bits cannot license a numerical inverse. *)
+          (a, b)
+      | _ ->
+          let u, v =
+            inverse_plain2 op ~left:(to_plain a) ~right:(to_plain b)
+              ~result:(to_plain r)
+          in
+          (inverse_meet a u, inverse_meet b v)
+    in
+    let pairs =
+      List.concat_map (leaves left) ~f:(fun a ->
+          List.concat_map (leaves right) ~f:(fun b ->
+              List.filter_map (leaves result) ~f:(fun r ->
+                  let x, y = one a b r in
+                  if is_bottom x || is_bottom y then None else Some (x, y))))
+    in
+    let assemble original f =
+      let answer = canonical (List.map pairs ~f) in
+      if is_bottom answer then bottom (bitwidth original) else answer
+    in
+    (assemble left fst, assemble right snd)

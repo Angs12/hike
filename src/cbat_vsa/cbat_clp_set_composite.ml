@@ -258,3 +258,15 @@ let caller_split = S.caller_split
 let tag t =
   match t with Scalar s -> S.tag s | Lanes ls -> sprintf "Lanes%d" (List.length ls)
 #endif
+
+let backward1 op ~arg ~result =
+  let answer = S.backward1 op ~arg:(plain arg) ~result:(plain result) in
+  if S.is_bottom answer then Scalar (S.bottom (bitwidth arg))
+  else intersection arg (Scalar answer)
+
+let backward2 op ~left ~right ~result =
+  let a,b = S.backward2 op ~left:(plain left) ~right:(plain right) ~result:(plain result) in
+  let keep original answer =
+    if S.is_bottom answer then Scalar (S.bottom (bitwidth original))
+    else intersection original (Scalar answer) in
+  keep left a,keep right b

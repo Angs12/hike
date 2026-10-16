@@ -32,6 +32,7 @@
   test_pieces
   test_call_effects
   test_backward
+  test_preimage
   test_forward
   test_vsa
   test_env_tag

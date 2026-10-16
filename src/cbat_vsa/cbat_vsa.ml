@@ -711,7 +711,8 @@ module Test_seam = struct
       { Cbat_backward.pm = mem; prange = range; pc; pbits = bits;
         pendian = endian }
   let cells_owed ce = not (Core.Map.is_empty ce)
-  let constrain_operands = Cbat_backward.constrain_operands
+  let constrain_operands ~env ?cells ?nonneg ~landmarks e produced =
+    Cbat_backward.constrain_operands ~env ?cells ?nonneg ~landmarks e produced
   let mk_rctx = mk_rctx_with_oracle
   let normalize_round = normalize_round
   (* The context's landmark table and the widening-head bracket: a refine

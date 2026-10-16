@@ -161,8 +161,7 @@ let tests : unit Alcotest.test list =
            bounded_above v (w32 10)));
 
     pin "BK-03"
-      "backward guard refinement through LSHIFT-const — the cell at RBP-8 is \
-       bounded (⊆ [0,9]; 40>>2 = 10)"
+      "LSHIFT pre-images preserve every wrapped input class and exclude low bits outside the guard"
       (fun () ->
         let sub3, body3 =
           mk_l3a_loop ~cmp:Bil.LT ~c:(w32 40)
@@ -172,7 +171,10 @@ let tests : unit Alcotest.test list =
                    Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
                    Bil.Int (Cbat_word.to_word (w32 2)) ))
         in
-        check "BK-03" (bounded_above (l3a_run_analyzed sub3 body3) (w32 9)));
+        let cell = l3a_run_analyzed sub3 body3 in
+        check "BK-03" (Ws.elem (w32 0) cell && Ws.elem (w32 9) cell
+          && Ws.elem (w32 0x40000000) cell && Ws.elem (w32 0xC0000009) cell
+          && not (Ws.elem (w32 10) cell)));
 
     pin "BK-04"
       "the TIMES rule over an unbounded operand is the identity (sound — the \
@@ -425,8 +427,7 @@ let tests : unit Alcotest.test list =
         check "BK-20" (bounded_above (l3c3_run sub4a body4a) (w32 39)));
 
     pin "BK-21"
-      "the ARSHIFT gate — an operand not provably non-negative (top) does NOT \
-       refine (the cell stays top; sound stop)"
+      "the ARSHIFT inverse preserves negative inputs and bounds the positive half"
       (fun () ->
         let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
         let sub4b, body4b =
@@ -434,7 +435,10 @@ let tests : unit Alcotest.test list =
             ~chain:(Bil.BinOp (Bil.ARSHIFT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
             ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
         in
-        check "BK-21" (Ws.is_top (l3c3_run sub4b body4b)));
+        let cell = l3c3_run sub4b body4b in
+        check "BK-21" (Ws.elem (w32 0x80000000) cell
+          && Ws.elem (w32 0xFFFFFFFF) cell && Ws.elem (w32 39) cell
+          && not (Ws.elem (w32 40) cell)));
 
 
 
@@ -934,7 +938,7 @@ let tests : unit Alcotest.test list =
 
     pin "BK-55"
       "the signed-division rule — `v := t sdiv 2; if EQ(v, −3)` refines the cell \
-       to {−6, −5} (0xFFFFFFFA ∈, 0xFFFFFFFB ∈, −3 ∉)"
+       to {−7, −6} (0xFFFFFFF9 ∈, 0xFFFFFFFA ∈, −5 ∉)"
       (fun () ->
         let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
         let sub5, body5 =
@@ -947,7 +951,8 @@ let tests : unit Alcotest.test list =
           ((not (Ws.is_top cell5))
           && (not (Ws.is_bottom cell5))
           && Ws.elem (w32 0xFFFFFFFA) cell5
-          && Ws.elem (w32 0xFFFFFFFB) cell5
+          && Ws.elem (w32 0xFFFFFFF9) cell5
+          && not (Ws.elem (w32 0xFFFFFFFB) cell5)
           && not (Ws.elem (w32 0xFFFFFFFD) cell5)));
 
     pin "BK-56"
@@ -1283,17 +1288,14 @@ let tests : unit Alcotest.test list =
           (Ws.min_elem r = Some (w32 0) && Ws.max_elem r = Some (w32 0xF)));
 
     pin "BK-85"
-      "the var-var signed guard reads its bound's payload — SLT(low:32[x], y) \
-       with y = {4} (a signed extremum) and x's low half in [0,3]: the \
-       constraint is the unsigned window [0,3], whose low-cast pre-image \
-       drops the value whose low half is 0x10 (the wrapped reading keeps it)"
+      "a signed guard over low:32[x] keeps the valid value 2 and excludes both values whose low word is 16"
       (fun () ->
         let x = Var.create ~is_virtual:true ~fresh:false "bk85_x" (Type.Imm 64) in
         let y = Var.create ~is_virtual:true ~fresh:false "bk85_y" (Type.Imm 32) in
         let out = Cbat_word.of_int64 ~width:64 0xFFFFFFFF00000010L in
         let env =
           mk_env
-            [ (x, Ws.of_list ~width:64 [ w64 0x10; out ]);
+            [ (x, Ws.of_list ~width:64 [ w64 2; w64 0x10; out ]);
               (y, Ws.singleton (w32 4)) ]
         in
         let env' =
@@ -1306,7 +1308,7 @@ let tests : unit Alcotest.test list =
             (Ws.singleton (Cbat_word.of_word Word.b1))
         in
         let r = AI.find_word 64 env' (Var.base x) in
-        check "BK-85" (not (Ws.elem out r)));
+        check "BK-85" (Ws.elem (w64 2) r && not (Ws.elem (w64 0x10) r) && not (Ws.elem out r)));
 
     pin "BK-86"
       "a guard the operand already satisfies is still seeded — the \

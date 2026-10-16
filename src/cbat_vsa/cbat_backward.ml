@@ -13,7 +13,6 @@ module Word_ops = Cbat_word
 module Stages = Cbat_vsa_stages
 open Cbat_transfer
 
-type guard_op = ULT | ULE | UGT | UGE | EQ | NEQ | SLT | SLE | SGT | SGE
 
 (* Proves an expression's every possible value has its sign bit clear:
    literals, positive-preserving arithmetic, and — through unique defs —
@@ -103,604 +102,6 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     | _ -> false
   in
   walk Exp.Set.empty Exp.Set.empty e
-
-let interval_clp_of ~(width : int) ~(cardn : Cbat_word.t) (base : Cbat_word.t)
-    : wordset option =
-  if Cbat_word.is_zero cardn then None
-  else
-    let ws = WordSet.of_clp
-        (Cbat_clp.Pieces.of_arcs
-           (Cbat_clp.arcs ~width ~step:(Cbat_word.one width) ~cardn base)) in
-    if WordSet.is_top ws then None else Some ws
-
-(* CLP interval hull; [None] on doubt — width mismatch, TOP collapse,
-   or a lo>hi pair without [~wrapping] (the wrapped pair is the
-   circular interval). *)
-let hull ~(wrapping : bool) (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t)
-    : wordset option =
-  if Cbat_word.bitwidth lo <> width || Cbat_word.bitwidth hi <> width then None
-  else if (not wrapping) && Cbat_word.(>) lo hi then None
-  else
-    let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
-    if WordSet.is_top ws then None else Some ws
-
-let neq_complement (c : Cbat_word.t) : wordset option =
-#ifdef VSA_DEBUG
-  Cbat_attr_census.bump "band.neq_complement";
-#endif
-  let cstr =
-    WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
-  if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
-
-(* The largest submask of [k] that is at most [v], built greedily from
-   the top bit: every [x] with [x land k <= v] has [x land k] at most
-   it, so [x <= max_submask_le k v lor lnot k]. *)
-let max_submask_le (k : Cbat_word.t) (v : Cbat_word.t) : Cbat_word.t =
-  let w = Cbat_word.bitwidth k in
-  let rec go i acc =
-    if i < 0 then acc
-    else
-      let bit = Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w i) in
-      let cand = Cbat_word.logor acc bit in
-      if (not (Cbat_word.is_zero (Cbat_word.logand k bit))) && Cbat_word.(<=) cand v
-      then go (i - 1) cand
-      else go (i - 1) acc
-  in
-  go (w - 1) (Cbat_word.zero w)
-
-let operand_constraints (op : Bil.binop) (cstr : wordset)
-    (a_ws : wordset) (b_ws : wordset) : wordset option * wordset option =
-  let width = WordSet.bitwidth cstr in
-  if WordSet.bitwidth a_ws <> width || WordSet.bitwidth b_ws <> width
-  then None, None
-  else
-    (* The extrema pairs, forced by the arms that read them. *)
-    let v_extrema = lazy (WordSet.min_elem cstr, WordSet.max_elem cstr) in
-    let a_extrema = lazy (WordSet.min_elem a_ws, WordSet.max_elem a_ws) in
-    let b_extrema = lazy (WordSet.min_elem b_ws, WordSet.max_elem b_ws) in
-    let b_single =
-      lazy (match Lazy.force b_extrema with
-          | Some k, Some k' when Cbat_word.(=) k k' -> Some k
-          | _ -> None) in
-    let wrap_limit (k : Cbat_word.t) : Cbat_word.t = Cbat_word.div (Cbat_word.ones width) k in
-    let operand_bounded (limit : Cbat_word.t) : bool =
-      match snd (Lazy.force a_extrema) with
-      | Some m -> Cbat_word.(<=) m limit
-      | None -> false in
-    (* The wrapping hull of a bound pair mapped to the operand's range. *)
-    let hull_by ((mn, mx) : Cbat_word.t option * Cbat_word.t option)
-        ~(f : Cbat_word.t -> Cbat_word.t -> Cbat_word.t * Cbat_word.t)
-      : wordset option =
-      match mn, mx with
-      | Some mn, Some mx ->
-        let lo, hi = f mn mx in
-        hull ~wrapping:true width lo hi
-      | _ -> None in
-    let ceil_div (k : Cbat_word.t) (x : Cbat_word.t) : Cbat_word.t =
-      let q = Cbat_word.div x k in
-      let r = Cbat_word.modulo x k in
-      if Cbat_word.is_zero r then q else Cbat_word.succ q in
-    match op with
-    | Bil.PLUS ->
-      (match Lazy.force v_extrema with
-       | Some vlo, Some vhi ->
-         hull_by (Lazy.force b_extrema) ~f:(fun bmin bmax ->
-             Cbat_word.sub vlo bmax, Cbat_word.sub vhi bmin),
-         hull_by (Lazy.force a_extrema) ~f:(fun amin amax ->
-             Cbat_word.sub vlo amax, Cbat_word.sub vhi amin)
-       | _ -> None, None)
-    | Bil.MINUS ->
-      (match Lazy.force v_extrema with
-       | Some vlo, Some vhi ->
-         hull_by (Lazy.force b_extrema) ~f:(fun bmin bmax ->
-             Cbat_word.add vlo bmin, Cbat_word.add vhi bmax),
-         hull_by (Lazy.force a_extrema) ~f:(fun amin amax ->
-             Cbat_word.sub amin vhi, Cbat_word.sub amax vlo)
-       | _ -> None, None)
-    | Bil.TIMES ->
-      (match Lazy.force v_extrema, Lazy.force b_single with
-       | (Some vlo, Some vhi), Some k ->
-         (match Cbat_word.to_int k with
-          | Ok kk when kk > 0 && operand_bounded (wrap_limit k) ->
-            (hull ~wrapping:false width (ceil_div k vlo) (Cbat_word.div vhi k), None)
-          | _ -> None, None)
-       | _ -> None, None)
-    | Bil.LSHIFT ->
-      (match Lazy.force v_extrema, Lazy.force b_extrema with
-       | (Some vlo, Some vhi), (Some smin, Some smax) ->
-         (match Cbat_word.to_int smin, Cbat_word.to_int smax with
-          | Ok smin_i, Ok smax_i
-            when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
-            let lo_a = Cbat_word.rshift vlo smax in
-            let hi_a = Cbat_word.rshift vhi smin in
-            (hull ~wrapping:false width lo_a hi_a, None)
-          | _ -> None, None)
-       | _ -> None, None)
-    | Bil.RSHIFT | Bil.ARSHIFT ->
-      (match Lazy.force v_extrema, Lazy.force b_extrema with
-       | (Some vlo, Some vhi), (Some smin, Some smax) ->
-         (match Cbat_word.to_int smin, Cbat_word.to_int smax with
-          | Ok smin_i, Ok smax_i
-            when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
-            let hi1 = Cbat_word.succ vhi in
-            let mask = Cbat_word.lshift (Cbat_word.one width)
-                (Cbat_word.of_int ~width:width (width - smax_i)) in
-            if Cbat_word.(>) hi1 mask then None, None
-            else
-              let lo_a = Cbat_word.lshift vlo (Cbat_word.of_int ~width smin_i) in
-              let hi_a = Cbat_word.pred (Cbat_word.lshift hi1 (Cbat_word.of_int ~width smax_i)) in
-              (hull ~wrapping:false width lo_a hi_a, None)
-          | _ -> None, None)
-       | _ -> None, None)
-    | Bil.DIVIDE ->
-      (match Lazy.force v_extrema, Lazy.force b_extrema with
-       | (Some vlo, Some vhi), (Some kmin, Some kmax) ->
-         (match Cbat_word.to_int kmin, Cbat_word.to_int kmax with
-          | Ok kmin_i, Ok kmax_i when kmin_i > 0 && kmin_i <= kmax_i ->
-            let hi1 = Cbat_word.succ vhi in
-            let kmax_w = Cbat_word.of_int ~width kmax_i in
-            let limit = Cbat_word.div (Cbat_word.ones width) kmax_w in
-            if Cbat_word.(>) hi1 limit then None, None
-            else
-              let lo_a = Cbat_word.mul vlo (Cbat_word.of_int ~width kmin_i) in
-              let hi_a = Cbat_word.pred (Cbat_word.mul hi1 kmax_w) in
-              (hull ~wrapping:false width lo_a hi_a, None)
-          | _ -> None, None)
-       | _ -> None, None)
-    | Bil.SDIVIDE ->
-      (match Lazy.force v_extrema, Lazy.force b_single with
-       | (Some vlo, Some vhi), Some k when width <= 32 ->
-         (match Cbat_word.to_int k with
-          | Ok kk when kk > 0 ->
-            (* Small widths avoid overflow. *)
-            (match Cbat_word.to_int vlo, Cbat_word.to_int vhi with
-             | Ok slo, Ok shi ->
-               let lo' = slo * kk in
-               let hi' = (shi + 1) * kk - 1 in
-               (hull ~wrapping:true width (Cbat_word.of_int ~width lo') (Cbat_word.of_int ~width hi'), None)
-             | _ -> None, None)
-          | _ -> None, None)
-       | _ -> None, None)
-    | Bil.MOD | Bil.SMOD ->
-      None, None
-    | Bil.AND | Bil.OR | Bil.XOR ->
-      (* Singleton masks constrain: XOR is a bitwise bijection, so its
-         pre-image is exact; AND bounds the operand below by the
-         constraint ([x >= x land k]) and above by the largest masked
-         value the constraint admits with every unmasked bit set. *)
-      (match Lazy.force b_single with
-       | Some k ->
-         if Cbat_word.is_zero k then
-           (match op with
-            | Bil.OR | Bil.XOR -> Some cstr, None
-            | _ -> None, None)
-         else if Cbat_word.(=) k (Cbat_word.ones width) then
-           (match op with
-            | Bil.AND -> Some cstr, None
-            | Bil.XOR -> Some (WordSet.lnot cstr), None
-            | _ -> None, None)
-         else
-           (match op with
-            | Bil.XOR ->
-              Some (WordSet.logxor cstr (WordSet.singleton k)), None
-            | Bil.AND ->
-              (match Lazy.force v_extrema with
-               | Some vlo, Some vhi ->
-                 hull ~wrapping:false width vlo
-                   (Cbat_word.logor (max_submask_le k vhi) (Cbat_word.lnot k)),
-                 None
-               | _ -> None, None)
-            | _ -> None, None)
-       | _ -> None, None)
-    | _ -> None, None
-
-(* Operand constraints for a bit window: the result constraint's hull
-   [vlo, vhi] placed at bit position [k], width [d], of the operand
-   (width [w]) — the window's bits carry the constraint, every bit
-   above the window free.  The endpoints lift to the operand width; a
-   constraint whose successor wraps reaches the word top.  Identity on
-   doubt. *)
-let shift_fill_constraint ~(w : int) (k : int) (d : int)
-    (vlo : Cbat_word.t) (vhi : Cbat_word.t) : wordset option =
-  let sh = Cbat_word.of_int ~width:w k in
-  let lo_a = Cbat_word.lshift (Cbat_word.extract_exn ~hi:(w - 1) vlo) sh in
-  let hi_max =
-    if Cbat_word.is_zero (Cbat_word.succ vhi) then Cbat_word.ones w
-    else
-      let hi_a =
-        Cbat_word.pred
-          (Cbat_word.lshift
-             (Cbat_word.extract_exn ~hi:(w - 1) (Cbat_word.succ vhi)) sh) in
-      let top =
-        if k + d >= w then Cbat_word.zero w
-        else
-          Cbat_word.sub (Cbat_word.ones w)
-            (Cbat_word.pred
-               (Cbat_word.lshift (Cbat_word.one w)
-                  (Cbat_word.of_int ~width:w (k + d)))) in
-      Cbat_word.add hi_a top
-  in
-  hull ~wrapping:false w lo_a hi_max
-
-(* The unsigned hull of a constraint; [None] when it has none. *)
-let bounds (cstr : wordset) : (Cbat_word.t * Cbat_word.t) option =
-  match WordSet.min_elem cstr, WordSet.max_elem cstr with
-  | Some lo, Some hi -> Some (lo, hi)
-  | _ -> None
-
-(* HIGH-cast pre-image: the constraint is the word's top [n] bits. *)
-let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
-    (cstr : wordset) : wordset option =
-  match denote_imm_exp a env with
-  | Ok a_ws ->
-    let w = WordSet.bitwidth a_ws in
-    let n = WordSet.bitwidth cstr in
-    if w <= n then None
-    else
-      (match bounds cstr with
-       | Some (vlo, vhi) ->
-         (* An open-top constraint (the succ wraps) has no closed hull. *)
-         if Cbat_word.is_zero (Cbat_word.succ vhi) then None
-         else shift_fill_constraint ~w (w - n) n vlo vhi
-       | _ -> None)
-  | Error _ -> None
-
-(* The six comparisons, exhaustive: any other binop is not a guard
-   op and fails loudly. *)
-let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
-  | Bil.LT -> ULT
-  | Bil.LE -> ULE
-  | Bil.EQ -> EQ
-  | Bil.NEQ -> NEQ
-  | Bil.SLT -> SLT
-  | Bil.SLE -> SLE
-  | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
-  | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
-  | Bil.AND | Bil.OR | Bil.XOR -> assert false
-
-let flip_guard_op (op : guard_op) : guard_op = match op with
-  | ULT -> UGT | UGT -> ULT
-  | ULE -> UGE | UGE -> ULE
-  | SLT -> SGT | SGT -> SLT
-  | SLE -> SGE | SGE -> SLE
-  | EQ -> EQ | NEQ -> NEQ
-
-
-(* The row a true guard [x op c] admits on [x]: [evidence_constraint] is the
-   CLP-interval evidence row ([None] = identity), [total_constraint] the
-   always-sound row; [guard_constraint] falls from evidence to total. *)
-let evidence_constraint ?(cur : wordset option = None)
-    ?(known_nonneg : bool = false)
-    (op : guard_op) (c : Cbat_word.t) : wordset option =
-  let width = Cbat_word.bitwidth c in
-  let half = Word_ops.half width in
-  let cardn_of_int (i : int) : Cbat_word.t option =
-    if i < 0 then None else Some (Cbat_word.of_int ~width:(width + 1) i) in
-  let int_of_word (v : Cbat_word.t) : int option =
-    Cbat_word.to_int v |> Result.ok in
-  (* The arms read the bound's payload: the sign flag a signed extremum
-     carries is an annotation, not part of the value the comparison
-     denotes, so the half tests run unsigned. *)
-  let payload = Cbat_word.unsigned in
-  let provably_nonneg =
-    known_nonneg
-    || Option.value_map cur ~default:false ~f:(fun ws ->
-        match WordSet.max_elem ws with
-        | None -> false
-        | Some m -> Cbat_word.(<) (payload m) half) in
-  match op with
-  | ULT ->
-    Option.bind (int_of_word c) ~f:(fun i ->
-        Option.bind (cardn_of_int i) ~f:(fun cardn ->
-            interval_clp_of ~width ~cardn (Cbat_word.zero width)))
-  | ULE ->
-    Option.bind (int_of_word c) ~f:(fun i ->
-        Option.bind (cardn_of_int (i + 1)) ~f:(fun cardn ->
-            interval_clp_of ~width ~cardn (Cbat_word.zero width)))
-  | EQ -> Some (WordSet.singleton c)
-  | SLT ->
-    if Cbat_word.(>=) (payload c) half
-    then interval_clp_of ~width ~cardn:(Cbat_word.sub c half) half
-    else if provably_nonneg
-    then interval_clp_of ~width ~cardn:c (Cbat_word.zero width)
-    else None
-  | SLE ->
-    if Cbat_word.(>=) (payload c) half
-    then interval_clp_of ~width ~cardn:(Cbat_word.succ (Cbat_word.sub c half)) half
-    else if provably_nonneg
-    then interval_clp_of ~width ~cardn:(Cbat_word.succ c) (Cbat_word.zero width)
-    else None
-  | NEQ | UGT | UGE | SGT | SGE -> None
-
-let total_constraint (op : guard_op) (c : Cbat_word.t) : wordset option =
-#ifdef VSA_DEBUG
-  Cbat_attr_census.bump
-    (match op with
-     | ULT -> "band.total.ult"
-     | ULE -> "band.total.ule"
-     | UGT -> "band.total.ugt"
-     | UGE -> "band.total.uge"
-     | EQ -> "band.total.eq"
-     | NEQ -> "band.total.neq"
-     | SLT -> "band.total.slt"
-     | SLE -> "band.total.sle"
-     | SGT -> "band.total.sgt"
-     | SGE -> "band.total.sge");
-#endif
-  let width = Cbat_word.bitwidth c in
-  let maxw = Cbat_word.ones width in
-  let half = Word_ops.half width in
-  let iv lo hi = hull ~wrapping:false width lo hi in
-  match op with
-  | EQ -> Some (WordSet.singleton c)
-  | NEQ -> neq_complement c
-  | ULT ->
-    (if Cbat_word.is_zero c then None
-     else iv (Cbat_word.zero width) (Cbat_word.pred c))
-  | ULE -> iv (Cbat_word.zero width) c
-  | UGT ->
-    (if Cbat_word.(=) c maxw then None
-     else iv (Cbat_word.succ c) maxw)
-  | UGE -> iv c maxw
-  | SLT ->
-    let pos =
-      if Cbat_word.is_zero c then None
-      else iv (Cbat_word.zero width) (Cbat_word.pred c) in
-    (match iv half maxw with
-     | Some neg ->
-       Some (match pos with
-         | Some p -> WordSet.union p neg
-         | None -> neg)
-     | None -> pos)
-  | SLE ->
-    (match iv half maxw with
-     | Some neg ->
-       (match iv (Cbat_word.zero width) c with
-        | Some lo -> Some (WordSet.union lo neg)
-        | None -> Some neg)
-     | None -> iv (Cbat_word.zero width) c)
-  | SGT ->
-    (if Cbat_word.(=) c (Cbat_word.pred half) then None
-     else iv (Cbat_word.succ c) (Cbat_word.pred half))
-  | SGE -> iv c (Cbat_word.pred half)
-
-let guard_constraint ?(cur : wordset option = None)
-    ?(known_nonneg : bool = false)
-    (op : guard_op) (c : Cbat_word.t) : wordset option =
-  match op with
-  | ULT | ULE | EQ | SLT | SLE ->
-    (match evidence_constraint ~cur ~known_nonneg op c with
-     | Some row ->
-#ifdef VSA_DEBUG
-       Cbat_attr_census.bump "band.constraint.ok";
-#endif
-       Some row
-     | None ->
-#ifdef VSA_DEBUG
-       Cbat_attr_census.bump "band.constraint.fallback";
-#endif
-       total_constraint op c)
-  | NEQ | UGT | UGE | SGT | SGE -> total_constraint op c
-
-
-(* The var-var meet: EQ keeps the intersection; NEQ removes the other
-   side's values exactly when that side is a singleton — with two or
-   more partners every value keeps a differing one. *)
-let overlap_eq (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
-    : wordset option * wordset option =
-  let ov = WordSet.meet a_ws b_ws in
-  if Cbat_word.is_zero (WordSet.cardinality ov)
-  then
-    (match op with
-     | Bil.NEQ -> Some a_ws, Some b_ws
-     | _ -> None, None)
-  else
-    (match op with
-     | Bil.NEQ ->
-       let da =
-         if Cbat_word.is_one (WordSet.cardinality b_ws) then WordSet.diff a_ws ov
-         else a_ws
-       in
-       let db =
-         if Cbat_word.is_one (WordSet.cardinality a_ws) then WordSet.diff b_ws ov
-         else b_ws
-       in
-#ifdef VSA_DEBUG
-       (if WordSet.equal da a_ws then
-          Cbat_attr_census.bump "band.diff.identity"
-        else Cbat_attr_census.bump "band.diff.exact");
-#endif
-       Some da, Some db
-     | _ -> Some ov, Some ov)
-
-(* [x op y]: const rows at the other operand's extrema; the signed [x]
-   rows take the evidence tier so identity survives an unproven
-   operand; EQ/NEQ take the meet. *)
-let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
-    : wordset option * wordset option =
-  let w = WordSet.bitwidth a_ws in
-  if WordSet.bitwidth b_ws <> w then None, None
-  else
-    let half = Word_ops.half w in
-    let signed =
-      match op with Bil.SLT | Bil.SLE -> true | _ -> false in
-    let mn s = if signed then WordSet.min_elem_signed s else WordSet.min_elem s in
-    let mx s = if signed then WordSet.max_elem_signed s else WordSet.max_elem s in
-    match mn a_ws, mx b_ws, mn b_ws, mx a_ws with
-    | Some mn_x, Some mx_y, Some _, Some _ ->
-      let nonneg_x =
-        match WordSet.max_elem a_ws with
-        | Some m -> Cbat_word.(<) m half
-        | None -> false in
-      (match op with
-       | Bil.LT -> total_constraint ULT mx_y, total_constraint UGT mn_x
-       | Bil.LE -> total_constraint ULE mx_y, total_constraint UGE mn_x
-       | Bil.SLT ->
-         evidence_constraint ~known_nonneg:nonneg_x SLT mx_y, total_constraint SGT mn_x
-       | Bil.SLE ->
-         evidence_constraint ~known_nonneg:nonneg_x SLE mx_y, total_constraint SGE mn_x
-       | Bil.EQ | Bil.NEQ -> overlap_eq op a_ws b_ws
-       | _ -> None, None)
-    | _ -> None, None
-
-(* The constraint row for an operand; signed rows consult the
-   non-negativity proof. *)
-let constraint_for_operand ~(env : AI.t) ?(nonneg : exp -> bool = fun _ -> false)
-    (e : exp) (op : guard_op) (c : Cbat_word.t)
-    : wordset option =
-  let cur = Base.Result.ok (denote_imm_exp e env) in
-  match op with
-  | SLT | SLE -> guard_constraint ~cur ~known_nonneg:(nonneg e) op c
-  | ULT | ULE | EQ -> guard_constraint ~cur op c
-  | NEQ | UGT | UGE | SGT | SGE -> guard_constraint op c
-
-let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
-    (cstr : wordset) : wordset option =
-  match denote_imm_exp a env with
-  | Ok a_ws ->
-    let n = WordSet.bitwidth a_ws in
-    let w = WordSet.bitwidth cstr in
-    if w <= n then None
-    else
-      let zero = Cbat_word.zero w in
-      let two_n = Cbat_word.pow2 ~width:w n in
-      let half =
-        Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w (n - 1)) in
-      let maxn = Cbat_word.pred two_n in
-      (match bounds cstr with
-       | Some (lo, hi) ->
-         let pieces =
-           if not is_signed then
-             if Cbat_word.(>) lo maxn then []
-             else [ (lo, Cbat_word.min hi maxn) ]
-           else begin
-             let pos =
-               if Cbat_word.(>) lo (Cbat_word.pred half) then []
-               else [ Cbat_word.max lo zero, Cbat_word.min hi (Cbat_word.pred half) ] in
-             let neg =
-               let neg_sext_lo =
-                 Cbat_word.sub (Cbat_word.ones w) (Cbat_word.pred half) in
-               let lo' = Cbat_word.max lo neg_sext_lo in
-               let hi' = Cbat_word.min hi (Cbat_word.ones w) in
-               if Cbat_word.(>) lo' hi' then []
-               else
-                 (* The negative half wraps above [two_n]. *)
-                 [ Cbat_word.add lo' two_n, Cbat_word.add hi' two_n ] in
-             pos @ neg
-           end
-         in
-         (match pieces with
-          | [] -> None
-          | (p0, p1) :: rest ->
-            let lo' =
-              List.fold rest ~init:p0 ~f:(fun acc (l, _) ->
-                  Cbat_word.min acc l) in
-            let hi' =
-              List.fold rest ~init:p1 ~f:(fun acc (_, h) ->
-                  Cbat_word.max acc h) in
-            hull ~wrapping:false n
-              (Cbat_word.extract_exn ~hi:(n - 1) lo')
-              (Cbat_word.extract_exn ~hi:(n - 1) hi'))
-       | _ -> None)
-  | Error _ -> None
-
-(* Low-cast pre-image: the constraint's window repeated at every
-   multiple of [2^n] the operand can reach.  A zero-extension of an
-   n-bit value reaches the first window only, so its pre-image is the
-   constraint itself at the operand's width; a bounded operand reaches
-   only the windows its own value set populates; an unbounded operand
-   takes the wide hull. *)
-let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
-    : wordset option =
-  match denote_imm_exp a env with
-  | Error _ -> None
-  | Ok a_ws ->
-    let w = WordSet.bitwidth a_ws in
-    let n = WordSet.bitwidth cstr in
-    if n >= w then None
-    else
-      (* A zero-extension of an n-bit value keeps its low n bits, so the
-         low cast is the identity there: the pre-image is the constraint
-         itself at the operand's width, never the wide hull. *)
-      let zero_extended_n =
-        match a with
-        | Bil.Cast (Bil.UNSIGNED, _, inner) ->
-          (match denote_imm_exp inner env with
-           | Ok inner_ws -> WordSet.bitwidth inner_ws = n
-           | Error _ -> false)
-        | _ -> false in
-      match bounds cstr with
-      | None -> None
-      | Some (vlo, vhi) ->
-        let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
-        let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
-        let wide_hull () =
-          let two_n = Cbat_word.pow2 ~width:w n in
-          hull ~wrapping:false w vlo_w
-            (Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n)) in
-        if zero_extended_n then hull ~wrapping:false w vlo_w vhi_w
-        else begin
-          match bounds a_ws with
-          | Some (alo, ahi)
-            when (not (WordSet.is_infinite a_ws)) && Cbat_word.(<=) alo ahi ->
-            (* The windows [k] the operand's reachable set populates:
-               window [k·2^n, k·2^n + 2^n) can carry a concrete
-               execution only when it meets [alo, ahi]; the others drop
-               and the surviving windows' constraint pieces hull. *)
-            (* The window index and the count word: rshift takes the
-               count as a value, so the count rides a small literal
-               ([n < w <= 64]) and the window base multiplies. *)
-            let step = Cbat_word.pow2 ~width:w n in
-            let cnt = Cbat_word.of_int ~width:w n in
-            let k0 = Cbat_word.rshift alo cnt in
-            let k1 = Cbat_word.rshift ahi cnt in
-            begin match Cbat_word.to_int (Cbat_word.sub k1 k0) with
-              | Ok span when span <= 64 ->
-                (* One window's constraint pieces: a non-wrapping
-                   constraint contributes [base+lo, base+hi]; a wrapping
-                   one contributes its high half [base+lo, base+2^n-1]
-                   and its low half [base, base+hi]. *)
-                let piece k =
-                  let base = Cbat_word.mul k step in
-                  let ints =
-                    if Cbat_word.(<=) vlo_w vhi_w then
-                      [ (Cbat_word.add base vlo_w, Cbat_word.add base vhi_w) ]
-                    else
-                      [ (Cbat_word.add base vlo_w,
-                         Cbat_word.add base (Cbat_word.ones n));
-                        (base, Cbat_word.add base vhi_w) ] in
-                  List.filter_map ints ~f:(fun (l, h) ->
-                      let l = Cbat_word.max alo l in
-                      let h = Cbat_word.min ahi h in
-                      hull ~wrapping:false w l h) in
-                let rec pieces k acc =
-                  if Cbat_word.(<=) k k1 then
-                    pieces (Cbat_word.add k (Cbat_word.one w))
-                      (List.rev_append (piece k) acc)
-                  else List.rev acc in
-                List.reduce (pieces k0 []) ~f:WordSet.union
-              | _ -> wide_hull ()
-            end
-          | _ -> wide_hull ()
-        end
-
-(* Operand constraints for an extract: the result constraint is the
-   operand's bits [lo, hi]; the window sits mid-word, so the endpoints
-   compute at the operand width with the free-above bits filled. *)
-let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
-    (cstr : wordset) : wordset option =
-  match denote_imm_exp a env with
-  | Ok a_ws ->
-    let w = WordSet.bitwidth a_ws in
-    let n = WordSet.bitwidth cstr in
-    if n <> hi - lo + 1 then None
-    else
-      (match bounds cstr with
-       | Some (vlo, vhi) -> shift_fill_constraint ~w lo n vlo vhi
-       | _ -> None)
-  | Error _ -> None
-
-
 
 (* A cell constraint awaiting delivery to the store that wrote it: what
    a load read, keyed by the byte range it touched.  An entry dies at the
@@ -1312,17 +713,22 @@ let rec reads_memory (e : exp) : bool =
   | Bil.Ite (c, t, f) -> reads_memory c || reads_memory t || reads_memory f
   | Bil.Let (_, a, b) -> reads_memory a || reads_memory b
 
-let rec constrain_operands ~(env : AI.t)
+let rec constrain_operands ~(env : AI.t) ?(seed = false)
     ?(cells : cell_env ref = ref no_cells)
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
   (* The recursive call on a sub-expression, in [env] unless given. *)
   let recur ?(env = env) e produced =
-    constrain_operands ~env ~cells ~nonneg ~landmarks e produced in
+    constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e produced in
   match e with
   | Bil.Var v ->
-    meet_var ~landmarks env v produced
+    if seed then (match Var.typ v with
+      | Type.Imm w when w = WordSet.bitwidth produced ->
+        ignore (meet_var ~landmarks env v produced);
+        AI.add_word env ~key:v ~data:produced
+      | _ -> env)
+    else meet_var ~landmarks env v produced
   | Bil.Int c ->
     (* The forward rule always produces the same constant: a disjoint
        produced value is the genuinely empty pre-image. *)
@@ -1337,40 +743,25 @@ let rec constrain_operands ~(env : AI.t)
       AI.bottom
     end
     else env
-  | Bil.UnOp (Bil.NOT, a) ->
-    recur a (WordSet.lnot produced)
-  | Bil.UnOp (Bil.NEG, a) ->
-    recur a (WordSet.neg produced)
-  | Bil.Cast (Bil.HIGH, sz, a) ->
-    Option.value_map (high_cast_constraint env a sz produced) ~default:env
-      ~f:(fun a' -> recur a a')
-  | Bil.Cast (ct, _, a) ->
-    (match ct with
-     | Bil.SIGNED | Bil.UNSIGNED ->
-       Option.value_map
-         (ext_cast_constraint
-            ~is_signed:(match ct with Bil.SIGNED -> true | _ -> false)
-            env a produced) ~default:env
-         ~f:(fun a' -> recur a a')
-     | _ ->
-       Option.value_map (low_cast_constraint env a produced) ~default:env
-         ~f:(fun a' -> recur a a'))
-  | Bil.Extract (hi, lo, a) ->
-    Option.value_map (extract_constraint env a hi lo produced) ~default:env
-      ~f:(fun a' -> recur a a')
-  | Bil.Concat (a, b) ->
-    (* The inverse splits the window on the width boundary. *)
-    (match denote_imm_exp b env with
-     | Ok b_ws ->
-       let bw = WordSet.bitwidth b_ws in
-       let cw = WordSet.bitwidth produced in
-       if bw >= cw then recur a produced
-       else
-         let env = recur a
-             (WordSet.extract ~hi:(cw - 1) ~lo:bw produced) in
-         recur ~env b
-           (WordSet.extract ~hi:(bw - 1) ~lo:0 produced)
+  | (Bil.UnOp (_, a) | Bil.Cast (_, _, a) | Bil.Extract (_, _, a)) ->
+    let op = match e with
+      | Bil.UnOp (Bil.NOT,_) -> Cbat_preimage.Lnot
+      | Bil.UnOp (Bil.NEG,_) -> Cbat_preimage.Neg
+      | Bil.Cast (c,n,_) -> Cbat_preimage.Cast (c,n)
+      | Bil.Extract (hi,lo,_) -> Cbat_preimage.Extract (Some hi,lo)
+      | _ -> assert false in
+    (match denote_imm_exp a env with
+     | Ok arg ->
+       let c = WordSet.backward1 op ~arg ~result:produced in
+       (* A rejected value still supplies its excluding boundary to the
+          landmark observer; the leaf owns empty-meet delivery. *)
+       let c = if WordSet.is_bottom c then
+           WordSet.backward1 op ~arg:(WordSet.top (WordSet.bitwidth arg)) ~result:produced
+         else c in
+       recur a c
      | Error _ -> env)
+  | Bil.Concat (a,b) ->
+    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
   | Bil.Ite (c, t, f) ->
     (* The branches are alternatives: a condition whose denotation names
        one branch constrains that branch; any other condition leaves the
@@ -1470,87 +861,65 @@ let rec constrain_operands ~(env : AI.t)
        (* A store onto a computed memory may write any cell. *)
        cells := no_cells;
        env)
-  | Bil.BinOp (Bil.AND, a, b) when WordSet.bitwidth produced = 1 ->
-    (* AND = true constrains both operands. *)
-    if WordSet.elem Cbat_word.b1 produced
-       && not (WordSet.elem Cbat_word.b0 produced)
-    then
-      let env = recur a produced in
-      recur ~env b produced
-    else
-      (* AND = false: which operand is false is unknown — identity. *)
-      env
-  | Bil.BinOp (Bil.OR, a, b) when WordSet.bitwidth produced = 1 ->
-    (* OR = false constrains both operands to false. *)
-    if WordSet.elem Cbat_word.b0 produced
-       && not (WordSet.elem Cbat_word.b1 produced)
-    then
-      let env = recur a produced in
-      recur ~env b produced
-    else env
-  | Bil.BinOp (op, a, b) ->
-    (match op with
-     | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE
-       when WordSet.bitwidth produced = 1 ->
-       (* The produced bit's polarity windows the operands: {1} through
-          the true side, {0} through the completed negation. *)
-       let has1 = WordSet.elem Cbat_word.b1 produced in
-       let has0 = WordSet.elem Cbat_word.b0 produced in
-       if has1 && not has0 then cmp_inverse ~env ~cells ~nonneg ~landmarks op a b
-       else if has0 && not has1 then
-         (match complete_cond (Bil.UnOp (Bil.NOT, e)) with
-          | Bil.BinOp (op', x, y) -> cmp_inverse ~env ~cells ~nonneg ~landmarks op' x y
-          | _ -> env)
-       else if has1 || has0 then env
-       else AI.bottom
-     | Bil.MOD | Bil.SMOD ->
-       (* No closed-form inverse: identity, no extra knowledge. *)
-       env
-     | _ ->
-       (* The subtraction pre-image: the operands' windows whose forward
-          images land in the produced value; literals and Let bindings
-          receive nothing. *)
-       let deliver (e : exp) (c : wordset option) (env : AI.t) : AI.t =
-         match e, c with
-         | Bil.Int _, _ | Bil.Let _, _ -> env
-         | _, Some c' -> recur ~env e c'
-         | _ -> env in
-       (match denote_imm_exp a env, denote_imm_exp b env with
-        | Ok a_ws, Ok b_ws ->
-          (let a', b' = operand_constraints op produced a_ws b_ws in
-           let env = deliver a a' env in
-           deliver b b' env)
-        | _ -> env))
+  | Bil.BinOp (op,a,b) ->
+    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
   | Bil.Unknown _ -> env
 
-(* The produced {1} windows the operands by the ordering decision. *)
-and cmp_inverse ~(env : AI.t) ~(cells : cell_env ref)
-    ~(landmarks : Cbat_landmarks.t)
-    ~(nonneg : exp -> bool)
-    (op : Bil.binop) (a : exp) (b : exp) : AI.t =
-  let const_side (x : exp) (flip : bool) (op : Bil.binop) (c : word) : AI.t =
-    let c0 = Cbat_word.of_word c in
-    let row o = if flip then flip_guard_op o else o in
-    let cstr_opt = match op with
-      | Bil.NEQ -> neq_complement c0
-      | _ -> constraint_for_operand ~env ~nonneg x (row (guard_op_of_binop op)) c0 in
-    match cstr_opt with
-    | Some cstr -> constrain_operands ~env ~cells ~nonneg ~landmarks x cstr
-    | None -> env in
-  match a, b with
-  | _, Bil.Int c0 -> const_side a false op c0
-  | Bil.Int c0, e0 -> const_side e0 true op c0
-  | _ ->
-    (match denote_imm_exp a env, denote_imm_exp b env with
-     | Ok a_ws, Ok b_ws ->
-       let x_cstr, y_cstr = overlap_constraints op a_ws b_ws in
-       let env = match x_cstr with
-         | Some xc -> constrain_operands ~env ~cells ~nonneg ~landmarks a xc
-         | None -> env in
-       (match y_cstr with
-        | Some yc -> constrain_operands ~env ~cells ~nonneg ~landmarks b yc
-        | None -> env)
-     | _ -> env)
+(* Numeric inverses join their alternatives before the effectful walk
+   delivers either projection. *)
+and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
+  match (denote_imm_exp a env, denote_imm_exp b env) with
+  | Ok left, Ok right ->
+      let signed =
+        match op with
+        | Cbat_preimage.Op (Bil.SLT | Bil.SLE) -> true
+        | _ -> false
+      in
+      let domain e value =
+        let w = WordSet.bitwidth value in
+        if signed && nonneg e then
+          WordSet.of_clp
+            (Cbat_clp.interval ~width:w (Cbat_word.zero w)
+               (Cbat_word.pred (Cbat_word.pow2 ~width:w (w - 1))))
+        else WordSet.top w
+      in
+      let left_domain = domain a left and right_domain = domain b right in
+      let left = WordSet.meet left left_domain
+      and right = WordSet.meet right right_domain in
+      let x, y = WordSet.backward2 op ~left ~right ~result:produced in
+      let raw e value domain =
+        match e with Bil.Int _ -> value | _ -> domain
+      in
+      let excluded =
+        lazy
+          (WordSet.backward2 op ~left:(raw a left left_domain)
+             ~right:(raw b right right_domain) ~result:produced)
+      in
+      let x =
+        if WordSet.is_bottom x then
+          let c =
+            fst (WordSet.backward2 op ~left:left_domain ~right ~result:produced)
+          in
+          if WordSet.is_bottom c then fst (Lazy.force excluded) else c
+        else x
+      in
+      let y =
+        if WordSet.is_bottom y then
+          let c =
+            snd
+              (WordSet.backward2 op ~left ~right:right_domain ~result:produced)
+          in
+          if WordSet.is_bottom c then snd (Lazy.force excluded) else c
+        else y
+      in
+      let deliver env e c =
+        match e with
+        | Bil.Int _ | Bil.Let _ -> env
+        | _ -> constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e c
+      in
+      let env = deliver env a x in
+      deliver env b y
+  | _ -> env
 
 (* The load's cell fact meets the env's memory at the denoted address:
    stack-symbolic addresses key by segment offsets, foreign by their
@@ -1900,9 +1269,10 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
   (* Outside a cycle no observation records, so the walk has no effect. *)
   if Cbat_landmarks.in_cycle landmarks then begin
-    (* The raw walk pushes the disabled cond's constraints through the
-       producers so the empty meets land on the counters. *)
-    let constrained = constrain_edge ~env ~landmarks disabled in
+    (* The observer seeds the requested facts even when the live state
+       excludes them. This temporary environment never enters the solve. *)
+    let constrained = constrain_operands ~seed:true ~env ~landmarks disabled
+        (WordSet.singleton Cbat_word.b1) in
     if not (AI.equal constrained AI.bottom) then begin
       let seeds = cond_seeds ~env:constrained disabled in
       (* Without seeds the observer, which never inverts memory defs,

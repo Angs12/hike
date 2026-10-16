@@ -17,6 +17,7 @@
  (ocamlopt_flags
   (:standard -O3))
  (modules
+  cbat_preimage
   cbat_clp
   cbat_clp_core
   cbat_clp_arith

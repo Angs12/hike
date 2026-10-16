@@ -174,6 +174,11 @@ module Pieces : sig
   val widen_hulls :
     (progression -> progression -> progression list) -> t -> t -> t
   val pp : Format.formatter -> t -> unit
+
+  (* Pure inverse operators: satisfying input projections, joined over
+     alternatives. Empty projections are proven impossible. *)
+  val backward1 : Cbat_preimage.unop -> arg:t -> result:t -> t
+  val backward2 : Cbat_preimage.binop -> left:t -> right:t -> result:t -> t * t
 end
 
 (* The step-1 interval [lo, hi] as pieces; a pair with [hi < lo] is the
@@ -253,6 +258,11 @@ module Exact : sig
 
   val get_idx : t -> int
   val pp : Format.formatter -> t -> unit
+
+  (* Pure inverse operators: satisfying input projections, joined over
+     alternatives. Empty projections are proven impossible. *)
+  val backward1 : Cbat_preimage.unop -> arg:t -> result:t -> t
+  val backward2 : Cbat_preimage.binop -> left:t -> right:t -> result:t -> t * t
 end
 
 

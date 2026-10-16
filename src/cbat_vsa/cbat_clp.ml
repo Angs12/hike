@@ -48,7 +48,7 @@ let () =
    disjoint, adjacent same-step runs merged, overlapping pieces hulled.
    The list is the set union; [] is bottom.  Smart constructors are the
    only way in; no raw list escapes except through [to_list]. *)
-module Pieces = struct
+module Pieces_base = struct
   type t = progression list [@@deriving bin_io, sexp, compare]
 
   module C = Cbat_clp_core
@@ -852,7 +852,7 @@ module Pieces = struct
   let meet = intersection
 end
 
-let interval = Pieces.interval
+let interval = Pieces_base.interval
 
 (* ==================== Exact: the uncapped flat element array ========== *)
 
@@ -864,7 +864,7 @@ let interval = Pieces.interval
    uncapped and unbudgeted; the caller's canonical promotion applies the
    budget.  Ordered images write their array directly; other images
    maintain an ordered bit-prefix set while computing their elements. *)
-module Exact = struct
+module Exact_base = struct
   module W = Cbat_word
 
   type t = { width : int; words : W.t array }
@@ -976,19 +976,19 @@ module Exact = struct
      builds them. *)
   let to_pieces (t : t) : progression list =
     if is_bottom t then []
-    else List.rev (Pieces.runs_from_sorted_elements ~width:t.width (elements t))
+    else List.rev (Pieces_base.runs_from_sorted_elements ~width:t.width (elements t))
 
   (* The same elements as a canonical piece union.  The array is strictly
      ascending at [width], so its runs are ascending, disjoint and
      non-wrapping: only the budget combines. *)
-  let pieces (t : t) : Pieces.t =
+  let pieces (t : t) : Pieces_base.t =
     let runs = to_pieces t in
     if List.length runs <= Cbat_vsa_utils.max_pieces then runs
-    else Pieces.hull runs
+    else Pieces_base.hull runs
 
   (* Piece minima ascend, but strided pieces can interleave.  Merge their
      ascending element streams to preserve the array's order. *)
-  let of_pieces ~(width : int) (ps : Pieces.t) : t =
+  let of_pieces ~(width : int) (ps : Pieces_base.t) : t =
 #ifdef VSA_DEBUG
     assert (List.for_all ps ~f:(fun p -> Cbat_clp_core.bitwidth p = width));
 #endif
@@ -1189,4 +1189,395 @@ module Exact = struct
     Format.fprintf ppf "@[{@ ";
     List.iter (elements t) ~f:(Format.fprintf ppf "%a@ " W.pp);
     Format.fprintf ppf "}@]"
+end
+
+module Exact_backward = Cbat_preimage.Make (struct
+  include Exact_base
+
+  let parts t = if is_bottom t then [] else [ t ]
+
+  let assemble ~width = function
+    | [] -> bottom width
+    | [ t ] -> t
+    | ts ->
+        of_iter ~width ~iter:(fun emit ->
+            List.iter ts ~f:(fun t -> List.iter (iter t) ~f:emit))
+
+  let unary op ~arg ~result =
+    filter arg ~f:(fun x -> elem (Cbat_preimage.word1 op x) result)
+
+  let binary op ~left ~right ~result =
+    let accepts x y =
+      Option.value_map (Cbat_preimage.word2 op x y) ~default:true ~f:(fun z ->
+          elem z result)
+    in
+    let xs = iter left and ys = iter right in
+    ( filter left ~f:(fun x -> List.exists ys ~f:(accepts x)),
+      filter right ~f:(fun y -> List.exists xs ~f:(fun x -> accepts x y)) )
+end)
+
+module Piece_backward = struct
+  module P = Pieces_base
+  module W = Cbat_word
+  module I = Cbat_preimage
+
+  let width = P.bitwidth
+  let empty a = P.bottom (width a)
+  let bounds a = Option.both (P.min_elem a) (P.max_elem a)
+  let iv w lo hi = if W.(lo > hi) then P.bottom w else P.interval ~width:w lo hi
+
+  let union _w xs =
+    P.produce (fun emit -> List.iter xs ~f:(fun p -> P.iter p ~f:emit))
+
+  let singleton a = if W.is_one (P.cardinality a) then P.min_elem a else None
+  let finite a cap = if P.card_exceeds cap a then None else Some (P.elements a)
+
+  let image1 op a =
+    match op with
+    | I.Lnot -> P.lnot a
+    | I.Neg -> P.neg a
+    | I.Cast (c, n) -> P.cast c n a
+    | I.Extract (hi, lo) -> P.extract ?hi ~lo a
+
+  (* The output window repeats only inside this input progression. *)
+  let low arg result =
+    let w = width arg and n = width result in
+    if n >= w then P.intersection arg (P.cast Bil.LOW w result)
+    else
+      match bounds arg with
+      | None -> arg
+      | Some (alo, ahi) ->
+          let count = W.of_int ~width:w n in
+          let k0 = W.rshift alo count and k1 = W.rshift ahi count in
+          if W.gt_int (W.sub k1 k0) Cbat_vsa_utils.max_pieces then
+            match bounds result with
+            | None -> arg
+            | Some (lo, hi) -> (
+                let lo = W.cast Bil.UNSIGNED w lo
+                and hi = W.cast Bil.UNSIGNED w hi in
+                let period = W.pow2 ~width:w n in
+                let step =
+                  if W.equal lo hi then Some period
+                  else
+                    match P.to_list result with
+                    | [ p ] ->
+                        let step = W.cast Bil.UNSIGNED w (step_of p) in
+                        if
+                          (not (W.is_zero step))
+                          && W.is_zero (W.modulo period step)
+                          && W.(lo < step)
+                          && W.equal hi (W.add lo (W.sub period step))
+                        then Some step
+                        else None
+                    | _ -> None
+                in
+                let first = W.add (W.lshift k0 count) lo in
+                let last = W.add (W.lshift k1 count) hi in
+                match step with
+                | Some step ->
+                    let distance =
+                      W.cast Bil.UNSIGNED (w + 1) (W.sub last first)
+                    in
+                    let cardn =
+                      W.succ (W.div distance (W.cast Bil.UNSIGNED (w + 1) step))
+                    in
+                    P.intersection arg
+                      (P.of_progression (create ~width:w ~step ~cardn first))
+                | None -> P.intersection arg (iv w first last))
+          else
+            let r = P.cast Bil.UNSIGNED w result in
+            let rec windows k acc =
+              let base = W.lshift k count in
+              let p = P.intersection arg (P.translate r base) in
+              let acc = p :: acc in
+              if W.equal k k1 then union w acc else windows (W.succ k) acc
+            in
+            windows k0 []
+
+  let extend signed arg result =
+    let n = width arg and w = width result in
+    let z = W.zero w and maxn = W.pred (W.pow2 ~width:w n) in
+    let image =
+      if not signed then P.intersection result (iv w z maxn)
+      else
+        let half = W.pow2 ~width:w (n - 1) in
+        P.intersection result
+          (union w [ iv w z (W.pred half); iv w (W.sub z half) (W.ones w) ])
+    in
+    P.intersection arg (P.cast Bil.LOW n image)
+
+  let extract arg result ~hi ~lo =
+    let w = width arg in
+    if hi < lo || lo < 0 || hi >= w then arg
+    else
+      let shifted = P.rshift arg (P.singleton (W.of_int ~width:w lo)) in
+      let narrowed = low shifted result in
+      if P.is_bottom narrowed then empty arg
+      else
+        let base = P.lshift narrowed (P.singleton (W.of_int ~width:w lo)) in
+        let lows = iv w (W.zero w) (W.pred (W.pow2 ~width:w lo)) in
+        P.intersection arg (P.add base lows)
+
+  let unary op ~arg ~result =
+    match finite arg 64 with
+    | Some xs ->
+        P.of_list ~width:(width arg)
+          (List.filter xs ~f:(fun x -> P.elem (I.word1 op x) result))
+    | None -> (
+        if not (P.overlap (image1 op arg) result) then empty arg
+        else
+          match op with
+          | I.Lnot -> P.intersection arg (P.lnot result)
+          | I.Neg -> P.intersection arg (P.neg result)
+          | I.Cast (c, n) when n = width arg -> P.intersection arg result
+          | I.Cast (Bil.HIGH, n) when n < width arg ->
+              extract arg result ~hi:(width arg - 1) ~lo:(width arg - n)
+          | I.Cast (_, n) when n < width arg -> low arg result
+          | I.Cast (Bil.SIGNED, _) -> extend true arg result
+          | I.Cast (Bil.UNSIGNED, _) -> extend false arg result
+          | I.Cast _ -> arg
+          | I.Extract (hi, lo) ->
+              extract arg result
+                ~hi:(Option.value hi ~default:(width arg - 1))
+                ~lo)
+
+  (* Order projections use signed endpoints on the signed number line. *)
+  let order ~signed ~strict left right =
+    let w = width left in
+    let mn = if signed then P.min_elem_signed else P.min_elem in
+    let mx = if signed then P.max_elem_signed else P.max_elem in
+    let first = if signed then W.pow2 ~width:w (w - 1) else W.zero w in
+    let last = if signed then W.pred first else W.ones w in
+    let less x y = if signed then W.(signed x < signed y) else W.(x < y) in
+    match (mn left, mx right) with
+    | Some x, Some y when less x y || ((not strict) && W.equal x y) ->
+        let upper = if strict then W.pred y else y in
+        let lower = if strict then W.succ x else x in
+        ( P.intersection left (P.interval ~width:w first upper),
+          P.intersection right (P.interval ~width:w lower last) )
+    | Some _, Some _ -> (empty left, empty right)
+    | _ -> (left, right)
+
+  let compare op left right truth =
+    match op with
+    | Bil.EQ | Bil.NEQ -> (
+        if Bool.equal truth (Poly.equal op Bil.EQ) then
+          let meet = P.intersection left right in
+          (meet, meet)
+        else
+          ( (match singleton right with
+            | Some k -> P.diff left (P.singleton k)
+            | None -> left),
+            match singleton left with
+            | Some k -> P.diff right (P.singleton k)
+            | None -> right ))
+    | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE ->
+        let signed = Poly.equal op Bil.SLT || Poly.equal op Bil.SLE in
+        let strict = Poly.equal op Bil.LT || Poly.equal op Bil.SLT in
+        if truth then order ~signed ~strict left right
+        else
+          let b, a = order ~signed ~strict:(not strict) right left in
+          (a, b)
+    | _ -> (left, right)
+
+  let ceil_div a b =
+    let q = W.div a b in
+    if W.is_zero (W.modulo a b) then q else W.succ q
+
+  let arithmetic op left right result =
+    let w = width left in
+    let keep a b = (P.intersection left a, P.intersection right b) in
+    match op with
+    | Bil.PLUS -> keep (P.sub result right) (P.sub result left)
+    | Bil.MINUS -> keep (P.add result right) (P.sub left result)
+    | Bil.TIMES ->
+        let project a b =
+          match (singleton b, bounds a, bounds result) with
+          | Some k, Some (_, amax), Some (lo, hi)
+            when (not (W.is_zero k)) && W.(amax <= div (ones w) k) ->
+              P.intersection a (iv w (ceil_div lo k) (W.div hi k))
+          | _ -> a
+        in
+        (project left right, project right left)
+    | Bil.DIVIDE -> (
+        match (bounds right, bounds result) with
+        | Some (kmin, kmax), Some (lo, hi) when not (W.is_zero kmin) ->
+            let wide x = W.cast Bil.UNSIGNED ((2 * w) + 1) x in
+            let low = W.mul (wide lo) (wide kmin) in
+            let high = W.pred (W.mul (W.succ (wide hi)) (wide kmax)) in
+            let maxw = wide (W.ones w) in
+            if W.(low > maxw) then (empty left, empty right)
+            else
+              keep
+                (iv w (W.cast Bil.LOW w low)
+                   (W.cast Bil.LOW w (W.min high maxw)))
+                right
+        | _ -> (left, right))
+    | Bil.SDIVIDE -> (
+        match
+          (singleton right, P.min_elem_signed result, P.max_elem_signed result)
+        with
+        | Some k, Some lo, Some hi when not (W.msb k || W.is_zero k) ->
+            let signed_z x =
+              let z = W.to_z x in
+              if W.msb x then Z.sub z (Z.shift_left Z.one w) else z
+            in
+            let k = W.to_z k and lo = signed_z lo and hi = signed_z hi in
+            let extra = Z.pred k in
+            let lower =
+              Z.sub (Z.mul lo k) (if Z.sign lo <= 0 then extra else Z.zero)
+            in
+            let upper =
+              Z.add (Z.mul hi k) (if Z.sign hi >= 0 then extra else Z.zero)
+            in
+            let half = Z.shift_left Z.one (w - 1) in
+            let lower = Z.max lower (Z.neg half)
+            and upper = Z.min upper (Z.pred half) in
+            if Z.compare lower upper > 0 then (empty left, empty right)
+            else
+              keep (P.interval ~width:w (W.of_z lower w) (W.of_z upper w)) right
+        | _ -> (left, right))
+    | Bil.AND | Bil.OR | Bil.XOR ->
+        let project a b =
+          match singleton b with
+          | Some k ->
+              let constraint_ =
+                match op with
+                | Bil.XOR -> P.logxor result (P.singleton k)
+                | Bil.AND when W.equal k (W.ones w) -> result
+                | Bil.OR when W.is_zero k -> result
+                | Bil.AND -> (
+                    match bounds result with
+                    | None -> a
+                    | Some (lo, hi) ->
+                        let rec submask i acc =
+                          if i < 0 then acc
+                          else
+                            let bit = W.pow2 ~width:w i in
+                            let cand = W.logor acc bit in
+                            submask (i - 1)
+                              (if
+                                 (not (W.is_zero (W.logand k bit)))
+                                 && W.(cand <= hi)
+                               then cand
+                               else acc)
+                        in
+                        iv w lo
+                          (W.logor (submask (w - 1) (W.zero w)) (W.lnot k)))
+                | _ -> a
+              in
+              P.intersection a constraint_
+          | None -> a
+        in
+        (project left right, project right left)
+    | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT -> (
+        match finite right 64 with
+        | None -> (left, right)
+        | Some counts ->
+            let pairs =
+              List.filter_map counts ~f:(fun k ->
+                  match W.to_int k with
+                  | Error _ -> Some (left, P.singleton k)
+                  | Ok n ->
+                      let candidate =
+                        if n >= w then
+                          if Poly.equal op Bil.ARSHIFT then left
+                          else if P.elem (W.zero w) result then left
+                          else empty left
+                        else if n < 0 then left
+                        else if n = 0 then P.intersection left result
+                        else if Poly.equal op Bil.LSHIFT then
+                          let valid =
+                            P.intersection result
+                              (P.of_progression
+                                 (create ~width:w ~step:(W.pow2 ~width:w n)
+                                    ~cardn:(W.pow2 ~width:(w + 1) (w - n))
+                                    (W.zero w)))
+                          in
+                          low left
+                            (P.cast Bil.LOW (w - n)
+                               (P.rshift valid (P.singleton k)))
+                        else
+                          let valid =
+                            if Poly.equal op Bil.RSHIFT then
+                              P.intersection result
+                                (iv w (W.zero w) (W.rshift (W.ones w) k))
+                            else
+                              let half = W.pow2 ~width:w (w - 1) in
+                              P.intersection result
+                                (union w
+                                   [
+                                     iv w (W.zero w) (W.rshift (W.pred half) k);
+                                     iv w (W.arshift half k) (W.ones w);
+                                   ])
+                          in
+                          let reduced =
+                            P.cast Bil.UNSIGNED w (P.cast Bil.LOW (w - n) valid)
+                          in
+                          let bases = P.lshift reduced (P.singleton k) in
+                          P.intersection left
+                            (P.add bases
+                               (iv w (W.zero w) (W.pred (W.pow2 ~width:w n))))
+                      in
+                      if P.is_bottom candidate then None
+                      else Some (candidate, P.singleton k))
+            in
+            ( union w (List.map pairs ~f:fst),
+              union (width right) (List.map pairs ~f:snd) ))
+    | _ -> (left, right)
+
+  let binary op ~left ~right ~result =
+    match (finite left 64, finite right 64) with
+    | Some xs, Some ys when List.length xs * List.length ys <= 4096 ->
+        let accepts x y =
+          Option.value_map (I.word2 op x y) ~default:true ~f:(fun z ->
+              P.elem z result)
+        in
+        ( P.of_list ~width:(width left)
+            (List.filter xs ~f:(fun x -> List.exists ys ~f:(accepts x))),
+          P.of_list ~width:(width right)
+            (List.filter ys ~f:(fun y ->
+                 List.exists xs ~f:(fun x -> accepts x y))) )
+    | _ -> (
+        match op with
+        | I.Concat ->
+            let rw = width right in
+            ( P.intersection left
+                (P.extract ~hi:(width result - 1) ~lo:rw result),
+              P.intersection right (P.extract ~hi:(rw - 1) ~lo:0 result) )
+        | I.Op ((Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE) as cmp)
+          ->
+            let has0 = P.elem W.b0 result and has1 = P.elem W.b1 result in
+            if has0 && has1 then (left, right)
+            else if has0 || has1 then compare cmp left right has1
+            else (empty left, empty right)
+        | I.Op op -> arithmetic op left right result)
+end
+
+module Pieces_backward = Cbat_preimage.Make (struct
+  include Pieces_base
+
+  let parts t = List.map (to_list t) ~f:of_progression
+
+  let assemble ~width:_ = function
+    | [] -> []
+    | [ p ] -> p
+    | ts -> produce (fun emit -> List.iter ts ~f:(fun p -> iter p ~f:emit))
+
+  let unary = Piece_backward.unary
+  let binary = Piece_backward.binary
+end)
+
+module Pieces = struct
+  include Pieces_base
+
+  let backward1 = Pieces_backward.backward1
+  let backward2 = Pieces_backward.backward2
+end
+
+module Exact = struct
+  include Exact_base
+
+  let backward1 = Exact_backward.backward1
+  let backward2 = Exact_backward.backward2
 end

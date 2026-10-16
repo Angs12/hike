@@ -173,7 +173,7 @@ type binop =
   | Logxor
   | Concat
 
-type unop =
+type unop = Cbat_preimage.unop =
   | Lnot
   | Neg
   | Extract of int option * int
@@ -186,3 +186,8 @@ val lift1 : unop -> t -> t
 (* The value's constructor, for the churn diagnosis. *)
 val tag : t -> string
 #endif
+
+(* Operand pre-images, with representation and origin dispatch owned by
+   the value domain. Alternatives are joined before returning. *)
+val backward1 : Cbat_preimage.unop -> arg:t -> result:t -> t
+val backward2 : Cbat_preimage.binop -> left:t -> right:t -> result:t -> t * t
