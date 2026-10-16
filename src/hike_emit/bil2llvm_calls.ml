@@ -8,13 +8,11 @@ open Bil2llvm_exp
 open Bil2llvm_fp
 open Bil2llvm_access
 
-let dbg_tail (msg : unit -> string) =
-#ifdef VSA_DEBUG
-  Printf.eprintf "hike-dbg-tail: %s\n%!" (msg ())
-#else
-  ignore msg
-#endif
-
+(* The main-role sub is the module's C entry, whatever the decode named it. *)
+let is_main_role ctx (sub_tid : tid) : bool =
+  match Core.Map.find ctx.sub_of sub_tid with
+  | Some s -> Term.has_attr s Hike_stack_model.main_role
+  | None -> false
 
 let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
@@ -163,7 +161,7 @@ let create_fun_declaration ?name ctx sub_tid =
       Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
     else Llvm.function_type ret_typ (Array.of_list args_typ)
   in
-  dbg_tail (fun () ->
+  Hike_diag.debug ~tag:"hike-dbg-tail" (fun () ->
       Printf.sprintf "decl %s extern=%b blocks=%s"
         (Tid.name sub_tid) (is_extern ctx sub_tid)
         (match Core.Map.find ctx.sub_of sub_tid with
@@ -188,11 +186,7 @@ let create_fun ctx sub_tid ~rets ~args ~variadic =
   in
   (* The main-role sub is the C entry the native crt1 calls: it is the
      module's `main` whatever the decode named it. *)
-  let fn_name =
-    match Core.Map.find ctx.sub_of sub_tid with
-    | Some s when Term.has_attr s Hike_stack_model.main_role -> "main"
-    | _ -> Tid.name sub_tid
-  in
+  let fn_name = if is_main_role ctx sub_tid then "main" else Tid.name sub_tid in
   let fn =
     Llvm.define_function (sanitize_name fn_name) fn_typ ctx.llvm_module
   in
@@ -200,9 +194,7 @@ let create_fun ctx sub_tid ~rets ~args ~variadic =
      nothing else, so every other definition is internal: the system
      crt's own _init/_fini do not collide with kept-by-refusal stubs,
      and the optimizer may cross the boundaries. *)
-  (match Core.Map.find ctx.sub_of sub_tid with
-   | Some s when Term.has_attr s Hike_stack_model.main_role -> ()
-   | _ -> Llvm.set_linkage Llvm.Linkage.Internal fn);
+  if not (is_main_role ctx sub_tid) then Llvm.set_linkage Llvm.Linkage.Internal fn;
   set_arg_names_of args fn;
   register_fn ctx sub_tid fn fn_typ;
   set_arg_attrs_of ctx fn args
@@ -587,7 +579,7 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
       match external_slot_target ctx ~sub target with
       | Some name -> create_external_boundary ctx scope llvm_builder blk_tid sub name
       | None ->
-        dbg_tail (fun () ->
+        Hike_diag.debug ~tag:"hike-dbg-tail" (fun () ->
             Printf.sprintf "sub %s blk %s target %s defs=[%s]"
               (Tid.name (Term.tid sub)) (Tid.name blk_tid) (Exp.to_string target)
               (Term.enum blk_t sub

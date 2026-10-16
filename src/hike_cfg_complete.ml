@@ -60,15 +60,6 @@ let retaddr_read ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     ~default:false
     ~f:(fun dtid -> Core.Set.mem retaddr dtid)
 
-(* The dispatch resolution's debug trace; the message is a thunk so
-   production never formats it. *)
-let debug_trace (msg : unit -> string) =
-#ifdef VSA_DEBUG
-  Printf.eprintf "hike-dbg-dispatch: %s\n%!" (msg ())
-#else
-  ignore msg
-#endif
-
 (* The jmp's indirect target when it is neither a retaddr read nor a
    read through a linker-owned slot: the ret epilogue's target is the
    stack-symbolic cell, and a slot-read target is a foreign boundary —
@@ -104,7 +95,7 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
         if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
            || Vsa.WordSet.is_bottom ws
         then (
-          debug_trace (fun () ->
+          Hike_diag.debug ~tag:"hike-dbg-dispatch" (fun () ->
               Printf.sprintf "bounded_words: the target denotation is %s"
                 (if Vsa.WordSet.is_top ws then "TOP"
                  else if Vsa.WordSet.is_infinite ws then "INFINITE"
@@ -116,7 +107,7 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
            with
            | Some ws -> Some ws
            | None ->
-             debug_trace (fun () ->
+             Hike_diag.debug ~tag:"hike-dbg-dispatch" (fun () ->
                  Printf.sprintf
                    "bounded_words: card exceeds the map's %d blocks"
                    (Core.Map.length block_addrs));
@@ -196,7 +187,7 @@ let module_base ~(denote : denote) ~(graph : Hike_backsubst.graph) ~(blk : blk t
 let case_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t) ~(blk : blk term) (texp : exp) :
     Cbat_word.t list option =
-  debug_trace (fun () ->
+  Hike_diag.debug ~tag:"hike-dbg-dispatch" (fun () ->
       Printf.sprintf "dw: blk %s texp=%s last=%b"
         (Tid.name (Term.tid blk))
         (match texp with
