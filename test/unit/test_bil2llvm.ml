@@ -601,6 +601,26 @@ let tests : unit Alcotest.test list =
         in
         check "EMIT-33" loud);
 
+    pin "EMIT-62"
+      "a loop body listed before its head still reads the head's phi, not undef"
+      (fun () ->
+        let x = v64 "px" in
+        let w (n : int) = Cbat_word.to_word (w64 n) in
+        let sub, _ =
+          sub_of "emit_body_before_head"
+            [ [ Def.create x (Bil.Int (w 0)) ], [ (2, mk_goto) ];
+              [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (w 1))) ],
+              [ (2, mk_goto) ];
+              [], [ (1, fun t -> mk_jmp_to t (Bil.Var (v1 "c")));
+                    (3, mk_goto) ];
+              [ Def.create (v64 "RAX") (Bil.Var x) ], [ (4, mk_ret) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ir = emit_ir [ sub ] in
+        check "EMIT-62"
+          (contains_substring ir " = phi i64 "
+          && not (contains_substring ir "undef")));
+
     pin "EMIT-60"
       "a runtime-stack sub lowers the cursor under each SP decrement, leaves a \
        pure increment alone, and restores the entry cursor before the return"

@@ -143,87 +143,52 @@ let create_elts ctx scope llvm_builder blk sub_tid =
   |> Seq.iter ~f:(fun elt ->
       match elt with
       | `Def def -> create_def ctx scope tid llvm_builder sub_tid def
-      | `Phi phi ->
-          (* A BIR phi renders as the LLVM phi of its own lhs; the
-             incomings fill after every body (a compound incoming
-             builds before its source block's terminator).  The type is
-             the lhs's: the type pass makes a phi with a pointer incoming a
-             pointer. *)
-          let var = Phi.lhs phi in
-          let res =
-            if var_is_ptr var then
-              Bil2llvm_value.Ptr (Llvm.build_empty_phi ctx.ptr_ty "" llvm_builder)
-            else
-              Bil2llvm_value.Int
-                (Llvm.build_empty_phi (typ_lltype ctx (Var.typ var)) ""
-                   llvm_builder)
-          in
-          insert_bir_phi scope tid var (Bil2llvm_value.ll res);
-          insert_local scope tid var res;
-          bind_ssaval scope var res
-      | `Jmp _ -> ())
+      | `Phi _ | `Jmp _ -> ())
 
-(* One incoming per (source block, exp): the exp evaluates in the
-   source block's context, before its terminator. *)
-let fill_bir_phis ctx scope blks =
-  Seq.iter blks ~f:(fun blk ->
-      let tid = Term.tid blk in
-      Term.enum phi_t blk
-      |> Seq.iter ~f:(fun phi ->
-          let phi_ll =
-            Base.Option.value_exn
-              (get_bir_phi scope tid (Phi.lhs phi))
-          in
-          Phi.values phi
-          |> Seq.iter ~f:(fun (src, exp) ->
-              let src_bb =
-                match get_bb_opt scope src with
-                | Some bb -> bb
-                | None ->
-                  failwith
-                    (Printf.sprintf
-                       "hike: phi incoming from block %s, which is not a \
-                        block of sub %s"
-                       (Tid.name src)
-                       (Tid.name (Term.tid (Seq.hd_exn blks))))
-              in
-              let src_b =
-                match Llvm.block_terminator src_bb with
-                | Some t -> Llvm.builder_before ctx.llvm_ctx t
-                | None -> Llvm.builder_at_end ctx.llvm_ctx src_bb
-              in
-              let value =
-                match exp with
-                | Bil.Var v when Base.Option.is_some (get_ssaval scope v) ->
-                    Base.Option.value_exn (get_ssaval scope v)
-                | _ -> create_exp ctx scope src_b src exp
-              in
-              (* The incoming takes the phi's type. *)
-              let phi_is_ptr =
-                match get_ssaval scope (Phi.lhs phi) with
-                | Some (Bil2llvm_value.Ptr _) -> true
-                | _ -> false
-              in
-              let value =
-                Bil2llvm_value.ll
-                  (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits src_b
-                     ~ptr:phi_is_ptr value)
-              in
-              (* An environment register's phi also stores each
-                 incoming to the process-global cell at its own source
-                 block — whichever edge runs leaves its value there. *)
-              if Abi.is_env_reg ctx.abi (Phi.lhs phi) then
-                ignore (Llvm.build_store value (env_global ctx (Phi.lhs phi)) src_b);
-              Llvm.add_incoming (value, src_bb) phi_ll)))
+(* Reverse postorder from the entry block, so a block's dominators emit
+   before it; blocks the entry cannot reach follow in term order. *)
+let emit_order blks =
+  let by_tid = Hashtbl.create 64 in
+  Seq.iter blks ~f:(fun b -> Hashtbl.replace by_tid (Term.tid b) b);
+  let seen = Hashtbl.create 64 in
+  let post = ref [] in
+  let succs blk =
+    let direct = function Direct t -> [ t ] | Indirect _ -> [] in
+    Term.enum jmp_t blk
+    |> Seq.to_list
+    |> List.concat_map (fun j ->
+        (match Jmp.kind j with
+         | Goto l -> direct l
+         | Call c ->
+             direct (Call.target c)
+             @ (match Call.return c with Some l -> direct l | None -> [])
+         | Int (_, t) -> [ t ]
+         | Ret _ -> []))
+  in
+  let rec visit tid =
+    match Hashtbl.find_opt by_tid tid with
+    | Some blk when not (Hashtbl.mem seen tid) ->
+        Hashtbl.replace seen tid ();
+        List.iter visit (succs blk);
+        post := blk :: !post
+    | _ -> ()
+  in
+  Base.Option.iter (Seq.hd blks) ~f:(fun b -> visit (Term.tid b));
+  let unreached =
+    Seq.to_list blks |> List.filter (fun b -> not (Hashtbl.mem seen (Term.tid b)))
+  in
+  !post @ unreached
 
 let populate_blks ctx scope blks sub =
   let sub_tid = Term.tid sub in
-  Seq.iter blks ~f:(fun blk ->
+  List.iter
+    (fun blk ->
       let llvm_builder =
         Llvm.builder_at_end ctx.llvm_ctx (get_bb scope (Term.tid blk))
       in
       create_elts ctx scope llvm_builder blk sub_tid;
       create_control_flow ctx scope llvm_builder blk sub)
+    (emit_order blks)
 
 
 let exit_entry scope llvm_builder sub =
@@ -338,8 +303,9 @@ let create_sub ctx scope sub =
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
+    Bil2llvm_phi.create ctx scope blks;
     populate_blks ctx scope blks sub;
-    fill_bir_phis ctx scope blks;
+    Bil2llvm_phi.fill ctx scope blks;
     scope.cur_frame := None;
     Base.Option.iter runtime_top ~f:(restore_cursor ctx fn);
     if frame_probes ~page:ctx.abi.Abi.page_size layout then

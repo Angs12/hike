@@ -55,3 +55,4 @@ is the pin's point, not its subject.
 | EMIT-60 | a runtime-stack sub lowers the cursor under each SP decrement (red zone below), leaves a pure increment alone, and restores the entry cursor before the return. | drop `lower_cursor`, or `restore_cursor` | EMIT-60 red: the `hike_rstack_set` count or operands differ |
 | EMIT-61 | a bounded sub emits no cursor helper, and an alloca frame past a page carries `probe-stack`. | drop `frame_probes`, or emit the helpers for every sub | EMIT-61 red: the attribute or helper text differs |
 | EMIT-58 | a pointer masked by an integer stays a pointer (`ptrmask`); a pointer difference is an integer. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
+| EMIT-62 | a loop body listed before its head in term order still reads the head's phi, not undef. | create phis per block as bodies emit, or emit bodies in term order | EMIT-62 red: no phi, or `undef` in the IR |
