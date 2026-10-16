@@ -1821,12 +1821,13 @@ let piece_is_infinite (q : t) =
   | Exact _ -> false
   | Many _ -> false
 
+(* A non-empty list whose every element passes; the empty mix is no shape. *)
+let nonempty_for_all (xs : 'a list) ~(f : 'a -> bool) : bool =
+  match xs with [] -> false | _ -> List.for_all xs ~f
+
 let is_infinite t =
   match t with
-  | Many ps ->
-    (match ps with
-     | [] -> false
-     | _ -> List.for_all ps ~f:piece_is_infinite)
+  | Many ps -> nonempty_for_all ps ~f:piece_is_infinite
   | q -> piece_is_infinite q
 
 let shape_pred (which : Clp.t -> bool) (t : t) : bool =
@@ -1837,10 +1838,7 @@ let shape_pred (which : Clp.t -> bool) (t : t) : bool =
     | Many _ -> false
   in
   match t with
-  | Many ps ->
-    (match ps with
-     | [] -> false
-     | _ -> List.for_all ps ~f:leaf)
+  | Many ps -> nonempty_for_all ps ~f:leaf
   | q -> leaf q
 
 let is_ascending t = shape_pred Clp.is_ascending t
@@ -2083,22 +2081,6 @@ let classify (t : t) : kind =
 
 (* The elements, when the set is enumerable within [cap]; [None] = the
    base is symbolic or the count exceeds the budget. *)
-let enumerate ~(cap : int) (t : t) : word list option =
-  if has_relative t then None else
-#ifdef VSA_DEBUG
-  if Cbat_word.gt_int (cardinality t) cap then begin
-    let tag = match t with
-      | Clp _ -> "Clp" | Exact _ -> "Exact" | Rel _ -> "Rel"
-      | Many ps -> sprintf "Many%d" (List.length ps) in
-    Printf.eprintf "hike-dbg-enum: cap=%d card=%s tag=%s\n%!"
-      cap (Cbat_word.to_string (cardinality t)) tag;
-    None
-  end else
-#else
-  if Cbat_word.gt_int (cardinality t) cap then None else
-#endif
-    Some (iter t)
-
 #ifdef VSA_DEBUG
 (* The value's constructor, for the churn diagnosis. *)
 let tag (t : t) : string =
@@ -2108,3 +2090,17 @@ let tag (t : t) : string =
   | Rel _ -> "Rel"
   | Many ps -> sprintf "Many%d" (List.length ps)
 #endif
+
+let enumerate ~(cap : int) (t : t) : word list option =
+  if has_relative t then None else
+#ifdef VSA_DEBUG
+  if Cbat_word.gt_int (cardinality t) cap then begin
+    Printf.eprintf "hike-dbg-enum: cap=%d card=%s tag=%s\n%!"
+      cap (Cbat_word.to_string (cardinality t)) (tag t);
+    None
+  end else
+#else
+  if Cbat_word.gt_int (cardinality t) cap then None else
+#endif
+    Some (iter t)
+

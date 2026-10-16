@@ -86,17 +86,19 @@ let cell_key (k : t) : Cbat_landmarks.cell_desc =
       lo_value = lo.pvalue;
       hi_width = hi.pwidth; hi_value = hi.pvalue; stride = k.step }
 
+(* Two lows name one grid of step [s]: equal widths, values congruent
+   modulo [s]. *)
+let congruent (a : point) (b : point) (s : int) : bool =
+  Int.equal a.pwidth b.pwidth
+  && Stdlib.Int64.equal
+       (Stdlib.Int64.rem (Stdlib.Int64.sub a.pvalue b.pvalue)
+          (Stdlib.Int64.of_int s)) 0L
+
 (* Strides survive a combination only when both keys name the same
      grid (equal step, congruent lows); any mix demotes to the hull. *)
 let combined_step (k1 : t) (k2 : t) : int =
-    let s = k1.step in
-    if s > 1 && s = k2.step
-       && Int.equal k1.lo.pwidth k2.lo.pwidth
-       && Stdlib.Int64.equal
-            (Stdlib.Int64.rem
-               (Stdlib.Int64.sub k1.lo.pvalue k2.lo.pvalue)
-               (Stdlib.Int64.of_int s)) 0L
-    then s else 1
+  let s = k1.step in
+  if s > 1 && s = k2.step && congruent k1.lo k2.lo s then s else 1
 
 (* The touched byte hull of a read anchored at [k]: the address set's
    hull grown by the access size — the bytes the read may land on. *)
@@ -115,16 +117,11 @@ let expand (k : t) ~(bytes : int) : t =
 (* Whether every point [p] claims is also claimed by [k]: a step-1
    key claims its whole hull; a strided key claims its grid only. *)
 let covers (k : t) (p : t) : bool =
-    if p.step > 1 then
-      k.step = 1 || combined_step k p > 1
-    else
-      k.step = 1
-      || (compare_point p.lo p.hi = 0
-          && Int.equal p.lo.pwidth k.lo.pwidth
-          && Stdlib.Int64.equal
-               (Stdlib.Int64.rem
-                  (Stdlib.Int64.sub p.lo.pvalue k.lo.pvalue)
-                  (Stdlib.Int64.of_int k.step)) 0L)
+  if p.step > 1 then
+    k.step = 1 || combined_step k p > 1
+  else
+    k.step = 1
+    || (compare_point p.lo p.hi = 0 && congruent p.lo k.lo k.step)
 
 (* [k] moved [bytes] up its line, stride kept; None when the move would
    wrap one bound past the other. *)

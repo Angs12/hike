@@ -479,8 +479,7 @@ module Pieces = struct
   let precedes (a : t) (b : t) : bool =
     List.for_all a ~f:(fun pa ->
         List.exists b ~f:(fun pb -> C.subset pa pb)
-        || ((not (C.is_infinite pa))
-            && not (Cbat_word.gt_int (C.cardinality pa) U.fin_set_size)
+        || (small_card pa
             && List.for_all (C.iter pa) ~f:(fun x ->
                 List.exists b ~f:(fun pb -> C.elem x pb))))
 
@@ -509,12 +508,8 @@ module Pieces = struct
     : progression list =
     if C.is_bottom pa || C.is_bottom pb then []
     else
-      let small p =
-        (not (C.is_infinite p))
-        && not (Cbat_word.gt_int (C.cardinality p) U.fin_set_size)
-      in
-      if small pa || small pb then begin
-        let small_p, big_p = if small pa then pa, pb else pb, pa in
+      if small_card pa || small_card pb then begin
+        let small_p, big_p = if small_card pa then pa, pb else pb, pa in
         let els = List.filter (C.iter_ascending small_p) ~f:(fun x -> C.elem x big_p) in
         runs_from_sorted_elements ~width:(C.bitwidth small_p) els
       end
