@@ -444,12 +444,6 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
       else
         let seen = Core.Set.add seen (Term.tid blk) in
         let js = Seq.to_list (Term.enum jmp_t blk) in
-        let follow_extra seen extra =
-          Core.Set.fold extra ~init:seen ~f:(fun seen t ->
-              match find_block t with
-              | Some b -> go seen b
-              | None -> seen)
-        in
         let follow_direct seen ts =
           Base.List.fold ts ~init:seen ~f:(fun seen t ->
               match find_block t with
@@ -459,7 +453,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
         let indirect seen ~blk texp =
           match indirect_targets ~blk texp with
           | None -> Core.Set.union seen all
-          | Some extra -> follow_extra seen extra
+          | Some extra -> follow_direct seen (Core.Set.to_list extra)
         in
         let seen =
           Base.List.fold js ~init:seen ~f:(fun seen j ->
@@ -562,13 +556,12 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub_tids = sub_tids sub in
   let index = Hike_transfer.index_of_sub sub in
-  let grew = ref false in
-  let resolved' =
+  let resolved', grew =
     Term.enum blk_t sub
-    |> Seq.fold ~init:resolved ~f:(fun acc blk ->
+    |> Seq.fold ~init:(resolved, false) ~f:(fun acc blk ->
         let last_defs = Vsa.last_defs blk in
         Term.enum jmp_t blk
-        |> Seq.fold ~init:acc ~f:(fun acc j ->
+        |> Seq.fold ~init:acc ~f:(fun ((m, grew) as acc) j ->
             match dispatch_target ~last_defs ~retaddr ~index ~foreign_slots j with
             | None -> acc
             | Some texp -> (
@@ -579,17 +572,16 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
                 | None -> acc
                 | Some cases ->
                     let ts = Core.Set.of_list (module Tid) cases in
-                    match Core.Map.find acc (Term.tid j) with
+                    match Core.Map.find m (Term.tid j) with
                     | Some old when Core.Set.equal old ts -> acc
                     | Some old ->
-                        grew := true;
-                        Core.Map.set acc ~key:(Term.tid j)
-                          ~data:(Core.Set.union old ts)
+                        ( Core.Map.set m ~key:(Term.tid j)
+                            ~data:(Core.Set.union old ts),
+                          true )
                     | None ->
-                        grew := true;
-                        Core.Map.set acc ~key:(Term.tid j) ~data:ts)))
+                        (Core.Map.set m ~key:(Term.tid j) ~data:ts, true))))
   in
-  (resolved', !grew)
+  (resolved', grew)
 
 (* The exit materialization at drain: the return canonicalization lands
    once, then the unreachable-block rule runs on the edge set.  The

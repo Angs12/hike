@@ -66,10 +66,7 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
           sm_access = Hike_image.section_access prot proj Bss;
           sm_lo = addr;
           sm_hi = Stdlib.Int64.sub (Stdlib.Int64.add addr size) 1L;
-          sm_words =
-            Stdlib.Int64.to_int
-              (Stdlib.Int64.div (Stdlib.Int64.add size (Stdlib.Int64.of_int (word - 1)))
-                 (Stdlib.Int64.of_int word));
+          sm_words = Hike_stack_bounds.cdiv (Stdlib.Int64.to_int size) word;
           sm_image = None;
           sm_copy_relocs = copy_relocs })
   in
@@ -1156,13 +1153,10 @@ let escape_roots_of_sub ~(addr_bits : int) ~(abi : Hike_abi.t)
 let whole_comps_of (ctx : ctx) : (int * int64 * int64) list =
   let bindings = Tree.to_sequence ctx.data_tree |> Seq.to_list in
   Base.List.filter_map ctx.whole ~f:(fun d ->
-      Option.bind
-        (Base.List.find bindings ~f:(fun (k, rs) ->
-             equal_sec k.lo.p_sec d.ds_sec
-             && (match rs.storage with Data_region _ -> true | _ -> false)))
-        ~f:(fun (_, rs) ->
+      Base.List.find_map bindings ~f:(fun (k, rs) ->
           match rs.storage with
-          | Data_region id -> Some (id, d.ds_lo, d.ds_hi)
+          | Data_region id when equal_sec k.lo.p_sec d.ds_sec ->
+            Some (id, d.ds_lo, d.ds_hi)
           | _ -> None))
 
 (* The carved data ranges' global components: word-grid tile and typed
