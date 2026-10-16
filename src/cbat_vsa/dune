@@ -53,6 +53,7 @@
   cbat_ai_memmap
   cbat_ai_representation
   cbat_call_effects
+  cbat_census
   cbat_kb_census
   cbat_attr_census
   cbat_env_tag

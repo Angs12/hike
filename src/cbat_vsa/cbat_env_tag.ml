@@ -69,17 +69,12 @@ let solve_denote :
       match def with
       | None -> denote_defs blk pre
       | Some d ->
-        let hit = ref false in
-        let env =
-          Term.enum def_t blk
-          |> Seq.fold ~init:pre ~f:(fun env x ->
-              if !hit then env
-              else if Tid.equal (Term.tid x) (Term.tid d) then (
-                hit := true;
-                env)
-              else denote_def x env)
-        in
-        if !hit then env else AI.top
+        Term.enum def_t blk
+        |> Seq.fold_until ~init:pre
+          ~f:(fun env x ->
+              if Tid.equal (Term.tid x) (Term.tid d) then Stop env
+              else Continue (denote_def x env))
+          ~finish:(fun _ -> AI.top)
     in
     denote_imm_exp e env
 

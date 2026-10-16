@@ -135,18 +135,26 @@ let consume_arm ~(head : Tid.t) ~(landmarks : Cbat_landmarks.t)
     v
   in
   (match Cbat_landmarks.steps landmarks head key with
-   | `Finite n -> extr n
-   | `Zero -> Cbat_landmarks.advance landmarks head key; zero_action ()
-   | `Inf ->
+   | Cbat_landmarks.Finite n -> extr n
+   | Cbat_landmarks.Zero -> Cbat_landmarks.advance landmarks head key; zero_action ()
+   | Cbat_landmarks.Inf ->
+     (* A key with no own answer plain-widens whatever the head's steps:
+        a word-steps translation of cell data undershoots growing cells
+        and grinds the fixpoint. *)
      (match head_arm with
-      | Cbat_landmarks.Finite n ->
-        (* The head's steps are the fallback computation of [n]; a cell
-           with no own answer plain-widens — a word-steps translation
-           of cell data undershoots growing cells and grinds the
-           fixpoint. *)
-        widen ()
-      | Cbat_landmarks.Inf -> widen ()
+      | Cbat_landmarks.Finite _ | Cbat_landmarks.Inf -> widen ()
       | Cbat_landmarks.Zero -> assert false))
+
+(* The key's extrapolation by [steps], flagged when it translated; a
+   refused one plain-widens. *)
+let extrapolate_or_widen ~landmarks ~head ~(key : Cbat_landmarks.key)
+    ~(old : WordSet.t) ~(new_ : WordSet.t) ~steps : WordSet.t * bool =
+  match
+    Cbat_landmarks.extrapolate ~steps ~old ~new_
+      ~entries:(Cbat_landmarks.entries landmarks head key)
+  with
+  | `Extrapolated d -> (d, true)
+  | `Widen -> (WordSet.widen_join old new_, false)
 
 (* The landmark walk: each key consumes its OWN row; the head's arm is
    the fallback, never a scope. *)
@@ -179,16 +187,10 @@ let walk_landmarks ~(head : Tid.t)
               consume_arm ~head ~landmarks
                 ~key:(Cbat_landmarks.Word (Cbat_var_id.var_of key))
                 ~head_arm:arm
-                ~extrapolate:(fun ~steps:n ->
-                    match
-                      Cbat_landmarks.extrapolate ~steps:n ~old:data_old
-                        ~new_:data_new
-                        ~entries:
-                          (Cbat_landmarks.entries landmarks head
-                             (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
-                    with
-                    | `Extrapolated d -> (d, true)
-                    | `Widen -> (WordSet.widen_join data_old data_new, false))
+                ~extrapolate:(fun ~steps ->
+                    extrapolate_or_widen ~landmarks ~head
+                      ~key:(Cbat_landmarks.Word (Cbat_var_id.var_of key))
+                      ~old:data_old ~new_:data_new ~steps)
                 ~zero_action:(fun () -> WordSet.join data_old data_new)
                 ~widen:(fun () -> WordSet.widen_join data_old data_new)
           in
@@ -210,15 +212,9 @@ let walk_landmarks ~(head : Tid.t)
                   let data_new = Mem.Val.data v2 in
                   let data =
                     consume_arm ~head ~landmarks ~key:cl ~head_arm:arm
-                      ~extrapolate:(fun ~steps:n ->
-                          match
-                            Cbat_landmarks.extrapolate ~steps:n
-                              ~old:data_old ~new_:data_new
-                              ~entries:
-                                (Cbat_landmarks.entries landmarks head cl)
-                          with
-                          | `Extrapolated d -> (d, true)
-                          | `Widen -> (WordSet.widen_join data_old data_new, false))
+                      ~extrapolate:(fun ~steps ->
+                          extrapolate_or_widen ~landmarks ~head ~key:cl
+                            ~old:data_old ~new_:data_new ~steps)
                       ~zero_action:(fun () ->
                           WordSet.widen_join data_old data_new)
                       ~widen:(fun () -> WordSet.widen_join data_old data_new)

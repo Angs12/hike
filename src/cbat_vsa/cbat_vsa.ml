@@ -105,25 +105,14 @@ let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   (* A partial CFG is unsound; out-of-graph blocks read bottom. *)
   Solution.create base_map AI.bottom
 
-(* Per-sub def-chain map. *)
-let defs_of_sub (s : sub term) : (def term * bool) Var.Map.t =
-  Term.enum blk_t s
-  |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.fold ~init:Var.Map.empty ~f:begin fun m d ->
+(* Per-sub def-chain map over the sub's defs in order. *)
+let defs_of (defs : def term list) : (def term * bool) Var.Map.t =
+  List.fold defs ~init:Var.Map.empty ~f:begin fun m d ->
     let key = Var.base (Def.lhs d) in
     match Core.Map.find m key with
     | None -> Core.Map.set m ~key ~data:(d, true)
     | Some _ -> Core.Map.set m ~key ~data:(d, false)
   end
-
-let stores_of_sub (s : sub term) : def term list =
-  Term.enum blk_t s
-  |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.filter ~f:(fun d ->
-      match Def.rhs d with
-      | Bil.Store _ -> true
-      | _ -> false)
-  |> Seq.to_list
 
 (* The run's context: the library builder plus production's own defaults —
    the non-negativity oracle over the sub's defs and stores, and the run's
@@ -136,12 +125,13 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
     Cbat_runctx.mk_rctx ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
       ~jmp_reads ?sub_lookup s
   in
-  let defs = defs_of_sub s in
-  let stores = stores_of_sub s in
+  let all_defs =
+    Term.enum blk_t s |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list in
+  let defs = defs_of all_defs in
   (* The stores grouped by their address exp: the witness reads the
      matching group, never every store in the sub. *)
   let store_index =
-    Base.List.fold stores ~init:Exp.Map.empty ~f:(fun acc d ->
+    Base.List.fold all_defs ~init:Exp.Map.empty ~f:(fun acc d ->
         match Def.rhs d with
         | Bil.Store (_, addr', _, _, _) ->
           Core.Map.add_multi acc ~key:addr' ~data:d
@@ -176,21 +166,14 @@ let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
    the completed (negation-free) form. *)
 let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
   let ircfg = Sub.to_cfg sub in
-  let tbl : (Tid.t, exp Tid.Map.t) Hashtbl.t =
-    Hashtbl.create (module Tid) in
   Graphs.Ir.edges ircfg
-  |> Seq.iter ~f:(fun e ->
-      let src = Graphs.Ir.Node.label (Graphs.Ir.Edge.src e) in
-      let jmp = Graphs.Ir.Edge.jmp e in
-      let jt = Term.tid jmp in
-      let by_jmp =
-        Option.value (Hashtbl.find tbl (Term.tid src)) ~default:Tid.Map.empty in
-      let by_jmp =
-        Core.Map.set by_jmp ~key:jt
-          ~data:(Cbat_vsa_utils.complete_cond (Graphs.Ir.Edge.cond e ircfg)) in
-      Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
-  Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
-      Core.Map.set acc ~key ~data)
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc e ->
+      let src = Term.tid (Graphs.Ir.Node.label (Graphs.Ir.Edge.src e)) in
+      let jmp = Term.tid (Graphs.Ir.Edge.jmp e) in
+      let cond = Cbat_vsa_utils.complete_cond (Graphs.Ir.Edge.cond e ircfg) in
+      Core.Map.update acc src ~f:(fun by_jmp ->
+          Core.Map.set (Option.value by_jmp ~default:Tid.Map.empty)
+            ~key:jmp ~data:cond))
 
 (* Per-sub disabled-continuation table: each jmp observes the NEXT
    jmp's cond — the excluded edge whose exclusion becomes a landmark. *)
@@ -238,9 +221,7 @@ let compute_need ~def_reads
           Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
           Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
         end));
-    let module Var_scc = Cbat_wto.Scc (struct
-        type t = Var.t
-      end) in
+    let module Var_scc = Cbat_wto.Scc (Var) in
     let comps =
       Var_scc.partition (Core.Set.to_list cycle_vars)
         (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
@@ -360,15 +341,15 @@ let rec static_graph_vsa
   let preserved = preserved_of_sub ~abi ~def_reads s in
   let edge_conds = edge_conds_of s in
   let disabled_conds = disabled_conds_of ~edge_conds s in
-  let cfg = Sub.to_graph s in
   (* Pseudo-nodes never reach denotation. *)
-  let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
-            |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+  let cfg =
+    Sub.to_graph s
+    |> Graphs.Tid.Node.remove Graphs.Tid.start
+    |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   let rctx =
     mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
       ~jmp_reads ~sub_lookup s
   in
-  let cfg = cfg_tmp in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
   let dg = Cbat_dispatch_graph.make ~cfg
@@ -377,7 +358,7 @@ let rec static_graph_vsa
   in
   let { Cbat_dispatch_graph.succs; Cbat_dispatch_graph.preds } = dg in
   (* WTO fixpoint; inner SCCs stabilize first. *)
-  let wto = wto_of_cfg ~succ:succs ~pred:preds cfg_tmp in
+  let wto = wto_of_cfg ~succ:succs ~pred:preds cfg in
   let smry = Cbat_wto.summary wto in
   let heads = smry.Cbat_wto.heads in
   let head_to_blocks = smry.Cbat_wto.head_to_blocks in

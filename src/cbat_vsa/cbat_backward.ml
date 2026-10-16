@@ -166,6 +166,15 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       match snd (Lazy.force a_extrema) with
       | Some m -> Cbat_word.(<=) m limit
       | None -> false in
+    (* The wrapping hull of a bound pair mapped to the operand's range. *)
+    let hull_by ((mn, mx) : Cbat_word.t option * Cbat_word.t option)
+        ~(f : Cbat_word.t -> Cbat_word.t -> Cbat_word.t * Cbat_word.t)
+      : wordset option =
+      match mn, mx with
+      | Some mn, Some mx ->
+        let lo, hi = f mn mx in
+        hull ~wrapping:true width lo hi
+      | _ -> None in
     let ceil_div (k : Cbat_word.t) (x : Cbat_word.t) : Cbat_word.t =
       let q = Cbat_word.div x k in
       let r = Cbat_word.modulo x k in
@@ -174,34 +183,25 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     | Bil.PLUS ->
       (match Lazy.force v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (fst (Lazy.force b_extrema)) (snd (Lazy.force b_extrema))
-             ~f:(fun bmin bmax ->
-               hull ~wrapping:true width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)) |> Option.join in
-         let b' = Option.map2 (fst (Lazy.force a_extrema)) (snd (Lazy.force a_extrema))
-             ~f:(fun amin amax ->
-               hull ~wrapping:true width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)) |> Option.join in
-         a', b'
+         hull_by (Lazy.force b_extrema) ~f:(fun bmin bmax ->
+             Cbat_word.sub vlo bmax, Cbat_word.sub vhi bmin),
+         hull_by (Lazy.force a_extrema) ~f:(fun amin amax ->
+             Cbat_word.sub vlo amax, Cbat_word.sub vhi amin)
        | _ -> None, None)
     | Bil.MINUS ->
       (match Lazy.force v_extrema with
        | Some vlo, Some vhi ->
-         let a' = Option.map2 (fst (Lazy.force b_extrema)) (snd (Lazy.force b_extrema))
-             ~f:(fun bmin bmax ->
-               hull ~wrapping:true width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)) |> Option.join in
-         let b' = Option.map2 (fst (Lazy.force a_extrema)) (snd (Lazy.force a_extrema))
-             ~f:(fun amin amax ->
-               hull ~wrapping:true width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)) |> Option.join in
-         a', b'
+         hull_by (Lazy.force b_extrema) ~f:(fun bmin bmax ->
+             Cbat_word.add vlo bmin, Cbat_word.add vhi bmax),
+         hull_by (Lazy.force a_extrema) ~f:(fun amin amax ->
+             Cbat_word.sub amin vhi, Cbat_word.sub amax vlo)
        | _ -> None, None)
     | Bil.TIMES ->
       (match Lazy.force v_extrema, Lazy.force b_single with
        | (Some vlo, Some vhi), Some k ->
          (match Cbat_word.to_int k with
           | Ok kk when kk > 0 && operand_bounded (wrap_limit k) ->
-            (match hull ~wrapping:false width (ceil_div k vlo)
-                     (Cbat_word.div vhi k) with
-             | Some a' -> Some a', None
-             | None -> None, None)
+            (hull ~wrapping:false width (ceil_div k vlo) (Cbat_word.div vhi k), None)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.LSHIFT ->
@@ -212,9 +212,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
             let lo_a = Cbat_word.rshift vlo smax in
             let hi_a = Cbat_word.rshift vhi smin in
-            (match hull ~wrapping:false width lo_a hi_a with
-             | Some a' -> Some a', None
-             | None -> None, None)
+            (hull ~wrapping:false width lo_a hi_a, None)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.RSHIFT | Bil.ARSHIFT ->
@@ -230,9 +228,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             else
               let lo_a = Cbat_word.lshift vlo (Cbat_word.of_int ~width smin_i) in
               let hi_a = Cbat_word.pred (Cbat_word.lshift hi1 (Cbat_word.of_int ~width smax_i)) in
-              (match hull ~wrapping:false width lo_a hi_a with
-               | Some a' -> Some a', None
-               | None -> None, None)
+              (hull ~wrapping:false width lo_a hi_a, None)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.DIVIDE ->
@@ -247,9 +243,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             else
               let lo_a = Cbat_word.mul vlo (Cbat_word.of_int ~width kmin_i) in
               let hi_a = Cbat_word.pred (Cbat_word.mul hi1 kmax_w) in
-              (match hull ~wrapping:false width lo_a hi_a with
-               | Some a' -> Some a', None
-               | None -> None, None)
+              (hull ~wrapping:false width lo_a hi_a, None)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.SDIVIDE ->
@@ -262,10 +256,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
              | Ok slo, Ok shi ->
                let lo' = slo * kk in
                let hi' = (shi + 1) * kk - 1 in
-               (match hull ~wrapping:true width
-                        (Cbat_word.of_int ~width lo') (Cbat_word.of_int ~width hi') with
-                | Some a' -> Some a', None
-                | None -> None, None)
+               (hull ~wrapping:true width (Cbat_word.of_int ~width lo') (Cbat_word.of_int ~width hi'), None)
              | _ -> None, None)
           | _ -> None, None)
        | _ -> None, None)
@@ -293,13 +284,10 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
               Some (WordSet.logxor cstr (WordSet.singleton k)), None
             | Bil.AND ->
               (match Lazy.force v_extrema with
-               | Some vlo, Some vhi -> (
-                 match
-                   hull ~wrapping:false width vlo
-                     (Cbat_word.logor (max_submask_le k vhi) (Cbat_word.lnot k))
-                 with
-                 | Some a' -> Some a', None
-                 | None -> None, None)
+               | Some vlo, Some vhi ->
+                 hull ~wrapping:false width vlo
+                   (Cbat_word.logor (max_submask_le k vhi) (Cbat_word.lnot k)),
+                 None
                | _ -> None, None)
             | _ -> None, None)
        | _ -> None, None)
@@ -333,6 +321,12 @@ let shift_fill_constraint ~(w : int) (k : int) (d : int)
   in
   hull ~wrapping:false w lo_a hi_max
 
+(* The unsigned hull of a constraint; [None] when it has none. *)
+let bounds (cstr : wordset) : (Cbat_word.t * Cbat_word.t) option =
+  match WordSet.min_elem cstr, WordSet.max_elem cstr with
+  | Some lo, Some hi -> Some (lo, hi)
+  | _ -> None
+
 (* HIGH-cast pre-image: the constraint is the word's top [n] bits. *)
 let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
     (cstr : wordset) : wordset option =
@@ -342,8 +336,8 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
     let n = WordSet.bitwidth cstr in
     if w <= n then None
     else
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some vlo, Some vhi ->
+      (match bounds cstr with
+       | Some (vlo, vhi) ->
          (* An open-top constraint (the succ wraps) has no closed hull. *)
          if Cbat_word.is_zero (Cbat_word.succ vhi) then None
          else shift_fill_constraint ~w (w - n) n vlo vhi
@@ -572,8 +566,8 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
       let half =
         Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w (n - 1)) in
       let maxn = Cbat_word.pred two_n in
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some lo, Some hi ->
+      (match bounds cstr with
+       | Some (lo, hi) ->
          let pieces =
            if not is_signed then
              if Cbat_word.(>) lo maxn then []
@@ -634,9 +628,9 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
            | Ok inner_ws -> WordSet.bitwidth inner_ws = n
            | Error _ -> false)
         | _ -> false in
-      match (WordSet.min_elem cstr, WordSet.max_elem cstr) with
-      | None, _ | _, None -> None
-      | Some vlo, Some vhi ->
+      match bounds cstr with
+      | None -> None
+      | Some (vlo, vhi) ->
         let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
         let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
         let wide_hull () =
@@ -645,8 +639,8 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
             (Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n)) in
         if zero_extended_n then hull ~wrapping:false w vlo_w vhi_w
         else begin
-          match (WordSet.min_elem a_ws, WordSet.max_elem a_ws) with
-          | (Some alo, Some ahi)
+          match bounds a_ws with
+          | Some (alo, ahi)
             when (not (WordSet.is_infinite a_ws)) && Cbat_word.(<=) alo ahi ->
             (* The windows [k] the operand's reachable set populates:
                window [k·2^n, k·2^n + 2^n) can carry a concrete
@@ -700,8 +694,8 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     let n = WordSet.bitwidth cstr in
     if n <> hi - lo + 1 then None
     else
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some vlo, Some vhi -> shift_fill_constraint ~w lo n vlo vhi
+      (match bounds cstr with
+       | Some (vlo, vhi) -> shift_fill_constraint ~w lo n vlo vhi
        | _ -> None)
   | Error _ -> None
 
@@ -729,19 +723,24 @@ let pending_key (p : pending) : Cbat_landmarks.key =
   | PW (v, _) -> Cbat_landmarks.Word v
   | PC { prange; _ } -> Cbat_landmarks.Cell (Mem.Key.cell_key prange)
 
-(* The first entry at [key], paired with the other entries. *)
-let pending_take (key : Cbat_landmarks.key) (ps : pending list)
+(* The first entry [f] accepts, paired with the other entries in order. *)
+let take_first ~(f : pending -> bool) (ps : pending list)
     : (pending * pending list) option =
   let rec go = function
     | [] -> None
     | p :: rest ->
-      if Cbat_landmarks.equal_key (pending_key p) key then Some (p, rest)
+      if f p then Some (p, rest)
       else
         match go rest with
         | Some (q, r) -> Some (q, p :: r)
         | None -> None
   in
   go ps
+
+(* The first entry at [key], paired with the other entries. *)
+let pending_take (key : Cbat_landmarks.key) (ps : pending list)
+    : (pending * pending list) option =
+  take_first ps ~f:(fun p -> Cbat_landmarks.equal_key (pending_key p) key)
 
 (* THE one leaf meet, keyed by what it constrains (a variable, or a
    memory cell) — the policy both lanes share.  Every meet is acquired
@@ -1048,32 +1047,32 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
             (Cbat_clp.t * bool) list =
           let w = Cbat_word.bitwidth hi in
           let back = Cbat_word.of_int ~width:w (nb - 1) in
-          let ranges = Stdlib.ref [] in
-          (match line with
-           | Hike_origin.Abs ->
-             List.iter image_fits ~f:(fun (fit_lo, fit_hi) ->
-                 let word (v : Stdlib.Int64.t) : Cbat_word.t =
-                   Cbat_word.of_int64 ~width:w v in
-                 ranges :=
-                   (Cbat_clp.interval ~width:w (word fit_lo) (word fit_hi), false)
-                   :: !ranges)
-           | _ -> ());
-          if Mem.has_cell_in mv ~origin:line ~lo ~hi:last then
-            List.iter (Lazy.force cells) ~f:(fun (k, _) ->
-                if Hike_origin.equal (Mem.Key.origin k) line then
-                  let cl, ch = Mem.Key.hull k in
-                  if Cbat_word.bitwidth cl = w && Cbat_word.bitwidth ch = w
-                  then begin
-                    let keep_whole =
-                      Cbat_word.gt_int
-                        (Cbat_word.succ_exact (Cbat_word.sub ch cl))
-                        cell_enum_bound in
-                    ranges :=
-                      (Cbat_clp.interval ~width:w (Cbat_word.sub cl back) ch,
-                       keep_whole)
-                      :: !ranges
-                  end);
-          List.rev !ranges in
+          let image_ranges =
+            match line with
+            | Hike_origin.Abs ->
+              List.map image_fits ~f:(fun (fit_lo, fit_hi) ->
+                  (Cbat_clp.interval ~width:w
+                     (Cbat_word.of_int64 ~width:w fit_lo)
+                     (Cbat_word.of_int64 ~width:w fit_hi),
+                   false))
+            | _ -> [] in
+          let cell_ranges =
+            if Mem.has_cell_in mv ~origin:line ~lo ~hi:last then
+              List.filter_map (Lazy.force cells) ~f:(fun (k, _) ->
+                  if Hike_origin.equal (Mem.Key.origin k) line then
+                    let cl, ch = Mem.Key.hull k in
+                    if Cbat_word.bitwidth cl = w && Cbat_word.bitwidth ch = w
+                    then
+                      let keep_whole =
+                        Cbat_word.gt_int
+                          (Cbat_word.succ_exact (Cbat_word.sub ch cl))
+                          cell_enum_bound in
+                      Some (Cbat_clp.interval ~width:w (Cbat_word.sub cl back) ch,
+                            keep_whole)
+                    else None
+                  else None)
+            else [] in
+          image_ranges @ cell_ranges in
         (* [q] minus one covered run [h] of [q]'s elements: the elements
            below [h]'s minimum and above its maximum.  [h] contains every
            element between its extrema (it is [q]'s grid intersected with
@@ -1389,15 +1388,7 @@ let rec constrain_operands ~(env : AI.t)
                  Var.same pm mv
                  && List.exists ks ~f:(fun k -> Mem.Key.overlap k prange)
                | PW _ -> false in
-             let rec take pending = match pending with
-               | [] -> None
-               | p :: rest ->
-                 if overwrites p then Some (p, rest)
-                 else
-                   (match take rest with
-                    | Some (q, r) -> Some (q, p :: r)
-                    | None -> None) in
-             (match take pending with
+             (match take_first ~f:overwrites pending with
               | None -> env
               | Some (p, rest) ->
                 cells := rest;

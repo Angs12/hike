@@ -64,7 +64,7 @@ val keys_at : t -> Tid.t -> key list
 (* A key's own arm: the steps until its closest landmark; Zero needs
    another measurement, Inf has no own answer (the head's arm is the
    fallback). *)
-val steps : t -> Tid.t -> key -> [> `Zero | `Finite of int | `Inf ]
+val steps : t -> Tid.t -> key -> arm
 
 (* Record a landmark for [key] at [head]. *)
 val record :

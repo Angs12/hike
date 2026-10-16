@@ -33,9 +33,7 @@ type summary = {
 val summary : comp list -> summary
 
 (* Kosaraju SCC over any ordered key. *)
-module Scc (K : sig
-    type t
-  end) : sig
+module Scc (K : Hashtbl.Key) : sig
   val partition :
     K.t list -> (K.t -> K.t list) -> (K.t -> K.t list) -> K.t list list
 end

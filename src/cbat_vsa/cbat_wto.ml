@@ -20,18 +20,6 @@ type comp =
   | Vertex of Tid.t
   | SCC of Tid.t * comp list
 
-let rec flatten_comps (cs : comp list) : Tid.t list =
-  List.concat_map cs ~f:(function
-      | Vertex v -> [v]
-      | SCC (h, inner) -> h :: flatten_comps inner)
-
-let rec heads_of_comps (cs : comp list) : Tid.Set.t =
-  List.fold cs ~init:Tid.Set.empty ~f:(fun acc -> function
-      | Vertex _ -> acc
-      | SCC (h, inner) ->
-        let acc = Core.Set.add acc h in
-        Core.Set.union acc (heads_of_comps inner))
-
 (* The driver's views of one ordering, built in a single pass: the head
    set, each head's member blocks, each block's innermost head, and the
    WTO position index. *)
@@ -43,67 +31,67 @@ type summary = {
 }
 
 let summary (cs : comp list) : summary =
-  let heads = heads_of_comps cs in
   let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
-  let rec collect comps =
-    List.iter comps ~f:(function
-        | Vertex _ -> ()
-        | SCC (h, inner) ->
-          let blocks = Tid.Set.of_list (h :: flatten_comps inner) in
-          Hashtbl.set head_to_blocks ~key:h ~data:blocks;
-          collect inner)
-  in
-  collect cs;
   let block_to_head : (Tid.t, Tid.t) Hashtbl.t = Hashtbl.create (module Tid) in
-  Hashtbl.iteri head_to_blocks ~f:(fun ~key:h ~data:blocks ->
-      Core.Set.iter blocks ~f:(fun btid ->
-          match Hashtbl.find block_to_head btid with
-          | None -> Hashtbl.set block_to_head ~key:btid ~data:h
-          | Some existing ->
-            (* Innermost wins. *)
-            let existing_set = Hashtbl.find_exn head_to_blocks existing in
-            if Core.Set.length blocks < Core.Set.length existing_set then
-              Hashtbl.set block_to_head ~key:btid ~data:h));
-  let pos_of =
-    List.mapi (flatten_comps cs) ~f:(fun i t -> (t, i))
-    |> List.fold ~init:Tid.Map.empty ~f:(fun m (t, i) ->
-        Core.Map.set m ~key:t ~data:i) in
-  { heads; head_to_blocks; block_to_head; pos_of }
+  let next = ref 0 in
+  let pos_of = ref Tid.Map.empty in
+  let place (t : Tid.t) : unit =
+    pos_of := Core.Map.set !pos_of ~key:t ~data:!next;
+    incr next
+  in
+  (* Pre-order walk with the innermost enclosing head; returns the
+     comps' blocks in order. *)
+  let rec walk (enclosing : Tid.t option) (comps : comp list) : Tid.t list =
+    List.concat_map comps ~f:(function
+        | Vertex v ->
+          place v;
+          Option.iter enclosing ~f:(fun h ->
+              Hashtbl.set block_to_head ~key:v ~data:h);
+          [ v ]
+        | SCC (h, inner) ->
+          place h;
+          Hashtbl.set block_to_head ~key:h ~data:h;
+          Hashtbl.set head_to_blocks ~key:h ~data:Tid.Set.empty;
+          let blocks = h :: walk (Some h) inner in
+          Hashtbl.set head_to_blocks ~key:h ~data:(Tid.Set.of_list blocks);
+          blocks)
+  in
+  ignore (walk None cs : Tid.t list);
+  let heads = Tid.Set.of_list (Hashtbl.keys head_to_blocks) in
+  { heads; head_to_blocks; block_to_head; pos_of = !pos_of }
 
 (* Kosaraju SCC over any ordered key: the block-graph partition and the
    widening-need var graph both call it (one interface, two adapters). *)
-module Scc (K : sig
-    type t
-  end) =
+module Scc (K : Hashtbl.Key) =
 struct
   let partition (nodes : K.t list) (succ : K.t -> K.t list)
       (pred : K.t -> K.t list) : K.t list list =
     (* Membership is hashed, not scanned — the DFS visits are O(V.E)
        total, not O(V^2.E).  Visit order is unchanged. *)
-    let in_nodes = Stdlib.Hashtbl.create 64 in
-    List.iter nodes ~f:(fun n -> Stdlib.Hashtbl.replace in_nodes n true);
-    let visited = Stdlib.Hashtbl.create 64 in
+    let in_nodes = Hashtbl.create (module K) in
+    List.iter nodes ~f:(fun n -> Hashtbl.set in_nodes ~key:n ~data:true);
+    let visited = Hashtbl.create (module K) in
     let order = ref [] in
     let rec dfs1 (n : K.t) : unit =
-      if not (Stdlib.Hashtbl.mem visited n) then begin
-        Stdlib.Hashtbl.replace visited n true;
+      if not (Hashtbl.mem visited n) then begin
+        Hashtbl.set visited ~key:n ~data:true;
         List.iter (succ n) ~f:(fun m ->
-            if Stdlib.Hashtbl.mem in_nodes m then dfs1 m);
+            if Hashtbl.mem in_nodes m then dfs1 m);
         order := n :: !order
       end
     in
     List.iter nodes ~f:dfs1;
-    let visited2 = Stdlib.Hashtbl.create 64 in
+    let visited2 = Hashtbl.create (module K) in
     let comps = ref [] in
     List.iter !order ~f:(fun n ->
-        if not (Stdlib.Hashtbl.mem visited2 n) then begin
+        if not (Hashtbl.mem visited2 n) then begin
           let cur = ref [] in
           let rec dfs2 (x : K.t) : unit =
-            if not (Stdlib.Hashtbl.mem visited2 x) then begin
-              Stdlib.Hashtbl.replace visited2 x true;
+            if not (Hashtbl.mem visited2 x) then begin
+              Hashtbl.set visited2 ~key:x ~data:true;
               cur := x :: !cur;
               List.iter (pred x) ~f:(fun p ->
-                  if Stdlib.Hashtbl.mem in_nodes p then dfs2 p)
+                  if Hashtbl.mem in_nodes p then dfs2 p)
             end
           in
           dfs2 n;
@@ -112,9 +100,7 @@ struct
     !comps
 end
 
-module Tid_scc = Scc (struct
-    type t = Tid.t
-  end)
+module Tid_scc = Scc (Tid)
 
 (* WTO over plain accessors. *)
 let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)

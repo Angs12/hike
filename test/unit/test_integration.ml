@@ -1315,14 +1315,14 @@ let tests : unit Alcotest.test list =
           ~is_upper:true ~warmed:false ~dist:10;
         check "LM steps: a just-recorded entry waits for a second measurement"
           (match Cbat_landmarks.steps lm h lw with
-           | `Zero -> true
+           | Cbat_landmarks.Zero -> true
            | _ -> false);
         Cbat_landmarks.advance lm h lw;
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~warmed:false ~dist:6;
         check "LM steps: the closer reading fires the steps ((6) / (10 - 6) = 1)"
           (match Cbat_landmarks.steps lm h lw with
-           | `Finite 1 -> true
+           | Cbat_landmarks.Finite 1 -> true
            | _ -> false));
 
     (* A landmark the guard stopped disabling leaves no reading behind;
@@ -1342,7 +1342,7 @@ let tests : unit Alcotest.test list =
           ~is_upper:true ~warmed:false ~dist:4;
         check "LM steps: the live entry still fires ((4) / (5 - 4) = 4)"
           (match Cbat_landmarks.steps lm h lw with
-           | `Finite 4 -> true
+           | Cbat_landmarks.Finite 4 -> true
            | _ -> false));
 
     (* The rotation keeps the history an entry holds: a round with no
@@ -1361,7 +1361,7 @@ let tests : unit Alcotest.test list =
           ~is_upper:true ~warmed:false ~dist:5;
         check "LM steps: the reading after an empty round still pairs ((5) / (10 - 5) = 1)"
           (match Cbat_landmarks.steps lm h lw with
-           | `Finite 1 -> true
+           | Cbat_landmarks.Finite 1 -> true
            | _ -> false));
 
     (* The magnitude's own edge: |2^63| overflows int64, so the
@@ -1482,14 +1482,14 @@ let tests : unit Alcotest.test list =
           ~is_upper:true ~warmed:true ~dist:10;
         check "narrowed arm: a lone warmed record does not answer Zero (it widens until paired)"
           (match Cbat_landmarks.steps lm2 h2 lw with
-           | `Zero -> false
+           | Cbat_landmarks.Zero -> false
            | _ -> true);
         (* dist_p = dist = 10 gives no shrink; a closer second reading fires. *)
         Cbat_landmarks.record lm2 ~key:lw ~head:h2 ~bound:(w32 100)
           ~is_upper:true ~warmed:true ~dist:6;
         check "narrowed arm: the closer narrowed reading fires the steps (6 / (10 - 6) = 1)"
           (match Cbat_landmarks.steps lm2 h2 lw with
-           | `Finite 1 -> true
+           | Cbat_landmarks.Finite 1 -> true
            | _ -> false);
         (* And the warmed entry never holds the head in Zero (the INT-15
            property at record time). *)
@@ -1499,7 +1499,7 @@ let tests : unit Alcotest.test list =
           ~is_upper:false ~warmed:true ~dist:3;
         check "narrowed arm: a lone warmed record does not answer Zero (it widens until paired)"
           (match Cbat_landmarks.steps lm3 h3 lw with
-           | `Zero -> false
+           | Cbat_landmarks.Zero -> false
            | _ -> true));
 
     (* Pin B (re-pinned): the cell's own Zero arm advances and WIDENS.

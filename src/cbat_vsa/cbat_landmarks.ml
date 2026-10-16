@@ -243,13 +243,22 @@ let observe_unsat (t : t) ~(key : key)
           record_narrowed t ~head:h ~key ~p ~m
         else record_excluded t ~head:h ~key ~p ~cstr
 
+(* The arm a key consumes: extrapolate by [Finite n] steps, advance and
+   join on [Zero], plain-widen on [Inf]. *)
+type arm = Finite of int | Zero | Inf
+
+let equal_arm (a : arm) (b : arm) : bool =
+  match a, b with
+  | Zero, Zero | Inf, Inf -> true
+  | Finite x, Finite y -> Int.equal x y
+  | _ -> false
+
 (* Steps until the closest landmark; Zero needs another measurement, Inf
    widens.  Only an entry holding a fresh measurement speaks: an entry
    already consumed by [advance] carries no reading, and a table keeps
    entries whose boundary the guard stopped reaching — neither may hold
    the head in [Zero], which never widens. *)
-let steps_of_entries (lst : lm_entry list) :
-    [> `Zero | `Finite of int | `Inf ] =
+let steps_of_entries (lst : lm_entry list) : arm =
   let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
   let steps =
     List.filter_map fresh ~f:(fun e ->
@@ -257,16 +266,15 @@ let steps_of_entries (lst : lm_entry list) :
         | Some dp, Some dc when dp > dc -> Some (dc / (dp - dc))
         | _ -> None)
   in
-  if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then `Zero
-  else if List.is_empty steps then `Inf
-  else `Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
+  if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then Zero
+  else if List.is_empty steps then Inf
+  else Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
 
 #ifdef VSA_DEBUG
 (* Which shape the entries are in — how many the row holds, how many carry
    a fresh reading, and whether the distances move — and which arm they
    answered for.  [kind] is the key kind, or "head" for the fold. *)
-let note_steps (kind : string) (lst : lm_entry list)
-    (answer : [ `Zero | `Finite of int | `Inf ]) : unit =
+let note_steps (kind : string) (lst : lm_entry list) (answer : arm) : unit =
   let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
   bump_steps
     (Printf.sprintf "table.%s.%d.%s" kind (List.length lst)
@@ -282,32 +290,21 @@ let note_steps (kind : string) (lst : lm_entry list)
              (if dp > dc then "live.shrink" else "live.hold"))
       | _ -> ());
   match answer with
-  | `Finite _ -> bump_steps (Printf.sprintf "fire.finite.%s" kind)
-  | `Zero -> bump_steps (Printf.sprintf "fire.zero.%s" kind)
-  | `Inf ->
+  | Finite _ -> bump_steps (Printf.sprintf "fire.finite.%s" kind)
+  | Zero -> bump_steps (Printf.sprintf "fire.zero.%s" kind)
+  | Inf ->
     bump_steps
       (Printf.sprintf "fire.inf.%s.%s" kind
          (if List.is_empty fresh then "stale" else "held"))
 #endif
 
-let steps (t : t) (h : Tid.t) (key : key) :
-    [> `Zero | `Finite of int | `Inf ] =
+let steps (t : t) (h : Tid.t) (key : key) : arm =
   let lst = entries t h key in
   let answer = steps_of_entries lst in
 #ifdef VSA_DEBUG
   note_steps (kind_of_key key) lst answer;
 #endif
   answer
-
-(* The arm a key consumes: extrapolate by [Finite n] steps, advance and
-   join on [Zero], plain-widen on [Inf]. *)
-type arm = Finite of int | Zero | Inf
-
-let equal_arm (a : arm) (b : arm) : bool =
-  match a, b with
-  | Zero, Zero | Inf, Inf -> true
-  | Finite x, Finite y -> Int.equal x y
-  | _ -> false
 
 (* The head's own arm: its word keys' entries folded, so the caller's
    decision keeps the shape it had when the table was per head.  It is
@@ -323,10 +320,7 @@ let head_arm (t : t) (h : Tid.t) : arm =
 #ifdef VSA_DEBUG
   note_steps "head" lst answer;
 #endif
-  match answer with
-  | `Finite n -> Finite n
-  | `Zero -> Zero
-  | `Inf -> Inf
+  answer
 
 (* The rotation: the current reading becomes the previous one.  An entry
    with no fresh reading keeps the history it holds — erasing it would
@@ -424,40 +418,27 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
       else Cbat_clp_set_composite.max_elem in
     let lo_base = Option.value (min_e data_new) ~default:(Cbat_word.zero width) in
     let hi_base = Option.value (max_e data_new) ~default:(Cbat_word.zero width) in
-    let extrap_lo =
-      let lo' = List.filter entries ~f:(fun e -> not e.is_upper) in
-      match lo' with
-      | [] -> lo_base
-      | _ ->
-        let candidates = List.filter_map lo' ~f:(fun e ->
-            let v = Cbat_word.sub lo_base (Cbat_word.of_int ~width (delta_of e)) in
-            let v = if cmp v lo_base > 0 then lo_base else v in
-            let v = if cmp v e.bound < 0 then e.bound else v in
-            let v = if cmp v lo_base > 0 then lo_base else v in
-            Some v)
-        in
-        List.fold candidates ~init:lo_base ~f:(fun acc v ->
-            Cbat_word.min_by ~signed v acc)
+    (* The extrapolation of [base] toward the lower or upper side: each
+       entry moves it by its growth, clamped at its landmark, and the
+       farthest candidate wins.  An upward overflow saturates; a downward
+       one stays at [base]. *)
+    let extrapolate ~lower ~base =
+      let past a b = if lower then cmp a b < 0 else cmp a b > 0 in
+      let behind a b = if lower then cmp a b > 0 else cmp a b < 0 in
+      let overflow = if lower then base else Cbat_word.ones width in
+      let es = List.filter entries ~f:(fun e -> Bool.(e.is_upper <> lower)) in
+      let candidate e =
+        let d = Cbat_word.of_int ~width (delta_of e) in
+        let v = if lower then Cbat_word.sub base d else Cbat_word.add base d in
+        let v = if behind v base then overflow else v in
+        let v = if past v e.bound then e.bound else v in
+        if behind v base then base else v
+      in
+      List.fold (List.map es ~f:candidate) ~init:base ~f:(fun acc v ->
+          if past v acc then v else acc)
     in
-    let extrap_hi =
-      let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
-      match hi' with
-      | [] -> hi_base
-      | _ ->
-        let candidates = List.filter_map hi' ~f:(fun e ->
-            let v = Cbat_word.add hi_base (Cbat_word.of_int ~width (delta_of e)) in
-            let v =
-              if cmp v hi_base < 0 then
-                (* Overflow saturates. *)
-                Cbat_word.ones width
-              else v in
-            let v = if cmp v e.bound > 0 then e.bound else v in
-            let v = if cmp v hi_base < 0 then hi_base else v in
-            Some v)
-        in
-        List.fold candidates ~init:hi_base ~f:(fun acc v ->
-            Cbat_word.max_by ~signed v acc)
-    in
+    let extrap_lo = extrapolate ~lower:true ~base:lo_base in
+    let extrap_hi = extrapolate ~lower:false ~base:hi_base in
     if cmp extrap_lo extrap_hi > 0 then data_new
     else
       match Cbat_clp_set_composite.origin data_new with

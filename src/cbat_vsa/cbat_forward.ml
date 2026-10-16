@@ -57,9 +57,14 @@ let denote_jump
     (b : blk term)  (env : AI.t) ~(entry : AI.t) ~(target : tid)
     : AI.t =
   (* The backward refinement's entry state IS the source block's IN
-     state — the env this jump transfers. *)
-  (* Per jmp: the edge's own cond and the disabled continuation (the
-     next edge's cond), both from the run's tables. *)
+     state — the env this jump transfers.  Per jmp: the edge's own cond
+     and the disabled continuation (the next edge's cond), both from the
+     run's tables. *)
+  let call_facts =
+    lazy (match Core.Map.find rctx.rc_blocks (Term.tid b) with
+    | Some bf -> bf.bf_call_facts
+    | None -> failwith "hike: no call facts for block (rctx)")
+  in
   let lookup_cond jmp =
     Core.Map.find edge_conds (Term.tid b)
     |> Option.bind ~f:(fun by_jmp ->
@@ -73,9 +78,8 @@ let denote_jump
     Option.iter (Core.Map.find disabled (Term.tid jmp))
       ~f:(fun dc ->
         Cbat_backward.acquire_unsat ~entry
-          ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
-          ~cache:(rctx : Cbat_runctx.refine_ctx).rc_prefix
-          ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
+          ~landmarks:rctx.rc_landmarks ~cache:rctx.rc_prefix
+          ~witness:rctx.rc_nonneg
           env b dc);
     let env =
       match edge_cond with
@@ -85,11 +89,7 @@ let denote_jump
       | None -> env in
 
     let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
-      let written_lanes, _ =
-        match Core.Map.find rctx.rc_blocks (Term.tid b) with
-        | Some bf -> bf.bf_call_facts
-        | None -> failwith "hike: no call facts for block (rctx)"
-      in
+      let written_lanes, _ = Lazy.force call_facts in
       Cbat_call_effects.transfer ~abi:rctx.Cbat_runctx.rc_abi ~preserved
         ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
         env
@@ -111,11 +111,7 @@ let denote_jump
         match site_callee with
         | Cbat_call_effects.Blocked -> AI.bottom
         | Cbat_call_effects.Summary summary ->
-          let _, pushed =
-            match Core.Map.find rctx.rc_blocks (Term.tid b) with
-            | Some bf -> bf.bf_call_facts
-            | None -> failwith "hike: no call facts for block (rctx)"
-          in
+          let _, pushed = Lazy.force call_facts in
           call_site_transfer ~summary ~pushed
     in
     let leads () = if env_leads ~target rel then env else AI.bottom in
