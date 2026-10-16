@@ -99,6 +99,14 @@ let synth_value ctx scope llvm_builder blk_tid v =
     warn_undef_read ctx scope v blk_tid;
     frozen_undef ctx scope v
 
+(* The generic memory path, unremapped: the cell at an integer address. *)
+let raw_load ?(ptr_cell = false) ctx llvm_builder size a =
+  cell_value ctx ~ptr:ptr_cell size
+    (Bil2llvm_memory.load ctx llvm_builder a (cell_type ctx ~ptr:ptr_cell size))
+
+let raw_store ctx llvm_builder data a =
+  ignore (Bil2llvm_memory.store ctx llvm_builder (Bil2llvm_value.ll data) a)
+
 let rec create_offset ctx scope llvm_builder blk_tid exp :
     Llvm.llvalue option =
   let addr_ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
@@ -219,26 +227,22 @@ and tls_ptr ctx scope llvm_builder blk_tid cls =
 and plain_store ctx scope llvm_builder blk_tid mem addr data =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let d = create_exp ctx scope llvm_builder blk_tid data in
-  let dv = Bil2llvm_value.ll d in
   (match mem with
    | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
      match
        Bil2llvm_memory.component_ptr ctx llvm_builder mv
          (as_int ctx llvm_builder a)
      with
-     | Some p -> ignore (Bil2llvm_memory.store_ptr llvm_builder dv p)
-     | None -> ignore (Bil2llvm_memory.store ctx llvm_builder dv a))
-   | _ -> ignore (Bil2llvm_memory.store ctx llvm_builder dv a));
+     | Some p ->
+       ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p)
+     | None -> raw_store ctx llvm_builder d a)
+   | _ -> raw_store ctx llvm_builder d a);
   d
 
 and plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
     addr size =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
-  let raw () =
-    cell_value ctx ~ptr:ptr_cell size
-      (Bil2llvm_memory.load ctx llvm_builder a
-         (cell_type ctx ~ptr:ptr_cell size))
-  in
+  let raw () = raw_load ~ptr_cell ctx llvm_builder size a in
   match mem with
   | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
     match
@@ -317,13 +321,10 @@ and sec_comp_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid exp
       let a = Bil2llvm_value.Int idx in
       if store then begin
         let d = stored () in
-        ignore (Bil2llvm_memory.store ctx llvm_builder (Bil2llvm_value.ll d) a);
+        raw_store ctx llvm_builder d a;
         d
       end
-      else
-        cell_value ctx ~ptr:ptr_cell size
-          (Bil2llvm_memory.load ctx llvm_builder a
-             (cell_type ctx ~ptr:ptr_cell size))
+      else raw_load ~ptr_cell ctx llvm_builder size a
   in
   emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size) ~emit
     ~rewrite:(rewrite_mem_node exp addr size)

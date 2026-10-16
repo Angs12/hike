@@ -795,9 +795,9 @@ let finalize_tree ~(word : int) ~(entry : int64)
           { storage = Stack_residue; members = ms })
     | sec ->
         if in_whole_span whole sec k.lo.p_pos then
-      let id =
-        match Base.List.Assoc.find !span_ids sec ~equal:equal_sec with
-        | Some id -> id
+          let id =
+            match Base.List.Assoc.find !span_ids sec ~equal:equal_sec with
+            | Some id -> id
             | None ->
                 incr next_global_id;
                 span_ids := (sec, !next_global_id) :: !span_ids;

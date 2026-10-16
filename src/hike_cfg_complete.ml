@@ -359,6 +359,16 @@ let rewrite_jmps_once ~(retaddr : Tid.Set.t) (sub : sub term) : sub term =
       splice_jmps blk
         ~classify:(ret_rewrite ~last_defs ~retaddr))
 
+(* Each block's follower in [sub]'s term order: the false edge of a
+   conditional goto whose block has no explicit one. *)
+let fallthroughs (sub : sub term) : Tid.t Tid.Map.t =
+  let tids = Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Seq.to_list in
+  match tids with
+  | [] -> Tid.Map.empty
+  | _ :: followers ->
+    Base.List.zip_exn (Base.List.drop_last_exn tids) followers
+    |> Core.Map.of_alist_reduce (module Tid) ~f:(fun a _ -> a)
+
 (* The unreachable-block rule, one walk over the rewritten edge set: a
    block is kept iff the walk reaches it — from the sub's entry over the
    explicit edges, or through a surviving indirect transfer of a REACHED
@@ -402,13 +412,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
     in
     let find_block t = Core.Map.find by_tid t in
     let all = Core.Set.of_list (module Tid) (Base.List.map blocks ~f:Term.tid) in
-    let rec nexts = function
-      | [] -> []
-      | b :: tl -> (
-          let nx = match tl with b2 :: _ -> Some (Term.tid b2) | [] -> None in
-          (Term.tid b, nx) :: nexts tl)
-    in
-    let fall_tbl = Core.Map.of_alist_exn (module Tid) (nexts blocks) in
+    let fall_tbl = fallthroughs sub in
     let indirect_targets ~blk texp : Tid.Set.t option =
       let last_defs = Vsa.last_defs blk in
       match texp with
@@ -473,7 +477,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
           || not (Model.is_true_cond (Jmp.cond (Base.List.last_exn js)))
         then
           match Core.Map.find fall_tbl (Term.tid blk) with
-          | Some (Some t) -> (
+          | Some t -> (
               match find_block t with
               | Some b -> go seen b
               | None -> seen)
@@ -484,18 +488,6 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
     Term.filter_map blk_t sub ~f:(fun b ->
         Base.Option.some_if (Core.Set.mem reachable (Term.tid b)) b)
 
-(* The block that follows [blk] in [sub]'s term order: the false edge of a
-   conditional goto whose block has no explicit one. *)
-let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
-  let tid = Term.tid blk in
-  let rec go seen = function
-    | [] -> None
-    | b :: rest ->
-        if seen then Some (Term.tid b)
-        else go (Tid.equal (Term.tid b) tid) rest
-  in
-  go false (Term.enum blk_t sub |> Seq.to_list)
-
 (* The completion owns the edge set, so it names it here: the BIR's jumps
    ARE the block's successors.  A conditional goto's implicit false edge
    becomes an explicit Goto, and a block whose every edge leads to ONE
@@ -503,6 +495,7 @@ let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
    nothing.  A guarded series keeps its edges: the split makes each piece
    a block of its own, so their destinations never collide. *)
 let materialize_fallthroughs (sub : sub term) : sub term =
+  let followers = fallthroughs sub in
   let direct (j : jmp term) : Tid.t option =
     match Jmp.kind j with Goto (Direct t) -> Some t | _ -> None
   in
@@ -512,7 +505,7 @@ let materialize_fallthroughs (sub : sub term) : sub term =
       | Some j
         when Option.is_some (direct j)
              && not (Model.is_true_cond (Jmp.cond j)) -> (
-          match fallthrough sub blk with
+          match Core.Map.find followers (Term.tid blk) with
           | Some succ -> Term.append jmp_t blk (Jmp.create (Goto (Direct succ)))
           | None -> blk)
       | _ -> blk

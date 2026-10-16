@@ -207,6 +207,9 @@ val sec_comp_mem : addr_bits:int -> int -> var
 val sec_res_name : int -> string
 val is_sec_comp_mem : var -> bool
 
+(* A model-owned storage var: a fissioned memory family or a storage base. *)
+val is_model_storage : var -> bool
+
 (* The tid-name sanitization. *)
 val sanitize_tid_name : string -> string
 

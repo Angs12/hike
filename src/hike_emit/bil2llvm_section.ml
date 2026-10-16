@@ -19,7 +19,7 @@ let lookup_native_fn ctx llvm_module v =
                       ~f:(fun (fn, _) -> fn)
         in
         match Core.Map.find ctx.sub_of tid with
-        | Some sub -> named (Bil2llvm_env.sanitize_name (Tid.name tid))
+        | Some _ -> named (Bil2llvm_env.sanitize_name (Tid.name tid))
         | None ->
           Base.Option.map (Core.Map.find !(ctx.ll_funcs) tid)
             ~f:(fun (fn, _) -> fn))
@@ -36,7 +36,7 @@ let lookup_native_fn ctx llvm_module v =
   then None
   else Base.Option.bind ctx.symtab ~f:(fun symtab ->
       Base.Option.bind
-        (Symtab.find_by_start symtab (Word.of_int64 ~width:64 v))
+        (Symtab.find_by_start symtab (Word.of_int64 ~width:ctx.addr_bits v))
         ~f:(fun (name, _, _) ->
           let fn = Llvm.lookup_function name llvm_module in
           Base.Option.map fn ~f:(fun f ->
@@ -111,7 +111,7 @@ let remap_native ctx llvm_ctx llvm_module v ~finish =
   Base.Option.first_some
     (Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:finish)
     (Base.Option.bind
-       (section_of_addr ctx.address (Word.of_int64 ~width:64 v))
+       (section_of_addr ctx.address (Word.of_int64 ~width:ctx.addr_bits v))
        ~f:(fun section ->
          let base, own_lo = owner_of ctx.address section v in
          Some
@@ -312,6 +312,7 @@ let align_of native_lo =
 let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let module Model = Hike_stack_model in
   let word = spec.spec_word in
+  let addr_bits = Hike_stack_model.word_bits word in
   let comps_of lo hi =
     Base.List.filter spec.spec_comps ~f:(fun c ->
         Int64.equal c.Model.sec_lo lo && Int64.equal c.Model.sec_hi hi)
@@ -447,8 +448,8 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
           o.own_lo o.own_hi (Llvm.value_name o.base));
 #endif
     let base = match owners with o :: _ -> o.base | [] -> assert false in
-    { base; min_addr = Word.of_int64 ~width:64 lo;
-      max_addr = Word.of_int64 ~width:64 hi; bytes = arr; owners }
+    { base; min_addr = Word.of_int64 ~width:addr_bits lo;
+      max_addr = Word.of_int64 ~width:addr_bits hi; bytes = arr; owners }
   in
   let build_entry (entry : Hike_stack_model.sec_meta) : section =
     let { Hike_stack_model.sm_type; sm_access; sm_lo = si_lo;
@@ -468,14 +469,16 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
       if bss then
         let size = Int64.to_int (Int64.sub (Int64.add si_hi 1L) si_lo) in
         { base;
-          min_addr = Word.of_int ~width:64 (Int64.to_int si_lo);
-          max_addr = Word.of_int ~width:64 (Int64.to_int si_lo + size - 1);
+          min_addr = Word.of_int64 ~width:addr_bits si_lo;
+          max_addr =
+            Word.of_int64 ~width:addr_bits
+              (Int64.add si_lo (Int64.of_int (size - 1)));
           bytes = None;
           owners }
       else
         { base;
-          min_addr = Word.of_int64 ~width:64 si_lo;
-          max_addr = Word.of_int64 ~width:64 si_hi;
+          min_addr = Word.of_int64 ~width:addr_bits si_lo;
+          max_addr = Word.of_int64 ~width:addr_bits si_hi;
           bytes;
           owners }
     in

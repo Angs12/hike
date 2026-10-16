@@ -41,20 +41,15 @@ let emit output_program proj =
   let abi = Abi.of_target target in
   let word = abi.Abi.word in
   let addr_bits = Theory.Target.bits target in
-  let relative, externals =
-    match (Hike_kb.facts ()).Hike_kb.spec with
-    | Some spec ->
-      (spec.Bil2llvm_env.spec_relative, spec.Bil2llvm_env.spec_externals)
-    | None ->
-      let bias = Hike_image.get_bias proj in
-      (Hike_image.relative_values proj ~bias,
-       Hike_image.external_references proj)
-  in
+  let facts = Hike_kb.facts () in
   let spec =
-    match (Hike_kb.facts ()).Hike_kb.spec with
+    match facts.Hike_kb.spec with
     | Some spec -> spec
     | None ->
         (* No attribution ran: the sections emit with no components. *)
+        let bias = Hike_image.get_bias proj in
+        let relative = Hike_image.relative_values proj ~bias in
+        let externals = Hike_image.external_references proj in
         let meta = Hike_sections.sec_meta ~word proj in
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
           ~tls:(Hike_image.tls_spec proj)
@@ -64,7 +59,7 @@ let emit output_program proj =
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
     ~symtab:(Some (Project.symbols proj))
-    ~synth:(Hike_kb.facts ()).synth
+    ~synth:facts.synth
     spec prog;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;

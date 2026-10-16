@@ -13,6 +13,7 @@ type context = {
 
 let prepare proj =
   let target = Project.target proj in
+  let abi = Hike_abi.of_target target in
   let range_of_section name =
     match
       Hike_image.get_section_mem name proj |> Hike_image.get_section_data
@@ -31,7 +32,7 @@ let prepare proj =
       match range_of_section ".got.plt" with
       | Some (lo, _) ->
         let w =
-          Int64.of_int (Hike_abi.word_bits (Hike_abi.of_target target) / 8)
+          Int64.of_int (Hike_abi.word_bits abi / 8)
         in
         [ lo; Int64.add lo w; Int64.add lo (Int64.mul 2L w) ]
       | None -> []
@@ -47,7 +48,7 @@ let prepare proj =
      at all. *)
   let images =
     Hike_image.get_section_images proj
-      ~page:(Hike_abi.of_target target).Hike_abi.page_size
+      ~page:abi.Hike_abi.page_size
     |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
            { Cbat_vsa.img_lo;
              img_hi;
@@ -62,7 +63,7 @@ let prepare proj =
   let data_spans =
     Hike_sections.attrib_spans
       ~meta:(Hike_sections.sec_meta
-               ~word:(Hike_abi.of_target target).Hike_abi.word proj)
+               ~word:abi.Hike_abi.word proj)
   in
   Hike_origin.Regions.install
     (Base.List.map data_spans ~f:(fun span ->

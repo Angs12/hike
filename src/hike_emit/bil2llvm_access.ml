@@ -97,37 +97,28 @@ let access_value ~ptr_cell ctx scope llvm_builder blk_tid def exp =
       let classified =
         Base.Option.bind mv ~f:(Hike_synth.classify ctx.synth)
       in
-      let is_region =
+      let kind =
         match classified with
-        | Some (Hike_synth.Storage (Hike_synth.Stack _))
-        | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
-        | _ -> false
-      in
-      let is_window =
-        match classified with
+        | Some (Hike_synth.Storage (Hike_synth.Stack id))
+        | Some (Hike_synth.Bytes (Hike_synth.Stack id)) -> `Region id
         | Some (Hike_synth.Storage Hike_synth.Window)
-        | Some (Hike_synth.Bytes Hike_synth.Window) -> true
-        | _ -> false
-      in
-      let region_or_window = is_region || is_window in
-      let sec_comp =
-        match classified with
+        | Some (Hike_synth.Bytes Hike_synth.Window) -> `Window
         | Some (Hike_synth.Storage (Hike_synth.Global _))
-        | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
-        | _ -> false
+        | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> `Component
+        | _ -> `Other
       in
+      let is_window = match kind with `Window -> true | _ -> false in
+      let region_or_window =
+        match kind with `Region _ | `Window -> true | _ -> false in
+      let sec_comp = match kind with `Component -> true | _ -> false in
       (* The attribution's rewrite re-pointed the memory node at the
          owning storage's mem var: the def's own alloca is the region it
          names (the residue included), never the address operand's. *)
       let storage =
-        match classified with
-        | Some (Hike_synth.Storage (Hike_synth.Stack id))
-        | Some (Hike_synth.Bytes (Hike_synth.Stack id)) ->
-          Some (Hike_stack_model.Ptr_region id)
-        | Some (Hike_synth.Storage Hike_synth.Window)
-        | Some (Hike_synth.Bytes Hike_synth.Window) ->
-          Some Hike_stack_model.Ptr_window
-        | _ -> Hike_def_slots.def_ptr_storage def
+        match kind with
+        | `Region id -> Some (Hike_stack_model.Ptr_region id)
+        | `Window -> Some Hike_stack_model.Ptr_window
+        | `Component | `Other -> Hike_def_slots.def_ptr_storage def
       in
       (match mv, sec_comp, region_or_window, node with
       | Some mv, true, _, `Load (_, addr, size) ->
@@ -180,15 +171,14 @@ let plan_atomics (sub : sub term) : atomic_action Tid.Map.t =
             let operand i = match Core.Map.find !inputs i with
               | Some e -> e | None -> failwith "hike-emit: atomic input is missing" in
             let kind = match op with
-              | "add" -> Rmw (Llvm.AtomicRMWBinOp.Add,operand 0)
-              | "sub" -> Rmw (Llvm.AtomicRMWBinOp.Sub,operand 0)
-              | "and" -> Rmw (Llvm.AtomicRMWBinOp.And,operand 0)
-              | "or" -> Rmw (Llvm.AtomicRMWBinOp.Or,operand 0)
-              | "xor" -> Rmw (Llvm.AtomicRMWBinOp.Xor,operand 0)
-              | "xchg" -> Rmw (Llvm.AtomicRMWBinOp.Xchg,operand 0)
-              | "cmpxchg" -> Compare_exchange (operand 0,operand 1)
-              | "neg" -> Negate
-              | _ -> failwith "hike-emit: unknown atomic operation" in
+              | Hike_atomic.Add -> Rmw (Llvm.AtomicRMWBinOp.Add,operand 0)
+              | Sub -> Rmw (Llvm.AtomicRMWBinOp.Sub,operand 0)
+              | And -> Rmw (Llvm.AtomicRMWBinOp.And,operand 0)
+              | Or -> Rmw (Llvm.AtomicRMWBinOp.Or,operand 0)
+              | Xor -> Rmw (Llvm.AtomicRMWBinOp.Xor,operand 0)
+              | Xchg -> Rmw (Llvm.AtomicRMWBinOp.Xchg,operand 0)
+              | Cmpxchg -> Compare_exchange (operand 0,operand 1)
+              | Neg -> Negate in
             (match Def.rhs d with
              | Bil.Load (mem,addr,_,size) ->
                Core.Map.set plan ~key:(Term.tid d)

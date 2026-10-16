@@ -25,7 +25,7 @@ let const_load ctx llvm_builder addr ty ~fallback =
 (* The section-owner pointer of a constant address: the atomic path's
    target (the store path's own resolution, without the value). *)
 let const_addr_ptr ctx llvm_builder addr_i64 ~fallback =
-  let w = Word.of_int64 ~width:64 addr_i64 in
+  let w = Word.of_int64 ~width:ctx.addr_bits addr_i64 in
   match section_of_addr ctx.address w with
   | Some section -> resolve_addr_in ctx llvm_builder section w
   | None -> fallback ()
@@ -46,7 +46,7 @@ let load ctx llvm_builder (addr : Bil2llvm_value.t) ty =
   | Bil2llvm_value.Int a -> (
     match Llvm.int64_of_const a with
     | Some v ->
-      const_load ctx llvm_builder (Word.of_int64 ~width:64 v) ty
+      const_load ctx llvm_builder (Word.of_int64 ~width:ctx.addr_bits v) ty
         ~fallback:raw
     | None -> raw ())
   | Bil2llvm_value.Ptr _ -> raw ()
@@ -57,7 +57,7 @@ let store ctx llvm_builder (value : Llvm.llvalue) (addr : Bil2llvm_value.t) =
   | Bil2llvm_value.Int a -> (
     match Llvm.int64_of_const a with
     | Some v ->
-      const_store ctx llvm_builder (Word.of_int64 ~width:64 v)
+      const_store ctx llvm_builder (Word.of_int64 ~width:ctx.addr_bits v)
         ~data:(fun () -> value) ~fallback:raw
     | None -> raw ())
   | Bil2llvm_value.Ptr _ -> raw ()

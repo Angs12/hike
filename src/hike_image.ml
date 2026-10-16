@@ -24,6 +24,13 @@ let get_section_data x =
       done;
       (arr, Memory.min_addr mem, Memory.max_addr mem))
 
+(* The rows of one declared Ogre fact table in the project's spec. *)
+let ogre_rows (proj : Project.t) table =
+  let open Ogre in
+  fst (run (collect Query.(select (from table))) (Project.specification proj)
+       |> Core.Or_error.ok_exn)
+  |> Base.Sequence.to_list
+
 let get_copy_relocations proj ~bss_addr ~bss_size =
   let rows =
     let open Ogre in
@@ -33,10 +40,9 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
     let name_ref () =
       Ogre.declare ~name:"llvm:name-reference" nr_tbl (fun a n -> (a, n))
     in
-    let c = Ogre.collect Query.(select (from name_ref)) in
-    fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn)
+    ogre_rows proj name_ref
   in
-  Base.Sequence.to_list rows
+  rows
   |> Base.List.filter_map ~f:(fun (fixup, name) ->
          let off = Stdlib.Int64.sub fixup bss_addr in
          if
@@ -49,16 +55,10 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
 (* Every word the loader's relocation facts name: a load-time relocation
    result, so a word at one of these addresses is not its file bytes. *)
 let get_relocated_words (proj : Project.t) : int64 list =
-  let open Ogre in
-  let collect attr = Ogre.collect Query.(select (from attr)) in
-  let relr = collect Image.Scheme.relative_relocation in
-  let rel = collect Image.Scheme.relocation in
-  let ext = collect Image.Scheme.external_reference in
-  let spec = Project.specification proj in
-  let rows q = fst (Ogre.run q spec |> Core.Or_error.ok_exn) in
-  let relr = Base.Sequence.to_list (rows relr) in
-  let rel = Base.Sequence.to_list (rows rel) |> Base.List.map ~f:fst in
-  let ext = Base.Sequence.to_list (rows ext) |> Base.List.map ~f:fst in
+  let relr = ogre_rows proj Image.Scheme.relative_relocation in
+  let rel = ogre_rows proj Image.Scheme.relocation |> Base.List.map ~f:fst in
+  let ext = ogre_rows proj Image.Scheme.external_reference
+            |> Base.List.map ~f:fst in
   relr @ rel @ ext
 
 (* Every symbol-bearing relocation site and the symbol named there: the
@@ -68,21 +68,13 @@ let get_relocated_words (proj : Project.t) : int64 list =
    shared object's .data.  A COPY site is in .bss, which carries no
    image and is served by the copy-relocation path instead. *)
 let external_references (proj : Project.t) : (int64 * string) list =
-  let open Ogre in
-  let c = Ogre.collect Query.(select (from Image.Scheme.external_reference)) in
-  fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn)
-  |> Base.Sequence.to_list
+  ogre_rows proj Image.Scheme.external_reference
 
 (* The loader's load bias: the memory image's addresses are the file
    vaddrs plus it, so a RELATIVE value [base + addend] reads as the
    addend plus it. *)
 let get_bias (proj : Project.t) : int64 =
-  let open Ogre in
-  let c = Ogre.collect Query.(select (from Image.Scheme.bias)) in
-  match
-    Base.Sequence.to_list
-      (fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn))
-  with
+  match ogre_rows proj Image.Scheme.bias with
   | b :: _ -> b
   | [] -> 0L
 
@@ -106,9 +98,7 @@ let relative_values (proj : Project.t) ~(bias : int64) : (int64 * int64) list
     Ogre.declare ~name:"llvm:relative-relocation-addend"
       Type.(scheme at $ addend) (fun site addend -> (site, addend))
   in
-  let c = Ogre.collect Query.(select (from rel_addend)) in
-  fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn)
-  |> Base.Sequence.to_list
+  ogre_rows proj rel_addend
   |> Base.List.map ~f:(fun (site, addend) ->
          (Int64.add site bias, Int64.add addend bias))
 
@@ -124,14 +114,14 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
   let len = Bytes.length bytes in
   if Base.List.is_empty relocated then [ (bytes, lo, hi) ]
   else begin
+    let relative = Core.Map.of_alist_reduce (module Core.Int64) relative
+        ~f:(fun first _ -> first) in
     let out = Bytes.copy bytes in
     let dropped = Array.make len false in
     Base.List.iter relocated ~f:(fun a ->
         let off = Int64.to_int (Int64.sub a lo) in
         if off >= 0 && off < len then
-          match
-            Base.List.Assoc.find relative ~equal:Int64.equal a
-          with
+          match Core.Map.find relative a with
           | Some v ->
             for k = 0 to word - 1 do
               if off + k < len then
@@ -164,11 +154,15 @@ let substitute_relocated_words ~(bytes : Bytes.t) ~(lo : int64)
     runs 0 []
   end
 
+let pt_load = 1L
+let pt_tls = 7L
+let pt_gnu_relro = 0x6474e552L
+
 (* The runtime ranges the process never writes once relocation is done,
    with their access: every PT_LOAD segment without PF_W is [Read_only],
    each PT_GNU_RELRO range [Relro], its end rounded down to a page as the
    loader's mprotect does.  Inclusive, bias applied. *)
-let protections (proj : Project.t) ~(page : int64) :
+let protections_at (proj : Project.t) ~(page : int64) ~(bias : int64) :
     (int64 * int64 * Hike_section.access) list =
   let open Ogre in
   let name = Type.("name" %: str) in
@@ -184,27 +178,27 @@ let protections (proj : Project.t) ~(page : int64) :
   let flags () = declare ~name:"llvm:elf-program-header-flags"
       Type.(scheme name $ flag "ld" $ flag "r" $ flag "w" $ flag "x")
       (fun n _ _ w _ -> (n, w)) in
-  let rows table =
-    fst (run (collect Query.(select (from table))) (Project.specification proj)
-         |> Core.Or_error.ok_exn) |> Base.Sequence.to_list in
-  let bias = get_bias proj in
-  let writable = rows flags in
-  let extent = rows virtuals in
-  Base.List.filter_map (rows types) ~f:(fun (id, t) ->
+  let writable = ogre_rows proj flags in
+  let extent = ogre_rows proj virtuals in
+  Base.List.filter_map (ogre_rows proj types) ~f:(fun (id, t) ->
       match Base.List.Assoc.find extent ~equal:String.equal id with
       | None -> None
       | Some (vaddr, memsz) ->
         let lo = Int64.add vaddr bias in
         let range hi access =
           if Int64.compare hi lo >= 0 then Some (lo, hi, access) else None in
-        if Int64.equal t 1L
+        if Int64.equal t pt_load
         && not (Base.Option.value ~default:true
                   (Base.List.Assoc.find writable ~equal:String.equal id))
         then range (Int64.pred (Int64.add lo memsz)) Hike_section.Read_only
-        else if Int64.equal t 0x6474e552L then
+        else if Int64.equal t pt_gnu_relro then
           range (Int64.pred (Int64.logand (Int64.add lo memsz) (Int64.neg page)))
             Hike_section.Relro
         else None)
+
+let protections (proj : Project.t) ~(page : int64) :
+    (int64 * int64 * Hike_section.access) list =
+  protections_at proj ~page ~bias:(get_bias proj)
 
 (* The access of the bytes [lo, hi]: the protection of a range covering
    them wholly, [Read_only] before [Relro]; any other byte may be
@@ -242,9 +236,10 @@ let clip_image ((bytes, lo, hi) : Bytes.t * int64 * int64)
    reads the abstract value, never the file contents. *)
 let get_section_images (proj : Project.t) ~(page : int64) :
     (Bytes.t * int64 * int64) list =
-  let readonly =
-    Base.List.map (protections proj ~page) ~f:(fun (lo, hi, _) -> (lo, hi)) in
   let bias = get_bias proj in
+  let readonly =
+    Base.List.map (protections_at proj ~page ~bias)
+      ~f:(fun (lo, hi, _) -> (lo, hi)) in
   let relative = relative_values proj ~bias in
   let relocated = get_relocated_words proj in
   let word = (Hike_abi.of_target (Project.target proj)).Hike_abi.word in
@@ -325,13 +320,11 @@ let tls_spec (proj : Project.t) : Hike_spec.tls_spec option =
       Type.(scheme name $ off $ size) (fun n o s -> (n, (o, s))) in
   let virtuals () = declare ~name:"llvm:elf-virtual-program-header"
       Type.(scheme name $ addr $ size) (fun n a s -> (n, (a, s))) in
-  let rows table =
-    fst (run (collect Query.(select (from table))) (Project.specification proj)
-         |> Core.Or_error.ok_exn) |> Base.Sequence.to_list in
+  let rows table = ogre_rows proj table in
   let headers = rows types in
   if Base.List.is_empty headers then
     failwith "hike-image: missing ELF program-header type/alignment facts";
-  let tls = Base.List.filter headers ~f:(fun (_, (t, _)) -> Int64.equal t 7L) in
+  let tls = Base.List.filter headers ~f:(fun (_, (t, _)) -> Int64.equal t pt_tls) in
   match tls with
   | [] -> None
   | [ (id, (_, alignment)) ] ->
@@ -353,11 +346,21 @@ let tls_spec (proj : Project.t) : Hike_spec.tls_spec option =
        would re-walk the map for every TLS byte. *)
     let mems =
       Project.memory proj |> Memmap.to_sequence |> Base.Sequence.to_list in
+    let current = ref None in
     let image = Bytes.init (Int64.to_int filesz) (fun i ->
-        let a = Word.of_int64 ~width:64 (Int64.add lo (Int64.of_int i)) in
-        let mem = Base.List.find mems ~f:(fun (mem, _) -> Memory.contains mem a)
-            |> Base.Option.value_exn ~message:"hike-image: unreadable PT_TLS image"
-            |> fst in
+        let a = Word.of_int64 ~width:(8 * (Hike_abi.of_target (Project.target proj)).Hike_abi.word)
+            (Int64.add lo (Int64.of_int i)) in
+        let mem =
+          match !current with
+          | Some mem when Memory.contains mem a -> mem
+          | _ ->
+            let mem =
+              Base.List.find mems ~f:(fun (mem, _) -> Memory.contains mem a)
+              |> Base.Option.value_exn ~message:"hike-image: unreadable PT_TLS image"
+              |> fst in
+            current := Some mem;
+            mem
+        in
         Memory.get ~addr:a mem |> Core.Or_error.ok_exn |> Word.to_int_exn
         |> Char.chr) in
     Some { Hike_spec.tls_lo = lo; tls_memsz = memsz;

@@ -109,10 +109,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
        a model memory state otherwise; only the model's own memory vars
        (the mem operands) are un-renamable. *)
     let renamable (v : var) =
-      not (Model.is_region_mem v)
-      && not (Model.is_window_mem v)
-      && not (Model.is_sec_comp_mem v)
-      && not (Model.is_storage_base v)
+      not (Model.is_model_storage v)
       && not (Hike_synth.is_module_addr_var Hike_synth.empty v)
       && not (Var.same v pc)
       && not (Var.same v window)
@@ -520,8 +517,7 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
                 |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))))
   |> Core.Set.filter ~f:(fun v ->
          not
-           (Model.is_region_mem v || Model.is_window_mem v
-          || Model.is_sec_comp_mem v || Model.is_storage_base v
+           (Model.is_model_storage v
           || Model.is_window_var v || Abi.is_sp abi (Var.base v)
           || Hike_synth.is_module_addr_var Hike_synth.empty v))
   |> Core.Set.to_list

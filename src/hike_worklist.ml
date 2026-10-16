@@ -506,11 +506,17 @@ and solve t frame (raw : sub term) : func =
     |> Seq.to_list |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
   in
   let lookup a = if is_entry t a then Some (entry_of t a).tid else None in
-  let callee tid : Vsa.Call_effects.callee =
+  let known tid =
     match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
-    | Some (_, s), _ -> Summary s.written
-    | None, None -> Summary None
-    | None, Some e -> (
+    | Some (_, s), _ -> `Symbol s
+    | None, Some e -> `Entry e
+    | None, None -> `Unknown
+  in
+  let callee tid : Vsa.Call_effects.callee =
+    match known tid with
+    | `Symbol s -> Summary s.written
+    | `Unknown -> Summary None
+    | `Entry e -> (
       match e.status with
       | Fresh -> Blocked
       | Open index -> Summary (read_open t frame e index).written
@@ -530,10 +536,10 @@ and solve t frame (raw : sub term) : func =
   let summary =
     S.of_solved ~abi:t.abi
       ~callee:(fun tid ->
-          match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
-          | Some (_, s), _ -> Some s
-          | None, Some e -> Some (summary t frame e)
-          | None, None -> None)
+          match known tid with
+          | `Symbol s -> Some s
+          | `Entry e -> Some (summary t frame e)
+          | `Unknown -> None)
       ~slot:(fun a ->
           Base.Option.map (Core.Map.find t.slot_names a) ~f:(fun n ->
               symbol_summary t (symbol t n)))
@@ -549,7 +555,7 @@ and bounded_words (ws : Vsa.WordSet.t) : int64 list option =
   then None
   else
     Base.Option.map (Vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
-        Base.List.filter_map words ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w)))
+        Base.List.filter_map words ~f:Cbat_word.to_int64_opt)
 
 (* The resolved destinations of the body's indirect transfers become
    decode facts on their instructions.  Whether any is new: the body

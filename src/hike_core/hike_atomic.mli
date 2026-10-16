@@ -4,7 +4,10 @@ open Bap.Std
 val lane : string -> int -> var
 
 (** Tags describe emission roles. All values remain ordinary BIR operands. *)
-val operation : string Value.Tag.t
+type op = Add | Sub | And | Or | Xor | Xchg | Cmpxchg | Neg
+[@@deriving bin_io, compare, sexp]
+
+val operation : op Value.Tag.t
 val input : int Value.Tag.t
 val write : unit Value.Tag.t
 

@@ -91,8 +91,9 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
       Base.List.fold words ~init:[] ~f:(fun acc w ->
           let kind = name ~sub j w in
           let w = Cbat_word.to_word w in
-          match Base.List.Assoc.find acc kind ~equal:Base.Poly.equal with
-          | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal:Base.Poly.equal
+          let equal a b = Int.equal (compare_jmp_kind a b) 0 in
+          match Base.List.Assoc.find acc kind ~equal with
+          | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal
           | None -> (kind, [ w ]) :: acc)
       |> List.rev
     in
@@ -219,8 +220,7 @@ let pieces (blk : blk term) : blk term list =
   match Term.enum jmp_t blk |> Seq.to_list with
   | [] | [ _ ] -> [ blk ]
   | jmps ->
-      let actions = ref [] in
-      let selectors =
+      let built =
         Base.List.map jmps ~f:(fun j ->
             match Jmp.kind j with
             | Call _ ->
@@ -234,29 +234,33 @@ let pieces (blk : blk term) : blk term list =
                 Blk.create ~defs:bindings
                   ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
               in
-              actions := action :: !actions;
-              Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action)))
-            | _ -> j)
+              (Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action))),
+               Some action)
+            | _ -> (j, None))
       in
+      let selectors = Base.List.map built ~f:fst in
+      let actions = Base.List.filter_map built ~f:snd in
       let tids = Term.tid blk ::
                  Base.List.map (Base.List.tl_exn selectors) ~f:(fun _ -> Tid.create ()) in
-      let n = Base.List.length selectors in
+      let next_tids =
+        Base.List.map (Base.List.tl_exn tids) ~f:Option.some @ [ None ] in
       let pieces =
-        Base.List.mapi selectors ~f:(fun i j ->
+        Base.List.mapi (Base.List.zip_exn (Base.List.zip_exn selectors tids) next_tids)
+          ~f:(fun i ((j, tid), next) ->
             let blk_i =
               if Int.equal i 0 then
                 Term.filter jmp_t blk ~f:(fun _ -> false)
                 |> Term.filter def_t ~f:(fun d ->
-                     Base.List.is_empty !actions || not (Model.is_call_arg (Def.lhs d)))
+                     Base.List.is_empty actions || not (Model.is_call_arg (Def.lhs d)))
                 |> fun b -> Term.append jmp_t b j
-              else Blk.create ~tid:(Base.List.nth_exn tids i) ~jmps:[ j ] ()
+              else Blk.create ~tid ~jmps:[ j ] ()
             in
-            if i + 1 < n then
-              Term.append jmp_t blk_i
-                (Jmp.create (Goto (Direct (Base.List.nth_exn tids (i + 1)))))
-            else blk_i)
+            match next with
+            | Some next_tid ->
+              Term.append jmp_t blk_i (Jmp.create (Goto (Direct next_tid)))
+            | None -> blk_i)
       in
-      pieces @ List.rev !actions
+      pieces @ actions
 
 let split_sub (sub : sub term) : sub term =
   Term.concat_map blk_t sub ~f:(fun blk ->

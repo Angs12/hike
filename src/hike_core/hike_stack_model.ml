@@ -313,9 +313,11 @@ let arg_slot ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Slot i)
    the slots. *)
 let call_arg ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Argument i)
 
+let kind (v : var) = Hike_synth.classify Hike_synth.empty v
+
 (* The call-argument temps survive DCE: they are the call's arguments. *)
 let is_call_arg v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Argument _)) -> true
   | _ -> false
 
@@ -323,12 +325,12 @@ let is_call_arg v =
    fp pass ([intrinsic:x<N>:<width>]); an FP call site's argument.  The
    base name carries no SSA version. *)
 let is_fp_operand_temp v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Fp_lane (Hike_synth.Input, _)) -> true
   | _ -> false
 
 let is_arg_slot v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Slot _)) -> true
   | _ -> false
 
@@ -337,7 +339,7 @@ let is_arg_slot v =
 let window_mem ~addr_bits = Hike_synth.bytes ~addr_bits Hike_synth.Window
 
 let is_window_mem v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Bytes Hike_synth.Window) -> true
   | _ -> false
 
@@ -346,7 +348,7 @@ let hike_window_var ~word =
   Hike_synth.base ~addr_bits:(word_bits word) Hike_synth.Window
 
 let is_window_var v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage Hike_synth.Window) -> true
   | _ -> false
 
@@ -387,7 +389,7 @@ let region_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Stack id)
 let region_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Stack id)
 
 let is_region_ptr v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Stack _)) -> true
   | _ -> false
 
@@ -397,7 +399,7 @@ let vla_ptr ~addr_bits t =
   Hike_synth.base ~addr_bits (Hike_synth.Allocation (Tid.hash t))
 
 let is_vla_ptr v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Allocation _)) -> true
   | _ -> false
 
@@ -406,7 +408,7 @@ let is_vla_ptr v =
 let sec_comp_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Global id)
 
 let is_sec_comp_ptr v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Global _)) -> true
   | _ -> false
 
@@ -419,12 +421,12 @@ let is_storage_base (v : var) : bool =
    (the caller reads the sret buffer through its own pointer) — the
    sweep never kills one. *)
 let is_global_mem (v : var) : bool =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
   | _ -> Core.String.equal (Var.name (Var.base v)) "mem"
 
 let region_ptr_id_of v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> Some id
   | _ -> None
 
@@ -501,7 +503,7 @@ let blk_reads ~(abi : Abi.t) (blk : blk term) : Var.Set.t =
          | `Jmp j -> Core.Set.union reads (jmp_reads ~abi j))
 
 let is_region_mem v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
   | _ -> false
 
@@ -523,9 +525,15 @@ let sec_comp_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Global 
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
 let is_sec_comp_mem v =
-  match Hike_synth.classify Hike_synth.empty v with
+  match kind v with
   | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
   | _ -> false
+
+(* A model-owned storage var: a fissioned memory family or a storage
+   base. *)
+let is_model_storage v =
+  is_region_mem v || is_window_mem v || is_sec_comp_mem v
+  || is_storage_base v
 
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
