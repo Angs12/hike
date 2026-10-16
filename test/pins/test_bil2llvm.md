@@ -29,7 +29,6 @@ one failing fixture never hides the rest of the module.
 | EMIT-25 | `create_branches`'s `Direct` arm routes an `@interrupt:` target to `create_interrupt` (a `div`-trap `goto @interrupt:#0` has no block to look up). | Drop the `@interrupt:` prefix guard so `Direct tid` always calls `get_bb`. | EMIT-25 FAILs: `emit_ir` raises `Failure "bb_find_exn: @interrupt:#0"` (measured). |
 | EMIT-28 | An indirect tail with no enumerated destinations is a loud failure (destination-less UB is never emitted behind a warning). | In `create_indirect_tail`, restore the warn-and-emit `indirectbr` arm. | EMIT-28 FAILs: `emit_ir` does not raise `"no enumerated destinations"`. |
 | EMIT-33 | A 3+-jmp series the splitter cannot compile (not all direct gotos) reaches the emitter, which fails loudly rather than render silently. | In `create_branches`, drop the `_ ->` failwith (render nothing). | EMIT-33 FAILs: `emit_ir` does not raise `"unsplit multi-jmp"`. |
-| EMIT-34 | a `Vla(T)`-origin access GEPs the `%vla` created at T (`create_dynamic_alloc` records its pair); each VLA's access hits its own alloca | drop the `Vla` arm from `mem_access` | EMIT-34 red: no `getelementptr i8, ptr %vla, i64 4` / `%vla2, i64 8` |
 | EMIT-41 | `set_owner_initializer`'s `relocated_symbol` names the symbol through `Bil2llvm_env.sanitize_name`, so a slot and the call site that names the same entity agree. | Drop the `sanitize_name` application in `relocated_symbol`. | EMIT-41 FAILs: the module carries `@foo.bar` instead of `@foobar` (measured). |
 | EMIT-42 | `create_branches`'s lone-jmp `Goto (Indirect …)` arm (`emit_indirect`) fails loudly on no enumerated destinations — the sibling site to EMIT-28's indirect tail. | Replace `emit_indirect`'s `failwith` with a no-op. | EMIT-42 FAILs: `emit_ir` does not raise `"no enumerated destinations"` (measured). |
 | EMIT-43 | `set_owner_initializer`'s `word64` consults the loader's RELATIVE facts first: a site the `spec_relative` table names renders the fact's runtime value remapped through the sections (the same `remap_native` map every pointer load takes), never the image's raw bits. | Empty the `relative` map in `bil2llvm_section.ml` (`let _relative = Core.Map.empty (module Core.Int64)`), leaving the match arm unreachable. | EMIT-43 FAILs: the slot carries `i64 66` (the raw bits) and no `ptrtoint (ptr getelementptr inbounds (i8, ptr @text, i64 4) to i64)` (measured). |
@@ -44,7 +43,6 @@ one failing fixture never hides the rest of the module.
 | EMIT-55 | Legacy lock/unlock markers require the paired producer and refuse. | Accept legacy markers. | The refusal assertion fails. |
 | EMIT-56 | NEG retries in a private helper, preserving the caller CFG at a phi join. | Inline the retry blocks into the caller. | The helper-call assertion fails. |
 | EMIT-57 | Unknown operation/width contracts refuse before analysis or emission. | Treat the name as an ordinary external call. | The refusal assertion fails. |
-| EMIT-59 | An allocation whose producer is not an SP def emits its alloca at the producer: `%vla_size` adds the floor's 15 bytes, `%vla_base` is `%vla + 15`, and the following `SP := t & −16` masks the base. | In `create_dynamic_alloc`, ignore `floor`. | EMIT-59: no `add` in the size, no `%vla_base`. |
 
 **Fixture note (2026-09-29).** `emit_ir` now runs
 `Hike.Cfg_complete.materialize_fallthroughs` before the split, as the
@@ -54,4 +52,6 @@ the SAME block (EMIT-01, EMIT-03, EMIT-09) now target distinct blocks —
 that shape is folded to one unconditional edge by the completion, which
 is the pin's point, not its subject.
 | EMIT-46 | the entry's declaration carries the ABI entry symbol, not the decoded tid name. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
+| EMIT-60 | a runtime-stack sub lowers the cursor under each SP decrement (red zone below), leaves a pure increment alone, and restores the entry cursor before the return. | drop `lower_cursor`, or `restore_cursor` | EMIT-60 red: the `hike_rstack_set` count or operands differ |
+| EMIT-61 | a bounded sub emits no cursor helper, and an alloca frame past a page carries `probe-stack`. | drop `frame_probes`, or emit the helpers for every sub | EMIT-61 red: the attribute or helper text differs |
 | EMIT-58 | a pointer masked by an integer stays a pointer (`ptrmask`); a pointer difference is an integer. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |

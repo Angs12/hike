@@ -4,19 +4,23 @@
 # not from any rendering.
 # Usage: check_allocas.sh <out_dir> (holds out_<name>.ll; exit 0 iff all pass).
 #   (a) every region/window reference implies its storage exists
-#       (a stack_rN alloca; the window parameter for window mems).
+#       (a stack_rN alloca, or a runtime-stack stack_r0 GEP; the window
+#       parameter for window mems).
 #   (b) a region GEP's index must be an integer (never a ptrtoint of an
 #       address value — the index is a model offset).
 #   (c) no @stack global reference.
 #   (d) residue discipline: no legacy %frame alloca (the residue is
-#       stack_r0); at most one residue alloca per define; references
-#       imply their alloca.
+#       stack_r0); at most one residue storage per define; references
+#       imply their storage.
 #   (e) no entry-edge poison phis.
 #   (f) every section component/residue global is internal.
 #   (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
 #       stack_rN alloca — GEP-derived pointers never become integers.
 #   (h) window mems imply the window parameter: a define referencing
 #       %hike_window_mem carries %hike_window.
+#   (i) runtime-stack discipline: the cursor helpers are defined exactly
+#       in modules that call hike_rstack_enter, and every return of a
+#       define that enters restores the entry cursor.
 #   INFO (non-failing): per-module inttoptr-derived load count.
 
 set -u
@@ -43,13 +47,13 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # the state-machine rules (b/d/INFO) keep their own passes.
   eval "$(awk '
     { line = $0
-      if (match(line, /%stack_r[0-9]+ = alloca/)) {
+      if (match(line, /%stack_r[0-9]+ = (alloca|getelementptr)/)) {
         id = substr(line, RSTART, RLENGTH)
-        sub(/ = alloca/, "", id)
+        sub(/ = (alloca|getelementptr)/, "", id)
         defined_sr[id] = 1
       }
       if (line ~ /%stack_r[0-9]/) n_sr_ref++
-      if (line ~ /%stack_r[0-9]+ = alloca/) n_sr_alloca++
+      if (line ~ /%stack_r[0-9]+ = (alloca|getelementptr)/) n_sr_alloca++
       if (line ~ /@stack/) n_stack++
       if (line ~ /phi .*\[ poison, %entry/) n_poison++
       if (line ~ /^@sec_comp_[0-9]+ =/) n_comp++
@@ -130,7 +134,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
   n_frame="$(grep -c '%frame = alloca' "$ll")"
   n_multi="$(awk '
     /^define / { if (in_d && n_r0 > 1) bad++; in_d = 1; n_r0 = 0 }
-    /%stack_r0 = alloca/ { n_r0++ }
+    /%stack_r0 = (alloca|getelementptr)/ { n_r0++ }
     END { if (in_d && n_r0 > 1) bad++; print bad + 0 }
   ' "$ll")"
   if [ "$n_frame" -ne 0 ] || [ "$n_multi" -ne 0 ]; then
@@ -138,6 +142,27 @@ for ll in "$OUT_DIR"/out_*.ll; do
     FAIL=$((FAIL + 1))
   else
     echo "PASS $name: (d) residue discipline ok (no %frame; at most one stack_r0 per define)"
+    PASS=$((PASS + 1))
+  fi
+
+  # (i) runtime-stack discipline.
+  n_enter="$(grep -c 'call ptr @hike_rstack_enter' "$ll")"
+  n_def="$(grep -c '^define .*@hike_rstack_enter' "$ll")"
+  n_unrestored="$(awk '
+    /^define / { entered = 0; last_set = "" }
+    /call ptr @hike_rstack_enter/ { entered = 1 }
+    /call void @hike_rstack_set\(ptr %rstack_top\)/ { last_set = "top"; next }
+    /call void @hike_rstack_set/ { last_set = "other"; next }
+    /^  ret / { if (entered && last_set != "top") bad++; last_set = "" }
+    END { print bad + 0 }
+  ' "$ll")"
+  if { [ "$n_enter" -gt 0 ] && [ "$n_def" -ne 1 ]; } \
+     || { [ "$n_enter" -eq 0 ] && [ "$n_def" -ne 0 ]; } \
+     || [ "$n_unrestored" -ne 0 ]; then
+    echo "FAIL $name: (i) runtime stack: $n_enter enter call(s), $n_def helper definition(s), $n_unrestored return(s) without the cursor restore"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS $name: (i) runtime stack ($n_enter enter call(s))"
     PASS=$((PASS + 1))
   fi
 

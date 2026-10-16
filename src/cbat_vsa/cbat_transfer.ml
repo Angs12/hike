@@ -15,11 +15,6 @@ module Word_ops = Cbat_word
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
-(* The SP var the VLA rebase anchors on; set at the solve entry next
-   to the address bits. *)
-let sp_var_ref : var option ref = ref None
-let set_sp_var (v : var) : unit = sp_var_ref := Some v
-
 let mem_idx addr_sz addressable_sz : Mem.idx =
   { Mem.addr_width =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
@@ -555,143 +550,6 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
-(* The offset extrema (signed) of a stack-symbolic value's hull. *)
-let offset_bounds (ws : wordset) : (int64 * int64) option =
-  match WordSet.stack_offsets ws with
-  | Some offs -> (
-      match WordSet.Clp.Pieces.min_elem offs, WordSet.Clp.Pieces.max_elem offs with
-      | Some lo, Some hi -> Cbat_word.int64_pair lo hi
-      | _ -> None)
-  | None -> None
-
-(* The signed extrema of a VLA value's frame-relative offsets. *)
-let vla_bounds (ws : wordset) : (int64 * int64) option =
-  Option.bind (WordSet.vla_offsets ws) ~f:(fun offs ->
-      match WordSet.Clp.Pieces.min_elem_signed offs, WordSet.Clp.Pieces.max_elem_signed offs with
-      | Some lo, Some hi -> Cbat_word.int64_pair lo hi
-      | _ -> None)
-
-(* The VLA event: a value that descends from SP by a non-singleton
-   amount, strictly below it on the stack line.
-   The direct [SP - x] form and the temporary/copy chain are the same
-   event: the amount reads from the denotations ([before - after]), so
-   no shape is privileged.  A singleton move is a static frame
-   adjust. *)
-let vla_event ~(before : wordset) ~(after : wordset) :
-    Hike_origin.vla_extent option =
-  let amount = WordSet.sub before after in
-  let non_singleton =
-    WordSet.is_top amount || WordSet.is_infinite amount
-    || (match WordSet.min_elem amount, WordSet.max_elem amount with
-        | Some a, Some b -> not (Cbat_word.equal a b)
-        | _ -> true)
-  in
-  let after_unbounded = WordSet.is_top after || WordSet.is_infinite after in
-  (* Two values in one VLA frame compare in its own offsets: the frame's
-     stack position may be unknown. *)
-  let bounds =
-    match WordSet.origin before, WordSet.origin after with
-    | Some (WordSet.Origin.Vla a), Some (WordSet.Origin.Vla b) when Tid.equal a b ->
-      vla_bounds
-    | _ -> offset_bounds
-  in
-  let descends =
-    match bounds before with
-    | None -> false
-    | Some (_, bhi) ->
-      if after_unbounded then true
-      else (
-        match bounds after with
-        | Some (_, phi) -> Stdlib.Int64.compare phi bhi < 0
-        | None -> false)
-  in
-  if not (non_singleton && descends) then None
-  else
-    let base_lo, base_hi =
-      if after_unbounded then (None, None)
-      else
-        match offset_bounds after with
-        | Some (lo, hi) -> (Some lo, Some hi)
-        | None -> (None, None)
-    in
-    let off_hi =
-      if WordSet.is_top amount || WordSet.is_infinite amount then None
-      else
-        match WordSet.max_elem amount with
-        | Some w -> (
-            match Cbat_word.to_int64 w with
-            | Ok v when Stdlib.Int64.compare v 0L > 0 -> Some v
-            | _ -> None)
-        | None -> None
-    in
-    Some { Hike_origin.off_lo = 0L; off_hi; base_lo; base_hi }
-
-(* A frame-relative value's offset extrema, when bounded. *)
-let frame_bounds (ws : wordset) : (int64 * int64) option =
-  if WordSet.is_top ws || WordSet.is_infinite ws then None else vla_bounds ws
-
-(* The seed: a def whose value descends from SP by a non-singleton
-   amount opens the frame named by the def's tid, whatever its lhs; the
-   value becomes the allocation base (frame-relative zero).  A value in
-   a frame SP does not hold is that frame's derivation, unless it
-   descends without bound below it: that is an allocation nested below
-   the pending frame.  Anything else keeps the plain-arithmetic result —
-   the sound identity.  A candidate SP never enters is no allocation:
-   consumers outside the solve read its frame as the stack top. *)
-let vla_seed (df : def term) (env : AI.t) (p : wordset) : wordset =
-  let tid = Term.tid df in
-  (* Only an SP def or a stack-line address can descend from SP: an
-     unknown value elsewhere names no position. *)
-  let on_line =
-    match !sp_var_ref, WordSet.origin p with
-    | Some sp, _ when Var.equal (Var.base (Def.lhs df)) (Var.base sp) -> true
-    | _, Some o -> WordSet.Origin.names_stack_line o
-    | _, None -> false
-  in
-  match !sp_var_ref with
-  | Some sp when on_line -> (
-      match denote_imm_exp (Bil.Var sp) env with
-      | Error _ -> p
-      | Ok before -> (
-          match WordSet.origin p with
-          | Some (WordSet.Origin.Vla parent as o)
-            when not (Option.equal WordSet.Origin.equal (WordSet.origin before) (Some o)) ->
-            if Option.is_some (frame_bounds p) then p
-            else (
-              WordSet.Origin.Vla_seed.record ~parent tid
-                { Hike_origin.off_lo = 0L; off_hi = None; base_lo = None; base_hi = None };
-              WordSet.vla_frame tid)
-          | _ -> (
-              match vla_event ~before ~after:p with
-              | None -> p
-              | Some ext ->
-                WordSet.Origin.Vla_seed.record tid ext;
-                WordSet.vla_frame tid)))
-  | _ -> p
-
-(* SP entering a frame confirms that frame as an allocation; the
-   frame's floor is the lowest offset SP enters at (round-down slack or
-   a bounded descent below the base).  An SP already in the frame
-   (pushes, a static area below the allocation) moves below it, not
-   within it. *)
-let vla_confirm (lhs : var) (env : AI.t) (p : wordset) : unit =
-  match !sp_var_ref, WordSet.origin p with
-  | Some sp, Some (WordSet.Origin.Vla t as o)
-    when Var.equal (Var.base lhs) (Var.base sp) -> (
-      let entering =
-        match denote_imm_exp (Bil.Var sp) env with
-        | Ok before ->
-          not (Option.equal WordSet.Origin.equal (WordSet.origin before) (Some o))
-        | Error _ -> true
-      in
-      match frame_bounds p with
-      | Some (lo, _) when entering ->
-        WordSet.Origin.Vla_seed.confirm t;
-        if Stdlib.Int64.compare lo 0L < 0 then
-          WordSet.Origin.Vla_seed.widen_off_lo t lo
-      | _ -> ())
-  | _ -> ()
-
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
    words and memory ops key cells by their segment offsets.  A def the
    denotation cannot type adds nothing: its readers take the top
@@ -713,11 +571,9 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
             WordSet.cast Bil.UNSIGNED n p
           | _ -> p
         in
-        let p = vla_seed df env p in
 #ifdef VSA_DEBUG
         debug_store_width v e p;
 #endif
-        vla_confirm v env p;
         AI.add_word env ~key:v ~data:p
       | `Mem m -> AI.add_memory env ~key:v ~data:m))
   with

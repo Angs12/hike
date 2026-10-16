@@ -393,10 +393,7 @@ let tests : unit Alcotest.test list =
             check "WS-40 (stack-family identity)"
               (Ws.in_stack_segment v
                && Option.is_some (Ws.stack_offsets v)))
-          [base; Ws.stack_word_i64 8L];
-        let tid = Tid.create () in
-        check "WS-40 (VLA identity)"
-          (Ws.in_stack_segment (Ws.vla_frame tid)));
+          [base; Ws.stack_word_i64 8L]);
 
     (* WS-39: the interior exclusion widens as two pieces — the x != k
        complement keeps its hole under a growing widen instead of being
@@ -493,31 +490,28 @@ let tests : unit Alcotest.test list =
         check "WS-47.leaf"
           (match Ws.stack_leaves u with [ l ] -> Ws.equal l s | _ -> false);
         check "WS-47.null" (Ws.elem (w64 0) u);
-        let tid = Tid.create () in
-        let both = Ws.join s (Ws.vla_frame tid) in
-        check "WS-47.vla" (List.length (Ws.stack_leaves both) = 2);
         check "WS-47.rip"
           (Ws.equal
              (Ws.join s (Ws.module_address 0x404000L))
              (Ws.join (Ws.module_address 0x404000L) s));
-        let frame = Ws.vla_frame tid in
-        let another = Ws.vla_frame (Tid.create ()) in
-        let repeated = Ws.set_origin (Ws.Origin.Vla tid) (Ws.stack_word_i64 8L) in
-        let left = Ws.join (Ws.join both another) repeated in
-        let right = Ws.join repeated (Ws.join another (Ws.join frame s)) in
+        let rodata o = Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) o in
+        let data o = Ws.set_origin (Ws.Origin.Rip Hike_section.Data) o in
+        let a = rodata (Ws.stack_word_i64 0L) and b = data (Ws.stack_word_i64 0L) in
+        let repeated = rodata (Ws.stack_word_i64 8L) in
+        let left = Ws.join (Ws.join s a) (Ws.join b repeated) in
+        let right = Ws.join repeated (Ws.join b (Ws.join a s)) in
         check "WS-47.origin-pool-order"
-          (Ws.equal left right && List.length (Ws.stack_leaves left) = 3
-           && Ws.precedes frame left && Ws.precedes repeated left);
-        let empty_frame = Ws.diff frame frame in
-        let empty_another = Ws.diff another another in
-        let empty = Ws.join empty_frame empty_another in
+          (Ws.equal left right && Ws.precedes a left && Ws.precedes repeated left
+           && Ws.precedes b left);
+        let empty_a = Ws.diff a a and empty_b = Ws.diff b b in
+        let empty = Ws.join empty_a empty_b in
         let expected_origin =
-          match Ws.origin frame, Ws.origin another with
-          | Some a, Some b -> Some (if Hike_origin.compare a b < 0 then a else b)
+          match Ws.origin a, Ws.origin b with
+          | Some x, Some y -> Some (if Hike_origin.compare x y < 0 then x else y)
           | _ -> None in
         check "WS-47.symbolic-bottom-order"
           (Ws.is_bottom empty && Ws.origin empty = expected_origin
-           && Ws.equal empty (Ws.join empty_another empty_frame)));
+           && Ws.equal empty (Ws.join empty_b empty_a)));
 
     pin "WS-48" "arithmetic on a mixed value distributes over its leaves" (fun () ->
         let u = Ws.join (Ws.stack_word_i64 (-16L)) (Ws.singleton (w64 0)) in
@@ -540,8 +534,10 @@ let tests : unit Alcotest.test list =
         let w = Ws.widen_join (u (-16L)) (Ws.join (u (-16L)) (u (-8L))) in
         check "WS-50.leaf" (not (List.is_empty (Ws.stack_leaves w)));
         check "WS-50.null" (Ws.elem (w64 0) w);
-        let old = Ws.join (u (-16L)) (Ws.vla_frame (Tid.create ())) in
-        let next = Ws.join (u (-16L)) (Ws.vla_frame (Tid.create ())) in
+        let rodata = Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 0L) in
+        let data = Ws.set_origin (Ws.Origin.Rip Hike_section.Data) (Ws.stack_word_i64 0L) in
+        let old = Ws.join (u (-16L)) rodata in
+        let next = Ws.join (u (-16L)) data in
         check "WS-50.one-sided-origins"
           (Ws.equal (Ws.widen_join old next) (Ws.join old next)));
 

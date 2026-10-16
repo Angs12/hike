@@ -89,7 +89,6 @@ let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = entry_block_of sub in
   let entry_state = Option.value ~default:AI.top entry in
-  Cbat_transfer.set_sp_var abi.Hike_abi.sp;
   (* The default entry seeds the SP with the SYMBOLIC SEGMENT BASE:
      every SP-derived address denotes [StackOff]; explicit fixture
      entries keep their own words. *)
@@ -635,7 +634,6 @@ type refine_ctx = Cbat_runctx.refine_ctx
 
 (* Re-exports of the sibling transfer/forward/backward modules. *)
 let set_addr_bits = Cbat_transfer.set_addr_bits
-let set_sp_var = Cbat_transfer.set_sp_var
 
 type section_image = Cbat_transfer.section_image = {
   img_lo : int64;
@@ -649,7 +647,6 @@ let with_images = Cbat_transfer.with_images
 let denote_def = Cbat_transfer.denote_def
 let denote_defs = Cbat_transfer.denote_defs
 let denote_imm_exp = Cbat_transfer.denote_imm_exp
-let vla_event = Cbat_transfer.vla_event
 let reachable_jumps = Cbat_transfer.reachable_jumps
 let fold_block_states = Cbat_transfer.fold_block_states
 let last_defs = Cbat_transfer.last_defs

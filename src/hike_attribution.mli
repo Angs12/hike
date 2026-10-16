@@ -5,7 +5,7 @@ type result = {
   facts : Hike_kb.facts;
 }
 
-(** Stamps dynamic allocations and section tags, promotes eligible storage,
+(** Stamps section tags, promotes eligible storage,
     and returns the emitter spec and DCE roots with the rewritten program. *)
 val run :
   facts:Hike_kb.facts ->

@@ -151,9 +151,7 @@ let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
            k)
   | _ -> assert false
 
-(* The full-span claim shapes.  With no VLA live, the tops claim the
-   sub-local line only — a VLA's bytes enter a claim solely through
-   its recorded extent. *)
+(* The full-span claim shapes: the tops claim the sub-local line only. *)
 let plain (t, ps) =
   match t, ps with
   | None, [ p1; p2 ] ->
@@ -161,10 +159,10 @@ let plain (t, ps) =
       && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
   | _ -> false
 
-let clamped (t, ps) =
+let to_floor (t, ps) =
   match t, ps with
   | Some Tag.Unbounded, [ p1 ] ->
-      portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
+      portion_eq p1 S.Stack (Int64.add entry Stdlib.Int64.min_int) (pos (-1L))
   | _ -> false
 
 (* S2's shape: a heap-pointing GPR store beside the [RSP-16] cell
@@ -194,6 +192,43 @@ let heap_store_sub name m_name (base : var) : sub term =
            `r64 ))
   in
   fst (sub_of name [ [ def_heap; def_rsp; def_heap_store ], [ (1, mk_goto) ]; [], [] ])
+
+(* Storage selection: the residue's below-entry extent is its proven
+   depth when it fits an alloca, and the runtime stack otherwise. The
+   variable store reaches the return cell, so it lives in the residue. *)
+let residue_layout name (mask : int64) =
+  let m = memv (name ^ "_m") in
+  let rsp = v64 "RSP" in
+  let u = v64 (name ^ "_u") and n = v64 (name ^ "_n") in
+  let def_n =
+    Def.create n
+      (Bil.BinOp
+         (Bil.AND, Bil.Var u, Bil.Int (Cbat_word.to_word (i2w mask))))
+  in
+  let def_st =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp
+             ( Bil.MINUS,
+               Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var n),
+               Bil.Int (Cbat_word.to_word (w64 4)) ),
+           Bil.Int (Cbat_word.to_word (w64 7)),
+           LittleEndian,
+           `r64 ))
+  in
+  let sub = straight_sub name [ def_n; def_st ] in
+  let ctx = fixture_ctx [ sub ] in
+  let tree =
+    Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
+  in
+  A.layout_of_tree ~word:8 ~entry:Hike.Stack_model.segment_base
+    ~abi:Hike.Abi.x86_64_sysv ~sub tree
+
+let residue_depth (l : Sm.sub_layout) =
+  Base.List.find_map l.Sm.regions ~f:(fun { Sm.r_id = id; r_lo; _ } ->
+      if Int.equal id 0 then Some (Int64.sub Hike.Stack_model.segment_base r_lo)
+      else None)
 
 let tests : unit Alcotest.test list =
   [
@@ -230,12 +265,13 @@ let tests : unit Alcotest.test list =
            | _ -> false));
 
     pin "SEC-09"
-      "AT1-S02: a symbolic TOP clamps to [entry-stack_max, entry)"
+      "AT1-S02: a symbolic TOP claims [floor, entry)"
       (fun () ->
         check "SEC-09"
           (match rd (Ws.stack_word (Clp.top 64)) with
            | Some Tag.Unbounded, [ p1 ] ->
-               portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
+               portion_eq p1 S.Stack
+                 (Int64.add entry Stdlib.Int64.min_int) (pos (-1L))
            | _ -> false));
 
     pin "SEC-10"
@@ -244,7 +280,7 @@ let tests : unit Alcotest.test list =
         check "SEC-10"
           (let _, ps = rd_spans (Ws.top 64) in
            Base.List.for_all ps ~f:(fun p ->
-               match p.A.pt_sec with S.Stack | S.Args | S.Vla -> true | _ -> false)));
+               match p.A.pt_sec with S.Stack | S.Args -> true | _ -> false)));
 
 
 
@@ -726,10 +762,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "SEC-52" (plain (A.top_claim ~cause:A.Foreign ~entry ~word:8)));
 
-    pin "SEC-53" "AT1-TC3: the unbounded-stack claim clamps below the entry"
+    pin "SEC-53" "AT1-TC3: the unbounded-stack claim reaches the floor below the entry"
       (fun () ->
         check "SEC-53"
-          (clamped (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8)));
+          (to_floor (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8)));
 
 
 
@@ -934,7 +970,7 @@ let tests : unit Alcotest.test list =
 
 
     pin "SEC-69"
-      "AT4-VLA: the extent claims bind nowhere — the static frame carves beside a live VLA"
+      "a runtime-sized allocation is ordinary stack arithmetic: its stores claim the stack down to the floor, so the sub selects the runtime stack and the frame cells share the residue"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let rax = v64 "at_vla_rax" in
@@ -1006,25 +1042,29 @@ let tests : unit Alcotest.test list =
           | Some (Some p) -> Some p
           | _ -> None
         in
+        let tree =
+          Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
+        in
+        let layout =
+          A.layout_of_tree ~word:8 ~entry ~abi:Hike.Abi.x86_64_sysv ~sub tree
+        in
+        ignore def_sub;
         check "SEC-69"
           ((match projection def_band with
             | Some p ->
-                (* The frame fact rides the projection's origin, named by
-                   the decrement def's own tid; a VLA claim binds nowhere
-                   in the tree. *)
-                Option.equal Hike_origin.equal p.A.origin
-                  (Some (Hike_origin.Vla (Term.tid def_sub)))
-                && p.A.portions = []
+                Option.equal Hike_origin.equal p.A.origin (Some Hike_origin.Stack)
+                && (match p.A.portions with
+                    | [ q ] ->
+                        Int64.equal q.A.pt_lo (Int64.add entry Stdlib.Int64.min_int)
+                    | _ -> false)
             | None -> false)
+           && layout.Sm.runtime_residue
            && (match storage_at ctx sub Sm.Stack (pos (-8L)) (pos (-1L)) with
-               | Some (A.Stack_region _) -> true
-               | _ -> false)
-           && (match storage_at ctx sub Sm.Stack (pos (-12L)) (pos (-9L)) with
-               | Some (A.Stack_region _) -> true
+               | Some A.Stack_residue -> true
                | _ -> false)));
 
     pin "SEC-70"
-      "AT4-VLA: a frame claim is not cut around the extent — it binds on its own line"
+      "a frame store beside a runtime-sized allocation keeps its one exact portion"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let rax = v64 "at_vla_rax" in
@@ -1083,6 +1123,52 @@ let tests : unit Alcotest.test list =
                    portion_eq q S.Stack (pos (-20L)) (pos (-13L)))
                && Base.List.length p.A.portions = 1
            | _ -> false));
+    pin "SEC-72"
+      "storage selection: a proven depth above 64 KiB sizes the residue exactly, with no runtime stack"
+      (fun () ->
+        let l = residue_layout "sel_deep" 0x3FFFFL in
+        check "SEC-72"
+          ((not l.Sm.runtime_residue)
+           && (match residue_depth l with
+               | Some d -> Int64.compare d 0x40003L >= 0
+                           && Int64.compare d 0x40043L < 0
+               | None -> false)));
+
+    pin "SEC-73"
+      "storage selection: a depth beyond the alloca limit selects the runtime stack"
+      (fun () ->
+        check "SEC-73"
+          (residue_layout "sel_huge" 0xFFFFFFFL).Sm.runtime_residue);
+
+    pin "SEC-74"
+      "storage selection: an unbounded stack extent selects the runtime stack"
+      (fun () ->
+        let m = memv "sel_top_m" in
+        let rsp = v64 "RSP" and u = v64 "sel_top_u" in
+        let def_st =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var u),
+                 Bil.Int (Cbat_word.to_word (w64 7)),
+                 LittleEndian,
+                 `r64 ))
+        in
+        let sub = straight_sub "sel_top" [ def_st ] in
+        let ctx = fixture_ctx [ sub ] in
+        let tree =
+          Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
+        in
+        let l =
+          A.layout_of_tree ~word:8 ~entry:Hike.Stack_model.segment_base
+            ~abi:Hike.Abi.x86_64_sysv ~sub tree
+        in
+        check "SEC-74" l.Sm.runtime_residue);
+
+    pin "SEC-75"
+      "storage selection: a bounded frame keeps allocas"
+      (fun () ->
+        check "SEC-75" (not (residue_layout "sel_small" 0xFFL).Sm.runtime_residue));
 ]
 
 let () = run "sections" tests

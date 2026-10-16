@@ -30,7 +30,6 @@ let tests = [
          Synth.bytes ~addr_bits:64 Synth.Window;
          Synth.base ~addr_bits:64 (Synth.Stack 4);
          Synth.bytes ~addr_bits:64 (Synth.Stack 4);
-         Synth.base ~addr_bits:64 (Synth.Allocation 123);
          Synth.base ~addr_bits:64 (Synth.Global 7);
          Synth.bytes ~addr_bits:64 (Synth.Global 7);
          Synth.environment env;
@@ -53,7 +52,7 @@ let tests = [
        check "the address and storage families are bases"
          (Synth.is_base_var table (Synth.module_addr ~addr_bits:64 0x4010L)
           && Synth.is_base_var table (Synth.base ~addr_bits:64 (Synth.Slot 2))
-          && Synth.is_base_var table (Synth.base ~addr_bits:64 (Synth.Allocation 5)));
+          && Synth.is_base_var table (Synth.base ~addr_bits:64 (Synth.Argument 3)));
        check "the bytes families are memory"
          (Synth.is_memory_var table (Synth.bytes ~addr_bits:64 (Synth.Global 7))
           && not (Synth.is_memory_var table (Synth.base ~addr_bits:64 (Synth.Global 7))));
@@ -243,7 +242,7 @@ let tests = [
            (Synth.bytes ~addr_bits:64 (Synth.Stack 3), 0x1000L);
            (Synth.bytes ~addr_bits:64 Synth.Window, 0x2000L);
            (Synth.base ~addr_bits:64 (Synth.Slot 1), 0x3000L);
-           (Synth.base ~addr_bits:64 (Synth.Allocation 4), 0x5000L) ]
+           (Synth.base ~addr_bits:64 (Synth.Argument 4), 0x5000L) ]
        in
        let origin v = Base.List.Assoc.find origins v ~equal:Var.equal in
        Base.List.iter origins ~f:(fun (mem, lo) ->

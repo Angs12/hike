@@ -25,8 +25,8 @@ type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
 (* The byte hull plus the address stride: step 1 claims every byte
    of the hull; step > 1 claims only the grid lo + i*step.  The origin
-   namespaces the key. Stack/Vla addresses are translated to
-   the shared Stack line before key construction; Rip and Abs stay separate. *)
+   namespaces the key. Stack addresses key on the Stack line; Rip and Abs
+   stay separate. *)
 type t = {origin : Hike_origin.t; lo : point; hi : point; step : int}
 [@@deriving bin_io, sexp]
 let compare_point (p1 : point) (p2 : point) : int =

@@ -18,10 +18,6 @@ let plus_addr sp (off : int64) : exp =
 (* The fixture stamps the producer's facts onto the terms, then runs the
    promotion as a BIR rewrite — what the pipeline's vsa pass does. *)
 let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
-  let sub =
-    Ds.stamp_dyn_allocs
-      ~allocs:(Hike.Sections.dynamic_allocs_of ~facts:top_facts sub) sub
-  in
   Hike.Promote.promote_sub ~addr_bits:64 facts sub
 
 (* Family 8: stack-arg promotion emission.  A promoted callee (two proven
@@ -392,24 +388,6 @@ let rw_window () : sub term =
   rewrite_one (straight_sub "rw_window" defs)
 
 
-(* The VLA fixture: a runtime-sized decrement (a guarded size join)
-   seeds the allocation; the post-decrement SP copy carries the Vla
-   origin and takes the allocation's base var. *)
-let rw_vla () : sub term =
-  let rsp = v64 "RSP" in
-  let rax = v64 "RAX" in
-  let c = v1 "rw_c" in
-  let k16 = Cbat_word.to_word (w64 16) |> fun w -> Bil.Int w in
-  let k32 = Cbat_word.to_word (w64 32) |> fun w -> Bil.Int w in
-  let defs =
-    [ Def.create rax
-        (Bil.Ite (Bil.Var c, k16, k32));
-      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax));
-      Def.create (v64 "rw_t") (Bil.Var rsp) ]
-  in
-  rewrite_one (straight_sub "rw_vla" defs)
-
-
 (* The lifted va_list construction: the incoming GP parameter registers
    stored into the frame (the reg_save_area) beside a pointer at/above
    the entry args base (the overflow_arg_area).  [overflow:false] drops
@@ -473,12 +451,6 @@ let rw_sec () : sub term =
   in
   let facts, subs, _ = fixture_facts [ sub0 ] in
   let prog = Program.create ~subs () in
-  let prog =
-    Term.map sub_t prog ~f:(fun sub ->
-        Hike.Def_slots.stamp_dyn_allocs
-          ~allocs:(Hike.Sections.dynamic_allocs_of ~facts sub)
-          sub)
-  in
   let ctx =
     Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
       ~spans prog
@@ -600,8 +572,7 @@ let tests : unit Alcotest.test list =
         let keep_sub0 = straight_sub "t10_keep" [ keep; keep_st ] in
         let keep_ctx = fixture_ctx [ keep_sub0 ] in
         let keep_sub = Hike.Sections.stamp_tags keep_ctx keep_sub0 in
-        let keep' = Ds.stamp_dyn_allocs ~allocs:Tid.Map.empty keep_sub in
-        let keep_def = Base.Option.value_exn (t10_find_def keep' (Term.tid keep)) in
+        let keep_def = Base.Option.value_exn (t10_find_def keep_sub (Term.tid keep)) in
         check "PR-12" (Ds.sec_tag keep_def <> None));
 
     (* PR-13: the call-arg def is bound right after the storing def. *)
@@ -867,24 +838,6 @@ let tests : unit Alcotest.test list =
           (match w with
            | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) -> Cu.is_window_var b
            | Some (Bil.Var b) -> Cu.is_window_var b
-           | _ -> false));
-
-    (* PR-29: a VLA address def's value is the allocation's base var
-       (the offsets are frame-relative — byte zero is the base). *)
-    pin "PR-29" "a VLA address def's value is its allocation base" (fun () ->
-        let sub' = rw_vla () in
-        ignore (install_fixture_envs [ sub' ]);
-        let t =
-          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
-          |> Seq.find ~f:(fun d ->
-                 String.equal (Var.name (Var.base (Def.lhs d))) "rw_t")
-          |> Base.Option.map ~f:Def.rhs
-        in
-        check "PR-29"
-          (match t with
-           | Some (Bil.Var pv) -> Cu.is_vla_ptr pv
-           | Some (Bil.BinOp (Bil.PLUS, Bil.Var pv, _)) ->
-               Cu.is_vla_ptr pv
            | _ -> false));
 
     (* PR-30: a constant address def's value is its component's base var

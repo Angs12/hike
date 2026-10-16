@@ -257,10 +257,9 @@ let sub_portions ~(entry : int64)
     parts )
 
 (* The full-span claim for a TOP address: a stack-symbolic top claims
-   below-entry only, clamped by [stack_max]; imprecision never
-   reaches the Args slots; any other top
-   claims the sub-local spaces' full range — the identity member
-   forcing write closure with the carved cells. *)
+   below-entry down to the floor; imprecision never reaches the Args
+   slots; any other top claims the sub-local spaces' full range — the
+   identity member forcing write closure with the carved cells. *)
 let top_claim ~(cause : top_cause)
     ~(entry : int64) ~(word : int) : sec_tag option * portion list =
   match cause with
@@ -268,7 +267,7 @@ let top_claim ~(cause : top_cause)
     ( Some Tag.Unbounded,
       snd (sub_portions ~entry ~word ~elig:false
              ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
-             (Stdlib.Int64.sub entry Hike_stack_model.stack_max)
+             (Model.stack_floor ~entry)
              (Stdlib.Int64.pred entry)) )
   | Query_failed | Foreign ->
     (None,
@@ -406,15 +405,9 @@ let range_of_denotation ~(word : int)
       top_claim ~cause:Unbounded_stack ~entry ~word
     else top_claim ~cause:Foreign ~entry ~word
   else
-    match Vsa.WordSet.origin ws with
-    | Some (Vsa.WordSet.Origin.Vla _) ->
-      (* A VLA claim's real storage is the dynamic alloca the origin
-         names; it binds nothing in the section tree. *)
-      (None, [])
-    | _ -> (
-      match Vsa.WordSet.stack_offsets ws with
-      | Some _ -> stack_offset_portions ~word ~entry ~width ws
-      | None -> plain_portions ~word ~entry ~spans ~basis ~width ws)
+    match Vsa.WordSet.stack_offsets ws with
+    | Some _ -> stack_offset_portions ~word ~entry ~width ws
+    | None -> plain_portions ~word ~entry ~spans ~basis ~width ws
 
 type env = {
   word : int;
@@ -564,7 +557,9 @@ let collect (env : env) (prog : program term) : collecting =
         (* A calling block exposes the call window to the callee —
            those bytes must live in the residue, never a carved
            region; the identity member spanning the window forces the
-           residue and grows its extent. *)
+           residue and grows its extent.  A non-singleton SP claims the
+           hull of its positions: the callee's window sits at the SP of
+           whichever run reaches the call. *)
         let has_call =
           Term.enum jmp_t acc.blk
           |> Seq.exists ~f:(fun j -> Hike_stack_model.call_pushes j)
@@ -574,24 +569,27 @@ let collect (env : env) (prog : program term) : collecting =
           Option.fold
             (Option.bind
                (Result.ok (env.denote ~blk:acc.blk (Bil.Var env.sp)))
-               ~f:Model.positions_of_offsets)
+               ~f:(Model.escape_extent ~entry:env.entry))
             ~init:acc
             ~f:(fun acc (lo, hi) ->
-              if not (Stdlib.Int64.equal lo hi) then acc
-              else
-                let sp_abs = lo in
-                let win_lo =
-                  Stdlib.Int64.sub sp_abs (Stdlib.Int64.of_int env.word) in
-                let win_hi =
-                  Stdlib.Int64.add
-                    (Stdlib.Int64.add sp_abs
-                       (Stdlib.Int64.of_int
-                          (window_push_slop_words * env.word)))
-                    Hike_stack_model.caller_window_bytes
-                in
-                Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:true (win_lo, win_hi))
-                  ~init:acc
-                  ~f:(fun acc m -> { acc with tree = insert acc.tree m }))
+              let win_lo =
+                Stdlib.Int64.sub lo (Stdlib.Int64.of_int env.word) in
+              let reach =
+                Stdlib.Int64.add
+                  (Stdlib.Int64.of_int (window_push_slop_words * env.word))
+                  Hike_stack_model.caller_window_bytes
+              in
+              (* Saturate at the line's ceiling. *)
+              let win_hi =
+                if Stdlib.Int64.compare hi
+                     (Stdlib.Int64.sub Model.args_ceiling reach) > 0
+                then Model.args_ceiling
+                else Stdlib.Int64.add hi reach
+              in
+              Base.List.fold
+                (escape_members ~sub:acc.sub ~env ~callwin:true (win_lo, win_hi))
+                ~init:acc
+                ~f:(fun acc m -> { acc with tree = insert acc.tree m }))
 
       method! enter_def d acc =
         let dtid = Term.tid d in
@@ -841,14 +839,11 @@ let conversion_of ~(word : int) ~(entry : int64)
           (* An unbounded address keeps its memory form: an above-entry
              direction's storage is the caller's world, which the typed
              arguments carry; a below-entry one is a pointer into the
-             residue alloca, exactly like a bounded one.  A VLA-origin
-             claim keeps its memory form too: the band's real storage is
-             the dynamic alloca the pointer chain names. *)
+             residue, exactly like a bounded one. *)
           let tag = p.tag in
           let portions = p.portions in
-          match (tag, p.origin) with
-          | (Some Tag.Unbounded, _) -> (Keep, tag)
-          | (_, Some (Hike_origin.Vla _)) -> (Keep, tag)
+          match tag with
+          | Some Tag.Unbounded -> (Keep, tag)
           | _ ->
           (* A return-address cell keeps its tag — the emitter's
              return arm. *)
@@ -858,7 +853,7 @@ let conversion_of ~(word : int) ~(entry : int64)
             | None -> false
           in
           (* A conversion needs the eligibility proof: an identity
-             portion (an escape, a full-span claim, a VLA extent) keeps
+             portion (an escape, a full-span claim) keeps
              the memory form — the raw lane is its sound answer. *)
           let owned =
             Base.List.filter portions ~f:(fun p ->
@@ -952,20 +947,6 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   in
   { sub_trees; data_tree; tags = collected.tags;
     projections = collected.projections; conversions; whole }
-
-(* The sub's dynamic allocations: the seed's confirmed frames whose
-   base-computing def lies in the sub.  The solve's boundary sweep is
-   their validation against the final denotations. *)
-let dynamic_allocs_of ~(facts : Hike_kb.facts) (sub : sub term) :
-    Hike_def_slots.dyn_alloc Tid.Map.t =
-  let own =
-    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.map ~f:Term.tid |> Seq.to_list |> Tid.Set.of_list
-  in
-  Core.Map.filter_keys facts.Hike_kb.vla_extents ~f:(Core.Set.mem own)
-  |> Core.Map.mapi ~f:(fun ~key ~data ->
-      { Hike_def_slots.floor = data.Hike_origin.off_lo;
-        parent = Core.Map.find facts.Hike_kb.vla_parents key })
 
 (* The storages an expression names: a storage base leaf itself, or a
    var the map proved to hold one.  Only address arithmetic carries the
@@ -1219,18 +1200,20 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         Stdlib.Int64.min reach Hike_stack_model.caller_window_bytes
       else reach
   in
-  (* A def-backed member's proven below-entry depth; an unbounded claim
-     keeps the fixed fallback. *)
+  (* A def-backed member whose below-entry extent is unbounded or too
+     deep for an alloca selects the runtime stack. *)
+  let member_runtime (m : member) : bool =
+    Option.is_some m.m_def
+    && (Stdlib.Int64.equal m.m_lo (Model.stack_floor ~entry)
+        || Stdlib.Int64.compare (Stdlib.Int64.sub entry m.m_lo)
+             Hike_stack_model.frame_alloca_max > 0)
+  in
+  (* A def-backed member's proven below-entry depth. *)
   let member_below (m : member) : int64 =
     match m.m_def with
     | None -> 0L
-    | Some _ ->
-      let depth = Stdlib.Int64.sub entry m.m_lo in
-      if
-        Stdlib.Int64.equal m.m_lo (Model.stack_floor ~entry)
-        || Stdlib.Int64.compare depth Hike_stack_model.stack_max > 0
-      then Hike_stack_model.stack_max
-      else Stdlib.Int64.max depth 0L
+    | Some _ when member_runtime m -> 0L
+    | Some _ -> Stdlib.Int64.max (Stdlib.Int64.sub entry m.m_lo) 0L
   in
   let ( below, carved ), residue_seen =
     Base.List.fold bindings
@@ -1297,7 +1280,13 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     else Base.List.rev carved
   in
   let window_param = args_residue in
-  { Hike_stack_model.regions; window_param }
+  let runtime_residue =
+    Base.List.exists bindings ~f:(fun (_, rs) ->
+        match rs.storage with
+        | Stack_residue -> Base.List.exists rs.members ~f:member_runtime
+        | _ -> false)
+  in
+  { Hike_stack_model.regions; window_param; runtime_residue }
 
 type def_fact = {
   fr_conv : conv;
@@ -1325,11 +1314,10 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(projections : projection option Tid.Map.t)
     ~(conversions : conv Tid.Map.t)
     ~(storages : Hike_synth.storage_span list)
-    ~(window_param : bool) ~(vla_tids : Tid.Set.t)
+    ~(window_param : bool)
     ~(spans : data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
-    ~(is_dyn_alloc : def term -> bool)
     (sub : sub term) : def_fact Tid.Map.t =
 #ifdef VSA_DEBUG
   let census key = Cbat_vsa.Cbat_attr_census.bump key in
@@ -1406,26 +1394,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         census "rw.access.section";
         Core.Map.set acc ~key:(Term.tid d)
           ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
-    | Keep -> (
-        (* A routable VLA access lands in its allocation:
-           the frame-relative offset from that alloca's
-           base, whichever register carries the address. *)
-        let vla_addr =
-          match Vsa.Def_origin.def_origin d with
-          | Some (Hike_origin.Vla tid)
-            when Core.Set.mem vla_tids tid ->
-              Base.Option.map
-                (Hike_synth_addr.offset_of ~leaves addr)
-                ~f:(Hike_synth_addr.base_plus
-                      (Model.vla_ptr ~addr_bits tid) ~rel:0L)
-          | _ -> None
-        in
-        census
-          (if Base.Option.is_some vla_addr then "rw.access.vla"
-           else "rw.access.keep");
-        Core.Map.set acc ~key:(Term.tid d)
-          ~data:{ fact with fr_addr = vla_addr; fr_bits = 8 * w })
-    | _ ->
+    | Keep | _ ->
         census "rw.access.keep";
         Core.Map.set acc ~key:(Term.tid d)
           ~data:
@@ -1528,28 +1497,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
              (the parameter is the base); below the
              entry line the tree's binding owns its
              whole range. *)
-          match Vsa.WordSet.origin ws with
-          | Some (Vsa.WordSet.Origin.Vla tid)
-            when (not (Vsa.WordSet.is_infinite ws))
-                 && Core.Set.mem vla_tids tid -> (
-              (* The offsets are frame-relative: the
-                 allocation's base is byte zero, no
-                 position arithmetic applies. *)
-              match
-                Base.Option.map
-                  (Hike_synth_addr.offset_of ~leaves (Def.rhs d))
-                  ~f:(Hike_synth_addr.base_plus (Model.vla_ptr ~addr_bits tid)
-                       ~rel:0L)
-              with
-              | Some rhs ->
-                  census "rw.value.vla";
-                  Core.Map.set acc ~key:(Term.tid d)
-                    ~data:{ fact with fr_rhs = Some rhs }
-              | None ->
-                  census "rw.value.vla.unfoldable"; acc)
-          | Some (Vsa.WordSet.Origin.Vla _) ->
-              census "rw.value.vla"; acc
-          | _ -> (
+          (
               let a_base = Model.args_base ~entry ~word in
               match
                 (not (Vsa.WordSet.is_infinite ws),
@@ -1605,14 +1553,12 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
          Term.enum def_t blk
          |> Seq.fold ~init:acc ~f:(fun acc d ->
-                if is_dyn_alloc d then acc
-                else
-                  let leaves =
-                    Hike_synth_addr.address_leaves ~denote ~storages ~blk
-                      ~def:d (Def.rhs d) in
-                  match access_of d with
-                  | Some access -> access_fact ~leaves acc d access
-                  | None -> value_fact ~blk ~leaves acc d))
+                let leaves =
+                  Hike_synth_addr.address_leaves ~denote ~storages ~blk
+                    ~def:d (Def.rhs d) in
+                match access_of d with
+                | Some access -> access_fact ~leaves acc d access
+                | None -> value_fact ~blk ~leaves acc d))
 
 let slot_arity ~(word : int) ~(entry : int64) (tree : sub_tree) : int =
   let arity =

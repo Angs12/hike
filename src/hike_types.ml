@@ -189,7 +189,7 @@ let sign_program ~(target : Bap_core_theory.Theory.Target.t)
 
 (* ---- The value kind (ptr vs int) ----
    A value is a pointer when any part of its denotation is a bounded
-   stack or VLA address.  Computed here, pre-SSA, where the denotation
+   stack address.  Computed here, pre-SSA, where the denotation
    resolves; the emitter's ptr discipline consumes it. *)
 
 module Vsa = Cbat_vsa
@@ -263,8 +263,8 @@ let ptr_facts_empty =
 
 (* The pointer-kind inference: a forward may-analysis over the sub's CFG
    (the BAP [Graphlib] fixpoint).  The data is the set of vars proven to
-   be stack/VLA addresses; the seed is the VSA denotation (a bounded
-   stack/VLA value) plus the caller-proven lanes; the transfer adds every
+   be stack addresses; the seed is the VSA denotation (a bounded
+   stack value) plus the caller-proven lanes; the transfer adds every
    def whose rhs is a pointer-preserving shape over a proven operand.
    The join is set union (any pointer use makes a var a pointer). *)
 let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
@@ -273,22 +273,17 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
     Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
       ~default:
         { Hike_stack_model.Sub_layout.regions = [];
-          window_param = false }
+          window_param = false;
+          runtime_residue = false }
   in
   let word = facts.Hike_kb.abi.Hike_abi.word in
-  let vla_reach (ws : Vsa.WordSet.t) : bool =
-    match Vsa.WordSet.origin ws with
-    | Some (Vsa.WordSet.Origin.Vla _) -> true
-    | _ -> false
-  in
   let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage option =
     (* One storage per value: the denotation must name exactly one
        alloca.  A value whose offsets span several regions (a phi's
        mixed-incoming join, a two-band hull) names none — the emitter
        keeps such a value on the pointer-value lane, where each path
        carries its own storage's pointer. *)
-    if vla_reach ws then Some Hike_stack_model.Ptr_vla
-    else if
+    if
       Hike_stack_model.is_window_denotation
         ~entry:Hike_stack_model.segment_base ~word ws
     then Some Hike_stack_model.Ptr_window
@@ -503,7 +498,7 @@ let fold_direct_calls (sub : sub term) ~(init : 'a)
                 | _ -> acc))
 
 (* The whole-program pointer-kind fixpoint.  A value is a pointer when
-   the VSA proves its denotation is a stack/VLA address, or it flows
+   the VSA proves its denotation is a stack address, or it flows
    from one: a copy, an address offset, an ite; a callee parameter a
    caller proves; a caller's return lane whose callee proves.  The
    def-use part runs per sub ([ptr_defs]); the call-graph edges run to a

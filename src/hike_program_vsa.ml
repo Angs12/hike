@@ -75,6 +75,7 @@ let normalize context program =
   let program = Hike_atomic.normalize ~addr_bits program in
   Term.map sub_t program ~f:(Hike_jump.compile_sub context.target)
   |> Hike_split_mem.normalize |> Hike_coerce.coerce_program
+  |> Hike_concat.normalize
   |> Hike_fp.run_program
 
 (* The rip tag is read once, here: a tagged literal naming a function

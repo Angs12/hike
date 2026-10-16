@@ -91,7 +91,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         Llvm.build_bitcast v (Llvm.double_type ctx.llvm_ctx) ""
           llvm_builder
       else if lane_is_ptr arg then
-        (* A stack/VLA address is passed as a pointer into the caller's
+        (* A stack address is passed as a pointer into the caller's
            own storage.  The kind is a callee-side may — a site whose
            value is not itself a stack address passes the register's
            bits, coerced to the lane's pointer type. *)

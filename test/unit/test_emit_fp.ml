@@ -231,12 +231,10 @@ let tests : unit Alcotest.test list =
                   r_hi = pos arg_hi;
                   r_bytes = arg_bytes } ];
             window_param = false;
+            runtime_residue = false;
           }
         in
-        let stamp sub =
-          Ds.stamp_dyn_allocs ~allocs:Tid.Map.empty sub
-          |> Sm.set_layout layout
-        in
+        let stamp sub = Sm.set_layout layout sub in
         let ir =
           emit_ir
             (Base.List.map ~f:stamp

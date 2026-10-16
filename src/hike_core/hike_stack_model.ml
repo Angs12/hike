@@ -4,7 +4,7 @@ module Vocab = struct
   open! Core
 
   type sec = Hike_section.t =
-    | Stack | Args | Vla | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
+    | Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
   [@@deriving equal, compare, sexp]
 
   let sec_name = Hike_section.name
@@ -146,18 +146,16 @@ end
 include Frame
 
 (* The storage a ptr-kind value lives in: a region or residue alloca of
-   this sub, the caller frame base (the window), or a VLA. *)
+   this sub, or the caller frame base (the window). *)
 type ptr_storage =
   | Ptr_region of int
   | Ptr_residue
   | Ptr_window
-  | Ptr_vla
 
 let equal_ptr_storage (a : ptr_storage) (b : ptr_storage) : bool =
   match a, b with
   | Ptr_region x, Ptr_region y -> Int.equal x y
-  | Ptr_residue, Ptr_residue | Ptr_window, Ptr_window | Ptr_vla, Ptr_vla ->
-      true
+  | Ptr_residue, Ptr_residue | Ptr_window, Ptr_window -> true
   | _ -> false
 
 (* A def keeps exactly one inline mem node, so one scan serves every
@@ -393,16 +391,6 @@ let is_region_ptr v =
   | Some (Hike_synth.Storage (Hike_synth.Stack _)) -> true
   | _ -> false
 
-(* The VLA storage base: one var per allocation, keyed by the
-   decrement def's tid — the emitter binds it to that %vla alloca. *)
-let vla_ptr ~addr_bits t =
-  Hike_synth.base ~addr_bits (Hike_synth.Allocation (Tid.hash t))
-
-let is_vla_ptr v =
-  match kind v with
-  | Some (Hike_synth.Storage (Hike_synth.Allocation _)) -> true
-  | _ -> false
-
 (* The section-component storage base: one var per component id, the
    emitter binds it to the component's global. *)
 let sec_comp_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Global id)
@@ -414,7 +402,7 @@ let is_sec_comp_ptr v =
 
 (* A storage's base value: never renamed, never a lane. *)
 let is_storage_base (v : var) : bool =
-  is_region_ptr v || is_vla_ptr v || is_sec_comp_ptr v
+  is_region_ptr v || is_sec_comp_ptr v
 
 (* The un-carved global memory state: BAP's own [mem] var, outside the
    fissioned families.  A store into it is observable outside the sub
@@ -554,8 +542,8 @@ let sub_operand_reads (s : sub term) : Var.Set.t =
              | `Phi p -> Core.Set.union reads (phi_reads p)
              | `Jmp j -> Core.Set.union reads (jmp_operand_reads j)))
 
-(* The deepest literal SP decrement in the sub (prologues and VLAs),
-   through a copy chain as in the dynamic-allocation walk. *)
+(* The deepest literal SP decrement in the sub (prologues), through a
+   copy chain. *)
 let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
   let is_sp v = Abi.is_sp abi (Var.base v) in
   (* The literal displacement of [SP - k] through copies defined
@@ -635,14 +623,17 @@ module Sub_layout = struct
     (* The sub reads its incoming window: its direct-call signature carries
        the hike_window parameter. *)
     window_param : bool;
+    (* The residue's below-entry extent is unbounded or exceeds
+       [frame_alloca_max]: its storage is the runtime stack. *)
+    runtime_residue : bool;
   }
   [@@deriving equal, compare, sexp]
 
   (* Required by [Value.Tag.register]. *)
-  let pp fmt { regions; window_param } =
-    Format.fprintf fmt "regions=%d;window=%b"
+  let pp fmt { regions; window_param; runtime_residue } =
+    Format.fprintf fmt "regions=%d;window=%b;runtime=%b"
       (Base.List.length regions)
-      window_param
+      window_param runtime_residue
 
   module Stringable = struct
     type nonrec t = t
@@ -654,13 +645,14 @@ module Sub_layout = struct
     include Stringable
 
     let caller_identity =
-      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/5"
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/6"
   end)
 end
 
 type sub_layout = Sub_layout.t = {
   regions : Sub_layout.region list;
   window_param : bool;
+  runtime_residue : bool;
 }
 
 type layout_region = Sub_layout.region = {

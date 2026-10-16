@@ -150,4 +150,3 @@ let materialize ctx scope llvm_builder blk_tid
           Bil2llvm_ptr.offset ~addr_bits llvm_builder
             (Bil2llvm_value.as_ptr llvm_builder wp) (entry_rel ())
       | None -> off_ptr ())
-  | Hike_stack_model.Ptr_vla -> off_ptr ()

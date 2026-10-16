@@ -1,11 +1,11 @@
 # test_model pins
 
-Module `test/unit/test_model.ml` (ids `MOD-01`..`MOD-48`), migrating
+Module `test/unit/test_model.ml` (ids `MOD-10`..`MOD-45`), migrating
 `test_cbat/test_model.ml`.  Every source `check`/`check_bound` site is carried
 as one pin, in source order across the six entry points
 (`run_producer_record`, `run_layout`, `run_stl_rewrite`, `run_emitter_shapes`,
 `run_text`, `run_abi_and_kb`); none retired.  Mechanism: the producer record
-(the composed fixpoint / VLA-event detection), the layout from the finalized
+(the composed fixpoint), the layout from the finalized
 tree, stack-to-locals fission, the emitter's alloca shapes, the printable-run
 rule, and the Abi/Kb convention facts.
 
@@ -17,14 +17,7 @@ here.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| MOD-01 | `Hike.Sections.dynamic_allocs_of` reads the seed's allocations: a literal decrement and a chain-resolved constant are not VLA events. | In `src/hike_promote.ml`, `event_rhs` (l.325): make the literal/chain arm an event. | MOD-01. |
-| MOD-02 | The runtime-unbounded decrement (`SP := SP − TOP`) is the VLA event; the literal decrement is not. | In `event_rhs`, drop the unbounded-decrement arm (identity). | MOD-02; MOD-03/04/05/07 lose their event. |
-| MOD-03 | `Hike_def_slots.stamp_dyn_allocs` writes the allocation (floor, parent) onto the def's value; `def_is_dyn_alloc` reads it. | Make `stamp_dyn_allocs ~allocs:_ sub = sub`, or `def_is_dyn_alloc _ = false`. | MOD-03. |
-| MOD-04 | A two-temp spelling (`t1 := SP − x; t2 := t1; SP := t2`) is one allocation named by `t1`, the def computing the base; the copies and the SP def carry its frame. | In `vla_seed`, seed only defs whose lhs is SP. | MOD-04: the allocation is the SP def. |
-| MOD-05 | The plus-form (a negative size ADDED) is the event — the value carries the unbounded stack position, not the MINUS spelling. | In `event_rhs`, remove the PLUS arm. | MOD-05. |
-| MOD-06 | A provably-above PLUS adjustment (hull `[0..63]`) is not the event — the def's value direction decides. | In `event_rhs`, treat every SP-adjusting PLUS as an event. | MOD-06. |
-| MOD-07 | A VLA in a looping sub is the event; the seed reads the final denotations, so the loop's widening does not hide it. | Make `vla_seed` require a straight-line (single-predecessor) block. | MOD-07. |
-| MOD-10 | A plain-TOP identity member forces the residue region (id 0) with the 64K unbounded floors. | In `layout_of_tree`, drop the `Stack_residue` floor (`stack_max`). | MOD-10; MOD-11. |
+| MOD-10 | A plain-TOP identity member forces the residue region (id 0) and sets `runtime_residue`. | In `layout_of_tree`, drop the `member_runtime` flag. | MOD-10. |
 | MOD-17 | Write-closed Window: an Args cell that also contains a store takes Window storage on both sides (the read keeps its mem node and tag, never a slot). | In `conversion_of` (l.116), treat a stored Args cell as an `Arg_slot`. | MOD-17. |
 | MOD-18 | `Hike_split_mem.normalize` splits the RMW; write-closure demotes the slot for both sides, so every memory node is on `window_mem`. | In `src/hike_split_mem.ml`, skip the split; or convert the hoisted read to a slot in the rewrite. | MOD-18. |
 | MOD-19 | `Hike_jump.compile_sub` compiles flag idioms to value comparisons — no memory node rides a cond. | In `src/hike_jump.ml`, `compile_sub` returns the sub unchanged. | MOD-19. |
@@ -36,9 +29,6 @@ here.
 | MOD-39 | The word size comes from the Target API: SysV carries 8; `of_target` derives `bits/8`. | In `hike_abi.ml`, hardcode the `word` field to a wrong value. | MOD-39. |
 | MOD-40 | The ONE caller-window denotation (`Hike_stack_model.is_window_denotation`): stack-symbolic, positions ordered, entirely at/above the args base — the promotion's window stamp (`hike_promote.ml`) and the pointer-kind storage (`hike_types.storage_of` → `Ptr_window`) both read it | replace the body with `match positions_of_offsets ws with Some (lo, _) -> lo >= args_base …` (drop the `stack_offsets` requirement and the hi/ordering checks) | MOD-40f red: a plain in-band word at a window position classifies as window |
 | MOD-43 | The one TP offset rule (`tls_tp_offset`): an affine analysis in the thread pointer — a bare constant is never a base; identity casts keep the form; width-changing casts of pointer-bearing values and non-unit coefficients are `Tp_nonlinear`; `(tp+1)-tp` cancels to absent. | In the cast arm, return `(c, v)` for every cast (no width check). | MOD-43.width-cast FAILs: the narrowing cast reads `Tp_based` instead of `Tp_nonlinear`. |
-| MOD-44 | A VLA candidate SP never enters (`t := SP − {16,32}` only) is no allocation, and `facts.denote` reads its frame value as the stack positions it stands for (base range plus offsets). | In `hike_kb.ml`, drop the `on_stack_line` map. | MOD-44: `t` reads with the `Vla` origin. |
-| MOD-45 | A runtime descent below a pending frame (`t := SP − x; u := t − y; SP := u`) is a nested allocation with `parent = t`; SP reaching `u` confirms both. | In `vla_seed`, return `p` for a value in a frame SP does not hold. | MOD-45: only one allocation, or no parent. |
-| MOD-46 | Two VLAs through copy chains are two top-level allocations; the second's descent is compared in the first frame's own offsets (its stack position is unknown). | In `vla_event`, always use `offset_bounds`. | MOD-46: the second allocation is missing. |
-| MOD-47 | The floor is where SP enters the frame: `SP := t & −16` gives −15; a later `SP := SP − 8` (a push below the allocation) does not lower it. | In `vla_confirm`, drop the `entering` test. | MOD-47: the floor reads −23. |
-| MOD-48 | An access through the producer's register (`mem[t + 8]`) is rewritten to the allocation base plus 8, whichever register carries it. | In `def_facts`'s `Keep` arm, drop the `Vla` routing. | MOD-48: the address stays `t + 8`. |
+| MOD-44 | A runtime-sized descent from SP (`t := SP − {16,32}`) reads through `facts.denote` as the stack positions it stands for: `Stack` origin, not TOP. | Make `facts.denote` rebase the value onto an allocation frame. | MOD-44: the origin is not `Stack` or the value is TOP. |
+| MOD-45 | An unbounded runtime SP decrement (`SP := SP − rcx` then a store above it) sets `runtime_residue`; masking the size to a byte keeps allocas. | In `layout_of_tree`, drop the `member_runtime` flag or flag every residue. | MOD-45: the unbounded layout is not runtime, or the bounded one is. |
 | MOD-41 | term read sets use BAP terms and include the ABI transfer reads. | textually invert the pinned contract in `Hike_stack_model` | pin FAILs under that inversion (re-demonstrated by review) |

@@ -64,6 +64,9 @@ type sub_frame = {
   entry_line : Llvm.llvalue;
   (* The entry line as a pointer into the residue (None = no storage). *)
   entry_ptr : Llvm.llvalue option;
+  (* A runtime-stack sub's cursor at entry: each SP decrement lowers the
+     cursor under it, every exit restores this value. *)
+  rstack_top : Llvm.llvalue option;
 }
 
 (* The one emission address index: the exact section tiling and each
@@ -229,7 +232,7 @@ let env_global ctx (v : var) =
 let load_env_reg ctx llvm_builder (v : var) =
   Llvm.build_load (var_lltype ctx v) (env_global ctx v) "" llvm_builder
 
-(* A var whose value is a stack/VLA address (a real pointer).  The
+(* A var whose value is a stack address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
 let is_ptr_var (v : Var.t) : bool =
   (match Hike_synth.classify Hike_synth.empty v with

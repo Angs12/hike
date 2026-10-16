@@ -254,43 +254,6 @@ let tests : unit Alcotest.test list =
           (Var.index (Phi.lhs phi) > 0
           && Option.equal Exp.equal call_incoming (Some (Bil.Var call_version))
           && bypass_has_version));
-
-    pin "SSA-05"
-      "a dynamic allocation records the SP version live before it, though \
-       it reads no SP and writes another register"
-      (fun () ->
-        let rsp = v64 "RSP" and rax = v64 "RAX" and rbx = v64 "RBX" in
-        let d_adj =
-          Def.create rsp
-            (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))))
-        in
-        let d_prod = Def.create rax (Bil.BinOp (Bil.MINUS, Bil.Var rax, Bil.Var rbx)) in
-        let sub =
-          straight_sub "ssa_dyn_alloc"
-            [ Def.create rax (Bil.Var rsp);
-              d_adj;
-              d_prod;
-              Def.create rsp (Bil.Var rax) ]
-          |> Hike.Def_slots.stamp_dyn_allocs
-               ~allocs:
-                 (Tid.Map.singleton (Term.tid d_prod)
-                    { Hike.Def_slots.floor = 0L; parent = None })
-        in
-        let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
-        let defs =
-          Term.enum sub_t prog |> Seq.hd_exn |> Term.enum blk_t
-          |> Seq.concat_map ~f:(Term.enum def_t)
-        in
-        let find tid = Seq.find defs ~f:(fun d -> Tid.equal (Term.tid d) tid) in
-        let adj_version = Base.Option.map (find (Term.tid d_adj)) ~f:Def.lhs in
-        let stamped =
-          Base.Option.bind (find (Term.tid d_prod)) ~f:Hike.Def_slots.def_sp_before
-        in
-        check "SSA-05"
-          (Base.Option.is_some adj_version
-          && Option.equal Var.equal stamped adj_version));
   ]
 
 let () = run "hike_ssa" tests

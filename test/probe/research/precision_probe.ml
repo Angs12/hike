@@ -1,8 +1,8 @@
 (* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
    Usage: dune exec test/probe/research/precision_probe.exe -- <binary> [<binary> ...]
    Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
-   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 5 ldstk_sh,
-   5 defstk_sh (see [row_of]).
+   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 4 ldstk_sh,
+   4 defstk_sh (see [row_of]).
    L2a diag mode (HIKE_VSA_DIAG_BOTTOM=1) adds DIAG/DIAG_SUM lines; OFF output is plain. *)
 
 open Bap.Std
@@ -326,12 +326,10 @@ let row_of (s : Sub_stats.t) : string list =
     string_of_int s.Sub_stats.ldstk_w_big;
     Int64.to_string s.Sub_stats.ldstk_w_max;
     string_of_int s.Sub_stats.ldstk_sh_stack;
-    string_of_int s.Sub_stats.ldstk_sh_vla;
     string_of_int s.Sub_stats.ldstk_sh_window;
     string_of_int s.Sub_stats.ldstk_sh_other;
     string_of_int s.Sub_stats.ldstk_sh_lost;
     string_of_int s.Sub_stats.defstk_sh_stack;
-    string_of_int s.Sub_stats.defstk_sh_vla;
     string_of_int s.Sub_stats.defstk_sh_window;
     string_of_int s.Sub_stats.defstk_sh_other;
     string_of_int s.Sub_stats.defstk_sh_lost ]

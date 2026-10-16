@@ -345,11 +345,9 @@ let clear_key (t : t) (h : Tid.t) (key : key) : unit =
     if List.is_empty rows then Hashtbl.remove t.rows h
     else Hashtbl.set t.rows ~key:h ~data:rows
 
-(* The value's own line: [Some base] when its offsets are translatable — a
-   fixed-base Stack/VLA line.  [None] defers (an unknown VLA base has no
-   entry-line position). *)
+(* The value's own line: the fixed base its offsets are translated from. *)
 let rel_line_base (o : Hike_origin.t) : Cbat_word.t option =
-  let f = Cbat_clp_set_composite.base_facts o in
+  let f = Hike_origin.facts o in
   if f.Hike_origin.certified > 0 then
     Some (Cbat_word.of_int64 ~width:64 f.Hike_origin.base)
   else None
@@ -378,13 +376,6 @@ let extend_grid ~(width : int) ~(base : Cbat_word.t) ~(step : Cbat_word.t)
         (Cbat_word.div (cw (Cbat_word.sub hi base')) (cw step))
         (Cbat_word.one w1) in
     Some (Cbat_clp.Pieces.of_arcs (Cbat_clp.arcs ~width ~step ~cardn base'))
-
-(* The value's translatable progression in its own space. *)
-let value_progression (o : Hike_origin.t) (v : Cbat_clp_set_composite.t) :
-    Cbat_clp.Pieces.t option =
-  match o with
-  | Hike_origin.Vla _ -> Cbat_clp_set_composite.vla_offsets v
-  | _ -> Cbat_clp_set_composite.stack_offsets v
 
 (* Extrapolate bounds toward landmarks; clamp at landmark and current
    bound.  The translation works in the value's own line — a plain word's
@@ -443,7 +434,7 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     else
       match Cbat_clp_set_composite.origin data_new with
       | Some o when Hike_origin.names_stack_line o -> (
-          match rel, value_progression o data_new with
+          match rel, Cbat_clp_set_composite.stack_offsets data_new with
           | Some b, Some p ->
             let lo_off = Cbat_word.sub extrap_lo b in
             let hi_off = Cbat_word.sub extrap_hi b in
@@ -480,14 +471,7 @@ let extrapolate ~(steps : int) ~(old : Cbat_clp_set_composite.t)
     List.filter entries ~f:(fun e ->
         Cbat_word.bitwidth e.bound = Cbat_clp_set_composite.bitwidth old)
   in
-  (* A relative value with no translatable line (an unknown VLA base)
-     defers to the plain widen. *)
-  let unknown_line v =
-    match Cbat_clp_set_composite.origin v with
-    | Some o when Hike_origin.names_stack_line o -> Option.is_none (rel_line_base o)
-    | _ -> false in
   match entries with
-  | _ :: _ when unknown_line old || unknown_line new_ -> `Widen
   | [] ->
     `Extrapolated (Cbat_clp_set_composite.extrapolate_steps ~steps old new_)
   | _ ->

@@ -129,7 +129,7 @@ let classify_top_addr (env : AI.t) (a : exp) : string =
   | None -> "denote_err"
   | Some v ->
     if not (Ws.is_top v) then "bounded"
-    else if shape_retained v then "vla_wide." ^ mech env a
+    else if shape_retained v then "stack_wide." ^ mech env a
     else mech env a
 
 let def_bucket (v : Ws.t) : string =

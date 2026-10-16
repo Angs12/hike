@@ -3,14 +3,13 @@
    this one ADT. *)
 open! Core
 
-type t = Stack | Args | Vla | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
+type t = Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
 [@@deriving bin_io, equal, compare, sexp]
 
 (* The section's ELF name — the one spelling of the name grammar. *)
 let name = function
   | Stack -> "stack"
   | Args -> "args"
-  | Vla -> "vla"
   | Data -> "data"
   | Rodata -> "rodata"
   | Bss -> "bss"

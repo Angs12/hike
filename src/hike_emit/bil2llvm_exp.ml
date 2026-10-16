@@ -253,7 +253,7 @@ and plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
     | None -> raw ())
   | _ -> raw ()
 
-(* One memory node: the address is a pointer (a stack/VLA value) or an
+(* One memory node: the address is a pointer (a stack value) or an
    integer (the raw/heap lane); the marker carries the loaded value
    through the enclosing rhs.  [ptr_cell]: the cell is read as the
    pointer it holds. *)

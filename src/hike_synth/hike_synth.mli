@@ -12,14 +12,13 @@ type table
 (** The storage a synthetic variable is based at, or names the bytes
     of.  One general descriptor covers every family: a stack region, the
     caller window, a section component, an argument slot, a call-argument
-    pointer, and a dynamic allocation. *)
+    pointer. *)
 type storage =
   | Stack of int
   | Window
   | Global of int
   | Slot of int
   | Argument of int
-  | Allocation of int
 
 type lane = Input | Output
 

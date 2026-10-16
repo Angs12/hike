@@ -282,7 +282,7 @@ let get_named_region_info proj =
 let section_range (proj : Project.t) (s : Hike_section.t) :
     (int64 * int64) option =
   match s with
-  | Stack | Args | Vla -> None
+  | Stack | Args -> None
   | Bss ->
     Seq.find (get_named_region_info proj) ~f:(fun { name; _ } ->
         String.equal name ("." ^ Hike_section.name Bss))

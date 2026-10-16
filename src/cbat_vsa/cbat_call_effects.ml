@@ -38,15 +38,12 @@ let range_of (ws : WordSet.t) : (Cbat_word.t * Cbat_word.t) option =
    stack-derived cells key by segment offsets, foreign cells by their
    concrete addresses.  The callee writes below its own RSP, so the
    keep boundary is the HIGHEST possible call-time SP's position — an
-   unbounded-below SP still has a highest position; a VLA-frame SP
-   keeps from its extent's LOW end instead — every run's live bytes
-   (the allocation's own, the frame above) sit at/above that run's SP,
-   and the callee reaches below its entry only.  An unbounded-above SP
-   keeps nothing — the whole-memory top stays the sound fallback on
-   any doubt.
+   unbounded-below SP still has a highest position, and the callee
+   reaches below its entry only.  An unbounded-above SP keeps nothing
+   — the whole-memory top stays the sound fallback on any doubt.
 
-   Only Stack/Vla origins certify a frame-keep boundary or a
-   stack escape. An SP without that proof forces whole-memory top. *)
+   Only the Stack origin certifies a frame-keep boundary or a stack
+   escape. An SP without that proof forces whole-memory top. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
@@ -60,16 +57,7 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     if WordSet.is_ascending rsp || WordSet.is_circular rsp then None
     else
       match WordSet.stack_offsets rsp with
-      | Some offs -> (
-          match WordSet.origin rsp with
-          | Some (WordSet.Origin.Vla tid) -> (
-            (* Keep from the allocation's base; an unknown base cannot
-               place the frame — the top fallback. *)
-            match WordSet.Origin.Vla_seed.extent tid with
-            | Some { WordSet.Origin.base_lo = Some blo; _ } ->
-              Some (Cbat_word.of_int64 blo)
-            | _ -> None)
-          | _ -> WordSet.Clp.Pieces.max_elem offs)
+      | Some offs -> WordSet.Clp.Pieces.max_elem offs
       | None -> None
   in
   (* The escape list: each escape's stack-line leaves (a mixed value's

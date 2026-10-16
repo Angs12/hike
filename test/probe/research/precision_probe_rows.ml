@@ -22,7 +22,7 @@ type win_bucket = [ `W_b64 | `W_4k | `W_2m | `W_big ]
    plain value that lands in the segment has lost it.  The caller frame
    is no longer a distinct origin: a [Stack] value whose offsets all lie
    at/above the ABI word is the window side of the entry line. *)
-type shape = [ `Stack | `Vla | `Window | `Other | `Lost ]
+type shape = [ `Stack | `Window | `Other | `Lost ]
 
 (* The x86-64 ABI word: the entry boundary the removed [Origin.Window]
    refinement used. *)
@@ -42,7 +42,6 @@ let caller_frame (ws : Ws.t) : bool =
 let classify_shape (ws : Ws.t) : shape =
   match Ws.origin ws with
   | Some Origin.Stack -> if caller_frame ws then `Window else `Stack
-  | Some (Origin.Vla _) -> `Vla
   | Some (Origin.Abs | Origin.Rip _) -> `Other
   | None -> `Lost
 
@@ -90,15 +89,13 @@ module Sub_stats = struct
     mutable ldstk_w_2m : int;
     mutable ldstk_w_big : int;
     mutable ldstk_w_max : int64;
-    (* stack-flagged access shape (5) *)
+    (* stack-flagged access shape (4) *)
     mutable ldstk_sh_stack : int;
-    mutable ldstk_sh_vla : int;
     mutable ldstk_sh_window : int;
     mutable ldstk_sh_other : int;
     mutable ldstk_sh_lost : int;
-    (* stack-flagged def shape (5) *)
+    (* stack-flagged def shape (4) *)
     mutable defstk_sh_stack : int;
-    mutable defstk_sh_vla : int;
     mutable defstk_sh_window : int;
     mutable defstk_sh_other : int;
     mutable defstk_sh_lost : int;
@@ -115,16 +112,15 @@ module Sub_stats = struct
       ldstk_bottom_live = 0; ldstk_bottom_dead = 0;
       ldstk_w_b64 = 0; ldstk_w_4k = 0; ldstk_w_2m = 0; ldstk_w_big = 0;
       ldstk_w_max = 0L;
-      ldstk_sh_stack = 0; ldstk_sh_vla = 0; ldstk_sh_window = 0;
+      ldstk_sh_stack = 0; ldstk_sh_window = 0;
       ldstk_sh_other = 0; ldstk_sh_lost = 0;
-      defstk_sh_stack = 0; defstk_sh_vla = 0; defstk_sh_window = 0;
+      defstk_sh_stack = 0; defstk_sh_window = 0;
       defstk_sh_other = 0; defstk_sh_lost = 0 }
 
   (* The shape of one stack-flagged access. *)
   let add_ld_shape (s : t) (sh : shape) : unit =
     match sh with
     | `Stack -> s.ldstk_sh_stack <- s.ldstk_sh_stack + 1
-    | `Vla -> s.ldstk_sh_vla <- s.ldstk_sh_vla + 1
     | `Window -> s.ldstk_sh_window <- s.ldstk_sh_window + 1
     | `Other -> s.ldstk_sh_other <- s.ldstk_sh_other + 1
     | `Lost -> s.ldstk_sh_lost <- s.ldstk_sh_lost + 1
@@ -133,7 +129,6 @@ module Sub_stats = struct
   let add_def_shape (s : t) (sh : shape) : unit =
     match sh with
     | `Stack -> s.defstk_sh_stack <- s.defstk_sh_stack + 1
-    | `Vla -> s.defstk_sh_vla <- s.defstk_sh_vla + 1
     | `Window -> s.defstk_sh_window <- s.defstk_sh_window + 1
     | `Other -> s.defstk_sh_other <- s.defstk_sh_other + 1
     | `Lost -> s.defstk_sh_lost <- s.defstk_sh_lost + 1
@@ -207,12 +202,10 @@ module Sub_stats = struct
     if Int64.compare src.ldstk_w_max dst.ldstk_w_max > 0 then
       dst.ldstk_w_max <- src.ldstk_w_max;
     dst.ldstk_sh_stack <- dst.ldstk_sh_stack + src.ldstk_sh_stack;
-    dst.ldstk_sh_vla <- dst.ldstk_sh_vla + src.ldstk_sh_vla;
     dst.ldstk_sh_window <- dst.ldstk_sh_window + src.ldstk_sh_window;
     dst.ldstk_sh_other <- dst.ldstk_sh_other + src.ldstk_sh_other;
     dst.ldstk_sh_lost <- dst.ldstk_sh_lost + src.ldstk_sh_lost;
     dst.defstk_sh_stack <- dst.defstk_sh_stack + src.defstk_sh_stack;
-    dst.defstk_sh_vla <- dst.defstk_sh_vla + src.defstk_sh_vla;
     dst.defstk_sh_window <- dst.defstk_sh_window + src.defstk_sh_window;
     dst.defstk_sh_other <- dst.defstk_sh_other + src.defstk_sh_other;
     dst.defstk_sh_lost <- dst.defstk_sh_lost + src.defstk_sh_lost

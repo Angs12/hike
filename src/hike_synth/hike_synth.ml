@@ -15,7 +15,6 @@ type kind =
   | K_window_memory
   | K_region of int
   | K_region_memory of int
-  | K_allocation of int
   | K_global of int
   | K_global_memory of int
   | K_environment of var
@@ -31,7 +30,6 @@ type storage =
   | Global of int
   | Slot of int
   | Argument of int
-  | Allocation of int
 
 type lane = Input | Output
 
@@ -47,7 +45,6 @@ let var ~addr_bits kind =
     | K_window_memory -> "hike_window_mem", mem_type addr_bits
     | K_region i -> Printf.sprintf "stack_r%d_ptr" i, mem_type addr_bits
     | K_region_memory i -> Printf.sprintf "stack_r%d_mem" i, mem_type addr_bits
-    | K_allocation i -> Printf.sprintf "hike_vla_%d_ptr" i, mem_type addr_bits
     | K_global i -> Printf.sprintf "sec_comp_%d_ptr" i, mem_type addr_bits
     | K_global_memory i -> Printf.sprintf "sec_comp_%d_mem" i, mem_type addr_bits
     | K_environment v -> Var.name v, Var.typ v
@@ -71,7 +68,6 @@ let base_kind_of_storage = function
   | Global id -> K_global id
   | Slot i -> K_slot i
   | Argument i -> K_argument i
-  | Allocation i -> K_allocation i
 
 let bytes_kind_of_storage = function
   | Stack id -> K_region_memory id
@@ -79,7 +75,6 @@ let bytes_kind_of_storage = function
   | Global id -> K_global_memory id
   | Slot i -> K_slot i
   | Argument i -> K_argument i
-  | Allocation i -> K_allocation i
 
 let base ~addr_bits storage = var ~addr_bits (base_kind_of_storage storage)
 let bytes ~addr_bits storage = var ~addr_bits (bytes_kind_of_storage storage)
@@ -136,8 +131,6 @@ let kind_of_var v =
     Base.Option.first_some
       (family n ~prefix:"sec_comp_" ~suffix:"_mem" (fun i -> K_global_memory i))
       (family n ~prefix:"sec_comp_" ~suffix:"_ptr" (fun i -> K_global i))
-  else if Base.String.is_prefix n ~prefix:"hike_vla_" then
-    family n ~prefix:"hike_vla_" ~suffix:"_ptr" (fun i -> K_allocation i)
   else if Base.String.is_prefix n ~prefix:"intrinsic:x" then
     fp_kind n ~prefix:"intrinsic:x" (fun i -> K_fp_input i)
   else if Base.String.is_prefix n ~prefix:"intrinsic:y" then
@@ -187,7 +180,6 @@ let storage_of_kind = function
   | K_global id | K_global_memory id -> Some (Global id)
   | K_slot i -> Some (Slot i)
   | K_argument i -> Some (Argument i)
-  | K_allocation i -> Some (Allocation i)
   | _ -> None
 
 let base_kind = function
@@ -196,7 +188,6 @@ let base_kind = function
   | K_global id | K_global_memory id -> Some (K_global id)
   | K_slot i -> Some (K_slot i)
   | K_argument i -> Some (K_argument i)
-  | K_allocation i -> Some (K_allocation i)
   | _ -> None
 
 let memory_kind = function
@@ -219,8 +210,7 @@ let classify tbl v =
   | Some k -> (
     match k with
     | K_addr a -> Some (Module_addr a)
-    | K_region _ | K_window | K_global _ | K_slot _ | K_argument _
-    | K_allocation _ ->
+    | K_region _ | K_window | K_global _ | K_slot _ | K_argument _ ->
       Base.Option.map (storage_of_kind k) ~f:(fun s -> Storage s)
     | K_region_memory _ | K_window_memory | K_global_memory _ ->
       Base.Option.map (storage_of_kind k) ~f:(fun s -> Bytes s)
@@ -263,7 +253,7 @@ let index_of tbl v =
   match classify tbl v with
   | Some (Storage s | Bytes s) -> (
     match s with
-    | Stack id | Global id | Slot id | Argument id | Allocation id -> Some id
+    | Stack id | Global id | Slot id | Argument id -> Some id
     | Window -> None)
   | Some (Fp_lane (_, i)) -> Some i
   | _ -> None
@@ -281,7 +271,7 @@ type storage_span = {
 let equal_storage (a : storage) (b : storage) : bool =
   match (a, b) with
   | Stack i, Stack j | Global i, Global j | Slot i, Slot j
-  | Argument i, Argument j | Allocation i, Allocation j -> Int.equal i j
+  | Argument i, Argument j -> Int.equal i j
   | Window, Window -> true
   | _ -> false
 

@@ -1123,41 +1123,6 @@ let tests : unit Alcotest.test list =
           (Ws.equal cell (Ws.singleton (w32 5)));
         check "A: the env is unchanged by the empty meet" (AI.equal refined entry));
 
-    (* T5-3 (the T12 ruling): a bounded runtime SP adjustment is NOT a VLA
-       — no allocation event; an unbounded size is the event. *)
-    pin "INT-10"
-      "T5-3 (T12 ruling): a bounded runtime SP adjustment is not the VLA event; an unbounded size \
-       is"
-      (fun () ->
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
-        let mk ~(unbounded : bool) (name : string) : sub term =
-          let t = Var.create ~is_virtual:true ~fresh:false "t5v_sz" (Type.Imm 64) in
-          let mem = memv "t5v_m" in
-          let sz_rhs =
-            if unbounded then Bil.Load (Bil.Var mem, Bil.Var rbp, LittleEndian, `r64)
-            else Bil.Int (Cbat_word.to_word (w64 16))
-          in
-          fst
-            (sub_of name
-               [ [ Def.create t sz_rhs;
-                   Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var t)) ],
-                 [ (1, mk_goto) ];
-                 [], [ (0, mk_ret) ] ])
-        in
-        let bounded = mk ~unbounded:false "t5v_bounded" in
-        let unbounded = mk ~unbounded:true "t5v_unbounded" in
-        let fb, bounded = fixture_facts_sub bounded in
-        let fu, unbounded = fixture_facts_sub unbounded in
-        check
-          "T5-3 (T12 ruling): a bounded runtime SP adjustment is NOT a VLA — no allocation event"
-          (Core.Set.is_empty
-             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fb bounded)));
-        check "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation event"
-          (not
-             (Core.Set.is_empty
-                (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fu unbounded)))));
-
     (* T5-4 (head extrapolation): a cell widens strictly by its OWN
        entries — no own entries plain-widen; own entries translate by
        their own steps; a bottom old state stays the plain widen.  One

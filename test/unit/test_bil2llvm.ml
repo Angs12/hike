@@ -601,98 +601,62 @@ let tests : unit Alcotest.test list =
         in
         check "EMIT-33" loud);
 
-    pin "EMIT-34"
-      "a Vla(T)-origin access GEPs the %vla created at T — two VLAs each hit their own"
+    pin "EMIT-60"
+      "a runtime-stack sub lowers the cursor under each SP decrement, leaves a \
+       pure increment alone, and restores the entry cursor before the return"
       (fun () ->
-        let m = memv "emit_vla_m" in
         let rsp = v64 "RSP" in
-        let rax = v64 "RAX" in
-        let rbx = v64 "RBX" in
-        let p1 = v64 "emit_vla_p1" in
-        let p2 = v64 "emit_vla_p2" in
         let w (x : int) = Cbat_word.to_word (w64 x) in
-        let d_dec1 =
-          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
-        in
-        let d_p1 = Def.create p1 (Bil.Var rsp) in
-        let d_ld1 =
-          Hike.Vsa.Def_origin.with_origin
-            (Hike_origin.Vla (Term.tid d_dec1))
-            (Def.create (v64 "emit_vla_t1")
-               (Bil.Load
-                  ( Bil.Var m,
-                    Bil.BinOp (Bil.PLUS, Bil.Var p1, Bil.Int (w 4)),
-                    LittleEndian,
-                    `r32 )))
-        in
-        let d_dec2 =
-          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rbx))
-        in
-        let d_p2 = Def.create p2 (Bil.Var rsp) in
-        let d_st2 =
-          Hike.Vsa.Def_origin.with_origin
-            (Hike_origin.Vla (Term.tid d_dec2))
-            (Def.create m
-               (Bil.Store
-                  ( Bil.Var m,
-                    Bil.BinOp (Bil.PLUS, Bil.Var p2, Bil.Int (w 8)),
-                    Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
-                    LittleEndian,
-                    `r32 )))
-        in
         let sub =
-          straight_sub "emit_vla_two"
-            [ d_dec1; d_p1; d_ld1; d_dec2; d_p2; d_st2 ]
-        in
-        let sub =
-          Ds.stamp_dyn_allocs
-            ~allocs:
-              (Core.Map.of_key_set
-                 (Core.Set.of_list (module Tid) [ Term.tid d_dec1; Term.tid d_dec2 ])
-                 ~f:(fun _ -> { Ds.floor = 0L; parent = None }))
-            sub
+          straight_sub "emit_rstack"
+            [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w 16)));
+              Def.create rsp (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w 16))) ]
           |> Sm.set_layout
-               { Sm.regions = []; window_param = false }
+               { Sm.regions =
+                   [ { Sm.r_id = 0;
+                       r_lo = Int64.add Sm.segment_base (-32L);
+                       r_hi = Int64.add Sm.segment_base 7L;
+                       r_bytes = 48L } ];
+                 window_param = false;
+                 runtime_residue = true }
         in
-        let types = retype_versions [ rsp; p1; p2 ] in
-        let ir = emit_ir ~types [ sub ] in
-        let count sub_str =
+        let ir = emit_ir ~types:(retype_versions [ rsp ]) [ sub ] in
+        let sets =
           String.split_on_char '\n' ir
-          |> List.filter (fun l -> contains_substring l sub_str)
-          |> List.length
+          |> List.filter (fun l -> contains_substring l "call void @hike_rstack_set")
         in
-        check "EMIT-34"
-          (contains_substring ir "getelementptr i8, ptr %vla, i64 4"
-          && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
-          && count " = alloca i8, i64 " = 2));
+        check "EMIT-60"
+          (contains_substring ir "%rstack_top = call ptr @hike_rstack_enter()"
+          && List.length sets = 2
+          && contains_substring ir ", i64 -128"
+          && contains_substring (List.nth sets 1) "ptr %rstack_top"));
 
-    pin "EMIT-59"
-      "an allocation computed off SP emits its alloca at the producer: the size \
-       adds the floor, the base is past it, and SP's copy is the base"
+    pin "EMIT-61"
+      "a bounded sub gets no cursor traffic, and an alloca frame past a page \
+       is probed"
       (fun () ->
-        let rsp = v64 "RSP" and rax = v64 "RAX" and t = v64 "emit_vla_t" in
-        let m = memv "emit_vla59_m" in
+        let rsp = v64 "RSP" in
         let w (x : int) = Cbat_word.to_word (w64 x) in
-        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax)) in
-        let sub =
-          straight_sub "emit_vla_producer"
-            [ d_t;
-              Def.create rsp (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int (w (-16))));
-              Def.create m
-                (Bil.Store
-                   ( Bil.Var m, Bil.Var rsp,
-                     Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
-                     LittleEndian, `r32 )) ]
-          |> Ds.stamp_dyn_allocs
-               ~allocs:(Tid.Map.singleton (Term.tid d_t) { Ds.floor = -15L; parent = None })
-          |> Sm.set_layout { Sm.regions = []; window_param = false }
+        let sub bytes name =
+          straight_sub name
+            [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w 16))) ]
+          |> Sm.set_layout
+               { Sm.regions =
+                   [ { Sm.r_id = 0;
+                       r_lo = Int64.add Sm.segment_base (Int64.neg bytes);
+                       r_hi = Int64.add Sm.segment_base 7L;
+                       r_bytes = Int64.add bytes 8L } ];
+                 window_param = false;
+                 runtime_residue = false }
         in
-        let ir = emit_ir ~types:(retype_versions [ rsp; t ]) [ sub ] in
-        check "EMIT-59"
-          (contains_substring ir "%vla_size = add i64"
-          && contains_substring ir ", 15"
-          && contains_substring ir "%vla_base = getelementptr i8, ptr %vla, i64 15"
-          && contains_substring ir "@llvm.ptrmask.p0.i64(ptr %vla_base"));
+        let types = retype_versions [ rsp ] in
+        let big = emit_ir ~types [ sub 8192L "emit_probe_big" ] in
+        let small = emit_ir ~types [ sub 64L "emit_probe_small" ] in
+        check "EMIT-61"
+          (contains_substring big "\"probe-stack\"=\"inline-asm\""
+          && not (contains_substring small "probe-stack")
+          && not (contains_substring big "hike_rstack")
+          && not (contains_substring small "hike_rstack")));
 
     pin "EMIT-58"
       "a pointer masked by an integer stays a pointer (ptrmask); a pointer \
@@ -711,14 +675,19 @@ let tests : unit Alcotest.test list =
               Def.create rax (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Var rsp));
               Def.create m
                 (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Var rax, LittleEndian, `r64)) ]
-          |> Ds.stamp_dyn_allocs
-               ~allocs:
-                 (Tid.Map.singleton (Term.tid d_dec) { Ds.floor = 0L; parent = None })
-          |> Sm.set_layout { Sm.regions = []; window_param = false }
+          |> Sm.set_layout
+               { Sm.regions =
+                   [ { Sm.r_id = 0;
+                       r_lo = Int64.add Sm.segment_base (-64L);
+                       r_hi = Int64.add Sm.segment_base 7L;
+                       r_bytes = 80L } ];
+                 window_param = false;
+                 runtime_residue = false }
         in
+        ignore d_dec;
         let ir = emit_ir ~types:(retype_versions [ rsp; rbp ]) [ sub ] in
         check "EMIT-58"
-          (contains_substring ir "call ptr @llvm.ptrmask.p0.i64(ptr %vla"
+          (contains_substring ir "call ptr @llvm.ptrmask.p0.i64(ptr %"
            && contains_substring ir "store i64"
            && not (contains_substring ir "inttoptr")));
 

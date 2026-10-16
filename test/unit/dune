@@ -43,6 +43,7 @@
   test_emit_fp
   test_jump
   test_coerce
+  test_concat
   test_resolve
   test_rip
   test_seam

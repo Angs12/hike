@@ -16,7 +16,7 @@ assertions.
 |---|---|---|---|
 | SEC-07 | a bottom denotation claims like a failed query (no tag, full-range portions); a def-anchored bottom is incomplete evidence on a reachable path, so the access keeps its memory form | make the bottom arm return `(Some Tag.Dead, [])` (the removed dead-class row) | SEC-07 red: the bottom denotation must produce non-empty portions and no tag |
 | SEC-08 | plain TOP claims Stack `[entry+min_int,entry+7]` + Args `[entry+8,max]`, no tag | clamp a plain top like a symbolic top | SEC-08 red: shape is not the two-portion plain claim |
-| SEC-09 | symbolic TOP clamps to `Stack [entry-65536,entry-1]` with `Stack_unbounded` | let a symbolic top fall through to the plain full-line claim | SEC-09 red: `t ≠ Stack_unbounded` / wrong bounds |
+| SEC-09 | symbolic TOP claims `Stack [floor,entry-1]` with `Stack_unbounded` | let a symbolic top fall through to the plain full-line claim | SEC-09 red: `t ≠ Stack_unbounded` / wrong bounds |
 | SEC-10 | a plain TOP contributes no data-space portion | let the plain top add a `Data`/`Rodata` portion | SEC-10 red: `for_all ps ∈ {Stack,Args}` fails |
 | SEC-13 | an overflowed unsigned expansion saturates at the domain top (`Sec` hi = -1) | wrap `hi+w-1` without saturation | SEC-13 red: `pt_hi ≠ -1` / unordered range |
 | SEC-14 | a signed expansion at the line top saturates at `max_int` (Args) | wrap the signed `lo+w-1` at the Args ceiling | SEC-14 red: no Args portion at `max_int` |
@@ -47,7 +47,7 @@ assertions.
 | SEC-50 | a copy-reloc span is one whole-span region; the slot keeps the through lane | carve the copy-reloc span into word components | SEC-50 red: `global_comps_of` nonempty / no whole span |
 | SEC-51 | `top_claim Query_failed` is the plain full-line claim | special-case a non-plain claim for `Query_failed` | SEC-51 red: `plain` fails |
 | SEC-52 | `top_claim Foreign` is the plain full-line claim | special-case a non-plain claim for `Foreign` | SEC-52 red: `plain` fails |
-| SEC-53 | `top_claim Unbounded_stack` clamps below the entry | answer the plain claim for `Unbounded_stack` | SEC-53 red: `clamped` fails |
+| SEC-53 | `top_claim Unbounded_stack` reaches the floor below the entry | answer the plain claim for `Unbounded_stack` | SEC-53 red: `to_floor` fails |
 | SEC-55 | the narrow `r16` store converts to `region_mem 1` at the storage base (`stack_r1_ptr`), keeping its width | make the region rewrite width-sensitive (skip narrow stores) | SEC-55 red: the narrow store's mem is not `region_mem 1` |
 | SEC-56 | the pre-call caller-frame cell `[RSP-8]` holds `{0xAA}` | break the store denotation at the frame cell | SEC-56 red: value ≠ `{0xAA}` |
 | SEC-57 | the pre-call outgoing slot `[RSP+16]` holds `{0xBB}` | drop the outgoing-slot store from the block | SEC-57 red: value ≠ `{0xBB}` |
@@ -56,6 +56,10 @@ assertions.
 | SEC-61 | the constant cell joins the widened member's `Stack_residue` (together, not Region) | split the widened member from the constant cells | SEC-61 red: `[entry-16,entry-9]` storage ≠ `Stack_residue` |
 | SEC-65 | `layout_of_tree` — an 8-byte occupied span allocates 16 (align16 once, no width factor) | multiply the size by the access width in the layout rule | SEC-65 red: `regions ≠ [ (1, (entry-8,entry-1), 16) ]` |
 | SEC-66 | `S2`: an untagged heap-RBP store does not degrade the sub (rsp cell keeps Region) | classify stack-ness by the base register's name | SEC-66 red: storage ≠ `Stack_region 1` |
-| SEC-69 | AT4-VLA: a runtime-sized VLA claim binds nowhere (origin = `Vla (the decrement's tid)`, portions = `[]`), and the static frame cells carve as `Stack_region`s | bind a `Vla` claim as a Stack portion | SEC-69 red: the portions/carve asserts fail |
-| SEC-70 | AT4-VLA: a frame claim is not cut around the VLA — it binds on its own line as one Stack portion | split a frame claim around the run's extents | SEC-70 red: the portion-count/split assert fails |
+| SEC-69 | a runtime-sized allocation is ordinary stack arithmetic: the band store's origin is `Stack` and its one portion reaches the floor, the layout sets `runtime_residue`, and the frame cells share the residue | bind a Stack-TOP claim only down to a fixed depth | SEC-69 red: the portion bound, the flag or the residue storage differs |
+| SEC-70 | a frame store beside a runtime-sized allocation keeps its one exact Stack portion | split a frame claim around the allocation | SEC-70 red: the portion-count/bounds assert fails |
 | SEC-71 | B2a: the residue's window reserve is the def-backed members' proven reach — the call escape does not size it. | textually invert the pinned contract in `Hike_sections` | pin FAILs under that inversion (re-demonstrated by review) |
+| SEC-72 | storage selection: a finite residue depth above 64 KiB sizes the residue exactly, `runtime_residue` false | clamp `member_below` to 64 KiB | SEC-72 red: the residue depth is 64 KiB |
+| SEC-73 | storage selection: a depth beyond `frame_alloca_max` sets `runtime_residue` | drop the depth test in `member_runtime` | SEC-73 red: flag false |
+| SEC-74 | storage selection: an unbounded stack extent sets `runtime_residue` | claim a bounded range for `Unbounded_stack` | SEC-74 red: flag false |
+| SEC-75 | storage selection: a bounded frame keeps allocas, `runtime_residue` false | set the flag for every residue | SEC-75 red: flag true |

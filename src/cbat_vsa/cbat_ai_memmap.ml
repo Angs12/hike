@@ -405,10 +405,8 @@ let meet_range_keep (m : t) ~key ~data : t =
    (the segment-relative line the Stack cells key by).  A called
    function writes only its own frame below its entry SP and the
    escape ranges — so Stack cells keep at/above [keep_lo]
-   outside [escape]; a VLA cell belongs to the caller's own allocation,
-   which the callee cannot reach (it keeps); a plain (absolute) or rip
-   cell names no stack line and the callee may clobber any non-stack
-   memory (it drops). *)
+   outside [escape]; a plain (absolute) or rip cell names no stack line
+   and the callee may clobber any non-stack memory (it drops). *)
 let call_keep (m : t) ~(keep_lo : Cbat_word.t)
     ~(escape : (Cbat_word.t * Cbat_word.t) list) : t =
   match m.itree with
@@ -426,10 +424,7 @@ let call_keep (m : t) ~(keep_lo : Cbat_word.t)
       let keeps (k : Key.t) : bool =
         let o = Key.origin k in
         Hike_origin.names_stack_line o
-        && (match o with
-            | Hike_origin.Vla _ -> true
-            | _ ->
-              (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt))
+        && (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt)
       in
       let kept =
         IT.to_sequence it

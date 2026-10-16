@@ -237,11 +237,6 @@ let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of ~call_info
                    window) keep their base name: readers find them
                    by name. *)
                 if renamable (Def.lhs d) then
-                  let d =
-                    if Hike_def_slots.def_is_dyn_alloc d then
-                      Hike_def_slots.set_sp_before (top sp) d
-                    else d
-                  in
                   Def.with_lhs d (new_name (Def.lhs d))
                 else d)
           in

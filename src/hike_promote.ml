@@ -182,7 +182,6 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     ~(ctx : Sections.ctx)
     ~(sites : (site_binding list * blk term) Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
-    ~(vla_tids : Tid.Set.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
   let tree =
@@ -228,8 +227,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
   let facts =
     Sections.def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
       ~projections:ctx.projections ~conversions:ctx.conversions ~storages
-      ~window_param:window_ok ~vla_tids ~spans ~denote
-      ~is_dyn_alloc:Hike_def_slots.def_is_dyn_alloc sub
+      ~window_param:window_ok ~spans ~denote sub
   in
   (* The second pass: one general [Term.mapper] over the sub.  Every def
      (and phi) the attribution proved is rewritten to its owning
@@ -302,6 +300,5 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
       in
       rewrite_sub ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx ~sites
         ~resolved
-        ~vla_tids:(Core.Map.key_set facts.Hike_kb.vla_extents)
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)

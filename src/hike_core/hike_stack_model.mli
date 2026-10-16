@@ -10,7 +10,6 @@ module Abi = Hike_abi
 type sec = Hike_section.t =
   | Stack
   | Args
-  | Vla
   | Text
   | Rodata
   | Data
@@ -47,7 +46,7 @@ val segment_base : int64
 
 (* The clamp and its bounds, shared with the call abstraction. *)
 val caller_window_bytes : int64
-val stack_max : int64
+val frame_alloca_max : int64
 val stack_floor : entry:int64 -> int64
 val args_ceiling : int64
 val positions_of_offsets : Cbat_clp_set_composite.t -> (int64 * int64) option
@@ -84,7 +83,6 @@ type ptr_storage =
   | Ptr_region of int
   | Ptr_residue
   | Ptr_window
-  | Ptr_vla
 
 val equal_ptr_storage : ptr_storage -> ptr_storage -> bool
 
@@ -166,8 +164,6 @@ val region_mem : addr_bits:int -> int -> var
 val region_ptr : addr_bits:int -> int -> var
 val is_region_ptr : var -> bool
 
-val vla_ptr : addr_bits:int -> Tid.t -> var
-val is_vla_ptr : var -> bool
 
 val sec_comp_ptr : addr_bits:int -> int -> var
 val is_sec_comp_ptr : var -> bool
@@ -233,6 +229,7 @@ module Sub_layout : sig
   type t = {
     regions : region list;
     window_param : bool;
+    runtime_residue : bool;
   }
 
   val equal : t -> t -> bool
@@ -253,6 +250,7 @@ type layout_region = Sub_layout.region = {
 type sub_layout = Sub_layout.t = {
   regions : Sub_layout.region list;
   window_param : bool;
+  runtime_residue : bool;
 }
 
 val layout_tag : Sub_layout.t Value.Tag.t

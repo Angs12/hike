@@ -12,41 +12,28 @@ module Origin = Hike_origin
 
 let abi = Hike_abi.x86_64_sysv
 
-(* ORI-01: the facts table — every origin's base sits on the segment
-   line and carries the certified entry nibble; the VLA frame's clamps
-   are the segment's own (its allocation lives on the frame line). *)
+(* ORI-01: the facts table — the stack base sits on the segment line and
+   carries the certified entry nibble. *)
 let ori_01 () =
   let st = Origin.facts Origin.Stack in
-  let vl = Origin.facts (Origin.Vla (Tid.create ())) in
   check "stack base is the segment base"
     (Stdlib.Int64.equal st.Origin.base Origin.segment_base);
   check "entry nibble certified" (st.Origin.certified = 4);
   check "stack span is 8 MiB each way"
     (Stdlib.Int64.equal (Stdlib.Int64.sub st.Origin.hi st.Origin.lo)
-       (Stdlib.Int64.mul 2L (Int64.shift_left 1L 23)));
-  check "vla frame rides the segment span"
-    (Stdlib.Int64.equal vl.Origin.base st.Origin.base
-    && Stdlib.Int64.equal vl.Origin.lo st.Origin.lo
-    && Stdlib.Int64.equal vl.Origin.hi st.Origin.hi)
+       (Stdlib.Int64.mul 2L (Int64.shift_left 1L 23)))
 
 (* ORI-02: the ADT is total and names every origin. *)
 let ori_02 () =
   let all =
     [ Origin.Abs;
       Origin.Stack;
-      Origin.Vla (Tid.create ());
       Origin.Rip Hike_section.Rodata ]
   in
   List.iter all ~f:(fun o ->
       let n = Origin.name o in
       check (sprintf "name %s nonempty" n) (String.length n > 0));
-  check "four origins" (List.length all = 4);
-  check "distinct tids are distinct origins"
-    (not
-       (Origin.equal (Origin.Vla (Tid.create ()))
-          (Origin.Vla (Tid.create ()))));
-  check "same tid is the same origin"
-    (let t = Tid.create () in Origin.equal (Origin.Vla t) (Origin.Vla t))
+  check "three origins" (List.length all = 3)
 
 (* The accessor's name answer, for the pin asserts. *)
 let origin_name (o : Origin.t option) : string option =
@@ -96,158 +83,10 @@ let ori_07 () =
 
 (* ORI-08: a caller-frame pointer (a Stack value at/above the word)
    stored to a cell reads back Stack. *)
-type vla_fix = {
-  vla_sub : sub term;
-  vla_stamped : sub term;
-  vla_dec : def term;
-  vla_envs : (AI.t * AI.t) Tid.Map.t;
-  vla_rsp : var;
-  vla_rbp : var;
-  vla_m : var;
-}
-
-let vla_fixture ?(copy = false) ~(frame : int) ~(sizes : int64 list)
-    ~(after : var -> var -> var -> def term list) () : vla_fix =
-  let m = memv "vla_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let rax = v64 "RAX" in
-  let f = v1 "vla_f" in
-  let frame_w = Cbat_word.to_word (w64 frame) in
-  let w64_of (i : int64) = Cbat_word.to_word (i2w i) in
-  let cell =
-    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12)))
-  in
-  let dec = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax) in
-  (* [copy]: the decrement goes through a temporary, [RCX := RSP - RAX;
-     RSP := RCX]. *)
-  let chain, def_dec =
-    if copy then
-      let rcx = v64 "RCX" in
-      let d = Def.create rsp (Bil.Var rcx) in
-      ([ Def.create rcx dec; d ], d)
-    else
-      let d = Def.create rsp dec in
-      ([ d ], d)
-  in
-  let body =
-    [ Def.create rbp (Bil.Var rsp);
-      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int frame_w));
-      Def.create m
-        (Bil.Store
-           ( Bil.Var m,
-             cell,
-             Bil.Cast (Bil.LOW, 32, Bil.Var rax),
-             LittleEndian,
-             `r32 ));
-      Def.create rax
-        (Bil.Load (Bil.Var m, cell, LittleEndian, Size.of_int_exn 32)) ]
-    @ chain
-    @ after rsp rbp m
-  in
-  (* Two guarded edges carry the size set into the merge block. *)
-  let lo = List.hd_exn sizes in
-  let hi = List.nth sizes 1 |> Option.value ~default:lo in
-  let sub =
-    fst
-      (sub_of "vla_fix"
-         [ [ Def.create rax (Bil.Int (w64_of lo)) ],
-           [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (1, mk_goto) ];
-           [ Def.create rax (Bil.Int (w64_of hi)) ],
-           [ (2, mk_goto) ];
-           body, [ (3, mk_goto) ];
-           [], [ (2, mk_ret) ] ])
-  in
-  let entry = anchored_entry () in
-  let sol =
-    static_graph_vsa ~abi sub
-      (Vsa.init_sol ~abi ~entry sub)
-  in
-  let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
-  { vla_sub = sub; vla_stamped = stamped; vla_dec = def_dec;
-    vla_envs = envs; vla_rsp = rsp; vla_rbp = rbp; vla_m = m }
-
-(* The frame block's tid — the block holding the decrement def. *)
-let body_tid (fix : vla_fix) : Tid.t option =
-  Term.enum blk_t fix.vla_sub
-  |> Seq.find ~f:(fun b ->
-         Term.enum def_t b
-         |> Seq.exists ~f:(fun d -> Tid.equal (Term.tid d) (Term.tid fix.vla_dec)))
-  |> Base.Option.map ~f:Term.tid
-
-(* The def's stamped origin through the seam, by lhs name inside the
-   frame block (the branches define their own RAX). *)
-let post_word_named (fix : vla_fix) (name : string) : Ws.t option =
-  Base.Option.bind (body_tid fix) ~f:(fun btid ->
-      Core.Map.find fix.vla_envs btid
-      |> Base.Option.map ~f:(fun (_, post) ->
-             AI.find_word 64 post (v64 name)))
-
-(* ORI-09: the seed — the dynamic decrement opens the VLA frame named
-   by the def's own tid; the value is the allocation base
-   (frame-relative 0) and the extent records the gate and the base's
-   entry-line range. *)
-let ori_09 () =
-  let fix =
-    vla_fixture ~frame:16 ~sizes:[ 16L; 32L ] ~after:(fun _ _ _ -> []) ()
-  in
-  let tid = Term.tid fix.vla_dec in
-  check "decrement def stamps its own Vla frame"
-    (Base.Option.bind (Term.find blk_t fix.vla_stamped (Base.Option.value_exn (body_tid fix)))
-       ~f:(fun blk ->
-             Term.enum def_t blk
-             |> Seq.fold ~init:None ~f:(fun acc d ->
-                    if Tid.equal (Term.tid d) tid then
-                      Vsa.Def_origin.def_origin d
-                    else acc))
-     |> fun o -> Option.equal Origin.equal o (Some (Origin.Vla tid)));
-  check "the post value is the allocation base, materialised to its entry-line range"
-    (Base.Option.value_map (post_word_named fix "RSP") ~default:false
-       ~f:(fun ws ->
-         Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla tid))
-         &&
-         match Ws.stack_bounds ws with
-         | Some (lo, hi) ->
-             Stdlib.Int64.equal lo (-48L) && Stdlib.Int64.equal hi (-32L)
-         | None -> false));
-  check "the extent records the frame gate and the base range"
-    (match Origin.Vla_seed.extent tid with
-     | Some e ->
-       Stdlib.Int64.equal e.Origin.off_lo 0L
-       && Option.equal Int64.equal e.Origin.off_hi (Some 32L)
-       && Option.equal Int64.equal e.Origin.base_lo (Some (-48L))
-       && Option.equal Int64.equal e.Origin.base_hi (Some (-32L))
-     | None -> false)
-
-(* ORI-10: +INT inside the extent shifts the frame-relative offsets
-   exactly and keeps the frame. *)
-let ori_17 () =
-  let before = Ws.stack_word_i64 0L in
-  let singleton = Ws.sub before (Ws.stack_word_i64 16L) in
-  check "a singleton move is not a VLA event"
-    (Option.is_none (Vsa.vla_event ~before ~after:singleton));
-  let top = Ws.sub before (Ws.top 64) in
-  check "a TOP size is a VLA event"
-    (match Vsa.vla_event ~before ~after:top with
-     | Some e -> Stdlib.Int64.equal e.Hike_origin.off_lo 0L
-                 && Option.is_none e.Hike_origin.off_hi
-                 && Option.is_none e.Hike_origin.base_lo
-     | None -> false);
-  let inf =
-    Ws.stack_word
-      (Clp.create_descending ~width:64 ~base:(w64 (-8)) ~step:(w64 1))
-  in
-  check "a directional-infinite size is a VLA event"
-    (match Vsa.vla_event ~before ~after:inf with
-     | Some e -> Option.is_none e.Hike_origin.off_hi
-     | None -> false)
-
 (* ORI-18: the D10 namespace test — the stack-line origins answer
    true; a plain or module-relative origin answers false. *)
 let ori_18 () =
   check "Stack names the stack line" (Origin.names_stack_line Origin.Stack);
-  check "a VLA frame names the stack line"
-    (Origin.names_stack_line (Origin.Vla (Tid.create ())));
   check "an absolute origin names no stack line"
     (not (Origin.names_stack_line Origin.Abs));
   check "a module-relative origin names no stack line"
@@ -256,7 +95,7 @@ let ori_18 () =
 let ori_19 () =
   let origins =
     [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata;
-      Origin.Rip Hike_section.Data; Origin.Vla (Tid.create ()); Origin.Vla (Tid.create ()) ]
+      Origin.Rip Hike_section.Data ]
   in
   let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
   List.iter origins ~f:(fun a ->
@@ -298,7 +137,7 @@ let ori_19 () =
      Ws.equal u (Ws.union data rip)
      && Ws.equal (Ws.diff u (plain 5L)) rip
      && Ws.equal (Ws.diff u (plain 3L)) data);
-  List.iter [ Origin.Abs; region; Origin.Stack; Origin.Vla (Tid.create ()) ] ~f:(fun o ->
+  List.iter [ Origin.Abs; region; Origin.Stack ] ~f:(fun o ->
       check "memory namespace follows the carried origin"
         (match Ws.address_groups (value o) with
          | [ (key, _) ] -> Origin.equal key (Ws.key_line o)
@@ -315,36 +154,9 @@ let ori_20 () =
       check "Abs negation uses absolute arithmetic"
         (Ws.equal (Ws.neg (abs k)) (Ws.neg (plain k))))
 
-let ori_21 () =
-  let plain k = Ws.singleton (i2w k) in
-  let tid = Tid.create () in
-  let frame = Ws.vla_frame tid in
-  Origin.Vla_seed.record tid
-    { Origin.off_lo = 0L; off_hi = Some 32L;
-      base_lo = Some (-31L); base_hi = Some (-31L) };
-  check "VLA certified bits include the allocation base residue"
-    (Ws.equal (Ws.logand frame (plain 15L)) (plain 9L));
-  Origin.Vla_seed.record tid
-    { Origin.off_lo = 0L; off_hi = Some 32L;
-      base_lo = Some (-31L); base_hi = Some (-16L) };
-  check "a variable VLA base has no assumed alignment"
-    (Ws.is_top (Ws.logand frame (plain 15L)));
-  let rounded = Ws.logand frame (plain (-4L)) in
-  check "unknown-residue rounding preserves origin with possible slack"
-    (Option.equal Origin.equal (Ws.origin rounded) (Some (Origin.Vla tid))
-     && Option.value_map (Ws.vla_offsets rounded) ~default:false
-          ~f:(fun offs -> Clp.elem (i2w (-3L)) offs && Clp.elem (i2w 0L) offs));
-  check "a runtime base is not a complete concrete enumeration"
-    (Option.is_none (Ws.enumerate ~cap:100 frame));
-  Origin.Vla_seed.reset ()
-
 let ori_22 () =
-  let tid = Tid.create () in
-  Origin.Vla_seed.record tid
-    { Origin.off_lo = 0L; off_hi = Some 32L;
-      base_lo = Some 0L; base_hi = Some 0L };
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata; Origin.Vla tid ] in
+    [ Origin.Abs; Origin.Stack; Origin.Rip Hike_section.Rodata ] in
   let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
   let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
   let cell = key (Ws.singleton (i2w 0x1000L)) in
@@ -358,8 +170,7 @@ let ori_22 () =
       List.iter origins ~f:(fun b ->
           check "memory aliases only the explicit shared coordinate line"
             (Bool.equal (Mem.Key.overlap (key data) (key (value b)))
-               (Origin.equal (Ws.key_line a) (Ws.key_line b)))));
-  Origin.Vla_seed.reset ()
+               (Origin.equal (Ws.key_line a) (Ws.key_line b)))))
 
 let ori_23 () =
   List.iter [ Origin.Stack ] ~f:(fun o ->
@@ -373,7 +184,7 @@ let ori_23 () =
 
 let ori_24 () =
   let origins =
-    [ Origin.Stack; Origin.Rip Hike_section.Rodata; Origin.Vla (Tid.create ()) ] in
+    [ Origin.Stack; Origin.Rip Hike_section.Rodata ] in
   List.iter origins ~f:(fun o ->
       let a = Ws.set_origin o (Ws.stack_word_i64 0L) in
       let b = Ws.set_origin o (Ws.stack_word_i64 1L) in
@@ -387,48 +198,6 @@ let ori_24 () =
      && Ws.is_bottom
           (Ws.diff a (Ws.set_origin (Origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 42L))))
 
-(* ORI-25: the copy chain's producer opens the frame — the temporary
-   and the SP it reaches carry it, and an access through the temporary
-   routes into the allocation. *)
-let ori_25 () =
-  let rcx = v64 "RCX" in
-  let fix =
-    vla_fixture ~copy:true ~frame:16 ~sizes:[ 16L; 32L ]
-      ~after:(fun _ _ m ->
-        [ Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   (Bil.PLUS, Bil.Var rcx, Bil.Int (Cbat_word.to_word (w64 8))),
-                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
-                 LittleEndian,
-                 `r32 )) ])
-      ()
-  in
-  let producer =
-    Term.enum blk_t fix.vla_sub |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
-    |> Option.value_exn |> Term.tid
-  in
-  let frame ws = Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla producer)) in
-  check "the temporary and SP carry the producer's frame"
-    (Option.value_map (post_word_named fix "RCX") ~default:false ~f:frame
-     && Option.value_map (post_word_named fix "RSP") ~default:false ~f:frame);
-  check "the SP def confirms it; no second allocation opens"
-    (Core.Set.equal (Origin.Vla_seed.allocations ())
-       (Core.Set.singleton (module Tid) producer));
-  check "an access through the temporary routes into the allocation"
-    (Base.Option.bind
-       (Term.find blk_t fix.vla_stamped (Base.Option.value_exn (body_tid fix)))
-       ~f:(fun blk ->
-         Term.enum def_t blk
-         |> Seq.find ~f:(fun d ->
-                match Def.rhs d with
-                | Bil.Store (_, Bil.BinOp (Bil.PLUS, _, _), _, _, _) -> true
-                | _ -> false)
-         |> Base.Option.bind ~f:Vsa.Def_origin.def_origin)
-     |> fun o -> Option.equal Origin.equal o (Some (Origin.Vla producer)))
-
 let ori_26 () =
   let s k = Ws.stack_word_i64 k in
   let c n = Ws.singleton (i2w n) in
@@ -441,6 +210,49 @@ let ori_26 () =
   check "OR with a constant above the certified bits answers top"
     (Ws.is_top (Ws.logor (s 0L) (c 0x100L)))
 
+(* ORI-27 (T35): the stack-probe shape — an SP that is a non-singleton
+   Stack set (two guarded sizes), then a fixed page decrement.  SP is
+   ordinary Stack arithmetic: its origin stays Stack and its offsets are
+   the exact shifted set. *)
+let ori_27 () =
+  let m = memv "ori27_m" in
+  ignore m;
+  let rsp = v64 "RSP" and rax = v64 "RAX" in
+  let f = v1 "ori27_f" in
+  let w (i : int64) = Cbat_word.to_word (i2w i) in
+  let sub =
+    fst
+      (sub_of "ori27"
+         [ [ Def.create rax (Bil.Int (w 16L)) ],
+           [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (1, mk_goto) ];
+           [ Def.create rax (Bil.Int (w 32L)) ],
+           [ (2, mk_goto) ];
+           [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax));
+             Def.create rsp
+               (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w 4096L))) ],
+           [ (3, mk_goto) ];
+           [], [ (2, mk_ret) ] ])
+  in
+  let entry = anchored_entry () in
+  let sol =
+    static_graph_vsa ~abi sub (Vsa.init_sol ~abi ~entry sub)
+  in
+  let envs, _ = Vsa.stamp_envs_of_sol ~sol sub in
+  let post =
+    Core.Map.data envs
+    |> List.map ~f:(fun (_, post) -> AI.find_word 64 post rsp)
+    |> List.filter ~f:(fun ws -> Option.is_some (Ws.stack_offsets ws)
+                                 && not (Ws.is_top ws))
+  in
+  check "SP stays on the Stack origin through the fixed decrement"
+    (List.for_all post ~f:(fun ws ->
+         Option.equal Origin.equal (Ws.origin ws) (Some Origin.Stack)));
+  check "the final SP is exactly the two shifted positions"
+    (List.exists post ~f:(fun ws ->
+         Option.value_map (Ws.stack_offsets ws) ~default:false ~f:(fun offs ->
+             Clp.elem (i2w (-4128L)) offs && Clp.elem (i2w (-4112L)) offs
+             && not (Clp.elem (i2w (-4120L)) offs))))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -449,7 +261,6 @@ let () =
 
       pin "ORI-07" "store-to-load round-trip (frame)" ori_07;
 
-      pin "ORI-09" "the VLA seed (Vla T at the true positions)" ori_09;
 
 
 
@@ -457,15 +268,15 @@ let () =
 
 
 
-      pin "ORI-17" "the D1 shape predicate (singleton / TOP / infinite)" ori_17;
       pin "ORI-18" "the D10 namespace test" ori_18;
       pin "ORI-19" "all origins retain identity and use their own facts" ori_19;
       pin "ORI-20" "absolute-origin arithmetic preserves bits" ori_20;
-      pin "ORI-21" "VLA operations require certified base bits" ori_21;
       pin "ORI-22" "all-origin memory round trips and alias namespaces" ori_22;
       pin "ORI-23" "rounding crosses base-residue block boundaries" ori_23;
       pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24;
-      pin "ORI-25" "the copy chain's producer opens the frame" ori_25;
       pin "ORI-26"
         "certified-bit OR/XOR of a stack value stays relative; above the certified bits it is top"
-        ori_26 ]
+        ori_26;
+      pin "ORI-27"
+        "a set-valued SP with a fixed decrement stays on the Stack origin"
+        ori_27 ]

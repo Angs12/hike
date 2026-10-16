@@ -20,20 +20,6 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   in
   let layout ~synth program =
     let facts = { facts with Hike_kb.synth } in
-    let dynamic_allocs =
-      Term.enum sub_t program
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun map sub ->
-             Core.Map.set map ~key:(Term.tid sub)
-               ~data:(Hike_sections.dynamic_allocs_of ~facts sub))
-    in
-    let program =
-      Term.map sub_t program ~f:(fun sub ->
-          let allocs =
-            Core.Map.find dynamic_allocs (Term.tid sub)
-            |> Option.value ~default:Tid.Map.empty
-          in
-          Hike_def_slots.stamp_dyn_allocs ~allocs sub)
-    in
     let sections =
       Hike_sections.attribute ~facts ~word ~entry ~spans program
     in

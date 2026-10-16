@@ -118,7 +118,7 @@ let tests : unit Alcotest.test list =
        pointer [In] lane"
       (fun () ->
         let layout : Sm.sub_layout =
-          { regions = []; window_param = true }
+          { regions = []; window_param = true; runtime_residue = false }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
         let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in

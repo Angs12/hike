@@ -16,7 +16,6 @@ let tests : unit Alcotest.test list =
         let kept = Ws.stack_word_i64 0L in
         let lost = Ws.singleton (Cbat_word.of_int64 ~width:64 Ws.stack_base) in
         let base = Ws.stack_word_i64 0L in
-        let tid = Tid.create () in
         check "PROBE-01 (only the carried origin names stack)"
           (Ws.in_stack_segment kept && not (Ws.in_stack_segment lost));
         check "PROBE-01 (the symbolic arm keeps its origin)"
@@ -25,18 +24,16 @@ let tests : unit Alcotest.test list =
           (Rows.classify_shape lost = `Lost);
         check "PROBE-01 (window)"
           (Rows.classify_shape (Ws.stack_word_i64 8L) = `Window);
-        check "PROBE-01 (vla)"
-          (Rows.classify_shape (Ws.vla_frame tid) = `Vla);
         check "PROBE-01 (rip -> other)"
           (Rows.classify_shape (Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base) = `Other));
 
     pin "PROBE-02"
-      "the five access shape counters sum to the non-bottom stack-flagged \
+      "the four access shape counters sum to the non-bottom stack-flagged \
        access population"
       (fun () ->
         let s = Rows.Sub_stats.create "add" in
         let shapes : Rows.shape list =
-          [ `Stack; `Vla; `Window; `Other; `Lost ]
+          [ `Stack; `Window; `Other; `Lost ]
         in
         List.iter
           (fun sh ->
@@ -48,7 +45,7 @@ let tests : unit Alcotest.test list =
         (* A non-stack access counts no shape. *)
         Rows.Sub_stats.add_ld s ~stack:false ~shape:(Some `Lost) `Exact;
         let sum =
-          s.Rows.Sub_stats.ldstk_sh_stack + s.Rows.Sub_stats.ldstk_sh_vla
+          s.Rows.Sub_stats.ldstk_sh_stack
           + s.Rows.Sub_stats.ldstk_sh_window + s.Rows.Sub_stats.ldstk_sh_other
           + s.Rows.Sub_stats.ldstk_sh_lost
         in
@@ -62,22 +59,22 @@ let tests : unit Alcotest.test list =
           - s.Rows.Sub_stats.ldstk_bottom_live
         in
         check "PROBE-02"
-          (sum = 5 && pop = 7 && non_bottom = 5 && sum = non_bottom));
+          (sum = 4 && pop = 6 && non_bottom = 4 && sum = non_bottom));
 
     pin "PROBE-03"
-      "the five def shape counters sum to the shape-carrying stack-flagged \
+      "the four def shape counters sum to the shape-carrying stack-flagged \
        def population"
       (fun () ->
         let s = Rows.Sub_stats.create "add" in
         let shapes : Rows.shape list =
-          [ `Stack; `Vla; `Window; `Other; `Lost ]
+          [ `Stack; `Window; `Other; `Lost ]
         in
         List.iter
           (fun sh ->
              Rows.Sub_stats.add_def s ~stack:true ~shape:(Some sh) `Exact)
           shapes;
         let sum () =
-          s.Rows.Sub_stats.defstk_sh_stack + s.Rows.Sub_stats.defstk_sh_vla
+          s.Rows.Sub_stats.defstk_sh_stack
           + s.Rows.Sub_stats.defstk_sh_window + s.Rows.Sub_stats.defstk_sh_other
           + s.Rows.Sub_stats.defstk_sh_lost
         in
@@ -87,7 +84,7 @@ let tests : unit Alcotest.test list =
         Rows.Sub_stats.add_def s ~stack:true ~shape:None `Bottom_dead;
         Rows.Sub_stats.add_def s ~stack:true ~shape:None `Bottom_live;
         check "PROBE-03"
-          (before = 5 && sum () = 5 && s.Rows.Sub_stats.def_bottom_dead = 1
+          (before = 4 && sum () = 4 && s.Rows.Sub_stats.def_bottom_dead = 1
            && s.Rows.Sub_stats.def_bottom_live = 1));
 
     pin "PROBE-04"

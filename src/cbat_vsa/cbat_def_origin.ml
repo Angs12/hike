@@ -53,31 +53,12 @@ let def_origin (d : def term) : Origin.t option =
 let with_origin (o : Origin.t) (d : def term) : def term =
   Hike_def_slot.put def_origin_d (Some o) d
 
-(* The def's stamped origin: its value's own origin.  A VLA origin is
-   routable only when the value's frame-relative offsets are inside the
-   allocation's gate ([off_lo, off_hi)); an out-of-gate or unknown-base
-   value reads Abs — the sound fallback. *)
-let routable_origin (v : WordSet.t) : Origin.t =
+(* The def's stamped origin: its value's own origin; a mixed or plain
+   value reads Abs, the sound fallback. *)
+let origin_of_def_value (v : WordSet.t) : Origin.t =
   match WordSet.origin v with
-  | Some (Origin.Vla tid as o) ->
-    let in_gate =
-      match WordSet.vla_offsets v, Origin.Vla_seed.extent tid with
-      | Some offs, Some e -> (
-          match WordSet.Clp.Pieces.min_elem offs, WordSet.Clp.Pieces.max_elem offs with
-          | Some lo, Some hi ->
-            Option.map (Cbat_word.int64_pair lo hi) ~f:(fun (klo, khi) ->
-                Int64.compare klo e.Origin.off_lo >= 0
-                && (match e.Origin.off_hi with
-                    | None -> true
-                    | Some h -> Int64.compare khi h < 0))
-          | _ -> None)
-      | _ -> None
-    in
-    if Option.value in_gate ~default:false then o else Origin.Abs
   | Some o -> o
   | None -> Origin.Abs
-
-let origin_of_def_value (v : WordSet.t) : Origin.t = routable_origin v
 
 (* The stamp sweep's per-def step: the routed origin is the memory
    node's ADDRESS (where the traffic lands, for a load and a store

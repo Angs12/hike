@@ -94,6 +94,7 @@ let key_extent (ws : Ws.t) : (Cbat_word.t * Cbat_word.t) option =
 (* The window extension's capacity; a real SysV window never needs more. *)
 let caller_window_bytes : int64 = 65536L
 
-(* The directionless stack top's below-entry clamp: a TOP stack offset
-   claims [entry - stack_max, entry). *)
-let stack_max : int64 = 65536L
+(* The largest proven below-entry depth a sub backs with an alloca. A
+   deeper or unbounded extent selects the runtime stack: this is a
+   storage choice, never a claim about the extent. *)
+let frame_alloca_max : int64 = 1_048_576L

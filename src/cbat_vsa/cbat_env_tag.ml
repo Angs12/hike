@@ -181,24 +181,6 @@ let denote_exp_at :
    the sub with every def stamped with the env its own transfer reads. *)
 let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
     (AI.t * AI.t) Tid.Map.t * sub term =
-  (* The final replay is the seed's authoritative pass for this sub:
-     clear its fixpoint-transient events so the table holds only the
-     events the converged denotations still satisfy.  Other subs'
-     entries stay: the table accumulates the program's allocations. *)
-  let own =
-    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.map ~f:Term.tid |> Seq.to_list |> Tid.Set.of_list
-  in
-  WordSet.Origin.Vla_seed.filter (fun t -> not (Core.Set.mem own t));
-  (* The first replay records the sub's candidates, confirmations and
-     floors; the stamping replay then reads every frame's final gate
-     (a floor can come from a def after the access in block order). *)
-  Term.enum blk_t sub
-  |> Seq.iter ~f:(fun blk ->
-      ignore
-        (Term.enum def_t blk
-         |> Seq.fold ~init:(Solution.get sol (Term.tid blk)) ~f:(fun env d ->
-             denote_def d env)));
   let envs = ref Tid.Map.empty in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->

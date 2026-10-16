@@ -108,6 +108,7 @@ let production_input (proj : Project.t) : program term =
   |> Term.map sub_t ~f:(Hike.Jump.compile_sub target)
   |> Hike.Split_mem.normalize
   |> Hike.Coerce.coerce_program
+  |> Hike.Concat.normalize
   |> Hike.Fp.run_program
 
 (* The analysis image set: never-written memory, relocated words resolved. *)

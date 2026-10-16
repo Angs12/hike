@@ -252,6 +252,30 @@ let create_blocks ctx scope llvm_ctx blks fn sub =
       init_blk_llvals scope tid;
       insert_bb scope tid (Llvm.append_block llvm_ctx (Term.name blk) fn))
 
+(* A runtime sub restores the caller's cursor before every return. *)
+let restore_cursor ctx fn top =
+  Llvm.iter_blocks
+    (fun bb ->
+      match Llvm.block_terminator bb with
+      | Some t when Llvm.instr_opcode t = Llvm.Opcode.Ret ->
+        Hike_stack_ptr.set_cursor ~llvm_ctx:ctx.llvm_ctx
+          (Llvm.builder_before ctx.llvm_ctx t) top
+      | _ -> ())
+    fn
+
+(* An alloca frame past one page is probed, so a large decrement cannot
+   step over the host's guard page. *)
+let frame_probes ~(page : int64) (layout : Hike_stack_model.sub_layout) : bool =
+  let bytes =
+    Base.List.sum (module Base.Int64) layout.Hike_stack_model.regions
+      ~f:(fun r ->
+        if layout.Hike_stack_model.runtime_residue
+           && Int.equal r.Hike_stack_model.r_id Hike_stack_model.residue_id
+        then 0L
+        else r.Hike_stack_model.r_bytes)
+  in
+  Int64.compare bytes page > 0
+
 (* Consumes the sub's LAYOUT tag (region geometry). *)
 let create_sub ctx scope sub =
   if is_empty sub then ()
@@ -275,10 +299,12 @@ let create_sub ctx scope sub =
     let layout =
       Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:{ Hike_stack_model.Sub_layout.regions = [];
-                   window_param = false }
+                   window_param = false;
+                   runtime_residue = false }
     in
-    let storages =
-      Hike_stack_ptr.build ~llvm_ctx ~llvm_builder ~addr_bits:ctx.addr_bits layout
+    let { Hike_stack_ptr.storages; runtime_top } =
+      Hike_stack_ptr.build_frame ~llvm_ctx ~llvm_builder
+        ~addr_bits:ctx.addr_bits ~word:ctx.abi.Abi.word layout
     in
     Base.List.iter storages ~f:(fun (s : Hike_stack_ptr.storage) ->
         Bil2llvm_synth.bind_storage scope s.mem s.base s.rel;
@@ -306,13 +332,20 @@ let create_sub ctx scope sub =
                  (Stdlib.Int64.neg rel) false |]
             "entry" llvm_builder)
     in
-    let fr : sub_frame = { entry_line; entry_ptr } in
+    let fr : sub_frame =
+      { entry_line; entry_ptr; rstack_top = runtime_top }
+    in
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub;
     fill_bir_phis ctx scope blks;
     scope.cur_frame := None;
+    Base.Option.iter runtime_top ~f:(restore_cursor ctx fn);
+    if frame_probes ~page:ctx.abi.Abi.page_size layout then
+      Llvm.add_function_attr fn
+        (Llvm.create_string_attr ctx.llvm_ctx "probe-stack" "inline-asm")
+        Llvm.AttrIndex.Function;
     let sub_tid = Term.tid sub in
     let lane_reads =
       Core.Map.fold !(scope.undef_warned) ~init:Var.Set.empty

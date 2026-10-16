@@ -32,9 +32,6 @@ let tp_offset_equal (a : Hike.Stack_model.tp_offset) (b : Hike.Stack_model.tp_of
   | Tp_based x, Tp_based y -> Base.Option.equal Int64.equal x y
   | _ -> false
 
-let stack_floor_bytes = Int64.mul 64L 1024L
-let residue_index = Int64.add stack_floor_bytes 8L
-let unbounded_residue_bytes = Int64.mul 2L residue_index
 
 let tid_set (tids : tid list) : Tid.Set.t =
   List.fold_left (fun s t -> Core.Set.add s t) Tid.Set.empty tids
@@ -100,168 +97,13 @@ let named n = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
 let tests : unit Alcotest.test list =
   [
     (* Lane A: the producer record (the composed producer end-to-end). *)
-    pin "MOD-01"
-      "PR-A5: neither the literal decrement nor the chain-resolved constant is the event"
-      (fun () ->
-        let a5_rbx = v64 "pr_a5_rbx" in
-        let a5_lit =
-          Def.create sp
-            (Bil.BinOp
-               ( Bil.MINUS,
-                 Bil.Var sp,
-                 Bil.Int (Cbat_word.to_word (w64 0x28)) ))
-        in
-        let a5_rbx_def =
-          Def.create a5_rbx (Bil.Int (Cbat_word.to_word (w64 0x80)))
-        in
-        let a5_bnd =
-          Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rbx))
-        in
-        let a5 = straight_sub "pr_a5_vla" [ a5_lit; a5_rbx_def; a5_bnd ] in
-        let facts, a5 = fixture_facts_sub a5 in
-        check "MOD-01"
-          (Core.Set.is_empty
-             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5))));
-
-    pin "MOD-02"
-      "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
-      (fun () ->
-        let a5_rcx = v64 "pr_a5_rcx" in
-        let a5_vla =
-          Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx))
-        in
-        let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
-        let facts, a5u = fixture_facts_sub a5u in
-        let a5u_events =
-          Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5u)
-        in
-        check "MOD-02"
-          (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ])));
-
-    pin "MOD-03"
-      "PR-A5: the dynamic-allocation fact rides the def's value through the stamp"
-      (fun () ->
-        let a5_rcx = v64 "pr_a5_rcx" in
-        let a5_vla =
-          Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx))
-        in
-        let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
-        let facts, a5u = fixture_facts_sub a5u in
-        let a5u_events =
-          Hike.Sections.dynamic_allocs_of ~facts a5u
-        in
-        let a5_stamped =
-          Ds.stamp_dyn_allocs ~allocs:a5u_events a5u
-        in
-        check "MOD-03"
-          (Ds.def_is_dyn_alloc
-             (Base.Option.value_exn
-                (def_of_tid a5_stamped (Term.tid a5_vla)))));
-
-    pin "MOD-04"
-      "PR-A5c: a VLA spelled through TWO temps is one allocation, named by the def computing its base"
-      (fun () ->
-        let a5_rcx = v64 "pr_a5_rcx" in
-        let a5c_t1 = v64 "pr_a5c_t1" in
-        let a5c_t2 = v64 "pr_a5c_t2" in
-        let a5c_d1 =
-          Def.create a5c_t1
-            (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx))
-        in
-        let a5c_d2 = Def.create a5c_t2 (Bil.Var a5c_t1) in
-        let a5c_sp = Def.create sp (Bil.Var a5c_t2) in
-        let a5c = straight_sub "pr_a5c_chain" [ a5c_d1; a5c_d2; a5c_sp ] in
-        let facts, a5c = fixture_facts_sub a5c in
-        check "MOD-04"
-          (Core.Set.equal
-             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5c))
-             (tid_set [ Term.tid a5c_d1 ])));
-
-    pin "MOD-05"
-      "PR-A5d: the lea-computed adjustment (a negative size ADDED) is the event"
-      (fun () ->
-        let a5_rcx = v64 "pr_a5_rcx" in
-        let a5d_t = v64 "pr_a5d_t" in
-        let a5d_d1 =
-          Def.create a5d_t
-            (Bil.BinOp
-               ( Bil.MINUS,
-                 Bil.Int (Cbat_word.to_word (w64 0)),
-                 Bil.Var a5_rcx ))
-        in
-        let a5d_sp =
-          Def.create sp (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Var a5d_t))
-        in
-        let a5d = straight_sub "pr_a5d_plus" [ a5d_d1; a5d_sp ] in
-        let facts, a5d = fixture_facts_sub a5d in
-        check "MOD-05"
-          (Core.Set.equal
-             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5d))
-             (tid_set [ Term.tid a5d_sp ])));
-
-    pin "MOD-06"
-      "PR-A5e: a provably-above PLUS adjustment is not the VLA event (the value's direction)"
-      (fun () ->
-        let a5e_y = v64 "pr_a5e_y" in
-        let a5e_r8 = v64 "pr_a5e_r8" in
-        let a5e_y_def =
-          Def.create a5e_y
-            (Bil.BinOp
-               ( Bil.AND,
-                 Bil.Var a5e_r8,
-                 Bil.Int (Cbat_word.to_word (w64 63)) ))
-        in
-        let a5e_sp =
-          Def.create sp (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Var a5e_y))
-        in
-        let a5e = straight_sub "pr_a5e_plus_above" [ a5e_y_def; a5e_sp ] in
-        let fa5e, a5e = fixture_facts_sub a5e in
-        check "MOD-06"
-          (Core.Set.is_empty
-             (Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts:fa5e a5e))));
-
-    pin "MOD-07"
-      "PR-A5b: a VLA in a looping sub is the event — the widened loop does not hide it"
-      (fun () ->
-        let a5_rcx = v64 "pr_a5_rcx" in
-        let a5b_loop =
-          Bil.BinOp
-            (Bil.LT, Bil.Var a5_rcx, Bil.Int (Cbat_word.to_word (w64 5)))
-        in
-        let a5b, _ =
-          sub_of "pr_a5b_loop_vla"
-            [ [ Def.create sp
-                  (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx)) ],
-              [ (1, mk_goto) ];
-              [],
-              [ (2, fun t -> mk_jmp_to t a5b_loop);
-                (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, a5b_loop))) ];
-              [], [ (1, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let a5b_body_sp =
-          Term.enum blk_t a5b
-          |> Seq.find_map ~f:(fun blk ->
-                 Term.enum def_t blk
-                 |> Seq.find_map ~f:(fun d ->
-                        if Var.same (Def.lhs d) sp then Some (Term.tid d)
-                        else None))
-          |> Base.Option.value_exn
-        in
-        let facts, a5b = fixture_facts_sub a5b in
-        let a5b_events =
-          Core.Map.key_set (Hike.Sections.dynamic_allocs_of ~facts a5b)
-        in
-        check "MOD-07"
-          (Core.Set.equal a5b_events (tid_set [ a5b_body_sp ])));
-
     (* Lane B: the layout from the finalized tree ([layout_of_tree]). *)
 
 
 
 
     pin "MOD-10"
-      "PR-B3: a plain-TOP identity member forces the residue region with the 64K unbounded floors"
+      "PR-B3: a plain-TOP identity member forces the residue region and selects the runtime stack"
       (fun () ->
         let abi = Hike.Abi.x86_64_sysv in
         let entry = Sm.segment_base in
@@ -284,9 +126,9 @@ let tests : unit Alcotest.test list =
             (tree_of sub2)
         in
         check "MOD-10"
-          (Base.List.exists l2.Sm.regions
-             ~f:(fun { Sm.r_id = id; r_bytes = b; _ } ->
-               Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
+          (l2.Sm.runtime_residue
+           && Base.List.exists l2.Sm.regions
+                ~f:(fun { Sm.r_id = id; _ } -> Int.equal id 0)));
 
 
 
@@ -674,9 +516,9 @@ let tests : unit Alcotest.test list =
           (Core.Set.equal (Blk.free_vars block)
              (Var.Set.singleton rax)));
 
-    (* The allocation is opened where its base is computed (ADR 0030). *)
+    (* SP arithmetic is ordinary Stack arithmetic (ADR 0037). *)
     pin "MOD-44"
-      "a candidate SP never enters is no allocation: its value reads as the stack positions it stands for"
+      "a runtime-sized descent from SP reads as the stack positions it stands for"
       (fun () ->
         let c = v1 "vla44_c" and t = v64 "vla44_t" in
         let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
@@ -686,8 +528,6 @@ let tests : unit Alcotest.test list =
         let sub = straight_sub "vla44_redzone" [ d_t ] in
         let facts, sub = fixture_facts_sub sub in
         let blk = Term.first blk_t sub |> Base.Option.value_exn in
-        check "MOD-44 no allocation"
-          (Core.Map.is_empty (Hike.Sections.dynamic_allocs_of ~facts sub));
         check "MOD-44 the value is its stack positions"
           (match facts.Hike.Kb.denote ~blk (Bil.Var t) with
            | Ok ws ->
@@ -697,100 +537,36 @@ let tests : unit Alcotest.test list =
            | Error _ -> false));
 
     pin "MOD-45"
-      "a runtime descent below a pending frame is a nested allocation; SP reaching it confirms both"
+      "an unbounded runtime SP decrement selects the runtime stack, and a bounded one keeps allocas"
       (fun () ->
-        let rcx = v64 "vla45_rcx" and rdx = v64 "vla45_rdx" in
-        let t = v64 "vla45_t" and u = v64 "vla45_u" in
-        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
-        let d_u = Def.create u (Bil.BinOp (Bil.MINUS, Bil.Var t, Bil.Var rdx)) in
-        let sub =
-          straight_sub "vla45_nested" [ d_t; d_u; Def.create sp (Bil.Var u) ]
+        let rcx = v64 "mod45_rcx" in
+        let m = memv "mod45_m" in
+        let abi = Hike.Abi.x86_64_sysv in
+        let layout name defs =
+          let sub = straight_sub name defs in
+          Hike.Sections.layout_of_tree ~word:8
+            ~entry:Hike.Stack_model.segment_base ~abi ~sub (tree_of sub)
         in
-        let facts, sub = fixture_facts_sub sub in
-        let allocs = Hike.Sections.dynamic_allocs_of ~facts sub in
-        check "MOD-45 two allocations"
-          (Core.Set.equal (Core.Map.key_set allocs)
-             (tid_set [ Term.tid d_t; Term.tid d_u ]));
-        check "MOD-45 the nested one is measured from its parent"
-          (match Core.Map.find allocs (Term.tid d_u),
-                 Core.Map.find allocs (Term.tid d_t) with
-           | Some a, Some b ->
-             Option.equal Tid.equal a.Hike.Def_slots.parent (Some (Term.tid d_t))
-             && Option.is_none b.Hike.Def_slots.parent
-           | _ -> false));
-
-    pin "MOD-46"
-      "two VLAs through copy chains are two top-level allocations"
-      (fun () ->
-        let rcx = v64 "vla46_rcx" and rdx = v64 "vla46_rdx" in
-        let t = v64 "vla46_t" and u = v64 "vla46_u" in
-        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
-        let d_u = Def.create u (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rdx)) in
-        let sub =
-          straight_sub "vla46_two"
-            [ d_t; Def.create sp (Bil.Var t); d_u; Def.create sp (Bil.Var u) ]
-        in
-        let facts, sub = fixture_facts_sub sub in
-        let allocs = Hike.Sections.dynamic_allocs_of ~facts sub in
-        check "MOD-46"
-          (Core.Set.equal (Core.Map.key_set allocs)
-             (tid_set [ Term.tid d_t; Term.tid d_u ])
-          && Core.Map.for_all allocs ~f:(fun a ->
-                 Option.is_none a.Hike.Def_slots.parent)));
-
-    pin "MOD-47"
-      "the frame's floor is where SP enters it (round-down slack); a later push is below the allocation"
-      (fun () ->
-        let rcx = v64 "vla47_rcx" and t = v64 "vla47_t" in
-        let w k = Bil.Int (Cbat_word.to_word (w64 k)) in
-        let d_t = Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
-        let sub =
-          straight_sub "vla47_floor"
-            [ d_t;
-              Def.create sp (Bil.BinOp (Bil.AND, Bil.Var t, w (-16)));
-              Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, w 8)) ]
-        in
-        let facts, sub = fixture_facts_sub sub in
-        check "MOD-47"
-          (match
-             Core.Map.find (Hike.Sections.dynamic_allocs_of ~facts sub) (Term.tid d_t)
-           with
-           | Some a -> Int64.equal a.Hike.Def_slots.floor (-15L)
-           | None -> false));
-
-    pin "MOD-48"
-      "an access through the producer's register is addressed from its allocation base"
-      (fun () ->
-        let rcx = v64 "vla48_rcx" and t = v64 "vla48_t" in
-        let m = memv "vla48_m" in
-        let w k = Bil.Int (Cbat_word.to_word (w64 k)) in
-        let st =
+        let store =
           Def.create m
             (Bil.Store
-               ( Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var t, w 8),
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.PLUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 8))),
                  Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
-                 LittleEndian, `r32 ))
+                 LittleEndian,
+                 `r32 ))
         in
-        let sub =
-          straight_sub "vla48_route"
-            [ Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx));
-              Def.create sp (Bil.Var t); st ]
+        let dec = Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var rcx)) in
+        let masked =
+          Def.create rcx
+            (Bil.BinOp
+               ( Bil.AND, Bil.Var rcx, Bil.Int (Cbat_word.to_word (w64 0xFF)) ))
         in
-        let sub = rewrite_one sub in
-        let addr =
-          Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
-          |> Seq.find_map ~f:(fun d ->
-                 match Def.rhs d with
-                 | Bil.Store (_, a, _, _, _) when Tid.equal (Term.tid d) (Term.tid st) -> Some a
-                 | _ -> None)
-        in
-        check "MOD-48"
-          (match addr with
-           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int k)) ->
-             Hike.Stack_model.is_vla_ptr b
-             && Base.Result.equal Int64.equal (fun _ _ -> false)
-                  (Cbat_word.to_int64 (Cbat_word.of_word k)) (Ok 8L)
-           | _ -> false));
+        check "MOD-45 unbounded"
+          (layout "mod45_unb" [ dec; store ]).Sm.runtime_residue;
+        check "MOD-45 bounded"
+          (not (layout "mod45_bnd" [ masked; dec; store ]).Sm.runtime_residue));
   ]
 
 let () = run "model" tests

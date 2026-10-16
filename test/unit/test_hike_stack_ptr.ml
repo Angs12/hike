@@ -22,8 +22,9 @@ let make_builder () =
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   (llvm_ctx, llvm_module, llvm_builder)
 
-let layout_of ?(window_param = false) regions : Model.sub_layout =
-  { regions; window_param }
+let layout_of ?(window_param = false) ?(runtime_residue = false) regions
+    : Model.sub_layout =
+  { regions; window_param; runtime_residue }
 
 (* The absolute segment-line position of a frame offset, exactly as the
    producer stamps it: [base + o]. *)
@@ -49,8 +50,9 @@ let tests : unit Alcotest.test list =
               r_hi = pos (-17L);
               r_bytes = 16L } ]
         in
-        let storages =
-          Stack_ptr.build ~llvm_ctx ~llvm_builder ~addr_bits:64 (layout_of regions)
+        let { Stack_ptr.storages; _ } =
+          Stack_ptr.build_frame ~llvm_ctx ~llvm_builder ~addr_bits:64 ~word:8
+            (layout_of regions)
         in
         ignore (Llvm.build_ret_void llvm_builder);
         let ir = Llvm.string_of_llmodule llvm_module in
@@ -66,6 +68,129 @@ let tests : unit Alcotest.test list =
           | _ -> false));
 
 
+    pin "SPTR-04"
+      "a runtime residue is the region below the cursor: the residue base \
+       derives from the entry call by GEPs, a carved region stays an alloca, \
+       and the helpers are weak noinline definitions with the cursor attributes"
+      (fun () ->
+        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
+        let regions =
+          [ { Model.Sub_layout.r_id = 0;
+              r_lo = pos (-48L);
+              r_hi = pos 15L;
+              r_bytes = 80L };
+            { Model.Sub_layout.r_id = 2;
+              r_lo = pos (-96L);
+              r_hi = pos (-81L);
+              r_bytes = 16L } ]
+        in
+        let { Stack_ptr.storages; runtime_top } =
+          Stack_ptr.build_frame ~llvm_ctx ~llvm_builder ~addr_bits:64 ~word:8
+            (layout_of ~runtime_residue:true regions)
+        in
+        Stack_ptr.set_cursor ~llvm_ctx llvm_builder
+          (Base.Option.value_exn runtime_top);
+        ignore (Llvm.build_ret_void llvm_builder);
+        let ir = Llvm.string_of_llmodule llvm_module in
+        check "SPTR-04"
+          (match storages, runtime_top with
+          | [ residue; carved ], Some top ->
+              (not (alloca_p residue.base))
+              && alloca_p carved.base
+              && Int64.equal residue.rel (-48L)
+              && contains_substring ir "%rstack_top = call ptr @hike_rstack_enter()"
+              && contains_substring ir "%rstack_entry = getelementptr i8, ptr %rstack_top, i64 -24"
+              && Llvm.value_name top = "rstack_top"
+              && contains_substring ir "define weak noalias ptr @hike_rstack_enter()"
+              && contains_substring ir "define weak void @hike_rstack_set(ptr nocapture"
+              && contains_substring ir "memory(inaccessiblemem: write)"
+              && contains_substring ir "noinline"
+              && contains_substring ir "@hike_rstack_cur = weak thread_local global"
+          | _ -> false));
+
+    pin "SPTR-05"
+      "a bounded layout carries no runtime-stack helper"
+      (fun () ->
+        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
+        let regions =
+          [ { Model.Sub_layout.r_id = 0;
+              r_lo = pos (-48L);
+              r_hi = pos 15L;
+              r_bytes = 80L } ]
+        in
+        let { Stack_ptr.storages; runtime_top } =
+          Stack_ptr.build_frame ~llvm_ctx ~llvm_builder ~addr_bits:64 ~word:8
+            (layout_of regions)
+        in
+        ignore (Llvm.build_ret_void llvm_builder);
+        let ir = Llvm.string_of_llmodule llvm_module in
+        check "SPTR-05"
+          (Base.Option.is_none runtime_top
+           && (match storages with [ s ] -> alloca_p s.base | _ -> false)
+           && not (contains_substring ir "hike_rstack")));
+
+    pin "SPTR-06"
+      "the optimizer sees a runtime frame as a fresh object: a frame store \
+       survives an unknown call and a store through an argument, and a frame \
+       counter becomes a phi"
+      (fun () ->
+        match Unix.system "command -v opt-21 >/dev/null 2>&1" with
+        | Unix.WEXITED 0 ->
+            let llvm_ctx, llvm_module, sp_b = make_builder () in
+            ignore (Llvm.build_ret_void sp_b);
+            let i64 = Llvm.i64_type llvm_ctx in
+            let ptr = Llvm.pointer_type llvm_ctx in
+            let unknown =
+              Llvm.declare_function "unknown" (Llvm.function_type i64 [||])
+                llvm_module
+            in
+            let fn =
+              Llvm.define_function "frame"
+                (Llvm.function_type i64 [| ptr |]) llvm_module
+            in
+            let b = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+            let regions =
+              [ { Model.Sub_layout.r_id = 0;
+                  r_lo = pos (-48L);
+                  r_hi = pos 15L;
+                  r_bytes = 80L } ]
+            in
+            let { Stack_ptr.storages; runtime_top } =
+              Stack_ptr.build_frame ~llvm_ctx ~llvm_builder:b ~addr_bits:64
+                ~word:8 (layout_of ~runtime_residue:true regions)
+            in
+            let top = Base.Option.value_exn runtime_top in
+            let cell =
+              Llvm.build_gep (Llvm.i8_type llvm_ctx)
+                (List.hd storages).base
+                [| Llvm.const_int i64 16 |] "cell" b
+            in
+            ignore (Llvm.build_store (Llvm.const_int i64 42) cell b);
+            Stack_ptr.set_cursor ~llvm_ctx b cell;
+            ignore (Llvm.build_store (Llvm.const_int i64 7) (Llvm.param fn 0) b);
+            ignore
+              (Llvm.build_call (Llvm.function_type i64 [||]) unknown [||] "" b);
+            let v = Llvm.build_load i64 cell "v" b in
+            Stack_ptr.set_cursor ~llvm_ctx b top;
+            ignore (Llvm.build_ret v b);
+            let src = Filename.temp_file "sptr06" ".ll" in
+            let oc = open_out src in
+            output_string oc (Llvm.string_of_llmodule llvm_module);
+            close_out oc;
+            let out = src ^ ".opt.ll" in
+            let rc =
+              Sys.command
+                (Printf.sprintf "opt-21 -O2 -S %s -o %s 2>&1 >/dev/null"
+                   (Filename.quote src) (Filename.quote out))
+            in
+            let text = In_channel.with_open_bin out In_channel.input_all in
+
+            Sys.remove src;
+            Sys.remove out;
+            check "SPTR-06"
+              (rc = 0 && contains_substring text "ret i64 42"
+               && not (contains_substring text "load i64"))
+        | _ -> check "SPTR-06" true);
 
   ]
 

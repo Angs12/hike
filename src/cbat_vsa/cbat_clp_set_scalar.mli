@@ -24,8 +24,7 @@ module Origin = Hike_origin
    mixed-origin values are [None]. *)
 val origin : t -> Origin.t option
 
-(* Re-tags a relative value's origin, offsets unchanged — the VLA
-   seed's framing step (the entry-line positions ARE the new frame's). *)
+(* Re-tags a relative value's origin, offsets unchanged. *)
 val set_origin : Origin.t -> t -> t
 
 include Cbat_wordset_intf.S with type t := t
@@ -54,10 +53,6 @@ val extrapolate_steps : steps:int -> t -> t -> t
    RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
 
-(* The origin's facts, with a fixed-base VLA's base and certified count
-   derived (it inherits Stack's) — the base an origin's offsets add to. *)
-val base_facts : Origin.t -> Origin.facts
-
 (* A module address: its link-time word in its section. *)
 val module_address : int64 -> t
 
@@ -67,23 +62,13 @@ val keep_section : old:t -> new_:t -> t -> t
 val stack_word : Cbat_clp.Pieces.t -> t
 val stack_word_i64 : int64 -> t
 
-(* A fresh VLA frame named by the SP-assigning def: offset 0 is the
-   allocation base (the post-move SP). *)
-val vla_frame : Bap.Std.Tid.t -> t
-
 (* The offset set of a stack-symbolic value — [Some offs] ONLY for the
-   symbolic arm; a plain in-band set is None.  A VLA value's offsets are
-   materialised onto the entry line through its base range; an unknown
-   base answers None. *)
+   symbolic arm; a plain in-band set is None. *)
 val stack_offsets : t -> Cbat_clp.Pieces.t option
 
 (* The stack-line leaves of a value (itself when it is one): the stack
    addresses the value may hold, one leaf per stack-line origin. *)
 val stack_leaves : t -> t list
-
-(* The frame-relative offsets of a VLA value (0 = the allocation base) —
-   [Some] only for the [Vla] origin. *)
-val vla_offsets : t -> Cbat_clp.Pieces.t option
 
 (* The value's address pieces per memory-key line: a relative value keeps
    its origin's line, plain values the absolute line, and a mixed value
@@ -102,20 +87,19 @@ type address_verdict =
 (* The elements [decide] keeps, bisected per progression on its memory
    key line: [decide line p] keeps or drops a whole sub-progression,
    splits it (a singleton never splits), or partitions it into pieces
-   with their own verdicts.  The origin is kept; an unbounded piece, a
-   frame-relative VLA value and a mixed-origin value are kept whole. *)
+   with their own verdicts.  The origin is kept; an unbounded piece and a
+   mixed-origin value are kept whole. *)
 val filter_addresses :
   t -> decide:(Origin.t -> Cbat_clp.t -> address_verdict) -> t
 
-(* Memory namespaces: Stack and Vla share the stack line;
-   Rip and Abs each retain their own line. *)
+(* Memory namespaces: Rip keys on the Abs line. *)
 val key_line : Origin.t -> Origin.t
 
 (* The set's own address stride: > 1 only for a bounded strided Clp or
    stack-offset progression; 1 otherwise. *)
 val stride : t -> int
 
-(* Stack identity requires a Stack or Vla runtime origin. *)
+(* Stack identity requires a Stack runtime origin. *)
 val in_stack_segment : t -> bool
 
 (* The offset set's extrema of a stack-symbolic value; None for a

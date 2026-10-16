@@ -149,10 +149,9 @@ val def_facts :
   projections:projection option Tid.Map.t ->
   conversions:conv Tid.Map.t ->
   storages:Hike_synth.storage_span list ->
-  window_param:bool -> vla_tids:Tid.Set.t -> spans:data_span list ->
+  window_param:bool -> spans:data_span list ->
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
-  is_dyn_alloc:(def term -> bool) ->
   sub term -> def_fact Tid.Map.t
 
 
@@ -191,11 +190,6 @@ val attribute :
   spans:data_span list ->
   program term ->
   ctx
-
-(** The sub's dynamic allocations: the seed's confirmed frames, keyed by
-    the def computing each base. *)
-val dynamic_allocs_of :
-  facts:Hike_kb.facts -> sub term -> Hike_def_slots.dyn_alloc Tid.Map.t
 
 (** The ownership query: the finalized binding owning [r]. *)
 val storage_of_range : range_storage Tree.t -> range -> range_storage option

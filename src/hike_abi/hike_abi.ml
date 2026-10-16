@@ -25,6 +25,7 @@ type t = {
   word : int;                    (* target word size in bytes *)
   page_size : int64;             (* the runtime page: the loader's RELRO
                                     mprotect rounds to it *)
+  red_zone : int;                (* bytes below SP a leaf may use unadjusted *)
   entry_symbol : string;         (* the process entry's linker symbol, the
                                     runtime boundary a dead continuation
                                     binds to (SysV: _start) *)
@@ -62,6 +63,7 @@ let x86_64_sysv : t =
         [ "CF"; "PF"; "AF"; "ZF"; "SF"; "OF" ];
     word = 8;
     page_size = 4096L;
+    red_zone = 128;
     entry_symbol = "_start";
     noreturn_symbols =
       [ "longjmp"; "siglongjmp"; "__stack_chk_fail"; "abort"; "exit";
@@ -174,6 +176,7 @@ let of_target (target : Theory.Target.t) : t =
       flag_regs = x86_64_sysv.flag_regs;
       word = Theory.Target.bits target / 8;
       page_size = x86_64_sysv.page_size;
+      red_zone = x86_64_sysv.red_zone;
       entry_symbol = x86_64_sysv.entry_symbol;
       noreturn_symbols = x86_64_sysv.noreturn_symbols;
     }

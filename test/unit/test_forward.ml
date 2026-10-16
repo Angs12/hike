@@ -28,17 +28,17 @@ let img_fixture =
   let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
   (img_var, images, m, k, env_with_addrs, load32)
 
-(* The band round-trip fixture: a VLA allocation whose pointer is
-   stored and reloaded in a loop.  Returns the sub, its block tids and
-   the pointer register. *)
-let vla_roundtrip () =
+(* The band round-trip fixture: a runtime-sized SP decrement whose
+   pointer is stored and reloaded in a loop.  Returns the sub, its block
+   tids and the pointer register. *)
+let sp_roundtrip () =
   let m, rsp, rbp = memv "t19_m", v64 "RSP", v64 "t19_rbp" in
   let rax = v64 "t19_rax" in
   let rn = v64 "t19_n" in
   let lit k = Bil.Int (Cbat_word.to_word (w64 k)) in
   let d_rbp = Def.create rbp (Bil.Var rsp) in
   let d_frame = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, lit 16)) in
-  (* n read from a cell: the VLA size is non-literal. *)
+  (* n read from a cell: the size is non-literal. *)
   let d_n_cell =
     Def.create m
       (Bil.Store (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
@@ -64,7 +64,7 @@ let vla_roundtrip () =
   let d_i1 = Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, lit 1)) in
   let cond = Bil.BinOp (Bil.LE, Bil.Var i, lit 3) in
   let sub, tids =
-    sub_of "t19_vla_roundtrip"
+    sub_of "t19_sp_roundtrip"
       [ [ d_rbp; d_frame; d_n_cell; d_n_load; d_sub; d_ptr; d_align;
           d_save; d_i1 ],
         [ (1, mk_goto) ];
@@ -437,19 +437,19 @@ let tests : unit Alcotest.test list =
     (* FWD-18: an arithmetic op with mismatched operand widths answers top
        at the common width. *)
 
-    (* FWD-19: the band round trip — a stored VLA-band pointer reloads
+    (* FWD-19: the band round trip — a stored stack pointer reloads
        with its band, so the through-pointer accesses stay bounded. *)
     pin "FWD-19"
       "a stored band pointer reloads with its band (the store->load round trip keeps the origin)"
       (fun () ->
-        let sub, tids, rax = vla_roundtrip () in
+        let sub, tids, rax = sp_roundtrip () in
         let envs, _, _ =
           solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
             Theory.Target.unknown sub
         in
         (* The RELOAD block's post state holds the reloaded value; the
            through-pointer reads keep the band only if that value is
-           still the Vla-origin Rel.  Read by tid, never by map order. *)
+           still the Stack-origin Rel.  Read by tid, never by map order. *)
         let reload_tid = tids.(1) in
         let post =
           match Core.Map.find envs reload_tid with
@@ -457,23 +457,10 @@ let tests : unit Alcotest.test list =
           | None -> AI.bottom
         in
         check "FWD-19"
-          (match Vsa.WordSet.vla_offsets (AI.find_word 64 post rax) with
+          (match Vsa.WordSet.stack_offsets (AI.find_word 64 post rax) with
            | Some _ -> true
            | None -> false));
 
-    pin "FWD-20" "a sub's VLA frames survive another sub's solve" (fun () ->
-        let vla, _, _ = vla_roundtrip () in
-        let other, _ = sub_of "t20_other" [ [], [ (0, mk_ret) ] ] in
-        let solve_one s =
-          ignore (solve ~callee:(callee_of (Program.create ~subs:[ s ] ()))
-                    Theory.Target.unknown s) in
-        Vsa.WordSet.Origin.Vla_seed.reset ();
-        solve_one vla;
-        let frames = Vsa.WordSet.Origin.Vla_seed.keys () in
-        solve_one other;
-        check "FWD-20.seeded" (not (Core.Set.is_empty frames));
-        check "FWD-20.kept"
-          (Core.Set.is_subset frames ~of_:(Vsa.WordSet.Origin.Vla_seed.keys ())));
     pin "FWD-21" "a store through a mixed-kind address writes each leaf's cells (weakly)"
       (fun () ->
         let p = v64 "fwd21_p" in

@@ -99,18 +99,10 @@ let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
                    (Cbat_clp_set_composite.is_top ws
                    || Cbat_clp_set_composite.is_bottom ws))
                 && Cbat_clp_set_composite.in_stack_segment ws ->
-           (* A Vla-origin value's offsets are frame-relative —
-              read them off the value, never the entry-line hull. *)
            let off =
-             match Cbat_clp_set_composite.origin ws with
-             | Some (Cbat_clp_set_composite.Origin.Vla _) -> (
-                 match Cbat_clp_set_composite.vla_offsets ws with
-                 | Some offs -> Model.singleton_offset offs
-                 | None -> None)
-             | _ -> (
-                 match Cbat_clp_set_composite.stack_offsets ws with
-                 | Some offs -> Model.singleton_offset offs
-                 | None -> None)
+             match Cbat_clp_set_composite.stack_offsets ws with
+             | Some offs -> Model.singleton_offset offs
+             | None -> None
            in
            Core.Map.set acc ~key:v
              ~data:(match off with Some k -> `Static k | None -> `Addr)
@@ -210,7 +202,7 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
     | Some (Hike_synth.Global _ as storage), None ->
       (* A module-backed storage owns the whole range: subtract its
          runtime base once, including when the index is dynamic.  A
-         runtime-backed storage (stack, window, slot, allocation)
+         runtime-backed storage (stack, window, slot)
          already carries its pointer-relative address and stays as it
          came. *)
       (match addr with
@@ -293,8 +285,7 @@ let repoint_mapper ?(addr : exp option) (mem_var : var) =
   end
 
 (* An access that keeps its memory node and takes [addr] as its address:
-   a slot access through the caller's slot pointer, a VLA access through
-   its allocation's base. *)
+   a slot access through the caller's slot pointer. *)
 let addr_mapper (addr : exp) =
   object
     inherit Exp.mapper as super
