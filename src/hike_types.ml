@@ -341,33 +341,46 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
     in
     Core.Set.add (Core.Set.add extra sp) window
   in
-  let is_ptr ptrs v = Core.Set.mem ptrs v || is_address_reg ~facts v in
+  (* Every var [is_ptr] sees occurs in the sub: classify each once. *)
+  let addrs = address_versions ~facts sub in
+  let is_ptr ptrs v = Core.Set.mem ptrs v || Core.Set.mem addrs v in
   let is_stack_addr (ws : Vsa.WordSet.t) : bool =
     Vsa.WordSet.in_stack_segment ws
   in
-  let denot_storage blk d =
-    match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
-    | Ok ws when is_stack_addr ws -> storage_of ws
-    | _ -> None
+  let defs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun blk ->
+           Term.enum def_t blk |> Seq.map ~f:(fun d -> (blk, d)))
+    |> Seq.to_list
   in
-  let shape_ptr (ptrs : Var.Set.t) (e : exp) : bool =
-    Hike_exp_fold.fold
-      (fun e child ->
-        match e with
-        | Bil.Var v ->
-            is_ptr ptrs v
-            || (match Var.typ v with Type.Mem _ -> true | _ -> false)
-        | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a || child b
-        | Bil.Ite (_, a, b) -> child a || child b
-        | _ -> false)
-      e
+  (* Each def's stack-address denotation, with its storage: independent
+     of [extra], so denoted once per sub. *)
+  let stack_denots =
+    Base.List.fold defs ~init:Tid.Map.empty ~f:(fun m (blk, d) ->
+        match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+        | Ok ws when is_stack_addr ws ->
+            Core.Map.set m ~key:(Term.tid d) ~data:(lazy (storage_of ws))
+        | _ -> m)
+  in
+  let denot_storage d =
+    match Core.Map.find stack_denots (Term.tid d) with
+    | Some st -> Lazy.force st
+    | None -> None
+  in
+  let rec shape_ptr (ptrs : Var.Set.t) (e : exp) : bool =
+    match e with
+    | Bil.Var v ->
+        is_ptr ptrs v || (match Var.typ v with Type.Mem _ -> true | _ -> false)
+    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) ->
+        shape_ptr ptrs a || shape_ptr ptrs b
+    | Bil.Ite (_, a, b) -> shape_ptr ptrs a || shape_ptr ptrs b
+    | _ -> false
   in
   let seed_of blk =
     Term.enum def_t blk
     |> Seq.fold ~init:extra ~f:(fun acc d ->
-           match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
-             | Ok ws when is_stack_addr ws -> add_value acc d
-             | _ -> acc)
+           if Core.Map.mem stack_denots (Term.tid d) then add_value acc d
+           else acc)
   in
   let def ptrs d =
     if shape_ptr ptrs (Def.rhs d) then add_value ptrs d else ptrs
@@ -407,44 +420,30 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
   in
   (* The storage of each pointer def: the denotation's, else inherited
      from a pointer operand. *)
-  let struct_storage (var_stors : Hike_stack_model.ptr_storage Var.Map.t)
+  let rec struct_storage (var_stors : Hike_stack_model.ptr_storage Var.Map.t)
       (e : exp) : Hike_stack_model.ptr_storage option =
-    Hike_exp_fold.fold
-      (fun e child ->
-        match e with
-        | Bil.Var v -> (
-            let self =
-              match Hike_stack_model.region_ptr_id_of (Var.base v) with
-              | Some id -> Some (Hike_stack_model.Ptr_region id)
-              | None -> None
-            in
-            match self with
+    match e with
+    | Bil.Var v -> (
+        match Hike_stack_model.region_ptr_id_of (Var.base v) with
+        | Some id -> Some (Hike_stack_model.Ptr_region id)
+        | None -> (
+            match Core.Map.find var_stors v with
             | Some st -> Some st
-            | None -> (
-                match Core.Map.find var_stors v with
-                | Some st -> Some st
-                | None -> Core.Map.find var_stors (Var.base v)))
-        | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) ->
-            Base.Option.first_some (child a) (child b)
-        | Bil.Ite (_, a, b) -> Base.Option.first_some (child a) (child b)
-        | _ -> None)
-      e
-  in
-  let defs =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(fun blk ->
-           Term.enum def_t blk |> Seq.map ~f:(fun d -> (blk, d)))
-    |> Seq.to_list
+            | None -> Core.Map.find var_stors (Var.base v)))
+    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) | Bil.Ite (_, a, b) ->
+        Base.Option.first_some (struct_storage var_stors a)
+          (struct_storage var_stors b)
+    | _ -> None
   in
   let rec stor_loop stors var_stors =
     let stors', var_stors' =
       Base.List.fold defs ~init:(stors, var_stors)
-        ~f:(fun (stors, var_stors) (blk, d) ->
+        ~f:(fun (stors, var_stors) (_, d) ->
           let v = Def.lhs d in
           if not (Core.Set.mem ptrs v) then (stors, var_stors)
           else
             let st =
-              match denot_storage blk d with
+              match denot_storage d with
               | Some st -> Some st
               | None -> struct_storage var_stors (Def.rhs d)
             in
@@ -492,15 +491,21 @@ let ptr_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
         | Some s -> Core.Set.add s v)
   in
   let subs = Term.enum sub_t prog |> Seq.to_list in
-  let rec fix pks inferred =
+  let extra_of pks sub =
+    Core.Map.find pks (Term.tid sub) |> Base.Option.value ~default:Var.Set.empty
+  in
+  (* [inferred] was computed under [prev_pks]; a sub whose extra is
+     unchanged keeps its result. *)
+  let rec fix pks prev_pks inferred =
     let inferred' =
       Base.List.fold subs ~init:Tid.Map.empty ~f:(fun acc sub ->
-          let extra =
-            Core.Map.find pks (Term.tid sub)
-            |> Base.Option.value ~default:Var.Set.empty
+          let extra = extra_of pks sub in
+          let pf =
+            match Core.Map.find inferred (Term.tid sub) with
+            | Some pf when Core.Set.equal extra (extra_of prev_pks sub) -> pf
+            | _ -> ptr_defs ~extra ~facts sub
           in
-          Core.Map.set acc ~key:(Term.tid sub)
-            ~data:(ptr_defs ~extra ~facts sub))
+          Core.Map.set acc ~key:(Term.tid sub) ~data:pf)
     in
     let ptr_vars_of sub =
       let vars =
@@ -558,9 +563,9 @@ let ptr_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
                         | _ -> pks)))
     in
     if Core.Map.equal Var.Set.equal pks pks' then (pks', inferred')
-    else fix pks' inferred'
+    else fix pks' pks inferred'
   in
-  fix Tid.Map.empty Tid.Map.empty
+  fix Tid.Map.empty Tid.Map.empty Tid.Map.empty
 
 #ifdef VSA_DEBUG
 let kind_census (prog : program term) : unit =
