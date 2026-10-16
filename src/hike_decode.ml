@@ -76,10 +76,8 @@ let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
 let function_cfg ~(file : string) (state : Driver.state) ~(entry : Addr.t)
     ~(is_entry : Addr.t -> bool) : Graphs.Cfg.t =
   let follow a = Kb.return (Addr.equal a entry || not (is_entry a)) in
-  let run : Graphs.Cfg.t Toplevel.var = Toplevel.var "hike-decode-function" in
-  Toplevel.put run
-    (Kb.Symbol.in_package file @@ fun () -> explore_cfg ~entry ~follow state);
-  Toplevel.get run
+  Hike_kb.eval
+    (Kb.Symbol.in_package file @@ fun () -> explore_cfg ~entry ~follow state)
 
 (* What a destination label names: a code address, or a symbol with no
    address in the module (an external or an intrinsic). *)
@@ -136,9 +134,9 @@ let trim (cfg : Graphs.Cfg.t) ~(entry : Block.t) ~(keep_fall : Block.t -> bool) 
    address labels, a call's return the cfg's fallthrough edge. *)
 let lift ~(file : string) ~(tid : Tid.t) ~(name : string) (entry : Block.t)
     (cfg : Graphs.Cfg.t) : sub term =
-  let run : sub term Toplevel.var = Toplevel.var "hike-decode-lift" in
-  Toplevel.put run (Kb.Symbol.in_package file @@ fun () -> Sub.KB.lift entry cfg);
-  let lifted = Toplevel.get run in
+  let lifted =
+    Hike_kb.eval
+      (Kb.Symbol.in_package file @@ fun () -> Sub.KB.lift entry cfg) in
   Sub.create ~tid ~name ~blks:(Term.enum blk_t lifted |> Seq.to_list) ()
   |> fun s -> Term.set_attr s address (Block.addr entry)
 
@@ -146,8 +144,7 @@ let lift ~(file : string) ~(tid : Tid.t) ~(name : string) (entry : Block.t)
    dispatch INSTRUCTION's own label ([provide] unions, so a later
    destination joins the earlier ones). *)
 let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
-  let run : unit Toplevel.var = Toplevel.var "hike-decode-dests" in
-  Toplevel.put run
+  Hike_kb.eval
     (let open Kb.Syntax in
      let addr a = Word.to_bitvec (Addr.of_int64 a) in
      Theory.Label.for_addr ~package:file (addr site) >>= fun label ->
@@ -159,8 +156,7 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
        | None -> Core.Set.empty (module Theory.Label)
      in
      Kb.provide Theory.Semantics.slot label
-       (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))));
-  Toplevel.get run
+       (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))))
 
 (* A fresh decode of every code region in which every root in [roots]
    answers [is_subroutine] through the entry promise, plus every provided
@@ -188,8 +184,7 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
      (monotone — [provide] unions), so the driver keeps decoding at the
      addresses the VSA resolved.  No brancher re-declaration: a promise's
      answer is cached at its first query, while a provided fact grows. *)
-  let out : Driver.state Toplevel.var = Toplevel.var "hike-decode-scan" in
-  Toplevel.put out
+  Hike_kb.eval
     (let open Kb.Syntax in
      Theory.instance () >>= fun theory ->
      Theory.with_current theory @@ fun () ->
@@ -198,8 +193,7 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
      Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) @@ fun () ->
      Kb.promising Theory.Label.is_subroutine ~promise:entry_promise @@ fun () ->
      let mems = code_mems proj |> List.rev in
-     kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems);
-  Toplevel.get out
+     kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems)
 
 (* Each decoded block's start address and its terminator instruction's
    address.  The solver's jmp rewrites rebuild jmps with [Jmp.create
@@ -218,8 +212,7 @@ let terminators (cfg : Graphs.Cfg.t) : (Addr.t * Addr.t) list =
    names them by, computed as the project's own disassembly computes
    them. *)
 let symtab ~(file : string) (state : Driver.state) : Symtab.t =
-  let out : Symtab.t Toplevel.var = Toplevel.var "hike-decode-symtab" in
-  Toplevel.put out
+  Hike_kb.eval
     (let open Kb.Syntax in
      Kb.Symbol.in_package file @@ fun () ->
      Theory.instance () >>= fun theory ->
@@ -227,5 +220,4 @@ let symtab ~(file : string) (state : Driver.state) : Symtab.t =
      Theory.Unit.for_file file >>= fun unit ->
      Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) (fun () ->
          Disasm.Subroutines.update Disasm.Subroutines.empty state)
-     >>= fun subs -> Symtab.create state subs);
-  Toplevel.get out
+     >>= fun subs -> Symtab.create state subs)

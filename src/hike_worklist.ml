@@ -160,10 +160,7 @@ type t = {
   results : (int64, final) Core.Hashtbl.t;
 }
 
-let eval (x : 'a Kb.t) : 'a =
-  let v = Toplevel.var "hike-worklist" in
-  Toplevel.put v x;
-  Toplevel.get v
+let eval = Hike_kb.eval
 
 let label_for_name t name =
   eval (Kb.Symbol.in_package t.file (fun () -> Theory.Label.for_name name))

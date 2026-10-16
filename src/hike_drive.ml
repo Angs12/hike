@@ -28,8 +28,7 @@ let provide_unit (proj : Project.t) ~(file : string) : unit =
     | Error err ->
       Core.invalid_argf "malformed ogre specification: %s" (Core.Error.to_string_hum err) ()
   in
-  let out : unit Toplevel.var = Toplevel.var "hike-drive-unit" in
-  Toplevel.put out
+  Hike_kb.eval
     (let open Kb.Syntax in
      Theory.Unit.for_file file >>= fun unit ->
      Kb.sequence [
@@ -38,8 +37,7 @@ let provide_unit (proj : Project.t) ~(file : string) : unit =
        Kb.provide Theory.Unit.target unit target;
        Kb.provide Theory.Unit.path unit (Some file);
        Kb.provide Project.memory_slot unit (Project.memory proj);
-     ]);
-  Toplevel.get out
+     ])
 
 let load ?(loader = "llvm") (path : string) : Project.t Core.Or_error.t =
   let empty = Project.state (Project.empty Theory.Target.unknown) in

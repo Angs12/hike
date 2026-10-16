@@ -7,6 +7,12 @@
 
 open Bap.Std
 
+(* One KB computation, evaluated through a fresh toplevel var. *)
+let eval (x : 'a Bap_core_theory.KB.t) : 'a =
+  let v = Toplevel.var "hike-kb-eval" in
+  Toplevel.put v x;
+  Toplevel.get v
+
 (* The denotation seam: [exp] in the before-env of [def], or the
    block's postcondition with no [def]. *)
 type denote =
