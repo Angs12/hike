@@ -234,26 +234,37 @@ let lnot_facts (p : t) (q : t) (f : and_facts option) : and_facts option =
            af_fixed = af.af_fixed }
   | _ -> and_facts_of q
 
-let logxor_core (p1 : t) (p2 : t) : t =
+(* An XOR operand's derived values: its complement and the AND facts of
+   both, each computed at most once however many pairs reach for them. *)
+type xor_operand = {
+  xp : t;
+  xnp : t;
+  xf : and_facts option Lazy.t;
+  xfn : and_facts option Lazy.t;
+}
+
+let xor_operand (p : t) : xor_operand =
+  let np = lnot p in
+  let xf = lazy (and_facts_of p) in
+  { xp = p; xnp = np; xf;
+    xfn = lazy (lnot_facts p np (Lazy.force xf)) }
+
+let logxor_ops (o1 : xor_operand) (o2 : xor_operand) : t =
+  let p1 = o1.xp and p2 = o2.xp in
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
     | None -> let width = bitwidth p1 in
   let two = create (W.of_int 2 ~width) in
-  let np1 = lnot p1 and np2 = lnot p2 in
+  let np1 = o1.xnp and np2 = o2.xnp in
   (* The four ANDs share their operands: [p1] feeds the first and fourth,
      [p2] the second and fourth, and each lnot operand mirrors its source.
      A fast arm never reaches the resolver. *)
-  (* Each operand's facts compute at most once, lazily, however many
-     of the four ANDs reach for them. *)
-  let f1 = lazy (and_facts_of p1) and f2 = lazy (and_facts_of p2) in
-  let fn1 = lazy (lnot_facts p1 np1 (Lazy.force f1))
-  and fn2 = lazy (lnot_facts p2 np2 (Lazy.force f2)) in
   let resolve (q : t) : and_facts option =
-    if phys_equal q p1 then Lazy.force f1
-    else if phys_equal q p2 then Lazy.force f2
-    else if phys_equal q np1 then Lazy.force fn1
-    else if phys_equal q np2 then Lazy.force fn2
+    if phys_equal q p1 then Lazy.force o1.xf
+    else if phys_equal q p2 then Lazy.force o2.xf
+    else if phys_equal q np1 then Lazy.force o1.xfn
+    else if phys_equal q np2 then Lazy.force o2.xfn
     else and_facts_of q in
   let approx1 = logor (logand_rule ~f:resolve p1 np2)
       (logand_rule ~f:resolve np1 p2) in
@@ -261,6 +272,22 @@ let logxor_core (p1 : t) (p2 : t) : t =
   let approx2 = sub (add p1 p2) (mul (logand_rule ~f:resolve p1 p2) two) in
   (* Meet of two sound approximations. *)
   intersection approx1 approx2
+
+let logxor_core (p1 : t) (p2 : t) : t =
+  logxor_ops (xor_operand p1) (xor_operand p2)
+
+(* A piece's split arcs as XOR operands; the results of an arc pair fold
+   as [arcs2] does. *)
+let xor_operands (p : t) : xor_operand list =
+  List.map (split_wrapped p) ~f:xor_operand
+
+let logxor_arcs (qs1 : xor_operand list) (qs2 : xor_operand list)
+    ~(width : int) : t =
+  List.fold qs1 ~init:None ~f:(fun acc o1 ->
+      List.fold qs2 ~init:acc ~f:(fun acc o2 ->
+          let r = logxor_ops o1 o2 in
+          match acc with None -> Some r | Some a -> Some (union a r)))
+  |> function Some r -> r | None -> bottom width
 
 let logxor (p1 : t) (p2 : t) : t = arcs2 logxor_core p1 p2
 

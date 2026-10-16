@@ -13,3 +13,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | WORD-07 | WO7: gt_int | textually invert the pinned contract in `Cbat_word` | pin FAILs under that inversion (re-demonstrated by review) |
 | WORD-08 | CAST-W1: a negative 32-bit word's SIGNED cast to 64 sign-extends | textually invert the pinned contract in `Cbat_word` | pin FAILs under that inversion (re-demonstrated by review) |
 | WORD-09 | N4: signed/unsigned return the word itself when the flag already matches | rebuild the word unconditionally in `Cbat_word.signed` / `unsigned` | pin FAILs (physical equality) with the early-return arms removed |
+| WORD-50 | gt_int and leq_int are the word compare against of_int at the word's width (wrapped, negative, signed arguments) | take the unwrapped fast path when the argument needs wrapping or the word is signed | passes at the introduction of the fast path (2026-10-16) |

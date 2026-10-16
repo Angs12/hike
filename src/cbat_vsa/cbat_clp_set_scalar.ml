@@ -1877,9 +1877,13 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
      the piece widen (the tier promotion the spec's Risks names) and the
      widening still extrapolates. *)
   let fs_widen (s1 : fset) (s2 : fset) : t =
-    let u = Exact.widen_join s1 s2 in
-    if Exact.equal u s1 then Exact u
-    else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
+    if Exact.precedes s2 s1 then Exact s1
+    else if Exact.bitwidth s1 = Exact.bitwidth s2 then
+      Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
+    else
+      let u = Exact.widen_join s1 s2 in
+      if Exact.equal u s1 then Exact u
+      else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
   in
   let plain_hull p1 p2 =
     canonical [ Clp (P.of_progression (f (as_clp p1) (as_clp p2))) ]

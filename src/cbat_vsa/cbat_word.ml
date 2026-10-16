@@ -715,11 +715,19 @@ let endian_string : Word.endian -> string = function
   | BigEndian -> "BE"
   | LittleEndian -> "LE"
 
-let gt_int (w : t) (i : int) : bool =
-  compare w (of_int ~width:(bitwidth w) i) > 0
+(* [compare w (of_int ~width i)] without building the word when [i] needs
+   no wrapping to [w]'s width and [w] is an unsigned machine word. *)
+let compare_int (w : t) (i : int) : int =
+  match w with
+  | Small (x, n, false) when i >= 0 && (n > 62 || i lsr n = 0) ->
+    Stdlib.compare x i
+  | W64 (x, n, false) when i >= 0 && (n > 62 || i lsr n = 0) ->
+    Int64.unsigned_compare x (Int64.of_int i)
+  | _ -> compare w (of_int ~width:(bitwidth w) i)
 
-let leq_int (w : t) (i : int) : bool =
-  compare w (of_int ~width:(bitwidth w) i) <= 0
+let gt_int (w : t) (i : int) : bool = compare_int w i > 0
+
+let leq_int (w : t) (i : int) : bool = compare_int w i <= 0
 
 (* Ordered infixes, defined last so the module's own uses of the
    Stdlib operators stay in scope. *)

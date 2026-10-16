@@ -31,6 +31,29 @@ let tests : unit Alcotest.test list =
         check "WORD-07"
           (Wo.gt_int (Cbat_word.of_int ~width:8 7) 5 && not (Wo.gt_int (Cbat_word.of_int ~width:8 3) 5)));
 
+    pin "WORD-50" "gt_int and leq_int are the word compare against of_int at the word's width: wrapped, negative and signed arguments included"
+      (fun () ->
+        let ints = [ 0; 1; 5; 255; 256; 300; -1; -300; max_int; min_int ] in
+        let words =
+          List.concat_map
+            (fun width ->
+               List.concat_map
+                 (fun v ->
+                    let w = Cbat_word.of_int ~width v in
+                    [ w; Cbat_word.signed w ])
+                 [ 0; 1; 5; 255; 300; -1; max_int ])
+            [ 8; 32; 62; 63; 64; 65; 128 ] in
+        let ok =
+          List.for_all (fun w ->
+              List.for_all (fun i ->
+                  let r = Cbat_word.compare w
+                      (Cbat_word.of_int ~width:(Cbat_word.bitwidth w) i) in
+                  Cbat_word.gt_int w i = (r > 0)
+                  && Cbat_word.leq_int w i = (r <= 0))
+                ints)
+            words in
+        check "WORD-50" ok);
+
     pin "WORD-08" "CAST-W1: a negative 32-bit word's SIGNED cast to 64 sign-extends"
       (fun () ->
         let w32m1 = Cbat_word.of_int64 ~width:32 (-1L) in

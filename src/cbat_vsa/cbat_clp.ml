@@ -194,11 +194,12 @@ module Pieces = struct
      ascending, disjoint, non-wrapping, single width. *)
   let rec merge_arc (acc : progression list) (a : progression)
     : progression list =
-    let rec scan left = function
+    (* [same]: [left] is still the untouched prefix of [acc]. *)
+    let rec scan same left = function
       | [] -> List.rev (a :: left)
-      | q :: rest ->
-        if C.subset a q then List.rev_append left (q :: rest)
-        else if C.subset q a then scan left rest
+      | (q :: rest) as cur ->
+        if C.subset a q then (if same then acc else List.rev_append left cur)
+        else if C.subset q a then scan false left rest
         else
           let hull =
             if overlap_exact a q then Some (C.union a q)
@@ -209,12 +210,12 @@ module Pieces = struct
           (match hull with
            | None ->
              if compare_piece a q < 0 then List.rev_append left (a :: q :: rest)
-             else scan (q :: left) rest
+             else scan same (q :: left) rest
            | Some r ->
              List.fold (split_arcs r)
                ~init:(List.rev_append left rest) ~f:merge_arc)
     in
-    scan [] acc
+    scan true [] acc
 
   (* [assemble] combines an already-ascending, non-wrapping stream.  While
      hulls stay disjoint a piece can only meet the tail.  Once its minimum
@@ -498,9 +499,11 @@ module Pieces = struct
     | _ ->
       (* [b] ascends, so each produced arc can only meet the placed tail;
          split every arc and place it exactly. *)
-      finish
-        (List.fold b ~init:a ~f:(fun acc p ->
-             List.fold (split_arcs p) ~init:acc ~f:merge_arc))
+      let merged =
+        List.fold b ~init:a ~f:(fun acc p ->
+            List.fold (split_arcs p) ~init:acc ~f:merge_arc) in
+      (* Every piece of [b] sat inside [a]'s pieces: [a] is the union. *)
+      if phys_equal merged a then a else finish merged
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -717,8 +720,21 @@ module Pieces = struct
   let lshift = lift2_parts A.lshift_parts
   let logand = lift2 A.logand
   let logor = lift2 A.logor
-  let logxor = lift2 A.logxor
   let concat = lift2 A.concat
+
+  (* Each operand's derived values are built once, not once per pair. *)
+  let logxor (a : t) (b : t) : t =
+    match a, b with
+    | [ pa ], [ pb ] -> of_progression (A.logxor pa pb)
+    | [], _ | _, [] -> []
+    | _ ->
+      let ob = List.map b ~f:(fun pb -> pb, A.xor_operands pb) in
+      produce (fun emit ->
+          List.iter a ~f:(fun pa ->
+              let oa = A.xor_operands pa in
+              List.iter ob ~f:(fun (pb, ob) ->
+                  emit (A.logxor_arcs oa ob
+                          ~width:(Stdlib.max (C.bitwidth pa) (C.bitwidth pb))))))
 
   let lnot = map C.lnot
   let neg = map A.neg
@@ -1024,8 +1040,18 @@ module Exact = struct
   let overlap (a : t) (b : t) : bool =
     a.width = b.width && not (is_bottom (intersection a b))
 
+  (* [a] is a subset of [b]: one linear pass over the sorted arrays. *)
   let precedes (a : t) (b : t) : bool =
-    a.width = b.width && is_bottom (diff a b)
+    let na = count a and nb = count b in
+    a.width = b.width && na <= nb
+    && (let rec go i j =
+          i = na
+          || (j < nb
+              && (let c = W.compare a.words.(i) b.words.(j) in
+                  if c = 0 then go (i + 1) (j + 1)
+                  else c > 0 && go i (j + 1)))
+        in
+        go 0 0)
 
   (* The pointwise element image at [width]. *)
   let lift1 ~(width : int) (f : W.t -> W.t) (a : t) : t =

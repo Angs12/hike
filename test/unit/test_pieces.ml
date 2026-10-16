@@ -521,6 +521,41 @@ let tests : unit Alcotest.test list =
           (not_mem_all d (List.map w32 [ 0; 1; 10; 11 ]));
         check "PCS-23.kept" (mem_all d (List.map w32 [ 2; 9; 12; 100 ])));
 
+    pin "PCS-24"
+      "a multi-piece XOR equals the union of its single-piece pair XORs: \
+       the operands' shared complements and facts change nothing"
+      (fun () ->
+        let step k lo n =
+          P.of_progression
+            (Clp.create ~width:32 ~step:(w32 k)
+               ~cardn:(Cbat_word.of_int ~width:33 n) (w32 lo)) in
+        let a = P.union (step 4 8 5) (P.union (step 1 100 3) (p32 [ 1000 ])) in
+        let b = P.union (step 6 3 4) (P.union (prog32 ~lo:64 ~hi:70) (p32 [ 5 ])) in
+        let pair pa pb =
+          P.logxor (P.of_progressions [ pa ]) (P.of_progressions [ pb ]) in
+        let expected =
+          List.fold_left
+            (fun acc pa ->
+               List.fold_left (fun acc pb -> P.union acc (pair pa pb)) acc
+                 (P.to_list b))
+            (P.bottom 32) (P.to_list a) in
+        check "PCS-24.pieces"
+          (List.length (P.to_list a) > 1 && List.length (P.to_list b) > 1);
+        check "PCS-24.equal" (P.equal (P.logxor a b) expected));
+
+    pin "PCS-25"
+      "a union whose right pieces all sit inside the left value is the left \
+       value itself, wherever the covering piece lies; a piece that adds an \
+       element is not"
+      (fun () ->
+        let a = P.union (prog32 ~lo:0 ~hi:9) (prog32 ~lo:100 ~hi:200) in
+        let inside = P.union (p32 [ 3; 4 ]) (p32 [ 150 ]) in
+        check "PCS-25.inside" (P.union a inside == a);
+        let grown = P.union a (p32 [ 150; 300 ]) in
+        check "PCS-25.grown"
+          (P.elem (w32 300) grown && P.elem (w32 150) grown
+           && P.elem (w32 5) grown && not (P.elem (w32 50) grown)));
+
   ]
 
 let () = run "pieces" tests
