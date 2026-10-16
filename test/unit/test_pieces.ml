@@ -103,18 +103,26 @@ let tests : unit Alcotest.test list =
           && not (P.precedes whole (P.bottom 32))));
 
     pin "PCS-09"
-      "the overlap pairing: the old grid pairs with the first overlapping \
-       incoming piece and the disjoint excess is its own atom (no hull \
-       into the pair)"
+      "growth across incoming pieces widens and extrapolates the old range"
       (fun () ->
         let old = prog32 ~lo:10 ~hi:100 in
         let incoming = P.union (prog32 ~lo:10 ~hi:20) (prog32 ~lo:40 ~hi:110) in
         let widened = P.widen_join old incoming in
         check "PCS-09.widen"
-          (P.max_elem widened = Some (w32 110)
-          && not (P.elem (w32 1000) widened));
+          (P.max_elem widened = Some (Cbat_word.ones 32)
+          && P.elem (w32 1000) widened);
         let extrapolated = P.extrapolate_steps ~steps:2 old incoming in
-        check "PCS-09.extrapolate" (P.max_elem extrapolated = Some (w32 110)));
+        check "PCS-09.extrapolate" (P.max_elem extrapolated = Some (w32 130)));
+
+    pin "PCS-26" "widening overlapping translated iterates stabilizes" (fun () ->
+        let rec converge n old =
+          let incoming = P.translate old (w32 10) in
+          let next = P.widen_join old incoming in
+          check "PCS-26.old" (P.precedes old next);
+          check "PCS-26.incoming" (P.precedes incoming next);
+          if P.equal next old then true
+          else n > 0 && converge (n - 1) next in
+        check "PCS-26.converges" (converge 5 (prog32 ~lo:10 ~hi:100)));
 
     pin "PCS-10" "large strided meets retain their shared grid"
       (fun () ->

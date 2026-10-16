@@ -3,7 +3,7 @@
 Module `Cbat_clp.Pieces` (and the exact run list, `Cbat_clp.Exact`). One row per pin in
 `test/unit/test_pieces.ml`.
 
-Except PCS-05/09 and the PCS-15..PCS-19 observed failures, red evidence is by review; the disable
+Except PCS-05/09/26 and the PCS-15..PCS-19 observed failures, red evidence is by review; the disable
 recipes invert the pinned contracts in the vendored domain library.
 
 | id | mechanism | disable recipe | red evidence |
@@ -13,7 +13,7 @@ recipes invert the pinned contracts in the vendored domain library.
 | PCS-05 | the widening pairing: the overlapping couple widens, an unmatched piece stays its own atom, a top couple collapses | restore the rank pairing and the excess hull in `positional` | observed FAIL on the pre-T28 code (2026-10-14): the one-sided `{10..12}` was hulled into the first pair (`l` had 1 piece containing 5) |
 | PCS-06 | the union-order precedes: one covering piece or element-wise coverage | replace `precedes` with hull containment | pin FAILs under that inversion (re-demonstrated by review) |
 | PCS-08 | the parts exactness: a straddling lshift keeps the overshift and the capped exact pieces apart | collapse the parts in `Pieces.lshift` | pin FAILs under that inversion (re-demonstrated by review) |
-| PCS-09 | the overlap pairing: the old grid pairs with the first overlapping incoming piece; the disjoint excess stays its own atom (both widening and landmark extrapolation) | put the excess hull back into `positional` (coalesce each side's tail into the last pair) | observed FAIL on the pre-T28 code (2026-10-14): `widen` maxed at the ascending ray's `0xFFFFFFFF` (was `Some (ones 32)`); `extrapolate` returned `0x82` (130) instead of `0x6E` (110) |
+| PCS-09 | growth across incoming pieces reaches widening and landmark extrapolation: `[10,100]` against `[10,20] ∪ [40,110]` widens upward and extrapolates to 130 | pair the raw incoming value instead of its union with the old value | observed FAIL before the cumulative-input fix (2026-10-17): both operations stopped at 110; restored the pre-T28 growth contract |
 | PCS-10 | strided meets solve the integer grid before clipping to word bounds, including an oversized period | restore modular Bezout arithmetic in the meet solver | observed FAIL before the correction at widths 8, 16, 32 and 64 |
 | PCS-11 | correct grid overlap keeps disjoint pieces separate through normalization, order and extrapolation | restore modular grid arithmetic used by `overlap_exact` | observed FAIL before the correction |
 | PCS-12 | subset checks each source arc, including new alignments introduced by rotation | compare only the reduced endpoints | observed FAIL before the correction; sparse containment across the modulus and ray alignment are also covered |
@@ -30,3 +30,4 @@ recipes invert the pinned contracts in the vendored domain library.
 | PCS-23 | difference removes every element of interleaved subtrahend pieces (`[0,100]` minus `{0,10}` and `{1,11}`) | build `diff_piece`'s removed list by concatenating the pieces' enumerations | observed FAIL before the fix (10 reappeared, 2026-10-15) |
 | PCS-24 | a multi-piece XOR equals the union of its single-piece pair XORs: shared per-operand complements and facts change nothing | give `Pieces.logxor` operands whose complement or facts belong to a different piece than the pair's | passes at the introduction of the shared operands (2026-10-16); a crossed operand would change the pair results |
 | PCS-25 | a union whose right pieces all sit inside the left value is the left value itself (physically), wherever the covering piece lies; a growing piece still joins | return the rebuilt list from `merge_arc` on containment, or finish a contained union | the identity check FAILs without the containment shortcut (2026-10-16) |
+| PCS-26 | overlapping translated iterates stabilize under repeated widening, and every step covers both the old and incoming values | pair the raw incoming value instead of its union with the old value | observed FAIL at `PCS-26.converges` before the fix (2026-10-17); the upper bound grew by 10 each round |

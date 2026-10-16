@@ -724,6 +724,9 @@ module Pieces_base = struct
     | [], _ -> b
     | _, [] -> a
     | _ ->
+      (* A successor may drop old elements or split its covering piece.
+         Pair against the cumulative value so growth reaches the widener. *)
+      let b = union a b in
       (* The origin tag: [true] is the old iterate [a]. *)
       let rec merge xs ys =
         match xs, ys with
