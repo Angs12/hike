@@ -72,7 +72,7 @@ val clip :
   int64 -> int64 -> int64 -> int64 -> (int64 * int64) option
 
 val singleton_i64 : Cbat_clp_set_composite.t -> int64 option
-val singleton_offset : Cbat_clp_set_composite.Clp.t -> int64 option
+val singleton_offset : Cbat_clp_set_composite.Clp.Pieces.t -> int64 option
 val singleton_stack_position : Cbat_clp_set_composite.t -> int64 option
 
 (* The return-address fact and its projections. *)

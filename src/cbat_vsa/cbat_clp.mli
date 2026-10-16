@@ -13,30 +13,58 @@
 
 open Bap.Std
 
-(* Circular linear progressions. *)
+(* Circular linear progressions.  A Finite progression never crosses
+   2^width: one that would is its two arcs.  The set operations live in
+   [Pieces]. *)
 
 type direction = Finite | Ascending | Descending | Circular
 [@@deriving bin_io, sexp, compare]
 
-type t [@@deriving bin_io, sexp]
+(* The core's record, so the arithmetic rules of [Cbat_clp_arith] apply
+   to it. *)
+type t = Cbat_clp_core.t [@@deriving bin_io, sexp, compare]
 
-include Cbat_wordset_intf.S with type t := t and type word = Cbat_word.t
+type word = Cbat_word.t
 
+(* The progression {base + n*step | n < cardn}; a Finite one must not
+   cross 2^width (use [arcs] when it may). *)
 val create : ?width:int -> ?step:Cbat_word.t -> ?cardn: Cbat_word.t -> Cbat_word.t -> t
+
+(* The same progression as its non-bottom, non-crossing pieces, ascending:
+   one, or the low and the high arc across the modulus. *)
+val arcs : ?width:int -> ?step:Cbat_word.t -> ?cardn: Cbat_word.t -> Cbat_word.t -> t list
+
 val create_ascending : width:int -> base:Cbat_word.t -> step:Cbat_word.t -> t
 val create_descending : width:int -> base:Cbat_word.t -> step:Cbat_word.t -> t
 
-(* Step-1 CLP [lo, hi]; a wrapped pair is the circular interval. *)
-val interval : width:int -> Cbat_word.t -> Cbat_word.t -> t
+val singleton : word -> t
+val bottom : int -> t
+val top : int -> t
+
+(* Unbounded progression at (base, step). *)
+val infinite : Cbat_word.t * Cbat_word.t -> t
+
+val bitwidth : t -> int
+val cardinality : t -> word
+val min_elem : t -> word option
+val max_elem : t -> word option
+val min_elem_signed : t -> word option
+val max_elem_signed : t -> word option
 
 (* The progression's step (0 for singletons). *)
 val step_of : t -> Cbat_word.t
 
+(* True when elements are spaced by a multiple of [w]. *)
+val splits_by : t -> word -> bool
+
+val elem : word -> t -> bool
+val iter : t -> word list
+val equal : t -> t -> bool
+val overlap : t -> t -> bool
+val pp : Format.formatter -> t -> unit
+
 val nearest_pred : Cbat_word.t -> t -> Cbat_word.t option
 val nearest_succ : Cbat_word.t -> t -> Cbat_word.t option
-
-(* Unbounded progression at (base, step). *)
-val infinite : Cbat_word.t * Cbat_word.t -> t
 
 val is_top : t -> bool
 val is_infinite : t -> bool
@@ -44,19 +72,16 @@ val is_bottom : t -> bool
 val is_ascending : t -> bool
 val is_descending : t -> bool
 val is_circular : t -> bool
-val is_wrapped : t -> bool
-
-(* A wrapped Finite piece's two non-wrapping arcs. *)
-val split_wrapped : t -> t list
 
 (* The elements at most [n], and the rest. *)
 val split_at_n : t -> Cbat_word.t -> t * t
 
 val subset : t -> t -> bool
-val translate : t -> Cbat_word.t -> t
+val intersection : t -> t -> t
 
-val widen_join : t -> t -> t
-val extrapolate_steps : steps:int -> t -> t -> t
+(* The widening of an iterate by its successor, as pieces. *)
+val widen_join : t -> t -> t list
+val extrapolate_steps : steps:int -> t -> t -> t list
 
 (* The progression type, named for the [Pieces] signature. *)
 type progression = t [@@deriving bin_io, sexp, compare]
@@ -73,9 +98,12 @@ module Pieces : sig
   val elements : t -> Cbat_word.t list
 
   val of_progression : progression -> t
+  (* A result's pieces: one progression or the two arcs of one across the
+     modulus, ascending. *)
+  val of_arcs : progression list -> t
   (* Merge ascending progression streams, without combining or capping. *)
   val merge_progressions : progression list -> progression list -> progression list
-  (* Build from disjoint, ascending, non-wrapping, non-bottom progressions. *)
+  (* Build from disjoint, ascending, non-bottom progressions. *)
   val of_progressions : progression list -> t
   val of_list : width:int -> Cbat_word.t list -> t
   val singleton : Cbat_word.t -> t
@@ -128,7 +156,29 @@ module Pieces : sig
   val extract : ?hi:int -> ?lo:int -> t -> t
   val cast : Bil.cast -> int -> t -> t
   val concat : t -> t -> t
+
+  (* The smallest arc of the circle holding every piece: one piece, or the
+     two arcs of one across the modulus. *)
+  val circular_hull : t -> t
+  val hull_union : t -> t -> t
+  (* [p] met with a hull, as a hull. *)
+  val hull_intersection : progression -> t -> t
+  (* The step of the progression a hull denotes. *)
+  val hull_step : t -> Cbat_word.t
+  val hull_add : t -> t -> t
+  val hull_sub : t -> t -> t
+  (* The hull of an ascending, deduplicated word list. *)
+  val hull_of_list : width:int -> Cbat_word.t list -> t
+  (* [widen_hulls f a b]: [f] on single-piece hulls; a hull across the
+     modulus widens to its circular grid. *)
+  val widen_hulls :
+    (progression -> progression -> progression list) -> t -> t -> t
+  val pp : Format.formatter -> t -> unit
 end
+
+(* The step-1 interval [lo, hi] as pieces; a pair with [hi < lo] is the
+   circular interval across the modulus. *)
+val interval : width:int -> Cbat_word.t -> Cbat_word.t -> Pieces.t
 
 (* The exact finite element set as an uncapped flat ascending array of
    words (ADR 0036).  No budget — the caller's

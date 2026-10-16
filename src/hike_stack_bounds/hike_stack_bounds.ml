@@ -76,7 +76,7 @@ let key_extent (ws : Ws.t) : (Cbat_word.t * Cbat_word.t) option =
   in
   match Ws.stack_offsets ws with
   | Some offs -> (
-      match Clp.min_elem offs, Clp.max_elem offs with
+      match Clp.Pieces.min_elem offs, Clp.Pieces.max_elem offs with
       | Some lo, Some hi -> Some (clamp lo hi)
       | _ -> Some (zero, ones))
   | None -> (

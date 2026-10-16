@@ -63,7 +63,7 @@ let routable_origin (v : WordSet.t) : Origin.t =
     let in_gate =
       match WordSet.vla_offsets v, Origin.Vla_seed.extent tid with
       | Some offs, Some e -> (
-          match WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs with
+          match WordSet.Clp.Pieces.min_elem offs, WordSet.Clp.Pieces.max_elem offs with
           | Some lo, Some hi ->
             Option.map (Cbat_word.int64_pair lo hi) ~f:(fun (klo, khi) ->
                 Int64.compare klo e.Origin.off_lo >= 0

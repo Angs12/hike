@@ -82,8 +82,8 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
           match Core.Map.find candidates t, Ws.vla_offsets ws with
           | Some { Hike_origin.base_lo = Some blo; base_hi = Some bhi; _ }, Some offs
             when not (Ws.is_top ws || Ws.is_infinite ws) -> (
-              match Base.Option.bind (Ws.Clp.min_elem_signed offs) ~f:Cbat_word.to_int64_opt,
-                    Base.Option.bind (Ws.Clp.max_elem_signed offs) ~f:Cbat_word.to_int64_opt with
+              match Base.Option.bind (Ws.Clp.Pieces.min_elem_signed offs) ~f:Cbat_word.to_int64_opt,
+                    Base.Option.bind (Ws.Clp.Pieces.max_elem_signed offs) ~f:Cbat_word.to_int64_opt with
               | Some klo, Some khi -> Some (Int64.add blo klo, Int64.add bhi khi)
               | _ -> None)
           | _ -> None

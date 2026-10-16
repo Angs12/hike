@@ -58,16 +58,16 @@ let tests : unit Alcotest.test list =
           if Cbat_word.bitwidth c >= 11 then Wo.gt_int c cap
           else Cbat_word.to_int_exn c > cap
         in
-        let enum (p : Clp.t) : W.t list * bool =
-          if cardn_gt enum_cap (Clp.cardinality p) then
-            match Clp.min_elem p with
+        let enum_piece (p : Cbat_clp.t) : W.t list * bool =
+          if cardn_gt enum_cap (Cbat_clp.cardinality p) then
+            match Cbat_clp.min_elem p with
             | None -> ([], true)
             | Some m0 ->
-                let mx = Clp.max_elem p in
+                let mx = Cbat_clp.max_elem p in
                 let rec go n cur acc =
                   if n >= enum_cap then (List.rev acc, true)
                   else
-                    match Clp.nearest_succ (Cbat_word.succ cur) p with
+                    match Cbat_clp.nearest_succ (Cbat_word.succ cur) p with
                     | None -> (List.rev (cur :: acc), true)
                     | Some nxt ->
                         if
@@ -79,7 +79,14 @@ let tests : unit Alcotest.test list =
                         else go (n + 1) nxt (cur :: acc)
                 in
                 go 0 m0 []
-          else (Clp.iter p, false)
+          else (Cbat_clp.iter p, false)
+        in
+        let enum (ps : Clp.t) : W.t list * bool =
+          List.fold_left
+            (fun (es, pre) p ->
+              let e, pr = enum_piece p in
+              (es @ e, pre || pr))
+            ([], false) (Clp.Pieces.to_list ps)
         in
         let check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp.t) : unit =
           let es1, pre1 = enum p1 in
@@ -241,7 +248,7 @@ let tests : unit Alcotest.test list =
         let bad = ref [] in
         let violation w cls detail = bad := (w, cls, detail) :: !bad in
         let ref_meet (w : int) (s1 : W.t) (l1 : W.t) (s2 : W.t) (l2 : W.t) :
-            [ `Empty | `Arc of W.t * W.t | `TwoPiece ] =
+            [ `Empty | `Arc of W.t * W.t | `Two of (W.t * W.t) * (W.t * W.t) ] =
           let ext x = W.extract_exn ~hi:w x in
           let n = Wo.dom_size ~width:(w + 1) w in
           let l1 = ext l1 and l2 = ext l2 in
@@ -272,7 +279,8 @@ let tests : unit Alcotest.test list =
               else begin
                 let en = Cbat_word.sub e n in
                 let p = if W.compare en l1 <= 0 then en else l1 in
-                if W.compare p dl >= 0 then `Arc (s1, l1) else `TwoPiece
+                if W.compare p dl >= 0 then `Arc (s1, l1)
+                else `Two ((s1, p), (Cbat_word.add s1 dl, Cbat_word.sub l1 dl))
               end
             end
         in
@@ -311,30 +319,33 @@ let tests : unit Alcotest.test list =
                      (Cbat_word.to_int64_exn s1) (Cbat_word.to_int64_exn l1)
                      (Cbat_word.to_int64_exn s2) (Cbat_word.to_int64_exn l2)
                      (Cbat_word.to_int64_exn s) (Cbat_word.to_int64_exn l) (describe res))
-          | `TwoPiece ->
+          | `Two ((sa, la), (sb, lb)) ->
               incr two_piece;
-              let small = if W.compare l1 l2 <= 0 then p1 else p2 in
-              if not (Clp.equal res small) then
+              let expected = Clp.union (build w sa la) (build w sb lb) in
+              if not (Clp.equal res expected) then
                 violation w cls
                   (Printf.sprintf
-                     "[%Lu,%Lu)&[%Lu,%Lu): TWO-PIECE, expected the smaller operand (%s), got %s"
+                     "[%Lu,%Lu)&[%Lu,%Lu): TWO-PIECE, expected both arcs (%s), got %s"
                      (Cbat_word.to_int64_exn s1) (Cbat_word.to_int64_exn l1)
                      (Cbat_word.to_int64_exn s2) (Cbat_word.to_int64_exn l2)
-                     (describe small) (describe res))
+                     (describe expected) (describe res))
         in
-        let walk_elems (p : Clp.t) (cap : int) : W.t list =
-          match Clp.min_elem p with
+        let walk_piece (p : Cbat_clp.t) (cap : int) : W.t list =
+          match Cbat_clp.min_elem p with
           | None -> []
           | Some m0 ->
               let rec go n cur acc =
                 if n >= cap then List.rev acc
                 else
-                  match Clp.nearest_succ (Cbat_word.succ cur) p with
+                  match Cbat_clp.nearest_succ (Cbat_word.succ cur) p with
                   | None -> List.rev (cur :: acc)
                   | Some nxt ->
                       if W.compare nxt cur <= 0 then List.rev (cur :: acc) else go (n + 1) nxt (cur :: acc)
               in
               go 1 m0 []
+        in
+        let walk_elems (ps : Clp.t) (cap : int) : W.t list =
+          List.concat_map (fun p -> walk_piece p cap) (Clp.Pieces.to_list ps)
         in
         let check_sound (w : int) (cls : string) (p1 : Clp.t) (p2 : Clp.t) : unit =
           incr sound_pairs;

@@ -19,16 +19,17 @@ let () =
     let size = 1 lsl width in
     let word = W.of_int ~width in
     let make () =
-      let raws = List.init (1 + Random.int 6) (fun _ ->
+      let raws = List.concat (List.init (1 + Random.int 6) (fun _ ->
         let base = word (Random.int size) in
         let step = word (Random.int (min size 12)) in
         let direction = Random.int 6 in
-        let p = match direction with
-        | 0 -> C.create_ascending ~width ~base ~step
-        | 1 -> C.create_descending ~width ~base ~step
-        | 2 -> C.infinite (base, step)
-        | _ -> C.create ~width ~step
+        let ps = match direction with
+        | 0 -> [ C.create_ascending ~width ~base ~step ]
+        | 1 -> [ C.create_descending ~width ~base ~step ]
+        | 2 -> [ C.infinite (base, step) ]
+        | _ -> C.arcs ~width ~step
                  ~cardn:(W.of_int ~width:(width + 1) (1 + Random.int 20)) base in
+        List.iter (fun p ->
         if direction < 2 then begin
           let base = W.to_int_exn base and step = W.to_int_exn step in
           for x = 0 to size - 1 do
@@ -40,14 +41,13 @@ let () =
             if expected <> C.elem (word x) p then
               fail "directional membership" (P.of_progression p) (P.bottom width) (P.of_progression p) x
           done
-        end;
-        p) in
+        end) ps;
+        ps)) in
       let p = List.fold_left (fun acc q -> P.union acc (P.of_progression q)) (P.bottom width) raws in
       List.iter (fun q -> for x = 0 to size - 1 do
         if C.elem (word x) q && not (P.elem (word x) p) then
           fail "normalize" (P.of_progression q) (P.bottom width) p x
       done) raws;
-      if List.exists C.is_wrapped (P.to_list p) then fail "wrapped" p p p 0;
       p in
     for _trial = 1 to 2000 do
       let a = make () and b = make () in

@@ -114,10 +114,10 @@ module Frame = struct
     if Cbat_clp_set_composite.is_top ws then None
     else singleton_pair (Cbat_clp_set_composite.min_elem ws) (Cbat_clp_set_composite.max_elem ws)
 
-  let singleton_offset (offs : Cbat_clp_set_composite.Clp.t) : int64 option =
+  let singleton_offset (offs : Cbat_clp_set_composite.Clp.Pieces.t) : int64 option =
     singleton_pair
-      (Cbat_clp_set_composite.Clp.min_elem offs)
-      (Cbat_clp_set_composite.Clp.max_elem offs)
+      (Cbat_clp_set_composite.Clp.Pieces.min_elem offs)
+      (Cbat_clp_set_composite.Clp.Pieces.max_elem offs)
 
   (* The denotation's single position on its stack-origin line. *)
   let singleton_stack_position (ws : Cbat_clp_set_composite.t) : int64 option =

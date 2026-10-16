@@ -69,7 +69,7 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
             | Some { WordSet.Origin.base_lo = Some blo; _ } ->
               Some (Cbat_word.of_int64 blo)
             | _ -> None)
-          | _ -> WordSet.Clp.max_elem offs)
+          | _ -> WordSet.Clp.Pieces.max_elem offs)
       | None -> None
   in
   (* The escape list: each escape's stack-line leaves (a mixed value's

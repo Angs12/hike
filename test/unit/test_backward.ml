@@ -1804,7 +1804,7 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.Val.create (Ws.singleton (w64 42)) LittleEndian) in
         let line = (Mem.Key.cell_key cell).Cbat_landmarks.origin in
         let strided base step card =
-          Clp.create ~width:64 ~step:(w64 step)
+          Cbat_clp.create ~width:64 ~step:(w64 step)
             ~cardn:(Cbat_word.of_int ~width:65 card) (w64 base) in
         check "BK-105.strided-miss"
           (not
@@ -1818,7 +1818,7 @@ let tests : unit Alcotest.test list =
              (strided 0x1000 0x10 1));
         check "BK-105.dense"
           (Vsa.Test_seam.piece_touches_cell mv ~line ~bytes:1
-             (Clp.interval ~width:64 (w64 0x1000) (w64 0x1010))));
+             (strided 0x1000 1 0x11)));
 
     pin "BK-106"
       "T27 step 4: image coverage is element-level — the whole read must fit \
@@ -1829,9 +1829,9 @@ let tests : unit Alcotest.test list =
           [ { Vsa.img_lo = lo; img_hi = hi; img_bytes = Bytes.make 8 '\000';
               img_slots = Core.Int64.Set.empty } ] in
         let strided base step card =
-          Clp.create ~width:64 ~step:(w64 step)
+          Cbat_clp.create ~width:64 ~step:(w64 step)
             ~cardn:(Cbat_word.of_int ~width:65 card) (w64 base) in
-        let dense lo hi = Clp.interval ~width:64 (w64 lo) (w64 hi) in
+        let dense lo hi = strided lo 1 (hi - lo + 1) in
         Vsa.with_images (img 0x1000L 0x1007L) (fun () ->
             check "BK-106.dense-fits"
               (Vsa.Test_seam.piece_touches_image ~bytes:8 (dense 0x1000 0x1000));
@@ -1943,7 +1943,7 @@ let tests : unit Alcotest.test list =
            cell only through the back-shifted range. *)
         check "BK-108.read-reaches-in"
           (Vsa.Test_seam.piece_touches_cell mv' ~line ~bytes:4
-             (Clp.singleton (w64 0)));
+             (Cbat_clp.singleton (w64 0)));
         (* The old per-singleton result: the read at 1 is the cell's
            value and misses the guard (drop); every other read is top. *)
         check "BK-108.singleton-kept"

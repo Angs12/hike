@@ -109,7 +109,8 @@ let interval_clp_of ~(width : int) ~(cardn : Cbat_word.t) (base : Cbat_word.t)
   if Cbat_word.is_zero cardn then None
   else
     let ws = WordSet.of_clp
-        (Cbat_clp.create ~width ~step:(Cbat_word.one width) ~cardn base) in
+        (Cbat_clp.Pieces.of_arcs
+           (Cbat_clp.arcs ~width ~step:(Cbat_word.one width) ~cardn base)) in
     if WordSet.is_top ws then None else Some ws
 
 (* CLP interval hull; [None] on doubt — width mismatch, TOP collapse,
@@ -913,9 +914,8 @@ let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t)
                   Cbat_word.bitwidth cl <> w
                   || Cbat_word.bitwidth ch <> w
                   || Cbat_clp.Pieces.overlap qp
-                       (Cbat_clp.Pieces.of_progression
-                          (Cbat_clp.interval ~width:w
-                             (Cbat_word.sub cl back) ch))))))
+                       (Cbat_clp.interval ~width:w
+                          (Cbat_word.sub cl back) ch)))))
 
 let piece_touches_cell (mv : Mem.t) ~(line : Hike_origin.t) ~(bytes : int)
     (p : Cbat_clp.t) : bool =
@@ -956,10 +956,9 @@ let piece_touches_image_bounds ~(fits : (Stdlib.Int64.t * Stdlib.Int64.t) list)
     let qp = Cbat_clp.Pieces.of_progression p in
     List.exists fits ~f:(fun (fit_lo, fit_hi) ->
         Cbat_clp.Pieces.overlap qp
-          (Cbat_clp.Pieces.of_progression
-             (Cbat_clp.interval ~width:w
-                (Cbat_word.of_int64 ~width:w fit_lo)
-                (Cbat_word.of_int64 ~width:w fit_hi))))
+          (Cbat_clp.interval ~width:w
+             (Cbat_word.of_int64 ~width:w fit_lo)
+             (Cbat_word.of_int64 ~width:w fit_hi)))
 
 let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
   match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
@@ -1014,8 +1013,8 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         let general_keep line (p : Cbat_clp.t) : bool =
           let one =
             match line with
-            | Hike_origin.Stack -> WordSet.stack_word p
-            | _ -> WordSet.of_clp p in
+            | Hike_origin.Stack -> WordSet.stack_word (Cbat_clp.Pieces.of_progression p)
+            | _ -> WordSet.of_clp (Cbat_clp.Pieces.of_progression p) in
           not (drops (load_value ~addr:one ~endian ~bits mv)) in
         let singleton_keep line (p : Cbat_clp.t) : bool =
           let point =
@@ -1044,7 +1043,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         let cell_enum_bound = 65536 in
         let covered_ranges (line : Hike_origin.t) ~(lo : Cbat_word.t)
             ~(hi : Cbat_word.t) ~(last : Cbat_word.t) :
-            (Cbat_clp.t * bool) list =
+            (Cbat_clp.Pieces.t * bool) list =
           let w = Cbat_word.bitwidth hi in
           let back = Cbat_word.of_int ~width:w (nb - 1) in
           let image_ranges =
@@ -1079,8 +1078,9 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
            an address interval, or that intersection hulled), so the
            dropped middle is exactly [h]'s own enumeration and never
            loses an element. *)
-        let subtract_run (q : Cbat_clp.t) (h : Cbat_clp.t) : Cbat_clp.t list =
-          match Cbat_clp.min_elem q, Cbat_clp.min_elem h, Cbat_clp.max_elem h with
+        let subtract_run (q : Cbat_clp.t) (h : Cbat_clp.Pieces.t) : Cbat_clp.t list =
+          match Cbat_clp.min_elem q, Cbat_clp.Pieces.min_elem h,
+                Cbat_clp.Pieces.max_elem h with
           | Some q_lo, Some h_lo, Some h_hi ->
             let left, q =
               if Cbat_word.(<) q_lo h_lo then
@@ -1108,7 +1108,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
            span free of stored cells), for 64-bit addresses below 2^61
            off the stack line; [None] sends the partition to the word
            path. *)
-        let int_runs line (small : Cbat_clp.t list) ~(width : int) :
+        let int_runs line (small : Cbat_clp.Pieces.t list) ~(width : int) :
             (int * int * int * int * bool) list option =
           let limit = Stdlib.Int64.shift_left 1L 61 in
           let small_int w =
@@ -1141,7 +1141,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
           | _ ->
             let runs =
               List.concat_map small ~f:(fun h ->
-                  List.map (Cbat_clp.split_wrapped h) ~f:run) in
+                  List.map (Cbat_clp.Pieces.to_list h) ~f:run) in
             if List.for_all runs ~f:Option.is_some then
               Some (List.filter_map runs ~f:Fn.id)
             else None in
@@ -1184,8 +1184,8 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
           let hits =
             List.filter_map (covered_ranges line ~lo ~hi ~last)
               ~f:(fun (r, keep_whole) ->
-                let h = Cbat_clp.intersection p r in
-                if Cbat_clp.is_bottom h then None else Some (h, keep_whole)) in
+                let h = Cbat_clp.Pieces.hull_intersection p r in
+                if Cbat_clp.Pieces.is_bottom h then None else Some (h, keep_whole)) in
           let small =
             List.filter_map hits ~f:(fun (h, keep_whole) ->
                 if keep_whole then None else Some h) in
@@ -1193,14 +1193,15 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
           | [] -> `Keep
           | _ when
               List.exists small ~f:(fun h ->
-                  Cbat_clp.is_infinite h
-                  || Cbat_word.gt_int (Cbat_clp.cardinality h) enum_bound) ->
+                  List.exists (Cbat_clp.Pieces.to_list h) ~f:Cbat_clp.is_infinite
+                  || Cbat_word.gt_int (Cbat_clp.Pieces.cardinality h) enum_bound) ->
             `Split
           | _ ->
             let rest =
               List.fold small ~init:[ p ] ~f:(fun qs h ->
                   List.concat_map qs ~f:(fun q ->
-                      if Cbat_clp.is_bottom (Cbat_clp.intersection q h) then [ q ]
+                      if Cbat_clp.Pieces.is_bottom (Cbat_clp.Pieces.hull_intersection q h)
+                      then [ q ]
                       else subtract_run q h)) in
             let width = Cbat_word.bitwidth hi in
             let kept =
@@ -1211,7 +1212,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                    before reading each covered address once. *)
                 let covered =
                   List.concat_map small ~f:(fun h ->
-                      List.map (Cbat_clp.split_wrapped h) ~f:Cbat_clp.iter)
+                      List.map (Cbat_clp.Pieces.to_list h) ~f:Cbat_clp.iter)
                   |> Cbat_vsa_utils.merge_balanced
                        ~merge:(Cbat_vsa_utils.merge_dedup ~compare:Cbat_word.compare) in
                 List.filter covered ~f:(fun x ->

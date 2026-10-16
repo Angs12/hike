@@ -12,7 +12,8 @@
    [lift_binop]/[lift_unop] and [mkzw] are mli-internal, so their rows run
    the public entries that reach them: the composite ops and [of_word]/
    [of_int64]/[of_int].  [create] is [Cbat_clp_core]'s, re-exported by the
-   [Cbat_clp] seam the production call sites use.
+   [Cbat_clp] seam the production call sites use.  The bit-op rows run the
+   progression-level [Cbat_clp_arith] rules the pieces call.
 
    Usage: rows shared by clp_bench.exe (the report) and clp_tripwire
    (the allocation tripwire test). *)
@@ -22,6 +23,7 @@ open Probe_common
 
 module CW = Cbat_word
 module Clp = Cbat_clp
+module A = Cbat_clp_arith
 module Comp = Cbat_clp_set_composite
 
 type row = Probe_common.bench_row
@@ -98,6 +100,12 @@ let word_bench () : row list =
 
 (* ---- Cbat_clp_arith / Clp.create ----------------------------------- *)
 
+(* The step-1 progression [lo, hi]. *)
+let interval_of ~(width : int) (lo : int) (hi : int) : Clp.t =
+  Clp.create ~width ~step:(CW.one width)
+    ~cardn:(CW.of_int ~width:(width + 1) (hi - lo + 1))
+    (CW.of_int ~width lo)
+
 let clp_bench () : row list =
   let w = 64 in
   let step8 = CW.of_int ~width:w 8 in
@@ -105,40 +113,34 @@ let clp_bench () : row list =
   let asc8b =
     Clp.create_ascending ~width:w ~base:(CW.of_int ~width:w 16) ~step:step8
   in
-  let interval =
-    Clp.interval ~width:w (CW.of_int ~width:w 0x1000)
-      (CW.of_int ~width:w 0x2000)
-  in
+  let interval = interval_of ~width:w 0x1000 0x2000 in
   let singleton = Clp.create ~width:w step8 in
   let cardn_two = CW.of_int ~width:(w + 1) 2 in
   let cardn_finite = CW.of_int ~width:(w + 1) 0x100000 in
   let cardn_wrap = CW.dom_size ~width:(w + 1) 63 in
   let w128 = 128 in
   let asc8_128 = Clp.create_ascending ~width:w128 ~base:step8 ~step:step8 in
-  let interval_128 =
-    Clp.interval ~width:w128 (CW.of_int ~width:w128 0x1000)
-      (CW.of_int ~width:w128 0x2000)
-  in
+  let interval_128 = interval_of ~width:w128 0x1000 0x2000 in
   [ measure ~name:"clp.logand(asc8,asc8b)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logand asc8 asc8b)));
+        keep (List.length (A.logand asc8 asc8b)));
     measure ~name:"clp.logand(interval,interval)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logand interval interval)));
+        keep (List.length (A.logand interval interval)));
     measure ~name:"clp.logand(interval,singleton)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logand interval singleton)));
+        keep (List.length (A.logand interval singleton)));
     measure ~name:"clp.logand(128,128)" ~n:10_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logand asc8_128 interval_128)));
+        keep (List.length (A.logand asc8_128 interval_128)));
     measure ~name:"clp.logor(asc8,asc8b)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logor asc8 asc8b)));
+        keep (List.length (A.logor asc8 asc8b)));
     measure ~name:"clp.logor(interval,singleton)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logor interval singleton)));
+        keep (List.length (A.logor interval singleton)));
     measure ~name:"clp.logxor(singleton,singleton)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logxor singleton singleton)));
+        keep (List.length (A.logxor singleton singleton)));
     measure ~name:"clp.logxor(asc8,asc8b)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logxor asc8 asc8b)));
+        keep (List.length (A.logxor asc8 asc8b)));
     measure ~name:"clp.logxor(interval,interval)" ~n:20_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logxor interval interval)));
+        keep (List.length (A.logxor interval interval)));
     measure ~name:"clp.logxor(128,128)" ~n:10_000 (fun () ->
-        keep (Clp.bitwidth (Clp.logxor asc8_128 interval_128)));
+        keep (List.length (A.logxor asc8_128 interval_128)));
     measure ~name:"clp.create(singleton)" ~n:200_000 (fun () ->
         keep (Clp.bitwidth (Clp.create ~width:w step8)));
     measure ~name:"clp.create(two,step8)" ~n:100_000 (fun () ->
@@ -172,7 +174,7 @@ let comp_bench () : row list =
     Comp.of_list ~width:w (List.init 10 (fun i -> CW.of_int ~width:w (i * 8)))
   in
   let clp_big = Comp.of_clp interval in
-  let clp_asc = Comp.of_clp asc8 in
+  let clp_asc = Comp.of_clp (Clp.Pieces.of_progression asc8) in
   let stack1 = Comp.stack_word_i64 8L in
   let stack_r =
     Comp.stack_word

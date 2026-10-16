@@ -81,26 +81,27 @@ let stack_cardinality (offs : P.t) : word =
     if Cbat_word.leq_int b 0x8000000000 then Cbat_word.mul a b
     else Cbat_word.ones width
 
-(* The single-progression hull of a piece union. *)
-let hull_of_pieces (ps : P.t) : clp option =
-  List.reduce (P.to_list ps) ~f:Clp.union
+(* The circular hull of a piece union: one piece, or the two arcs of one
+   across the modulus; empty when the union is. *)
+let hull_of_pieces (ps : P.t) : P.t option =
+  let h = P.circular_hull ps in
+  if P.is_bottom h then None else Some h
 
-(* The hull, or the empty piece at [width] when there is none. *)
-let hull_or_bottom ~(width : int) (ps : P.t) : clp =
-  Option.value (hull_of_pieces ps) ~default:(Clp.bottom width)
+let hull_or_bottom (ps : P.t) : P.t = P.circular_hull ps
 
 let pieces_of_finset (s : fset) : P.t = Exact.pieces s
 
-let clp_of_finset fs : clp =
+(* The circular hull of a finite set. *)
+let hull_of_finset fs : P.t =
   let width = Exact.bitwidth fs in
   match Exact.iter fs with
-  | [] -> Clp.bottom width
-  | [ x ] -> Clp.singleton x
-  | l -> Clp.of_list ~width l
+  | [] -> P.bottom width
+  | [ x ] -> P.singleton x
+  | l -> P.hull_of_list ~width l
 
 (* ---------------- constructors ---------------- *)
 
-let stack_word (offs : Clp.t) : t = Rel (Origin.Stack, P.of_progression offs)
+let stack_word (offs : P.t) : t = Rel (Origin.Stack, offs)
 
 let stack_word_i64 (k : int64) : t =
   Rel (Origin.Stack, P.singleton (Cbat_word.of_int64 k))
@@ -190,7 +191,7 @@ let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
 
 (* The offsets' SIGNED extrema of a stack value (the offset line is
    signed: negative below the entry).  Exact over the arcs of every
-   progression — a wrapped SP piece measures instead of failing. *)
+   progression — offsets across the modulus measure instead of failing. *)
 let offsets_signed_extrema (offs : P.t)
     : (Cbat_word.t * Cbat_word.t) option =
   let fold (acc : (Cbat_word.t * Cbat_word.t) option)
@@ -220,11 +221,11 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
   | _ -> None
 
 (* The step-1 piece over the int64 position range [lo, hi]. *)
-let line_interval (lo : int64) (hi : int64) : clp =
+let line_interval (lo : int64) (hi : int64) : P.t =
   Clp.interval ~width:64 (Cbat_word.of_int64 lo) (Cbat_word.of_int64 hi)
 
-(* The VLA value's entry-line hull as a piece. *)
-let vla_line_piece (tid : Tid.t) (offs : P.t) : clp option =
+(* The VLA value's entry-line hull. *)
+let vla_line_piece (tid : Tid.t) (offs : P.t) : P.t option =
   Option.map (vla_entry_hull tid offs) ~f:(fun (lo, hi) -> line_interval lo hi)
 
 (* A stack-line value's offsets on the entry line, the Stack key line
@@ -234,7 +235,7 @@ let line_offsets (o : Origin.t) (offs : P.t) : P.t =
   match o with
   | Origin.Vla tid -> (
     match vla_line_piece tid offs with
-    | Some p -> P.of_progression p
+    | Some p -> p
     | None -> P.top 64)
   | Origin.Stack | Origin.Rip _ | Origin.Abs -> offs
 
@@ -257,7 +258,7 @@ let rec to_plain (t : t) : t =
      | Some (cmin, cmax)
        when Stdlib.Int64.compare cmin 0L >= 0
             && Stdlib.Int64.compare cmax cmin >= 0 ->
-       Clp (P.of_progression (line_interval cmin cmax))
+       Clp (line_interval cmin cmax)
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
@@ -430,26 +431,26 @@ let rec plain_is_top (t : t) : bool =
   | Rel (_, offs) -> P.is_top offs
   | Many ps -> List.exists ps ~f:plain_is_top
 
-(* The plain single-progression hull of the whole value. *)
-let as_clp (t : t) : clp =
+(* The circular hull of the whole plain value. *)
+let as_hull (t : t) : P.t =
   match to_plain t with
   | Clp ps ->
     (match hull_of_pieces ps with
      | Some p -> p
-     | None -> Clp.top (Stdlib.max 1 (P.bitwidth ps)))
-  | Exact s -> clp_of_finset s
+     | None -> P.top (Stdlib.max 1 (P.bitwidth ps)))
+  | Exact s -> hull_of_finset s
   | Many ps ->
     let hulls =
       List.filter_map ps ~f:(function
-        | Exact s -> Some (clp_of_finset s)
+        | Exact s -> Some (hull_of_finset s)
         | Clp hps -> hull_of_pieces hps
         | Rel _ -> None
         | Many _ -> None)
     in
     (match hulls with
-     | [] -> Clp.top 64
-     | p :: rest -> List.fold rest ~init:p ~f:Clp.union)
-  | _ -> Clp.top 64
+     | [] -> P.top 64
+     | p :: rest -> List.fold rest ~init:p ~f:P.hull_union)
+  | _ -> P.top 64
 
 let of_list ~width l : t =
   canonical
@@ -458,7 +459,7 @@ let of_list ~width l : t =
 
 let singleton w : t = Exact (Exact.singleton w)
 
-let of_clp (p : clp) : t = canonical [ Clp (P.of_progression p) ]
+let of_clp (ps : P.t) : t = canonical [ Clp ps ]
 
 let of_exact (s : Exact.t) : t = canonical [ Exact s ]
 
@@ -735,16 +736,17 @@ let rec equal (t1 : t) (t2 : t) : bool =
   | _ -> false
 
 let overlap (t1 : t) (t2 : t) : bool =
-  let hull = hull_or_bottom ~width:1 in
+  (* The hull's width; an empty hull reads as one bit wide. *)
+  let hull_width h = if P.is_bottom h then 1 else P.bitwidth h in
   let leaf_pair q1 q2 =
     match q1, q2 with
     | Exact s1, Exact s2 -> Exact.overlap s1 s2
     | Exact s1, Clp ps2 ->
-      let h = hull ps2 in
-      Exact.overlap_elem ~width:(Clp.bitwidth h) ~elem:(fun w -> Clp.elem w h) s1
+      let h = hull_or_bottom ps2 in
+      Exact.overlap_elem ~width:(hull_width h) ~elem:(fun w -> P.elem w h) s1
     | Clp ps1, Exact s2 ->
-      let h = hull ps1 in
-      Exact.overlap_elem ~width:(Clp.bitwidth h) ~elem:(fun w -> Clp.elem w h) s2
+      let h = hull_or_bottom ps1 in
+      Exact.overlap_elem ~width:(hull_width h) ~elem:(fun w -> P.elem w h) s2
     | Clp ps1, Clp ps2 -> P.overlap ps1 ps2
     | _ -> false
   in
@@ -856,11 +858,10 @@ module Piece_binop = Binop (Piece_repr)
    a piece union can hold is lost here, not at the join. *)
 let piece_collapse (ps : P.t) : P.t =
   match P.to_list ps with
-  (* [of_progression] returns a live unwrapped piece as itself. *)
-  | [ p ] when not (Clp.is_bottom p) && not (Clp.is_wrapped p) -> ps
+  | [ _ ] -> ps
   | _ ->
     match hull_of_pieces ps with
-    | Some p -> P.of_progression p
+    | Some h -> h
     | None -> ps
 
 (* The pairwise product stays within [max_pieces] pairs: past it, the
@@ -963,14 +964,14 @@ let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
 (* The offset piece union of a stack-symbolic value — answers ONLY for
    the symbolic arm; a plain in-band set is None.  The single-progression
    view is the hull (the exact union is the piece list itself). *)
-let stack_offsets (t : t) : Clp.t option =
+let stack_offsets (t : t) : P.t option =
   match t with
   | Rel (Origin.Vla tid, offs) -> (
     (* The frame-relative offsets shifted onto the entry line; an unknown
        base has no entry-line position (the sound fallback). *)
     vla_line_piece tid offs)
   | Rel (o, offs) when Origin.names_stack_line o ->
-    Some (hull_or_bottom ~width:64 offs)
+    Some (hull_or_bottom offs)
   | _ -> None
 
 (* The stack-line leaves of a value (itself when it is one): the stack
@@ -980,10 +981,10 @@ let stack_leaves (t : t) : t list =
 
 (* The frame-relative offsets of a VLA value (0 = the allocation base) —
    [Some] only for the [Vla] origin. *)
-let vla_offsets (t : t) : Clp.t option =
+let vla_offsets (t : t) : P.t option =
   match t with
   | Rel (Origin.Vla _, offs) ->
-    Some (hull_or_bottom ~width:64 offs)
+    Some (hull_or_bottom offs)
   | _ -> None
 
 (* The memory-key coordinate line.  A stack access can land inside a
@@ -1006,15 +1007,15 @@ let rec address_groups (t : t) : (Origin.t * P.t) list =
        offsets shift by the allocation base's range; an unknown base
        keys the whole stack line (a stack access can land in the VLA). *)
     match vla_line_piece tid offs with
-    | Some p -> [ (Origin.Stack, P.of_progression p) ]
+    | Some p -> [ (Origin.Stack, p) ]
     | None -> [ (Origin.Stack, P.top 64) ])
   | Rel (o, offs) -> [ (key_line o, offs) ]
   | Clp ps -> [ (Origin.Abs, ps) ]
   | Exact s -> [ (Origin.Abs, pieces_of_finset s) ]
   | Many ps -> List.concat_map ps ~f:address_groups
 
-(* A finite non-wrapped progression split at its value midpoint; a
-   singleton has no halves. *)
+(* A finite progression split at its value midpoint; a singleton has no
+   halves. *)
 let halves (p : clp) : (clp * clp) option =
   match Clp.min_elem p, Clp.max_elem p with
   | Some lo, Some hi when Cbat_word.(<) lo hi ->
@@ -1052,8 +1053,7 @@ let filter_addresses (t : t)
     else
       let kept =
         (* Source grids can interleave; merge their survivor streams. *)
-        List.concat_map progs ~f:(fun p ->
-            List.map (Clp.split_wrapped p) ~f:(bisect line []))
+        List.map progs ~f:(bisect line [])
         |> Utils.merge_balanced ~merge:P.merge_progressions in
       Some (P.of_progressions kept) in
   match t with
@@ -1280,8 +1280,7 @@ let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
     (match o, Cbat_word.to_int64 slack with
      | Origin.Vla tid, Ok m -> Origin.Vla_seed.widen_off_lo tid (Stdlib.Int64.neg m)
      | _ -> ());
-    Some (P.sub offs (P.of_progression
-        (Clp.interval ~width:64 (Cbat_word.zero 64) slack)))
+    Some (P.sub offs (Clp.interval ~width:64 (Cbat_word.zero 64) slack))
   else
     let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
     let b_lo = Stdlib.Int64.logand facts.base m64 in
@@ -1315,14 +1314,14 @@ let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
                     (Cbat_word.rshift span65 (Cbat_word.of_int ~width:65 s))
                     (Cbat_word.one 65)
                 in
-                Some (Clp.create a' ~step ~cardn:cnt)
+                Some (P.of_arcs (Clp.arcs a' ~step ~cardn:cnt))
               | _ -> None)
           | _ -> None)
     in
     let rec union_all = function
       | [] -> P.bottom 64
-      | [ g ] -> P.of_progression g
-      | g :: rest -> P.union (P.of_progression g) (union_all rest)
+      | [ g ] -> g
+      | g :: rest -> P.union g (union_all rest)
     in
     if List.length imgs = List.length (P.to_list offs) then
       Some (union_all imgs)
@@ -1436,22 +1435,22 @@ let logor_rel_xor (op : binop) (o : Origin.t) (offs : P.t) (plain : t) : t =
 let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
   match op with
   | Add | Sub ->
-    let f = match op with Sub -> Clp.sub | _ -> Clp.add in
-    let hull = hull_or_bottom ~width:64 in
-    let hull_of_plain (q : t) : clp option =
+    let f = match op with Sub -> P.hull_sub | _ -> P.hull_add in
+    let hull = hull_or_bottom in
+    let hull_of_plain (q : t) : P.t option =
       match q with
       | Clp ps -> hull_of_pieces ps
-      | Exact s -> Some (clp_of_finset s)
+      | Exact s -> Some (hull_of_finset s)
       | _ -> None
     in
     (match t1, t2 with
      | Rel (o, a1), q2 when bitwidth q2 = 64 ->
        (match hull_of_plain q2 with
-        | Some p2 -> canonical [ Rel (o, P.of_progression (f (hull a1) p2)) ]
+        | Some p2 -> canonical [ Rel (o, f (hull a1) p2) ]
         | None -> lift_binop op t1 t2)
      | q1, Rel (o, a2) when bitwidth q1 = 64 ->
        (match hull_of_plain q1 with
-        | Some p1 -> canonical [ Rel (o, P.of_progression (f p1 (hull a2))) ]
+        | Some p1 -> canonical [ Rel (o, f p1 (hull a2)) ]
         | None -> lift_binop op t1 t2)
      | _ -> lift_binop op t1 t2)
   | Meet -> meet_rel t1 t2
@@ -1779,8 +1778,8 @@ let rec precedes t1 t2 : bool =
   | Clp p1, Clp p2 -> P.precedes p1 p2
   | Exact s1, Exact s2 -> Exact.precedes s1 s2
   | Clp _, Exact _ -> false
-  | Exact s, Clp _ -> Clp.precedes (clp_of_finset s) (as_clp t2)
-  | _ -> Clp.precedes (as_clp t1) (as_clp t2)
+  | Exact s, Clp _ -> P.precedes (hull_of_finset s) (as_hull t2)
+  | _ -> P.precedes (as_hull t1) (as_hull t2)
 
 (* Values with the same origin widen in its offsets.
    A plain pair widens BY KIND — two Clp leaves via [fp] (the positional
@@ -1792,7 +1791,7 @@ let rec precedes t1 t2 : bool =
    from the plain ones, each origin in its own offsets: a relative leaf
    is never hulled into a plain value (a stack address would leave the
    stack key line).  A relative leaf only one side carries is kept. *)
-let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
+let hull_join (f : Clp.t -> Clp.t -> Clp.t list) (fp : P.t -> P.t -> P.t) t1 t2 : t =
   (* The Exact tier widens by its own union while the union stays put;
      a union that grew has left the exact-small tier, so it escapes to
      the piece widen (the tier promotion the spec's Risks names) and the
@@ -1807,7 +1806,7 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
       else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
   in
   let plain_hull p1 p2 =
-    canonical [ Clp (P.of_progression (f (as_clp p1) (as_clp p2))) ]
+    canonical [ Clp (P.widen_hulls f (as_hull p1) (as_hull p2)) ]
   in
   (* Two plain values: every kind carried by BOTH sides pairs with its
      own widen; a kind carried by one side only (the excess) hulls the
@@ -1888,9 +1887,7 @@ let rec get_idx (t : t) : idx =
   match t with
   | Rel _ -> 64
   | Clp ps ->
-    (match hull_of_pieces ps with
-     | Some p -> Clp.get_idx p
-     | None -> 0)
+    P.bitwidth ps
   | Exact s -> Exact.get_idx s
   | Many ps ->
     List.fold ps ~init:0 ~f:(fun a q -> Stdlib.max a (get_idx q))
@@ -1900,12 +1897,12 @@ let pp_leaf ppf (t : t) =
   | Rel (o, offs) ->
     Format.fprintf ppf "@[%s%a@]" (Origin.name o) (fun ppf ps ->
         match hull_of_pieces ps with
-        | Some p -> Clp.pp ppf p
+        | Some p -> P.pp ppf p
         | None -> ())
     offs
   | Clp ps ->
     (match hull_of_pieces ps with
-     | Some p -> Clp.pp ppf p
+     | Some p -> P.pp ppf p
      | None -> Format.fprintf ppf "_|_")
   | Exact s -> Exact.pp ppf s
   | Many _ -> ()

@@ -106,7 +106,7 @@ let tests : unit Alcotest.test list =
         let cardn = Cbat_word.of_int64 ~width:64 0x8000000000002000L in
         let crossed =
           Ws.of_clp
-            (Ws.Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn base) in
+            (Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn base) in
         let literal =
           Ws.singleton (Cbat_word.of_int64 ~width:64 0x3FFFFFFFFFFFFFFFL) in
         check "PROBE-04 (the domain rejects numeric coincidence)"

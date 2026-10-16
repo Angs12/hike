@@ -357,7 +357,7 @@ let rel_line_base (o : Hike_origin.t) : Cbat_word.t option =
 (* Extend the grid [base + i*step] to cover [lo,hi], keeping the step and
    base congruence (the signed line).  None for a singleton (step 0). *)
 let extend_grid ~(width : int) ~(base : Cbat_word.t) ~(step : Cbat_word.t)
-    (lo : Cbat_word.t) (hi : Cbat_word.t) : Cbat_clp.t option =
+    (lo : Cbat_word.t) (hi : Cbat_word.t) : Cbat_clp.Pieces.t option =
   if Cbat_word.is_zero step then None
   else
     let diff = Cbat_word.sub lo base in
@@ -377,11 +377,11 @@ let extend_grid ~(width : int) ~(base : Cbat_word.t) ~(step : Cbat_word.t)
       Cbat_word.add
         (Cbat_word.div (cw (Cbat_word.sub hi base')) (cw step))
         (Cbat_word.one w1) in
-    Some (Cbat_clp.create ~width ~step ~cardn base')
+    Some (Cbat_clp.Pieces.of_arcs (Cbat_clp.arcs ~width ~step ~cardn base'))
 
 (* The value's translatable progression in its own space. *)
 let value_progression (o : Hike_origin.t) (v : Cbat_clp_set_composite.t) :
-    Cbat_clp.t option =
+    Cbat_clp.Pieces.t option =
   match o with
   | Hike_origin.Vla _ -> Cbat_clp_set_composite.vla_offsets v
   | _ -> Cbat_clp_set_composite.stack_offsets v
@@ -448,9 +448,9 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
             let lo_off = Cbat_word.sub extrap_lo b in
             let hi_off = Cbat_word.sub extrap_hi b in
             let base =
-              Option.value (Cbat_clp.min_elem p) ~default:lo_off in
+              Option.value (Cbat_clp.Pieces.min_elem p) ~default:lo_off in
             (match
-               extend_grid ~width ~base ~step:(Cbat_clp.step_of p) lo_off hi_off
+               extend_grid ~width ~base ~step:(Cbat_clp.Pieces.hull_step p) lo_off hi_off
              with
              | Some p' ->
                Cbat_clp_set_composite.set_origin o

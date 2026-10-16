@@ -37,7 +37,7 @@ val is_ascending : t -> bool
 val is_descending : t -> bool
 val is_circular : t -> bool
 
-val of_clp : Cbat_clp.t -> t
+val of_clp : Cbat_clp.Pieces.t -> t
 
 (* A produced exact set, promoted through the usual finite-tier budget. *)
 val of_exact : Cbat_clp.Exact.t -> t
@@ -64,7 +64,7 @@ val module_address : int64 -> t
 (* [r] re-tagged with the section [old] and [new_] share, if any. *)
 val keep_section : old:t -> new_:t -> t -> t
 
-val stack_word : Cbat_clp.t -> t
+val stack_word : Cbat_clp.Pieces.t -> t
 val stack_word_i64 : int64 -> t
 
 (* A fresh VLA frame named by the SP-assigning def: offset 0 is the
@@ -75,7 +75,7 @@ val vla_frame : Bap.Std.Tid.t -> t
    symbolic arm; a plain in-band set is None.  A VLA value's offsets are
    materialised onto the entry line through its base range; an unknown
    base answers None. *)
-val stack_offsets : t -> Cbat_clp.t option
+val stack_offsets : t -> Cbat_clp.Pieces.t option
 
 (* The stack-line leaves of a value (itself when it is one): the stack
    addresses the value may hold, one leaf per stack-line origin. *)
@@ -83,7 +83,7 @@ val stack_leaves : t -> t list
 
 (* The frame-relative offsets of a VLA value (0 = the allocation base) —
    [Some] only for the [Vla] origin. *)
-val vla_offsets : t -> Cbat_clp.t option
+val vla_offsets : t -> Cbat_clp.Pieces.t option
 
 (* The value's address pieces per memory-key line: a relative value keeps
    its origin's line, plain values the absolute line, and a mixed value
@@ -94,8 +94,8 @@ val address_groups : t -> (Origin.t * Cbat_clp.Pieces.t) list
    to the whole progression; [`Split`] hands it back to the bisection;
    [`Parts parts`] replaces it by the listed pieces with their verdicts,
    without recursion (elements no piece covers are dropped, so a bulk
-   decider lists what it keeps). The listed pieces are non-bottom, non-wrapping,
-   ordered by unsigned minimum, and contain only elements of the input. *)
+   decider lists what it keeps). The listed pieces are non-bottom, ordered by
+   unsigned minimum, and contain only elements of the input. *)
 type address_verdict =
   [ `Keep | `Drop | `Split | `Parts of (Cbat_clp.t * [ `Keep | `Drop ]) list ]
 

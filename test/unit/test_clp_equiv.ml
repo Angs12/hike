@@ -24,6 +24,7 @@
 open Bap.Std
 open Hike_test.Harness
 module Ws = Cbat_clp_set_composite
+module Clp = Hike_test.Common.Clp
 module CKL = Core.List
 module CW = Cbat_word
 
@@ -37,29 +38,30 @@ let cw_gcd_exn (a : CW.t) (b : CW.t) : CW.t =
 (* CLP reference implementations. *)
 (* ========================================================================= *)
 
-let ref_bottom (width : int) : Ws.Clp.t =
-  Ws.Clp.create ~width (Cbat_word.of_word (Word.zero width))
+let ref_bottom (width : int) : Clp.t =
+  Clp.create ~width (Cbat_word.of_word (Word.zero width))
     ~cardn:(Cbat_word.of_word (Word.zero (width + 1)))
 
-let ref_top (i : int) : Ws.Clp.t =
-  Ws.Clp.infinite (Cbat_word.of_word (Word.zero i), Cbat_word.of_word (Word.one i))
+let ref_top (i : int) : Clp.t =
+  Clp.infinite (Cbat_word.of_word (Word.zero i), Cbat_word.of_word (Word.one i))
 
-let ref_is_top (p : Ws.Clp.t) : bool = Ws.Clp.equal p (ref_top (Ws.Clp.bitwidth p))
+let ref_is_top (p : Clp.t) : bool =
+  (not (Clp.is_bottom p)) && Clp.equal p (ref_top (Clp.bitwidth p))
 
 let ops :
-    (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)
+    (string * (Clp.t -> Clp.t -> Clp.t)
      * (Cbat_word.t -> Cbat_word.t -> Cbat_word.t)) list =
-  [ ("add", Ws.Clp.add, CW.add); ("sub", Ws.Clp.sub, CW.sub)
-  ; ("mul", Ws.Clp.mul, CW.mul)
-  ; ("logand", Ws.Clp.logand, CW.logand); ("logor", Ws.Clp.logor, CW.logor)
-  ; ("logxor", Ws.Clp.logxor, CW.logxor) ]
+  [ ("add", Clp.add, CW.add); ("sub", Clp.sub, CW.sub)
+  ; ("mul", Clp.mul, CW.mul)
+  ; ("logand", Clp.logand, CW.logand); ("logor", Clp.logor, CW.logor)
+  ; ("logxor", Clp.logxor, CW.logxor) ]
 
 (* The concrete finite-set oracle: a CLP's concrete elements when it is
    finite and small enough to enumerate. *)
-let small_elems (p : Ws.Clp.t) : Cbat_word.t list option =
-  if Ws.Clp.is_infinite p then None
-  else if CW.gt_int (Ws.Clp.cardinality p) 64 then None
-  else Some (Ws.Clp.iter p)
+let small_elems (p : Clp.t) : Cbat_word.t list option =
+  if Clp.is_infinite p then None
+  else if CW.gt_int (Clp.cardinality p) 64 then None
+  else Some (Clp.iter p)
 
 (* ========================================================================= *)
 (* Ref_word: the frozen reference word implementations, verbatim. *)
@@ -462,36 +464,36 @@ let run_sweep () : int * int * int =
   let widths = [ 1; 2; 3; 4; 8; 16; 32; 64 ] in
   CKL.iter widths ~f:(fun w ->
       (* identity elements *)
-      let tb = Ws.Clp.bottom w and rb = ref_bottom w in
+      let tb = Clp.bottom w and rb = ref_bottom w in
       incr checked;
-      if not (Ws.Clp.equal tb rb) then bad (Printf.sprintf "BOTTOM w=%d differs" w);
-      let tt = Ws.Clp.top w and rt = ref_top w in
+      if not (Clp.equal tb rb) then bad (Printf.sprintf "BOTTOM w=%d differs" w);
+      let tt = Clp.top w and rt = ref_top w in
       incr checked;
-      if not (Ws.Clp.equal tt rt) then bad (Printf.sprintf "TOP w=%d differs" w);
+      if not (Clp.equal tt rt) then bad (Printf.sprintf "TOP w=%d differs" w);
       incr checked;
-      if not (Ws.Clp.is_top tt) then bad (Printf.sprintf "TOP w=%d: is_top false" w);
+      if not (Clp.is_top tt) then bad (Printf.sprintf "TOP w=%d: is_top false" w);
       incr checked;
-      if Ws.Clp.is_top tb then bad (Printf.sprintf "BOTTOM w=%d: is_top true" w);
+      if Clp.is_top tb then bad (Printf.sprintf "BOTTOM w=%d: is_top true" w);
       (* word ops at this width, over the swept values *)
       let n = min 16 (1 lsl (min w 4)) in
       for b1 = 0 to n - 1 do
         for s1 = 0 to n - 1 do
           for c1 = 0 to n - 1 do
             let p1 =
-              Ws.Clp.create (Cbat_word.of_int ~width:w b1)
+              Clp.create (Cbat_word.of_int ~width:w b1)
                 ~step:(Cbat_word.of_int ~width:w s1)
                 ~cardn:(Cbat_word.of_int ~width:(w + 1) c1)
             in
             (* is_top on the swept value *)
             incr checked;
-            if not (Bool.equal (Ws.Clp.is_top p1) (ref_is_top p1)) then
+            if not (Bool.equal (Clp.is_top p1) (ref_is_top p1)) then
               bad (Printf.sprintf "IS_TOP w=%d b=%d s=%d c=%d" w b1 s1 c1);
             (* the word ops, driven by the swept (base, step, cardn) *)
             if c1 land 3 = 0 && s1 land 3 = 0 && b1 land 3 = 0 then
               check_cbat_word w (Z.of_int b1) (Z.of_int s1);
             for b2 = 0 to n - 1 do
               let p2 =
-                Ws.Clp.create (Cbat_word.of_int ~width:w b2)
+                Clp.create (Cbat_word.of_int ~width:w b2)
                   ~step:(Cbat_word.of_int ~width:w s1)
                   ~cardn:(Cbat_word.of_int ~width:(w + 1) c1)
               in
@@ -503,7 +505,7 @@ let run_sweep () : int * int * int =
                     if not
                          (CKL.for_all xs ~f:(fun x ->
                               CKL.for_all ys ~f:(fun y ->
-                                  Ws.Clp.elem (wop x y) got)))
+                                  Clp.elem (wop x y) got)))
                     then
                       bad
                         (Printf.sprintf
@@ -530,12 +532,12 @@ let run_sweep () : int * int * int =
                       CKL.iter ind_steps ~f:(fun s2 ->
                           CKL.iter ind_cards ~f:(fun c2 ->
                               let p1 =
-                                Ws.Clp.create (Cbat_word.of_int ~width:4 b1)
+                                Clp.create (Cbat_word.of_int ~width:4 b1)
                                   ~step:(Cbat_word.of_int ~width:4 s1)
                                   ~cardn:(Cbat_word.of_int ~width:5 c1)
                               in
                               let p2 =
-                                Ws.Clp.create (Cbat_word.of_int ~width:4 b2)
+                                Clp.create (Cbat_word.of_int ~width:4 b2)
                                   ~step:(Cbat_word.of_int ~width:4 s2)
                                   ~cardn:(Cbat_word.of_int ~width:5 c2)
                               in
@@ -546,7 +548,7 @@ let run_sweep () : int * int * int =
                                 if not
                                      (CKL.for_all xs ~f:(fun x ->
                                           CKL.for_all ys ~f:(fun y ->
-                                              Ws.Clp.elem (wop x y) got)))
+                                              Clp.elem (wop x y) got)))
                                 then
                                   bad
                                     (Printf.sprintf
@@ -572,35 +574,35 @@ let run_sweep () : int * int * int =
                       CKL.iter (piece_vals w) ~f:(fun s2 ->
                           CKL.iter piece_cards ~f:(fun c2 ->
                               let p1 =
-                                Ws.Clp.create (CW.of_int ~width:w b1)
+                                Clp.create (CW.of_int ~width:w b1)
                                   ~step:(CW.of_int ~width:w s1)
                                   ~cardn:(CW.of_int ~width:(w + 1) c1) in
                               let p2 =
-                                Ws.Clp.create (CW.of_int ~width:w b2)
+                                Clp.create (CW.of_int ~width:w b2)
                                   ~step:(CW.of_int ~width:w s2)
                                   ~cardn:(CW.of_int ~width:(w + 1) c2) in
-                              let pa = Ws.Clp.Pieces.of_progression p1 in
-                              let pb = Ws.Clp.Pieces.of_progression p2 in
-                              let a = Ws.Clp.Pieces.union pa pb in
-                              let xa = Ws.Clp.Pieces.elements a in
-                              let xb = Ws.Clp.Pieces.elements pb in
+                              let pa = p1 in
+                              let pb = p2 in
+                              let a = Clp.Pieces.union pa pb in
+                              let xa = Clp.Pieces.elements a in
+                              let xb = Clp.Pieces.elements pb in
                               let show =
                                 Printf.sprintf "w=%d b1=%d s1=%d c1=%d b2=%d s2=%d c2=%d"
                                   w b1 s1 c1 b2 s2 c2 in
                               CKL.iter
-                                [ ("add", Ws.Clp.Pieces.add, CW.add);
-                                  ("sub", Ws.Clp.Pieces.sub, CW.sub);
-                                  ("mul", Ws.Clp.Pieces.mul, CW.mul);
-                                  ("logand", Ws.Clp.Pieces.logand, CW.logand);
-                                  ("logor", Ws.Clp.Pieces.logor, CW.logor);
-                                  ("logxor", Ws.Clp.Pieces.logxor, CW.logxor) ]
+                                [ ("add", Clp.Pieces.add, CW.add);
+                                  ("sub", Clp.Pieces.sub, CW.sub);
+                                  ("mul", Clp.Pieces.mul, CW.mul);
+                                  ("logand", Clp.Pieces.logand, CW.logand);
+                                  ("logor", Clp.Pieces.logor, CW.logor);
+                                  ("logxor", Clp.Pieces.logxor, CW.logxor) ]
                                 ~f:(fun (nm, f, wop) ->
                                   incr checked;
                                   let got = f a pb in
                                   if not
                                        (CKL.for_all xa ~f:(fun x ->
                                             CKL.for_all xb ~f:(fun y ->
-                                                Ws.Clp.Pieces.elem (wop x y) got)))
+                                                Clp.Pieces.elem (wop x y) got)))
                                   then
                                     bad
                                       (Printf.sprintf
@@ -608,38 +610,38 @@ let run_sweep () : int * int * int =
                                          nm show));
                               incr checked;
                               if not
-                                   (Ws.Clp.Pieces.equal (Ws.Clp.Pieces.union a pb) a)
+                                   (Clp.Pieces.equal (Clp.Pieces.union a pb) a)
                               then bad (Printf.sprintf "PIECES union not exact %s" show);
                               incr checked;
-                              let m = Ws.Clp.Pieces.meet a pb in
+                              let m = Clp.Pieces.meet a pb in
                               if
                                 not
                                   (CKL.for_all xb ~f:(fun x ->
-                                       Ws.Clp.Pieces.elem x m)
+                                       Clp.Pieces.elem x m)
                                   && CW.equal
-                                       (Ws.Clp.Pieces.cardinality m)
-                                       (Ws.Clp.Pieces.cardinality pb))
+                                       (Clp.Pieces.cardinality m)
+                                       (Clp.Pieces.cardinality pb))
                               then bad (Printf.sprintf "PIECES meet not exact %s" show);
                               incr checked;
-                              let d = Ws.Clp.Pieces.diff a pb in
+                              let d = Clp.Pieces.diff a pb in
                               let survivors =
-                                CKL.filter (Ws.Clp.Pieces.elements a)
-                                  ~f:(fun x -> not (Ws.Clp.elem x p2)) in
+                                CKL.filter (Clp.Pieces.elements a)
+                                  ~f:(fun x -> not (Clp.elem x p2)) in
                               let exact_d = List.length survivors <= 4 in
                               if
                                 not
-                                  (CKL.for_all (Ws.Clp.Pieces.elements a)
+                                  (CKL.for_all (Clp.Pieces.elements a)
                                      ~f:(fun x ->
-                                       if Ws.Clp.elem x p2 then
+                                       if Clp.elem x p2 then
                                          (not exact_d)
-                                         || not (Ws.Clp.Pieces.elem x d)
-                                       else Ws.Clp.Pieces.elem x d))
+                                         || not (Clp.Pieces.elem x d)
+                                       else Clp.Pieces.elem x d))
                               then bad (Printf.sprintf "PIECES diff not exact %s" show))))))));
   CKL.iter piece_widths ~f:(fun w ->
-      let big = Ws.Clp.top w in
+      let big = Clp.top w in
       incr checked;
       if not
-           (Ws.Clp.Pieces.elem (CW.zero w) (Ws.Clp.Pieces.of_progression big))
+           (Clp.Pieces.elem (CW.zero w) big)
       then bad (Printf.sprintf "PIECES top membership w=%d" w));
 
   (* Signed extrema vs the concrete oracle, over WRAPPED and plain
@@ -664,7 +666,7 @@ let run_sweep () : int * int * int =
           CKL.iter (piece_vals w) ~f:(fun s1 ->
               CKL.iter piece_cards ~f:(fun c1 ->
                   let p =
-                    Ws.Clp.create (CW.of_int ~width:w b1)
+                    Clp.create (CW.of_int ~width:w b1)
                       ~step:(CW.of_int ~width:w s1)
                       ~cardn:(CW.of_int ~width:(w + 1) c1)
                   in
@@ -684,12 +686,12 @@ let run_sweep () : int * int * int =
                              (Z.to_string want))
                     in
                     report "MIN"
-                      (match Ws.Clp.min_elem_signed p with
+                      (match Clp.min_elem_signed p with
                        | Some v -> signed_z v
                        | None -> Z.of_string "unused")
                       (match tmin with Some z -> z | None -> Z.zero);
                     report "MAX"
-                      (match Ws.Clp.max_elem_signed p with
+                      (match Clp.max_elem_signed p with
                        | Some v -> signed_z v
                        | None -> Z.of_string "unused")
                       (match tmax with Some z -> z | None -> Z.zero)))));
@@ -741,7 +743,7 @@ let run_sweep () : int * int * int =
               let ex = Ws.singleton (comp_cw w b1) in
               let clp =
                 Ws.of_clp
-                  (Ws.Clp.create ~width:w (comp_cw w b2) ~step:(comp_cw w s2)
+                  (Clp.create ~width:w (comp_cw w b2) ~step:(comp_cw w s2)
                      ~cardn:(CW.of_int ~width:(w + 1) c2))
               in
               let show =
@@ -794,170 +796,170 @@ let run_sweep () : int * int * int =
   let check_directional () =
     let w64 = 64 in
     let w_8 = CW.of_int ~width:w64 8 in
-    let asc = Ws.Clp.create_ascending ~width:w64 ~base:w_8 ~step:w_8 in
+    let asc = Clp.create_ascending ~width:w64 ~base:w_8 ~step:w_8 in
     incr checked;
-    if not (Ws.Clp.is_ascending asc) then
+    if not (Clp.is_ascending asc) then
       bad "DIRECTIONAL: is_ascending asc should be true";
     incr checked;
-    if not (Ws.Clp.is_infinite asc) then
+    if not (Clp.is_infinite asc) then
       bad "DIRECTIONAL: is_infinite asc should be true";
     incr checked;
-    if Ws.Clp.is_descending asc then
+    if Clp.is_descending asc then
       bad "DIRECTIONAL: is_descending asc should be false";
     incr checked;
-    if Ws.Clp.is_circular asc then
+    if Clp.is_circular asc then
       bad "DIRECTIONAL: is_circular asc should be false";
     incr checked;
-    (match Ws.Clp.min_elem asc with
+    (match Clp.min_elem asc with
      | Some m when CW.equal m w_8 -> ()
      | Some m -> bad (Printf.sprintf "DIRECTIONAL: min_elem asc got %s expected %s" (CW.to_string m) (CW.to_string w_8))
      | None -> bad "DIRECTIONAL: min_elem asc got None");
     incr checked;
-    (match Ws.Clp.min_elem_signed asc with
+    (match Clp.min_elem_signed asc with
      | Some m when CW.equal m w_8 -> ()
      | Some m -> bad (Printf.sprintf "DIRECTIONAL: min_elem_signed asc got %s expected %s" (CW.to_string m) (CW.to_string w_8))
      | None -> bad "DIRECTIONAL: min_elem_signed asc got None");
 
     (* Descending ray *)
     let w_64 = CW.of_int ~width:w64 64 in
-    let desc = Ws.Clp.create_descending ~width:w64 ~base:w_64 ~step:w_8 in
+    let desc = Clp.create_descending ~width:w64 ~base:w_64 ~step:w_8 in
     incr checked;
-    if not (Ws.Clp.is_descending desc) then
+    if not (Clp.is_descending desc) then
       bad "DIRECTIONAL: is_descending desc should be true";
     incr checked;
-    if not (Ws.Clp.is_infinite desc) then
+    if not (Clp.is_infinite desc) then
       bad "DIRECTIONAL: is_infinite desc should be true";
     incr checked;
-    if Ws.Clp.is_ascending desc then
+    if Clp.is_ascending desc then
       bad "DIRECTIONAL: is_ascending desc should be false";
     incr checked;
-    if Ws.Clp.is_circular desc then
+    if Clp.is_circular desc then
       bad "DIRECTIONAL: is_circular desc should be false";
     incr checked;
-    (match Ws.Clp.max_elem desc with
+    (match Clp.max_elem desc with
      | Some m when CW.equal m w_64 -> ()
      | Some m -> bad (Printf.sprintf "DIRECTIONAL: max_elem desc got %s expected %s" (CW.to_string m) (CW.to_string w_64))
      | None -> bad "DIRECTIONAL: max_elem desc got None");
     incr checked;
-    (match Ws.Clp.max_elem_signed desc with
+    (match Clp.max_elem_signed desc with
      | Some m when CW.equal m w_64 -> ()
      | Some m -> bad (Printf.sprintf "DIRECTIONAL: max_elem_signed desc got %s expected %s" (CW.to_string m) (CW.to_string w_64))
      | None -> bad "DIRECTIONAL: max_elem_signed desc got None");
 
     (* Canonicalization: cardn = 1 becomes Finite singleton *)
     let max_val = CW.ones w64 in
-    let asc_single = Ws.Clp.create_ascending ~width:w64 ~base:max_val ~step:w_8 in
+    let asc_single = Clp.create_ascending ~width:w64 ~base:max_val ~step:w_8 in
     incr checked;
-    if Ws.Clp.is_ascending asc_single then
+    if Clp.is_ascending asc_single then
       bad "DIRECTIONAL: asc_single should canonicalize to Finite (not ascending)";
     incr checked;
-    if Ws.Clp.is_infinite asc_single then
+    if Clp.is_infinite asc_single then
       bad "DIRECTIONAL: asc_single should canonicalize to Finite (not infinite)";
 
-    let desc_single = Ws.Clp.create_descending ~width:w64 ~base:(CW.of_int ~width:w64 7) ~step:w_8 in
+    let desc_single = Clp.create_descending ~width:w64 ~base:(CW.of_int ~width:w64 7) ~step:w_8 in
     incr checked;
-    if Ws.Clp.is_descending desc_single then
+    if Clp.is_descending desc_single then
       bad "DIRECTIONAL: desc_single should canonicalize to Finite (not descending)";
     incr checked;
-    if Ws.Clp.is_infinite desc_single then
+    if Clp.is_infinite desc_single then
       bad "DIRECTIONAL: desc_single should canonicalize to Finite (not infinite)";
 
     (* Operations: widen_join, subset, intersection, translate. *)
     (* widen_join: stable lo -> Ascending *)
-    let p_8 = Ws.Clp.create ~width:w64 w_8 in
-    let p_8_16 = Ws.Clp.interval ~width:w64 w_8 (CW.of_int ~width:w64 16) in
-    let wj_asc = Ws.Clp.widen_join p_8 p_8_16 in
+    let p_8 = Clp.create ~width:w64 w_8 in
+    let p_8_16 = Clp.interval ~width:w64 w_8 (CW.of_int ~width:w64 16) in
+    let wj_asc = Clp.widen_join p_8 p_8_16 in
     incr checked;
-    if not (Ws.Clp.is_ascending wj_asc) then
+    if not (Clp.is_ascending wj_asc) then
       bad "TICKET03 widen_join: stable lo should widen to Ascending";
     incr checked;
-    (match Ws.Clp.min_elem wj_asc with
+    (match Clp.min_elem wj_asc with
      | Some m when CW.equal m w_8 -> ()
      | _ -> bad "TICKET03 widen_join: asc min_elem should be 8");
 
     (* widen_join: stable hi -> Descending *)
-    let p_64 = Ws.Clp.create ~width:w64 w_64 in
-    let p_56_64 = Ws.Clp.interval ~width:w64 (CW.of_int ~width:w64 56) w_64 in
-    let wj_desc = Ws.Clp.widen_join p_64 p_56_64 in
+    let p_64 = Clp.create ~width:w64 w_64 in
+    let p_56_64 = Clp.interval ~width:w64 (CW.of_int ~width:w64 56) w_64 in
+    let wj_desc = Clp.widen_join p_64 p_56_64 in
     incr checked;
-    if not (Ws.Clp.is_descending wj_desc) then
+    if not (Clp.is_descending wj_desc) then
       bad "TICKET03 widen_join: stable hi should widen to Descending";
     incr checked;
-    (match Ws.Clp.max_elem wj_desc with
+    (match Clp.max_elem wj_desc with
      | Some m when CW.equal m w_64 -> ()
      | _ -> bad "TICKET03 widen_join: desc max_elem should be 64");
 
     (* subset *)
-    let p_8_16_s8 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 2) w_8 in
+    let p_8_16_s8 = Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 2) w_8 in
     incr checked;
-    if not (Ws.Clp.subset p_8_16_s8 asc) then
+    if not (Clp.subset p_8_16_s8 asc) then
       bad "TICKET03 subset: {8, 16} with step 8 should be subset of Ascending[8, ..]";
-    let p_0 = Ws.Clp.create ~width:w64 (CW.zero w64) in
+    let p_0 = Clp.create ~width:w64 (CW.zero w64) in
     incr checked;
-    if Ws.Clp.subset p_0 asc then
+    if Clp.subset p_0 asc then
       bad "TICKET03 subset: {0} should NOT be subset of Ascending[8, ..]";
-    let p_56_64_s8 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 2) (CW.of_int ~width:w64 56) in
+    let p_56_64_s8 = Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 2) (CW.of_int ~width:w64 56) in
     incr checked;
-    if not (Ws.Clp.subset p_56_64_s8 desc) then
+    if not (Clp.subset p_56_64_s8 desc) then
       bad "TICKET03 subset: {56, 64} with step 8 should be subset of Descending[.. 64]";
-    let asc_16 = Ws.Clp.create_ascending ~width:w64 ~base:(CW.of_int ~width:w64 16) ~step:w_8 in
+    let asc_16 = Clp.create_ascending ~width:w64 ~base:(CW.of_int ~width:w64 16) ~step:w_8 in
     incr checked;
-    if not (Ws.Clp.subset asc_16 asc) then
+    if not (Clp.subset asc_16 asc) then
       bad "TICKET03 subset: Ascending[16, ..] should be subset of Ascending[8, ..]";
     incr checked;
-    if Ws.Clp.subset asc asc_16 then
+    if Clp.subset asc asc_16 then
       bad "TICKET03 subset: Ascending[8, ..] should NOT be subset of Ascending[16, ..]";
     incr checked;
-    if Ws.Clp.subset asc p_8_16_s8 then
+    if Clp.subset asc p_8_16_s8 then
       bad "TICKET03 subset: Ascending should NOT be subset of Finite";
     incr checked;
-    if Ws.Clp.subset (Ws.Clp.top w64) asc then
+    if Clp.subset (Clp.top w64) asc then
       bad "TICKET03 subset: Top (Circular) should NOT be subset of Ascending";
 
     (* intersection *)
-    let p_0_64 = Ws.Clp.interval ~width:w64 (CW.zero w64) w_64 in
-    let meet_asc_fin = Ws.Clp.intersection asc p_0_64 in
-    let expected_8_64 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 8) w_8 in
+    let p_0_64 = Clp.interval ~width:w64 (CW.zero w64) w_64 in
+    let meet_asc_fin = Clp.intersection asc p_0_64 in
+    let expected_8_64 = Clp.create ~width:w64 ~step:w_8 ~cardn:(CW.of_int ~width:65 8) w_8 in
     incr checked;
-    if not (Ws.Clp.equal meet_asc_fin expected_8_64) then
+    if not (Clp.equal meet_asc_fin expected_8_64) then
       bad "TICKET03 intersection: Ascending[8, ..] ⊓ [0, 64] should be {8, 16, .., 64}";
 
-    let meet_asc_desc = Ws.Clp.intersection asc desc in
+    let meet_asc_desc = Clp.intersection asc desc in
     incr checked;
-    if not (Ws.Clp.equal meet_asc_desc expected_8_64) then
+    if not (Clp.equal meet_asc_desc expected_8_64) then
       bad "TICKET03 intersection: Ascending[8, ..] ⊓ Descending[.. 64] should be {8, 16, .., 64}";
 
-    let desc_0 = Ws.Clp.create_descending ~width:w64 ~base:(CW.zero w64) ~step:w_8 in
-    let meet_disjoint = Ws.Clp.intersection asc desc_0 in
+    let desc_0 = Clp.create_descending ~width:w64 ~base:(CW.zero w64) ~step:w_8 in
+    let meet_disjoint = Clp.intersection asc desc_0 in
     incr checked;
-    if not (Ws.Clp.is_bottom meet_disjoint) then
+    if not (Clp.is_bottom meet_disjoint) then
       bad "TICKET03 intersection: Ascending[8, ..] ⊓ Descending[.. 0] should be bottom";
 
     (* translate *)
     let w_16 = CW.of_int ~width:w64 16 in
     (* Ascending[8, ..] + 16 carries its top two elements across the
        word boundary to 0 and 8. *)
-    let trans_asc = Ws.Clp.translate asc w_16 in
+    let trans_asc = Clp.translate asc w_16 in
     incr checked;
-    if not (Ws.Clp.elem (CW.zero w64) trans_asc
-            && Ws.Clp.elem w_8 trans_asc
-            && Ws.Clp.elem (CW.of_int ~width:w64 24) trans_asc) then
+    if not (Clp.elem (CW.zero w64) trans_asc
+            && Clp.elem w_8 trans_asc
+            && Clp.elem (CW.of_int ~width:w64 24) trans_asc) then
       bad "TICKET03 translate: a wrapping Ascending translate keeps the carried elements";
-    let trans_down = Ws.Clp.translate asc_16 (CW.neg w_8) in
+    let trans_down = Clp.translate asc_16 (CW.neg w_8) in
     incr checked;
-    if not (Ws.Clp.is_ascending trans_down) then
+    if not (Clp.is_ascending trans_down) then
       bad "TICKET03 translate: an ordered translate on Ascending should remain Ascending";
     incr checked;
-    (match Ws.Clp.min_elem trans_down with
+    (match Clp.min_elem trans_down with
      | Some m when CW.equal m w_8 -> ()
      | _ -> bad "TICKET03 translate: base should be 8");
 
-    let trans_desc = Ws.Clp.translate desc w_16 in
+    let trans_desc = Clp.translate desc w_16 in
     incr checked;
-    if not (Ws.Clp.is_descending trans_desc) then
+    if not (Clp.is_descending trans_desc) then
       bad "TICKET03 translate: non-underflowing translate on Descending should remain Descending";
     incr checked;
-    (match Ws.Clp.max_elem trans_desc with
+    (match Clp.max_elem trans_desc with
      | Some m when CW.equal m (CW.of_int ~width:w64 80) -> ()
      | _ -> bad "TICKET03 translate: base should be 80");
   in

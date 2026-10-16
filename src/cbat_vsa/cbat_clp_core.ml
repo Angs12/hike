@@ -57,7 +57,9 @@ let is_infinite (p : t) : bool =
 let fit_to (width : int) (w : W.t) : W.t =
   if W.bitwidth w = width then W.unsigned w else W.extract_exn ~hi:(width - 1) w
 
-let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
+(* The canonical record of a progression.  A Finite one may still cross
+   2^width: [create] is for those known not to, [arcs] splits any. *)
+let make ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let width = Option.value ~default:(W.bitwidth base) width in
   let cardn_w = W.cap_at_width ~width:(width + 1) (W.unsigned cardn) in
   let base' = fit_to width base in
@@ -91,6 +93,42 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
       {base = base''; step = step''; cardn = cardn''; dir = Circular}
     else
       {base = base'; step = step'; cardn = cardn_w; dir = Finite}
+
+(* Whether a Finite progression's last element lies past 2^width. *)
+let crosses (p : t) : bool =
+  match p.dir with
+  | Finite when not (W.is_zero p.cardn) ->
+    let width = W.bitwidth p.base in
+    let n = W.extract_exn ~hi:(width - 1) p.cardn in
+    W.(<) (W.add p.base (W.mul p.step (W.pred n))) p.base
+  | _ -> false
+
+(* A progression whose elements stay below 2^width (checked in debug
+   builds). *)
+let create ?width ?step ?cardn base : t =
+  let p = make ?width ?step ?cardn base in
+#ifdef VSA_DEBUG
+  assert (not (crosses p));
+#endif
+  p
+
+(* The high arc [base .. 2^width) and the low arc after the wrap of a
+   crossing progression, ascending. *)
+let split_crossing (p : t) : t list =
+  let width = W.bitwidth p.base in
+  let n = W.extract_exn ~hi:(width - 1) p.cardn in
+  let k = W.succ (W.div (W.sub (W.ones width) p.base) p.step) in
+  let high = make ~width ~step:p.step ~cardn:k p.base in
+  let low =
+    make ~width ~step:p.step ~cardn:(W.sub n k)
+      (W.add p.base (W.mul k p.step)) in
+  [ low; high ]
+
+(* The non-bottom, non-crossing pieces of a progression that may cross
+   2^width, ascending: one, or the low and the high arc. *)
+let arcs ?width ?step ?cardn base : t list =
+  let p = make ?width ?step ?cardn base in
+  if W.is_zero p.cardn then [] else if crosses p then split_crossing p else [ p ]
 
 let singleton w = create w
 
@@ -160,13 +198,15 @@ let cardn_from_bounds base step e : W.t =
     (* Extra bit so succ never wraps. *)
     W.succ (W.extract_exn ~hi:width div_by_step)
 
-(* Step-1 CLP [lo, hi]; wrapped pair is circular. *)
-let interval ~(width : int) (lo : W.t) (hi : W.t) : t =
-  create ~width ~step:(W.one width)
+(* The step-1 interval [lo, hi] as its arcs; [hi < lo] is the circular
+   interval across the modulus. *)
+let interval ~(width : int) (lo : W.t) (hi : W.t) : t list =
+  arcs ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
 
-(* Sound hull of an ascending, deduped list (a precondition — no sort). *)
-let of_list ~width l : t =
+(* Sound hull of an ascending, deduped list (a precondition — no sort),
+   as its arcs. *)
+let of_list ~width l : t list =
   assert (width > 0);
   let open Monads.Std.Monad.Option.Syntax in
   (match begin
@@ -190,9 +230,9 @@ let of_list ~width l : t =
     List.last l >>= fun e ->
     let cardn = cardn_from_bounds base step e in
     assert(W.bitwidth base = width);
-    !!(create base ~step ~cardn)
+    !!(arcs base ~step ~cardn)
   end with
-  | None -> bottom width
+  | None -> []
   | Some x -> x)
 
 (* Cardinality as a (width+1)-bit W.t; exact for a finite CLP. *)
@@ -260,7 +300,8 @@ let nearest_inf_succ (w : W.t) (base : W.t) (step : W.t) : W.t =
 let max_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
-  | Finite | Circular ->
+  | Finite -> finite_end p
+  | Circular ->
     let max_wd = W.ones (bitwidth p) in
     nearest_pred max_wd p
   | Ascending ->
@@ -273,23 +314,16 @@ let max_elem (p : t) : W.t option =
 let min_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
-  | Finite | Circular ->
+  | Finite -> Some p.base
+  | Circular ->
     let min_wd = W.zero (bitwidth p) in
     nearest_succ min_wd p
   | Ascending -> Some p.base
   | Descending ->
     if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
 
-let is_wrapped (p : t) : bool =
-  if is_infinite p || is_bottom p then false
-  else
-    match finite_end p with
-    | Some e -> W.(<) e (base_of p)
-    | None -> false
-
 (* The elements at or below [bound], then the rest; each part is a
-   non-wrapping arc when the input's span crosses [bound] once.  The
-   input must start at or below [bound]. *)
+   non-crossing arc.  The input must start at or below [bound]. *)
 let split_above (bound : W.t) (p : t) : t list =
   let width = bitwidth p in
   let b = base_of p and s = step_of p in
@@ -308,31 +342,15 @@ let split_above (bound : W.t) (p : t) : t list =
         let above = create ~width ~step:s ~cardn:above_count above_base in
         [ below; above ]
 
-(* A wrapped Finite piece is two non-wrapping arcs (the high arc before
-   the modulus and the low arc after the wrap); the meet of each arc is
-   joined. *)
-let split_wrapped (p : t) : t list =
-  if not (is_wrapped p) then [ p ]
-  else split_above (W.ones (bitwidth p)) p
-
-(* The elements in ascending unsigned order.  [iter] follows the
-   traversal, so a wrapped progression runs its high arc before its low
-   one; this emits the arcs by base. *)
-let iter_ascending (p : t) : W.t list =
-  match split_wrapped p with
-  | [ a; b ] when W.(>) (base_of a) (base_of b) -> iter b @ iter a
-  | arcs -> List.concat_map arcs ~f:iter
-
 (* The runs of one sign half: the non-negative elements first, the
    negative ones after.  Each run maps element-wise under a signed
    cast. *)
 let split_sign (p : t) : t list =
-  List.concat_map (split_wrapped p) ~f:(fun q ->
-      match finite_end q with
-      | None -> [ q ]
-      | Some e ->
-        if Bool.equal (W.msb (base_of q)) (W.msb e) then [ q ]
-        else split_above (W.pred (half (bitwidth q))) q)
+  match finite_end p with
+  | None -> [ p ]
+  | Some e ->
+    if Bool.equal (W.msb (base_of p)) (W.msb e) then [ p ]
+    else split_above (W.pred (half (bitwidth p))) p
 
 (* Signed order: at/above the half the word is negative. *)
 let signed_le (width : int) (x : W.t) (y : W.t) : bool =
@@ -342,8 +360,8 @@ let signed_le (width : int) (x : W.t) (y : W.t) : bool =
   | false, true -> false
   | _ -> W.(<=) x y
 
-(* The signed extrema of one NON-wrapped finite arc [a, a+s, ..., l]
-   (l >= a unsigned).  Elements at/above the half are negative: the
+(* The signed extrema of one finite arc [a, a+s, ..., l] (l >= a
+   unsigned).  Elements at/above the half are negative: the
    signed max is the largest element below the half (the whole arc
    when every element is at/above it), the signed min the smallest
    element at/above the half (the whole arc when every element is
@@ -377,21 +395,12 @@ let arc_min_signed (p : t) : W.t =
     let k = if W.(>=) k (W.pred n) then W.pred n else k in
     W.add a (W.mul k s)
 
-(* The signed extrema of a finite piece: its (possibly two) arcs
-   answer separately and the signed order folds them — a wrapped
-   traversal measures exactly instead of answering None. *)
 let max_elem_signed (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Descending -> Some p.base
   | Ascending | Circular -> nearest_pred (W.pred (half (bitwidth p))) p
-  | Finite ->
-    let width = bitwidth p in
-    List.fold (split_wrapped p) ~init:None ~f:(fun acc arc ->
-        let c = arc_max_signed arc in
-        match acc with
-        | None -> Some c
-        | Some b -> Some (if signed_le width c b then b else c))
+  | Finite -> Some (arc_max_signed p)
 
 (* Min signed element. *)
 let min_elem_signed (p : t) : W.t option =
@@ -399,13 +408,7 @@ let min_elem_signed (p : t) : W.t option =
   else match p.dir with
   | Ascending -> Some p.base
   | Descending | Circular -> nearest_succ (half (bitwidth p)) p
-  | Finite ->
-    let width = bitwidth p in
-    List.fold (split_wrapped p) ~init:None ~f:(fun acc arc ->
-        let c = arc_min_signed arc in
-        match acc with
-        | None -> Some c
-        | Some b -> Some (if signed_le width c b then c else b))
+  | Finite -> Some (arc_min_signed p)
 
 let splits_by (p : t) (w : W.t) : bool =
   let divides a b = W.is_zero (W.modulo b a) in
@@ -414,9 +417,8 @@ let splits_by (p : t) (w : W.t) : bool =
     min_elem p >>= fun min_p ->
     finite_end p >>= fun e ->
     if W.is_zero (step_of p) then !!true else
-      (* Multi-element case. *)
+      (* Multi-element case; a descending ray's base is its top. *)
       !!(divides w (step_of p) &&
-         (* Wrapping case. *)
          (W.(=) (base_of p) min_p ||
           divides w (W.sub e (base_of p))))
   end
@@ -424,7 +426,16 @@ let splits_by (p : t) (w : W.t) : bool =
 (* Membership. *)
 let elem (i : W.t) (p : t) : bool =
   assert (W.bitwidth i = bitwidth p);
-  Option.value_map (nearest_pred i p) ~default:false ~f:(W.( = ) i)
+  match p.dir with
+  | Finite ->
+    (not (W.is_zero p.cardn))
+    && W.(>=) i p.base
+    && (if W.is_zero p.step then W.(=) i p.base
+        else
+          W.is_zero (W.modulo (W.sub i p.base) p.step)
+          && W.(<=) i (W.add p.base (W.mul p.step
+                         (W.pred (W.extract_exn ~hi:(W.bitwidth i - 1) p.cardn)))))
+  | _ -> Option.value_map (nearest_pred i p) ~default:false ~f:(W.( = ) i)
 
 (* Equivalence; faster than subset.  The structural comparison over
    the record's fields (all comparable words/directions), not the
@@ -440,25 +451,6 @@ let equal (p1 : t) (p2 : t) : bool =
 
 (* Top test via the canonical top value. *)
 let is_top (p : t) : bool = equal p (top (bitwidth p))
-
-(* Rebase onto an extrema interval; [default] when the extrema give
-   out (bottom). *)
-let unwrap_with ~default min max (p : t) : t =
-  let open Monads.Std.Monad.Option.Syntax in
-  match begin
-    min p >>= fun base ->
-    max p >>= fun e ->
-    let step = (step_of p) in
-    let cardn = cardn_from_bounds base step e in
-    !!(create base ~step ~cardn)
-  end with
-  | None -> default (bitwidth p)
-  | Some x -> x
-
-let unwrap (p : t) : t = unwrap_with ~default:bottom min_elem max_elem p
-
-let unwrap_signed (p : t) : t =
-  unwrap_with ~default:top min_elem_signed max_elem_signed p
 
 (* Smallest circular hull of two intervals.  The offsets are rebased
    to a1 (the *_rel suffix); all comparisons run in the rebased line,
@@ -484,31 +476,32 @@ let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =
   else if W.(>) (W.sub a2_rel b1_rel) (W.sub zero b2_rel) then (a2,b1)
   else (a1, b2)
 
-(* Rotate without changing step/cardinality. *)
-let translate (p : t) i : t =
+(* Rotate without changing step/cardinality; the image splits where it
+   crosses the modulus. *)
+let translate (p : t) i : t list =
   let width = bitwidth p in
   assert (W.bitwidth i = width);
-  if is_bottom p then p
+  if is_bottom p then []
   else
     let new_base = W.add (base_of p) i in
     match p.dir with
-    | Finite -> create ~width new_base ~step:(step_of p) ~cardn:(cardn_of p)
+    | Finite -> arcs ~width new_base ~step:(step_of p) ~cardn:(cardn_of p)
     | Ascending | Descending -> (
       (* A ray's image keeps its order unless the shift carries elements
          across the word boundary.  An ordered image keeps the ray to the
-         same edge (a superset); a wrapped image is the exact progression. *)
+         same edge (a superset); a crossing image is the exact progression. *)
       let lo = W.add (base_of (forward p)) i in
       match finite_end p with
-      | None -> p
+      | None -> [ p ]
       | Some e ->
         let hi = W.add e i in
         if W.(<) hi lo then
-          create ~width lo ~step:(step_of p) ~cardn:(cardn_of p)
+          arcs ~width lo ~step:(step_of p) ~cardn:(cardn_of p)
         else if is_ascending p then
-          create_ascending ~width ~base:lo ~step:(step_of p)
-        else create_descending ~width ~base:hi ~step:(step_of p))
+          [ create_ascending ~width ~base:lo ~step:(step_of p) ]
+        else [ create_descending ~width ~base:hi ~step:(step_of p) ])
     | Circular ->
-      infinite (new_base, step_of p)
+      [ infinite (new_base, step_of p) ]
 
 (* Largest step covering both progressions. *)
 let common_step (b1,s1) (b2,s2) : W.t =
@@ -518,30 +511,31 @@ let common_step (b1,s1) (b2,s2) : W.t =
   else let gcd_s = (bounded_gcd s1 s2) in
     bounded_gcd gcd_s b_diff
 
+(* Both Finite: [p1]'s elements read from [p2]'s base lie within [p2]'s
+   span on its grid. *)
 let subset_finite (p1 : t) (p2 : t) : bool =
   let width = bitwidth p1 in
-  let nb2 = W.neg (base_of p2) in
-  let p1 = translate p1 nb2 in
-  let p2 = translate p2 nb2 in
-  (* Rotation can split the source grid into differently aligned arcs. *)
-  List.for_all (split_wrapped p1) ~f:(fun p1 ->
+  W.(>=) (base_of p1) (base_of p2)
+  && (let nb2 = W.neg (base_of p2) in
       match finite_end p1, finite_end p2 with
       | None, _ -> true
       | Some _, None -> false
       | Some e1, Some e2 ->
-        let in_bounds = W.(<=) e1 e2 && W.(<=) (base_of p1) e2 in
-        let step_and_overlap = W.(=) (common_step ((base_of p1),(step_of p1)) (W.zero width, (step_of p2))) (step_of p2) in
+        let b1 = W.add (base_of p1) nb2 in
+        let e1 = W.add e1 nb2 and e2 = W.add e2 nb2 in
+        let in_bounds = W.(<=) e1 e2 && W.(<=) b1 e2 in
+        let step_and_overlap =
+          W.(=) (common_step (b1, step_of p1) (W.zero width, step_of p2))
+            (step_of p2) in
         let singleton_elem = is_one (cardn_of p1) && elem (base_of p1) p2 in
         singleton_elem || (in_bounds && step_and_overlap))
 
 (* Subset order. *)
-let rec subset (p1 : t) (p2 : t) : bool =
+let subset (p1 : t) (p2 : t) : bool =
   if bitwidth p1 <> bitwidth p2 then false
   else if is_bottom p1 then true
   else if is_bottom p2 then false
   else if phys_equal p1 p2 || equal p1 p2 then true
-  else if is_wrapped p1 then
-    List.for_all (split_wrapped p1) ~f:(fun arc -> subset arc p2)
   else
     let divides a b =
       if W.is_zero a then W.is_zero b
@@ -644,55 +638,82 @@ let union_ray_finite ~width ~ascending (ray : t) (fin : t) : t =
     let hi = Option.value (max_elem fin) ~default:fin.base in
     create_descending ~width ~base:(W.max ray.base hi) ~step
 
-(* Union; same width expected.  The finite arm's hull is MODULAR: the
-   grid step divides both steps and every endpoint's modular distance
-   from the hull base, so a wrap-traversing hull keeps its far end (an
-   absolute-difference step can leave the wrapped end unreachable).
-   Wrapped finite operands ride the same path: their traversal is the
-   forward arc [base, finite_end]. *)
-let rec union (p1 : t) (p2 : t) : t =
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
+(* The circular hull of two Finite spans (base, last element, step) on
+   the common grid: every endpoint's modular distance from the hull base
+   is a multiple of the step, so a hull that crosses the modulus keeps
+   its far end.  The endpoints are words, so no progression crosses; the
+   hull comes out as its arcs. *)
+let hull_spans (b1, e1, s1) (b2, e2, s2) : t list =
+  let base, newE = interval_union (b1, e1) (b2, e2) in
+  let g x acc = bounded_gcd acc (W.sub x base) in
+  let step = bounded_gcd s1 s2 |> g b1 |> g e1 |> g b2 |> g e2 in
+  arcs base ~step ~cardn:(cardn_from_bounds base step newE)
+
+let nonbottom (p : t) : t list = if is_bottom p then [] else [ p ]
+
+(* Union of two progressions, as arcs; same width expected. *)
+let union (p1 : t) (p2 : t) : t list =
+  if bitwidth p1 <> bitwidth p2 then
+    [ top (Stdlib.max (bitwidth p1) (bitwidth p2)) ]
   else
     let width = bitwidth p1 in
-    if is_bottom p1 then p2
-    else if is_bottom p2 then p1
-    else if is_top p1 || is_top p2 then top width
-    else if equal p1 p2 then p1
+    if is_bottom p1 then nonbottom p2
+    else if is_bottom p2 then [ p1 ]
+    else if is_top p1 || is_top p2 then [ top width ]
+    else if equal p1 p2 then [ p1 ]
     else match p1.dir, p2.dir with
-    | (Ascending | Descending | Circular), Finite when is_wrapped p2 ->
-      List.fold (split_wrapped p2) ~init:(bottom width)
-        ~f:(fun acc q -> union acc (union p1 q))
-    | Finite, (Ascending | Descending | Circular) when is_wrapped p1 ->
-      List.fold (split_wrapped p1) ~init:(bottom width)
-        ~f:(fun acc q -> union acc (union q p2))
     | Finite, Finite ->
-      Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
-        Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
-          let b1 = base_of p1 and b2 = base_of p2 in
-          let base, newE = interval_union (b1, e1) (b2, e2) in
-          let g x acc = bounded_gcd acc (W.sub x base) in
-          let step =
-            bounded_gcd (step_of p1) (step_of p2)
-            |> g b1 |> g e1 |> g b2 |> g e2 in
-          let cardn = cardn_from_bounds base step newE in
-          create base ~step ~cardn
-        end
-      end
+      (match finite_end p1, finite_end p2 with
+       | Some e1, Some e2 ->
+         hull_spans (base_of p1, e1, step_of p1) (base_of p2, e2, step_of p2)
+       | _ -> [ p1; p2 ])
     | Ascending, Ascending ->
       let base = W.min p1.base p2.base in
       let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
-      create_ascending ~width ~base ~step
+      [ create_ascending ~width ~base ~step ]
     | Descending, Descending ->
       let base = W.max p1.base p2.base in
       let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
-      create_descending ~width ~base ~step
-    | Ascending, Finite -> union_ray_finite ~width ~ascending:true p1 p2
-    | Finite, Ascending -> union_ray_finite ~width ~ascending:true p2 p1
-    | Descending, Finite -> union_ray_finite ~width ~ascending:false p1 p2
-    | Finite, Descending -> union_ray_finite ~width ~ascending:false p2 p1
+      [ create_descending ~width ~base ~step ]
+    | Ascending, Finite -> [ union_ray_finite ~width ~ascending:true p1 p2 ]
+    | Finite, Ascending -> [ union_ray_finite ~width ~ascending:true p2 p1 ]
+    | Descending, Finite -> [ union_ray_finite ~width ~ascending:false p1 p2 ]
+    | Finite, Descending -> [ union_ray_finite ~width ~ascending:false p2 p1 ]
     | _ ->
       let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
-      infinite (base_of p1, step)
+      [ infinite (base_of p1, step) ]
+
+(* A Finite span of [xs], one progression or the two arcs of a crossing
+   one. *)
+let span_of_arcs (xs : t list) : (W.t * W.t * W.t) option =
+  match xs with
+  | [ p ] when p.dir = Finite ->
+    Option.map (finite_end p) ~f:(fun e -> (base_of p, e, step_of p))
+  | [ low; high ] when low.dir = Finite && high.dir = Finite ->
+    (* The arcs of one crossing progression: a singleton arc lost its
+       step, the other kept it. *)
+    let step =
+      if W.is_zero (step_of high) then step_of low else step_of high in
+    Option.map (finite_end low) ~f:(fun e -> (base_of high, e, step))
+  | _ -> None
+
+(* Union of two arc lists, each a progression or the two arcs of a
+   crossing one: the circular hull on the Finite spans, else the union
+   of each pair. *)
+let rec union_arcs (xs : t list) (ys : t list) : t list =
+  match xs, ys with
+  | [], l | l, [] -> l
+  | [ x ], [ y ] -> union x y
+  | _ ->
+    let width = bitwidth (List.hd_exn xs) in
+    if List.exists (xs @ ys) ~f:(fun p -> bitwidth p <> width) then
+      [ top (List.fold (xs @ ys) ~init:width ~f:(fun a p -> Stdlib.max a (bitwidth p))) ]
+    else
+      match span_of_arcs xs, span_of_arcs ys with
+      | Some s1, Some s2 -> hull_spans s1 s2
+      | _ ->
+        List.concat_map xs ~f:(fun x -> List.map ys ~f:(fun y -> union x y))
+        |> List.reduce_exn ~f:union_arcs
 
 let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   let width = bitwidth p1 in
@@ -702,60 +723,13 @@ let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
       ~min_bound:(W.max lo1 lo2) ~max_bound:(W.min hi1 hi2)
   | _ -> bottom width
 
-(* Circular step-1 arc (start, length) of a finite CLP; None otherwise.
-   [create] keeps step-1 shapes verbatim, so the arc is (base, cardn)
-   directly. Normalized edge shapes recover too: a singleton is a length-1
-   arc; the wrapped two-point pair is stored descending (base = the second
-   element, step = -1), which is the arc (base-1, 2). *)
-let step1_arc (p : t) : (word * word) option =
-  let width = bitwidth p in
-  if is_bottom p || is_infinite p then None
-  else if W.is_one (step_of p) then Some (base_of p, cardn_of p)
-  else if W.is_zero (step_of p) && is_one (cardn_of p) then
-    Some (base_of p, W.one (width + 1))
-  else if W.is_zero (W.succ (step_of p)) && W.(=) (cardn_of p) (W.of_int ~width:(width + 1) 2) then
-    Some (W.pred (base_of p), W.of_int ~width:(width + 1) 2)
+(* The span [lo, hi] of a dense Finite progression (step 1 or a
+   singleton); None otherwise. *)
+let dense_span (p : t) : (word * word) option =
+  if p.dir <> Finite || W.is_zero p.cardn then None
+  else if W.is_one p.step || is_one p.cardn then
+    Option.map (finite_end p) ~f:(fun e -> (p.base, e))
   else None
-
-(* Exact meet of two circular step-1 arcs; None when the true intersection
-   is two separate pieces (not representable as one CLP). All arithmetic at
-   width+1 bits so the wrap never overflows. *)
-let step1_intersection (width : int) (p1 : t) (p2 : t) : t option =
-  match step1_arc p1, step1_arc p2 with
-  | Some (s1, l1), Some (s2, l2) ->
-    let n = dom_size ~width:(width + 1) width in
-    if W.(>=) l1 n then Some p2
-    else if W.(>=) l2 n then Some p1
-    else if W.is_zero l1 || W.is_zero l2 then Some (bottom width)
-    else
-      let d = W.extract_exn ~hi:width (W.sub s2 s1) in
-      let e = W.add d l2 in
-      if W.(>=) d l1 then begin
-        (* B starts at/after A's end; only B's wrapped tail reaches into A. *)
-        if W.(<) e n then Some (bottom width)
-        else begin
-          let tail = W.sub e n in
-          let m = if W.(<=) tail l1 then tail else l1 in
-          if W.is_zero m then Some (bottom width)
-          else Some (create ~width s1 ~step:(W.one width) ~cardn:m)
-        end
-      end
-      else begin
-        (* B starts inside A. *)
-        if W.(<=) e n then begin
-          let m = if W.(<=) e l1 then e else l1 in
-          if W.(=) m d then Some (bottom width)
-          else Some (create ~width (W.add s1 d) ~step:(W.one width) ~cardn:(W.sub m d))
-        end
-        else begin
-          (* B wraps: pieces [d, l1) and [0, min(e-n, l1)). *)
-          let en = W.sub e n in
-          let piece = if W.(<=) en l1 then en else l1 in
-          if W.(>=) piece d then Some p1
-          else Some (if W.(<=) l1 l2 then p1 else p2)
-        end
-      end
-  | _ -> None
 
 let rec intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)
@@ -767,18 +741,12 @@ let rec intersection (p1 : t) (p2 : t) : t =
     else if is_top p1 then p2
     else if is_top p2 then p1
     else if equal p1 p2 then p1
-    else (match step1_intersection width p1 p2 with
-    | Some p -> p
-    | None ->
-          (* A wrapped Finite operand must meet arc-by-arc: its
-             finite_end is the wrap edge, not its upper bound. *)
-          if is_wrapped p1 || is_wrapped p2 then
-            List.fold
-              (List.concat_map (split_wrapped p1) ~f:(fun q1 ->
-                   List.map (split_wrapped p2) ~f:(fun q2 ->
-                       intersection q1 q2)))
-              ~init:(bottom width) ~f:union
-          else
+    else (match dense_span p1, dense_span p2 with
+    | Some (lo1, hi1), Some (lo2, hi2) ->
+      let lo = W.max lo1 lo2 and hi = W.min hi1 hi2 in
+      if W.(>) lo hi then bottom width
+      else create ~width lo ~step:(W.one width) ~cardn:(cardn_from_bounds lo (W.one width) hi)
+    | _ ->
           (match p1.dir, p2.dir with
           | Finite, Finite -> intersection_finite_or_circular p1 p2
           | Circular, Circular -> intersection_finite_or_circular p1 p2
@@ -842,37 +810,33 @@ let diff_descending (p1 : t) (i : t) (i_end : W.t) : t =
     else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
   | _ -> p1
 
-let diff_circular (p1 : t) (i_end : W.t) (cardn : W.t) : t =
-  (* Wrapping remainder. *)
-  create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
+let diff_circular (p1 : t) (i_end : W.t) (cardn : W.t) : t list =
+  (* The remainder runs on from the removed run and may cross. *)
+  arcs (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
 
-let diff_finite (p1 : t) (i : t) (i_end : W.t) (cardn : W.t)
-    ~(fallback : unit -> t) : t =
-  (* The edges are one interval only on a non-wrapping traversal,
-     where the unsigned minimum is the start; a wrapped Finite set
-     decides by its survivors. *)
-  match finite_end p1 with
-  | Some p_end when W.(<) p_end (base_of p1) -> fallback ()
-  | _ ->
-    (match min_elem i, min_elem p1 with
-     | Some i_lo, Some p_lo ->
-       if W.(=) i_lo p_lo then
-         create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
-       else
-         (match finite_end p1 with
-          | Some p_end when W.(=) i_end p_end ->
-            create p_lo ~step:(step_of p1) ~cardn
-          | _ -> p1)
-     | _ -> p1)
+let diff_finite (p1 : t) (i : t) (i_end : W.t) (cardn : W.t) : t =
+  (* The edges are one interval: the removed run starts the set or
+     ends it, else the set stays whole. *)
+  match min_elem i, min_elem p1 with
+  | Some i_lo, Some p_lo ->
+    if W.(=) i_lo p_lo then
+      create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
+    else
+      (match finite_end p1 with
+       | Some p_end when W.(=) i_end p_end ->
+         create p_lo ~step:(step_of p1) ~cardn
+       | _ -> p1)
+  | _ -> p1
 
-(* Difference; exact when one CLP, else identity. *)
-let diff (p1 : t) (p2 : t) : t =
-  if bitwidth p1 <> bitwidth p2 then p1
-  else if is_bottom p1 then p1
-  else if is_bottom p2 then p1
+(* Difference as arcs; exact when one run, else the survivors' hull
+   within the enumeration budget, else the identity. *)
+let diff (p1 : t) (p2 : t) : t list =
+  if bitwidth p1 <> bitwidth p2 then [ p1 ]
+  else if is_bottom p1 then []
+  else if is_bottom p2 then [ p1 ]
   else
     let i = intersection p1 p2 in
-    if is_bottom i then p1
+    if is_bottom i then [ p1 ]
     else
       let run =
         (is_one (cardn_of i) || W.(=) (step_of i) (step_of p1))
@@ -881,45 +845,44 @@ let diff (p1 : t) (p2 : t) : t =
          form one, the identity otherwise; past the budget the identity
          is the sound over-approximation. *)
       let enumerate_or_identity () =
-        if W.gt_int (cardn_of p1) fin_set_size then p1
+        if W.gt_int (cardn_of p1) fin_set_size then [ p1 ]
         else
           let survivors =
-            List.filter ~f:(fun x -> not (elem x p2)) (iter_ascending p1)
+            List.filter ~f:(fun x -> not (elem x p2)) (iter p1)
           in
           let hull = of_list ~width:(bitwidth p1) survivors in
-          if W.equal (cardn_of hull)
+          let covered =
+            List.fold hull ~init:(W.zero (bitwidth p1 + 1)) ~f:(fun a q ->
+                W.add a (cardn_of q)) in
+          if W.equal covered
              (W.of_int ~width:(bitwidth p1 + 1) (List.length survivors))
           then hull
-          else p1
+          else [ p1 ]
       in
       if not run then enumerate_or_identity ()
       else
         match finite_end i with
-        | None -> p1
+        | None -> [ p1 ]
         | Some i_end ->
           let cardn = W.sub (cardn_of p1) (cardn_of i) in
-          if W.is_zero cardn then bottom (bitwidth p1)
-          else if is_ascending p1 then diff_ascending p1 i i_end
-          else if is_descending p1 then diff_descending p1 i i_end
+          if W.is_zero cardn then []
+          else if is_ascending p1 then nonbottom (diff_ascending p1 i i_end)
+          else if is_descending p1 then nonbottom (diff_descending p1 i i_end)
           else if is_circular p1 then diff_circular p1 i_end cardn
-          else diff_finite p1 i i_end cardn ~fallback:enumerate_or_identity
+          else [ diff_finite p1 i i_end cardn ]
 
-type idx = int
-let get_idx = bitwidth
-let precedes = subset
-let join = union
-let meet = intersection
-
-let widen_join (p1 : t) (p2 : t) : t =
+(* The widening of an iterate by its successor, as arcs (a join of
+   incomparable iterates may cross the modulus). *)
+let widen_join (p1 : t) (p2 : t) : t list =
   (* From bottom the new iterate is itself the widening step; the later
      iterates carry the extrapolation.  Answering top would drop a real
      bound the first widening is meant to keep. *)
-  if is_bottom p1 then p2
+  if is_bottom p1 then nonbottom p2
   else if subset p1 p2 then
-    if equal p1 p2 then p1 else
+    if equal p1 p2 then [ p1 ] else
     let width = bitwidth p2 in
     let step = step_of p2 in
-    if W.is_zero step then top width
+    if W.is_zero step then [ top width ]
     else
       match min_elem p1, max_elem p1, min_elem p2, max_elem p2 with
       | Some lo1, Some hi1, Some lo2, Some hi2 ->
@@ -928,25 +891,25 @@ let widen_join (p1 : t) (p2 : t) : t =
         let hi_grew = W.(>) hi2 hi1 in
         let lo_grew = W.(<) lo2 lo1 in
         if lo_stable && hi_grew then
-          create_ascending ~width ~base:lo1 ~step
+          [ create_ascending ~width ~base:lo1 ~step ]
         else if hi_stable && lo_grew then
-          create_descending ~width ~base:hi1 ~step
+          [ create_descending ~width ~base:hi1 ~step ]
         else
-          infinite ((base_of p2), step)
-      | _ -> infinite ((base_of p2), step)
-  else join p1 p2
+          [ infinite ((base_of p2), step) ]
+      | _ -> [ infinite ((base_of p2), step) ]
+  else union p1 p2
 
-let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
-  if is_bottom p1 then p2
+let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t list =
+  if is_bottom p1 then nonbottom p2
   else if subset p1 p2 then
-    if equal p1 p2 then p1
+    if equal p1 p2 then [ p1 ]
     else if steps < 0 then widen_join p1 p2
     else
       match min_elem p1, max_elem p1, min_elem p2, max_elem p2 with
       | Some lo1, Some hi1, Some lo2, Some hi2 ->
         let width = bitwidth p2 in
         let step = step_of p2 in
-        if W.is_zero step then top width
+        if W.is_zero step then [ top width ]
         else
           let lo_unstable = W.compare lo2 lo1 < 0 in
           let hi_unstable = W.compare hi2 hi1 > 0 in
@@ -978,32 +941,33 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
             widen_join p1 p2
           else
             let try_create lo hi =
-              try create lo ~step ~cardn:(cardn_from_bounds lo step hi)
+              try [ create lo ~step ~cardn:(cardn_from_bounds lo step hi) ]
               with _ -> widen_join p1 p2
             in
             (* Stable bounds kept. *)
-            if not lo_unstable && not hi_unstable then p2
+            if not lo_unstable && not hi_unstable then [ p2 ]
             else if lo_unstable && hi_unstable then try_create extrap_lo extrap_hi
             else if hi_unstable then try_create lo2 extrap_hi
             else try_create extrap_lo hi2
       | _ -> widen_join p1 p2
-  else join p1 p2
+  else union p1 p2
+
+(* A span's elements, abbreviated: its first, second and last. *)
+let pp_span ppf ~(width : int) ~(base : W.t) ~(step : W.t) ~(cardn : W.t)
+    ~(last : W.t) =
+  if W.is_one cardn then
+    Format.fprintf ppf "@[{%a}:%i@]" W.pp base width
+  else if W.is_one (W.pred cardn) then
+    Format.fprintf ppf "@[{%a,@ %a}:%i@]" W.pp base W.pp last width
+  else
+    Format.fprintf ppf "@[{%a,@ %a,@ ...,@ %a}:%i@]"
+      W.pp base W.pp (W.add base step) W.pp last width
 
 let pp ppf (p : t) =
   let p = forward p in
   let width = bitwidth p in
   match finite_end p with
   | None -> Format.fprintf ppf "{}:%i" width
-  | Some _ when W.is_one (cardn_of p) ->
-    Format.fprintf ppf "@[{%a}:%i@]" W.pp (base_of p) width
-  | Some e when W.is_one @@ W.pred (cardn_of p) ->
-    Format.fprintf ppf "@[{%a,@ %a}:%i@]"
-      W.pp (base_of p)
-      W.pp e
-      width
-  | Some e ->
-    Format.fprintf ppf "@[{%a,@ %a,@ ...,@ %a}:%i@]"
-      W.pp (base_of p)
-      W.pp (W.add (base_of p) (step_of p))
-      W.pp e
-      width
+  | Some last ->
+    pp_span ppf ~width ~base:(base_of p) ~step:(step_of p)
+      ~cardn:(cardn_of p) ~last

@@ -2,7 +2,79 @@
 open Bap.Std
 open Bap_core_theory
 module W = Word
-module Clp = Cbat_clp
+(* The word-set view of [Cbat_clp]: a value is the canonical piece union,
+   built from progressions and acted on by the [Pieces] operations.  The
+   single-progression layer is [Cbat_clp] itself. *)
+module Clp = struct
+  module P = Cbat_clp.Pieces
+  module Exact = Cbat_clp.Exact
+  module Pieces = P
+
+  type t = P.t
+
+  let of_progression = P.of_progression
+  let create ?width ?step ?cardn base =
+    P.of_arcs (Cbat_clp.arcs ?width ?step ?cardn base)
+  let create_ascending ~width ~base ~step =
+    P.of_progression (Cbat_clp.create_ascending ~width ~base ~step)
+  let create_descending ~width ~base ~step =
+    P.of_progression (Cbat_clp.create_descending ~width ~base ~step)
+  let infinite bs = P.of_progression (Cbat_clp.infinite bs)
+  let interval = Cbat_clp.interval
+  let singleton = P.singleton
+  let bottom = P.bottom
+  let top = P.top
+  (* The circular hull of an ascending, deduplicated word list. *)
+  let of_list = P.hull_of_list
+
+  let bitwidth = P.bitwidth
+  let cardinality = P.cardinality
+  let min_elem = P.min_elem
+  let max_elem = P.max_elem
+  let min_elem_signed = P.min_elem_signed
+  let max_elem_signed = P.max_elem_signed
+  let elem = P.elem
+  let iter = P.elements
+  let equal = P.equal
+  let overlap = P.overlap
+  let splits_by = P.splits_by
+  let is_bottom = P.is_bottom
+  let is_top = P.is_top
+  let is_ascending = P.is_ascending
+  let is_descending = P.is_descending
+  let is_circular = P.is_circular
+  let is_infinite (t : t) = List.exists Cbat_clp.is_infinite (P.to_list t)
+  let subset = P.precedes
+  let precedes = P.precedes
+
+  let union = P.union
+  let join = P.join
+  let meet = P.meet
+  let intersection = P.intersection
+  let diff = P.diff
+  let widen_join = P.widen_join
+  let extrapolate_steps = P.extrapolate_steps
+  let translate = P.translate
+
+  let add = P.add
+  let sub = P.sub
+  let mul = P.mul
+  let div = P.div
+  let sdiv = P.sdiv
+  let modulo = P.modulo
+  let smodulo = P.smodulo
+  let arshift = P.arshift
+  let rshift = P.rshift
+  let lshift = P.lshift
+  let logand = P.logand
+  let logor = P.logor
+  let logxor = P.logxor
+  let lnot = P.lnot
+  let neg = P.neg
+  let extract = P.extract
+  let cast = P.cast
+  let concat = P.concat
+end
 module Ex = Clp.Exact
 
 module Wo = Cbat_word

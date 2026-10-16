@@ -559,7 +559,7 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
 let offset_bounds (ws : wordset) : (int64 * int64) option =
   match WordSet.stack_offsets ws with
   | Some offs -> (
-      match WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs with
+      match WordSet.Clp.Pieces.min_elem offs, WordSet.Clp.Pieces.max_elem offs with
       | Some lo, Some hi -> Cbat_word.int64_pair lo hi
       | _ -> None)
   | None -> None
@@ -567,7 +567,7 @@ let offset_bounds (ws : wordset) : (int64 * int64) option =
 (* The signed extrema of a VLA value's frame-relative offsets. *)
 let vla_bounds (ws : wordset) : (int64 * int64) option =
   Option.bind (WordSet.vla_offsets ws) ~f:(fun offs ->
-      match WordSet.Clp.min_elem_signed offs, WordSet.Clp.max_elem_signed offs with
+      match WordSet.Clp.Pieces.min_elem_signed offs, WordSet.Clp.Pieces.max_elem_signed offs with
       | Some lo, Some hi -> Cbat_word.int64_pair lo hi
       | _ -> None)
 

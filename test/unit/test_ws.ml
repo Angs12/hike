@@ -209,9 +209,9 @@ let tests : unit Alcotest.test list =
           && not (Ws.elem (w32 99) u)));
 
     pin "WS-35"
-      "the wrapped SP piece measures — a stack value whose offsets wrap the \
-       modulus ({-16, 0} as a wrapped pair) keeps signed extrema and \
-       segment-relative bounds (-16, 0) instead of answering None"
+      "the SP offsets across the modulus measure — a stack value whose \
+       offsets span it ({-16, 0, 16} as two arcs) keeps signed extrema and \
+       segment-relative bounds (-16, 16) instead of answering None"
       (fun () ->
         let w64 = Cbat_word.of_int ~width:64 in
         (* The vasnprintf shape: a wrapped finite offsets piece whose
@@ -225,7 +225,7 @@ let tests : unit Alcotest.test list =
            stack_base-16 and stack_base+16. *)
         let base = 0x3FFF_FFFF_FFFF_FFF8L in
         check "WS-35"
-          (Clp.is_wrapped offs
+          (List.length (Clp.Pieces.to_list offs) = 2
           && (match Ws.stack_bounds v with
               | Some (lo, hi) ->
                 Stdlib.Int64.equal lo (-16L) && Stdlib.Int64.equal hi 16L
@@ -439,22 +439,22 @@ let tests : unit Alcotest.test list =
         let dense = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 31)) in
         let split = w32 15 in
         let below p =
-          match Clp.min_elem p with
+          match Cbat_clp.min_elem p with
           | Some lo -> Cbat_word.(<=) lo split
           | None -> true in
         let parts_calls = Stdlib.ref 0 in
         let parts_decide _line p =
           Stdlib.incr parts_calls;
-          if Cbat_word.gt_int (Clp.cardinality p) 1 then
+          if Cbat_word.gt_int (Cbat_clp.cardinality p) 1 then
             (* The covered run [0,31]: keep its lower half, drop its
                upper half; the verdicts apply as listed. *)
-            let a, b = Clp.split_at_n p split in
+            let a, b = Cbat_clp.split_at_n p split in
             `Parts [ (a, `Keep); (b, `Drop) ]
           else if below p then `Keep else `Drop in
         let bisect_calls = Stdlib.ref 0 in
         let bisect_decide _line p =
           Stdlib.incr bisect_calls;
-          if Cbat_word.gt_int (Clp.cardinality p) 1 then `Split
+          if Cbat_word.gt_int (Cbat_clp.cardinality p) 1 then `Split
           else if below p then `Keep else `Drop in
         let by_parts = Ws.filter_addresses dense ~decide:parts_decide in
         let by_bisect = Ws.filter_addresses dense ~decide:bisect_decide in
@@ -472,15 +472,15 @@ let tests : unit Alcotest.test list =
         let interleaved = Ws.union grid (point 2) in
         let filtered =
           Ws.filter_addresses interleaved ~decide:(fun _ p ->
-              if Clp.elem (w64 0) p then
-                `Parts [ (Clp.singleton (w64 24), `Keep) ]
+              if Cbat_clp.elem (w64 0) p then
+                `Parts [ (Cbat_clp.singleton (w64 24), `Keep) ]
               else `Keep) in
         check "WS-46.interleaved-parts-order"
           (Ws.equal filtered (Ws.union (point 2) (point 24)));
         let split_filtered =
           Ws.filter_addresses interleaved ~decide:(fun _ p ->
-              if Cbat_word.gt_int (Clp.cardinality p) 1 then `Split
-              else if Clp.elem (w64 24) p || Clp.elem (w64 2) p then `Keep
+              if Cbat_word.gt_int (Cbat_clp.cardinality p) 1 then `Split
+              else if Cbat_clp.elem (w64 24) p || Cbat_clp.elem (w64 2) p then `Keep
               else `Drop) in
         check "WS-46.interleaved-split-order"
           (Ws.equal split_filtered filtered));

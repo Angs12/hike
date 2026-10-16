@@ -154,9 +154,15 @@ let tests : unit Alcotest.test list =
       "W1: [0,9] \\ [3,5] — the interior run is two pieces, not one CLP: the identity (the sound \
        over-approximation)"
       (fun () ->
-        let a = int32 ~lo:0 ~hi:9 in
-        let b = int32 ~lo:3 ~hi:5 in
-        check "CLP-27" (Clp.equal (Clp.diff a b) a && Clp.subset (Clp.diff a b) a));
+        let prog ~lo ~hi =
+          Cbat_clp.create ~width:32 ~step:(w32 1)
+            ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (w32 lo) in
+        let a = prog ~lo:0 ~hi:9 in
+        let b = prog ~lo:3 ~hi:5 in
+        check "CLP-27"
+          (match Cbat_clp_core.diff a b with
+           | [ r ] -> Cbat_clp.equal r a
+           | _ -> false));
 
 
 
@@ -575,20 +581,19 @@ let tests : unit Alcotest.test list =
 
 
     pin "CLP-117"
-      "difference of a wrapped finite progression equals the hull of its ascending survivors"
+      "difference by something other than one run equals the hull of its ascending survivors"
       (fun () ->
         let w8 = Cbat_word.of_int ~width:8 in
         let prog base step n =
-          Clp.create ~width:8 ~step:(w8 step)
+          Cbat_clp.create ~width:8 ~step:(w8 step)
             ~cardn:(Cbat_word.of_int ~width:9 n) (w8 base) in
-        let wrapped = prog 250 4 3 in
+        let same a b = List.equal Cbat_clp.equal a b in
         check "CLP-117.witness"
-          (Clp.equal (Clp.diff wrapped (Clp.singleton (w8 254)))
-             (Clp.of_list ~width:8 [ w8 2; w8 250 ]));
-        let tied = prog 128 64 4 in
+          (same (Cbat_clp_core.diff (prog 0 2 4) (prog 2 4 2))
+             (Cbat_clp_core.of_list ~width:8 [ w8 0; w8 4 ]));
         check "CLP-117.tie"
-          (Clp.equal (Clp.diff tied (prog 64 128 2))
-             (Clp.of_list ~width:8 [ w8 0; w8 128 ])));
+          (same (Cbat_clp_core.diff (prog 0 64 4) (prog 64 128 2))
+             (Cbat_clp_core.of_list ~width:8 [ w8 0; w8 128 ])));
 
 
 

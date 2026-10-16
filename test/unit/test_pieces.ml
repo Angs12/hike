@@ -7,11 +7,15 @@ open Bap_core_theory
 open Hike_test.Harness
 open Hike_test.Common
 
+(* The progression layer itself, not [Common]'s piece-union view. *)
+module Clp = Cbat_clp
 module P = Clp.Pieces
 module Ex = Clp.Exact
 
-(* Interval builder: [lo, hi] step 1 at width 32. *)
-let int32 ~lo ~hi = Clp.interval ~width:32 (w32 lo) (w32 hi)
+(* Interval builder: the progression [lo, hi] step 1 at width 32. *)
+let int32 ~lo ~hi =
+  Clp.create ~width:32 ~step:(w32 1)
+    ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (w32 lo)
 
 let prog32 ~lo ~hi = P.of_progression (int32 ~lo ~hi)
 let p32 l = P.of_list ~width:32 (List.map w32 l)
@@ -31,8 +35,8 @@ let tests : unit Alcotest.test list =
           && not_mem_all p (List.map w32 [ 3; 4; 5; 9 ])
           && P.equal p (P.union (prog32 ~lo:0 ~hi:2) (prog32 ~lo:6 ~hi:8))
           && P.equal (p32 [ 0; 2; 4 ])
-               (P.of_progression
-                  (Clp.create ~width:32 ~step:(w32 2)
+               (P.of_arcs
+                  (Clp.arcs ~width:32 ~step:(w32 2)
                      ~cardn:(Cbat_word.of_int ~width:33 3) (w32 0)))
           && List.length
                (P.to_list (P.union (p32 [ 0; 1; 2; 3; 4 ]) (P.singleton (w32 2))))
@@ -116,8 +120,8 @@ let tests : unit Alcotest.test list =
       (fun () ->
         List.iter (fun width ->
           let w = Cbat_word.of_int ~width in
-          let prog base step count = P.of_progression
-            (Clp.create ~width ~step:(w step)
+          let prog base step count = P.of_arcs
+            (Clp.arcs ~width ~step:(w step)
                ~cardn:(Cbat_word.of_int ~width:(width + 1) count) (w base)) in
           let r = P.intersection (prog 23 11 20) (prog 66 8 14) in
           check "PCS-10" (P.equal r (P.singleton (w 122)))) [8;16;32;64];
@@ -131,13 +135,12 @@ let tests : unit Alcotest.test list =
         List.iter (fun width ->
           let w = Cbat_word.of_int ~width in
           let scaled n = Cbat_word.lshift (w n) (w (width - 8)) in
-          let prog base step count = P.of_progression
-            (Clp.create ~width ~step:(scaled step)
+          let prog base step count = P.of_arcs
+            (Clp.arcs ~width ~step:(scaled step)
                ~cardn:(Cbat_word.of_int ~width:(width + 1) count) (scaled base)) in
           let a = P.union (prog 59 10 20) (prog 7 1 11) in
-          let b = P.of_progression (Clp.interval ~width (w 0) (scaled 59)) in
+          let b = Clp.interval ~width (w 0) (scaled 59) in
           check "PCS-11.disjoint" (List.length (P.to_list a) = 2);
-          check "PCS-11.canonical" (List.for_all (fun p -> not (Clp.is_wrapped p)) (P.to_list a));
           check "PCS-11.order" (not (P.precedes a b));
           check "PCS-11.extrapolate"
             (P.elem (scaled 69) (P.extrapolate_steps ~steps:2 a b))) [8;16;32;64]);
@@ -147,17 +150,19 @@ let tests : unit Alcotest.test list =
         let w = Cbat_word.of_int ~width:8 in
         let a = Clp.interval ~width:8 (w 200) (w 100) in
         let b = Clp.interval ~width:8 (w 50) (w 220) in
-        check "PCS-12" (not (Clp.subset a b));
-        let sparse = Clp.create ~width:8 ~step:(w 80)
-            ~cardn:(Cbat_word.of_int ~width:9 3) (w 200) in
-        check "PCS-12.sparse" (Clp.subset sparse (Clp.interval ~width:8 (w 0) (w 220)));
-        let misaligned = Clp.create ~width:8 ~step:(w 6)
-            ~cardn:(Cbat_word.of_int ~width:9 3) (w 252) in
-        let grid = Clp.create ~width:8 ~step:(w 3)
-            ~cardn:(Cbat_word.of_int ~width:9 85) (w 0) in
-        check "PCS-12.alignment" (not (Clp.subset misaligned grid));
-        let ray = Clp.create_descending ~width:8 ~base:(w 252) ~step:(w 3) in
-        check "PCS-12.ray" (not (Clp.subset misaligned ray)));
+        check "PCS-12" (not (P.precedes a b));
+        let strided step count base =
+          P.of_arcs
+            (Clp.arcs ~width:8 ~step:(w step)
+               ~cardn:(Cbat_word.of_int ~width:9 count) (w base)) in
+        let sparse = strided 80 3 200 in
+        check "PCS-12.sparse" (P.precedes sparse (Clp.interval ~width:8 (w 0) (w 220)));
+        let misaligned = strided 6 3 252 in
+        let grid = strided 3 85 0 in
+        check "PCS-12.alignment" (not (P.precedes misaligned grid));
+        let ray =
+          P.of_progression (Clp.create_descending ~width:8 ~base:(w 252) ~step:(w 3)) in
+        check "PCS-12.ray" (not (P.precedes misaligned ray)));
 
     pin "PCS-13" "directional membership, enumeration and complement agree"
       (fun () ->
@@ -168,8 +173,8 @@ let tests : unit Alcotest.test list =
           check "PCS-13.desc" (Clp.elem (w 4) d && not (Clp.elem (w 14) d));
           check "PCS-13.asc" (Clp.elem (w 14) a && not (Clp.elem (w 4) a));
           check "PCS-13.iter" (List.sort Cbat_word.compare (Clp.iter d) = [w 4;w 9]);
-          let flipped = Clp.lnot d in
-          check "PCS-13.lnot" (Clp.elem (Cbat_word.lnot (w 4)) flipped);
+          let flipped = P.lnot (P.of_progression d) in
+          check "PCS-13.lnot" (P.elem (Cbat_word.lnot (w 4)) flipped);
           check "PCS-13.meet"
             (P.equal (P.intersection (P.of_progression d) (P.singleton (w 4))) (P.singleton (w 4))))
           [8;16;32;64]);
@@ -182,7 +187,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let a = P.singleton (w64 16) in
         let amt =
-          P.of_progression (Clp.interval ~width:64 (w64 8) (w64 70)) in
+          Clp.interval ~width:64 (w64 8) (w64 70) in
         let r = P.lshift a amt in
         check "PCS-08"
           (P.elem (w64 0) r && P.elem (w64 4096) r && P.elem (w64 8192) r
@@ -194,8 +199,8 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let w8 = Cbat_word.of_int ~width:8 in
         let covers p i =
-          let t = Clp.translate p i in
-          List.for_all (fun x -> Clp.elem (Cbat_word.add x i) t) (Clp.iter p)
+          let t = P.translate (P.of_progression p) i in
+          List.for_all (fun x -> P.elem (Cbat_word.add x i) t) (Clp.iter p)
         in
         for base = 0 to 255 do
           List.iter (fun step ->
@@ -213,12 +218,12 @@ let tests : unit Alcotest.test list =
             [ 1; 2; 3; 5; 8; 16; 48 ]
         done;
         let full = Clp.create_descending ~width:64 ~base:(w64 (-8)) ~step:(w64 8) in
-        let shifted = Clp.add full (Clp.singleton (w64 8)) in
+        let shifted = P.add (P.of_progression full) (P.singleton (w64 8)) in
         check "PCS-14.full"
-          (List.for_all (fun x -> Clp.elem (w64 x) shifted) [ 0; 8; -8; -16 ]);
+          (List.for_all (fun x -> P.elem (w64 x) shifted) [ 0; 8; -8; -16 ]);
         let ray = Clp.create_ascending ~width:64 ~base:(w64 (-0x58)) ~step:(w64 8) in
-        let up = Clp.translate ray (w64 8) in
-        check "PCS-14.ray" (Clp.elem (w64 0) up && Clp.elem (w64 (-0x50)) up));
+        let up = P.translate (P.of_progression ray) (w64 8) in
+        check "PCS-14.ray" (P.elem (w64 0) up && P.elem (w64 (-0x50)) up));
 
 
 
@@ -237,7 +242,7 @@ let tests : unit Alcotest.test list =
           let cardn =
             Cbat_word.of_int ~width:(width + 1) (1 + Random.State.int st 6)
           in
-          P.of_progression (Clp.create ~width ~step ~cardn base) in
+          P.of_arcs (Clp.arcs ~width ~step ~cardn base) in
         let make () =
           List.fold_left
             (fun acc _ -> P.union acc (rand_piece ()))
@@ -258,7 +263,7 @@ let tests : unit Alcotest.test list =
           else if
             not
               (List.for_all
-                 (fun q -> (not (Clp.is_bottom q)) && not (Clp.is_wrapped q))
+                 (fun q -> not (Clp.is_bottom q))
                  ls)
           then Some "shape"
           else None in
@@ -462,8 +467,8 @@ let tests : unit Alcotest.test list =
           [ 8; 16 ];
         let interleaved =
           P.union
-            (P.of_progression
-               (Clp.create ~width:32 ~step:(w32 4)
+            (P.of_arcs
+               (Clp.arcs ~width:32 ~step:(w32 4)
                   ~cardn:(Cbat_word.of_int ~width:33 3) (w32 0)))
             (P.singleton (w32 2)) in
         let exact = Ex.of_pieces ~width:32 interleaved in
@@ -486,8 +491,8 @@ let tests : unit Alcotest.test list =
        earlier piece hidden behind an interleaved tail"
       (fun () ->
         let step10 n base =
-          P.of_progression
-            (Clp.create ~width:32 ~step:(w32 10)
+          P.of_arcs
+            (Clp.arcs ~width:32 ~step:(w32 10)
                ~cardn:(Cbat_word.of_int ~width:33 n) (w32 base)) in
         let a =
           P.union (P.union (P.singleton (w32 0)) (P.singleton (w32 1)))
@@ -512,8 +517,8 @@ let tests : unit Alcotest.test list =
       "difference removes every element of interleaved subtrahend pieces"
       (fun () ->
         let step10 base =
-          P.of_progression
-            (Clp.create ~width:32 ~step:(w32 10)
+          P.of_arcs
+            (Clp.arcs ~width:32 ~step:(w32 10)
                ~cardn:(Cbat_word.of_int ~width:33 2) (w32 base)) in
         let removed = P.union (step10 0) (step10 1) in
         let d = P.diff (prog32 ~lo:0 ~hi:100) removed in
@@ -526,8 +531,8 @@ let tests : unit Alcotest.test list =
        the operands' shared complements and facts change nothing"
       (fun () ->
         let step k lo n =
-          P.of_progression
-            (Clp.create ~width:32 ~step:(w32 k)
+          P.of_arcs
+            (Clp.arcs ~width:32 ~step:(w32 k)
                ~cardn:(Cbat_word.of_int ~width:33 n) (w32 lo)) in
         let a = P.union (step 4 8 5) (P.union (step 1 100 3) (p32 [ 1000 ])) in
         let b = P.union (step 6 3 4) (P.union (prog32 ~lo:64 ~hi:70) (p32 [ 5 ])) in
