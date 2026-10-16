@@ -21,19 +21,19 @@ let apply_block ~equal ~def ~phi ~jmp elts state =
   in
   close state
 
-let run ~(graph : Graphs.Tid.t) ~(sub : sub term) ~rev ~initial ~default
-    ~equal ~merge ~def ~phi ~jmp =
+(* The fixpoint over per-block transfers; [before]/[after] re-apply the
+   fixed state's transfer once per block. *)
+let solve ~(graph : Graphs.Tid.t) ~(sub : sub term) ~rev ~initial ~default
+    ~equal ~merge ~(transfer_of : blk term -> 'a -> 'a) =
   let blocks =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun blocks blk ->
-           let elts = Blk.elts blk |> Seq.to_list in
-           Core.Map.set blocks ~key:(Term.tid blk)
-             ~data:(if rev then List.rev elts else elts))
+           Core.Map.set blocks ~key:(Term.tid blk) ~data:(transfer_of blk))
   in
   let transfer tid state =
     match Core.Map.find blocks tid with
     | None -> state
-    | Some elts -> apply_block ~equal ~def ~phi ~jmp elts state
+    | Some f -> f state
   in
   let start = if rev then Graphs.Tid.exit else Graphs.Tid.start in
   let fixed =
@@ -52,3 +52,30 @@ let run ~(graph : Graphs.Tid.t) ~(sub : sub term) ~rev ~initial ~default
           Core.Map.set after ~key:tid ~data:after_state ))
   in
   { before; after }
+
+let run ~graph ~sub ~rev ~initial ~default ~equal ~merge ~def ~phi ~jmp =
+  solve ~graph ~sub ~rev ~initial ~default ~equal ~merge
+    ~transfer_of:(fun blk ->
+        let elts = Blk.elts blk |> Seq.to_list in
+        let elts = if rev then List.rev elts else elts in
+        apply_block ~equal ~def ~phi ~jmp elts)
+
+(* A block's backward transfer as one idempotent [(live \ kill) U gen]:
+   each element, last to first, replaces the gen set by
+   [(gen \ writes) U reads] and adds its writes to the kill set. *)
+let liveness ~graph ~sub ~initial ~def ~phi ~jmp =
+  let empty = Var.Set.empty in
+  solve ~graph ~sub ~rev:true ~initial ~default:empty ~equal:Core.Set.equal
+    ~merge:Core.Set.union
+    ~transfer_of:(fun blk ->
+        let step (gen, kill) (writes, reads) =
+          (Core.Set.union (Core.Set.diff gen writes) reads,
+           Core.Set.union kill writes) in
+        let gen, kill =
+          Blk.elts blk |> Seq.to_list |> List.rev
+          |> List.fold ~init:(empty, empty) ~f:(fun acc -> function
+              | `Def d -> step acc (def d)
+              | `Phi p -> step acc (phi p)
+              | `Jmp j -> step acc (empty, jmp j))
+        in
+        fun live -> Core.Set.union (Core.Set.diff live kill) gen)

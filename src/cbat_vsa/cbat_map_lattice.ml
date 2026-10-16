@@ -102,8 +102,8 @@ module Make_indexed_from_map
       (* Joins run per edge per sweep on mostly-stable maps: the
          physical-equality fast path skips the merge. *)
       if Stdlib.( == ) m1 m2 then t1 else Some (f m1 m2)
-    | Some m1, None -> Some m1
-    | None, Some m2 -> Some m2
+    | Some _, None -> t1
+    | None, Some _ -> t2
     | None, None -> None
 
   let meet' (m1 : map) (m2 : map) : map =
@@ -129,26 +129,31 @@ module Make_indexed_from_map
   (* Absent keys read top, so a stored top binding is pure bloat —
      remove it.  [equal] is structural: a symbolic top (a stack-segment
      value) is not the lattice top and stays. *)
-  let op_add op (m : map) ~key:key ~data:data : t =
+  let op_add op (t : t) (m : map) ~key:key ~data:data : t =
     let top = L.top (L.get_idx data) in
-    let old_data = match Map.find m key with Some v -> v | None -> top in
-    let v = op data old_data in
-    Option.return
-      (if L.equal v top then Map.remove m key
-       else Map.set m ~key ~data:v)
+    let old = Map.find m key in
+    let v = op data (match old with Some v -> v | None -> top) in
+    (* A write that changes nothing hands back the original wrapper; the
+       stored-value case compares physically, never structurally. *)
+    if L.equal v top then
+      (match old with None -> t | Some _ -> Option.return (Map.remove m key))
+    else
+      (match old with
+       | Some o when Stdlib.( == ) o v -> t
+       | _ -> Option.return (Map.set m ~key ~data:v))
 
   let join_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
     match t with
     | None -> None
-    | Some m -> op_add L.join m ~key ~data
+    | Some m -> op_add L.join t m ~key ~data
   let meet_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
     match t with
     | None -> None
-    | Some m -> op_add L.meet m ~key ~data
+    | Some m -> op_add L.meet t m ~key ~data
   let add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
     match t with
     | None -> None
-    | Some m -> op_add (fun x _ -> x) m ~key ~data
+    | Some m -> op_add (fun x _ -> x) t m ~key ~data
 
   let find' (idx : idx) (m : map) (k : K.t) : L.t =
     match Map.find m k with Some v -> v | None -> L.top idx
@@ -163,13 +168,26 @@ module Make_indexed_from_map
 
   (* Drop stored bindings the keeper rejects; bottom stays bottom. *)
   let filter_keys (t : t) ~(f : Key.t -> bool) : t =
-    Option.map t ~f:(fun m -> Map.filter_keys m ~f)
+    match t with
+    | None -> None
+    | Some m ->
+      (* Nothing dropped keeps the wrapper; a drop ends the scan early. *)
+      if Map.for_alli m ~f:(fun ~key ~data:_ -> f key) then t
+      else Some (Map.filter_keys m ~f)
 
-  (* Shared fold for [precedes'] and [equal']. *)
+  exception Differs
+
+  (* Shared walk for [precedes'] and [equal']; stops at the first
+     binding the branch rejects. *)
   let fold2_both
       (branch : [ `Left of L.t | `Right of L.t | `Both of L.t * L.t ] -> bool)
       (m1 : map) (m2 : map) : bool =
-    Map.fold2 m1 m2 ~init:true ~f:(fun ~key:_ ~data cur -> cur && branch data)
+    match
+      Map.iter2 m1 m2 ~f:(fun ~key:_ ~data ->
+          if not (branch data) then raise_notrace Differs)
+    with
+    | () -> true
+    | exception Differs -> false
 
   let precedes' (m1 : map) (m2 : map) : bool =
     fold2_both (function

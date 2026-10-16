@@ -764,22 +764,27 @@ let last_defs (blk : blk term) : def term Var.Map.t =
    no edge may run.  A live state that produces one is an analysis bug,
    and the decision seam says so loudly rather than widening the
    guard.  Jumps after one that always runs are not denoted. *)
-let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
-  Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
+let reachable_jumps_by (type a) ~(jmp : a -> jmp term) (env : AI.t)
+    (items : a seq) : a seq =
+  Seq.unfold_with items ~init:true ~f:begin fun reachable item ->
+    let jmp_term = jmp item in
     if not reachable then Seq.Step.Done
     else
     let cond =
-      match denote_imm_exp (Jmp.cond jmp) env with
+      match denote_imm_exp (Jmp.cond jmp_term) env with
       | Ok c ->
           if WordSet.is_bottom c && not (AI.equal env AI.bottom) then
             failwith
               (Printf.sprintf
                  "vsa: bottom cond denotation in a live state (jmp %s)"
-                 (Tid.name (Term.tid jmp)));
+                 (Tid.name (Term.tid jmp_term)));
           c
       | Error _ -> WordSet.top 1
     in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
-    if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}
+    if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = item; state = can_fall_through}
     else Seq.Step.Skip {state = can_fall_through}
   end
+
+let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
+  reachable_jumps_by ~jmp:Fn.id env jmps

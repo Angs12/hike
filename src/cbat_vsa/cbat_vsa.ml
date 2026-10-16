@@ -448,6 +448,8 @@ let static_graph_vsa
       resolved s
   in
   let { Cbat_dispatch_graph.succs; Cbat_dispatch_graph.preds } = dg in
+  let plan_of =
+    Cbat_forward.plans_of ~resolved ~edge_conds ~disabled:disabled_conds ~rctx in
   (* WTO fixpoint; inner SCCs stabilize first. *)
   let wto = wto_of_cfg ~succ:succs ~pred:preds cfg in
   let smry = Cbat_wto.summary wto in
@@ -495,8 +497,7 @@ let static_graph_vsa
         (Hashtbl.find block_to_head p) (fun () ->
           let p_entry = Stages.time `Glue (fun () -> get p) in
           let res = Stages.time `Denote (fun () ->
-              Cbat_forward.denote_block ~preserved ~callee ~resolved
-                ~edge_conds ~disabled:disabled_conds
+              Cbat_forward.denote_block ~preserved ~callee ~plan_of
                 ~rctx
                 ~source:p p_entry ~target:v) in
           let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in

@@ -87,25 +87,21 @@ let base_vars vars =
       Core.Set.add acc (Var.base v))
 
 let live_in_of_sub ~def_reads ~def_writes ~phi_reads
-    ~phi_writes ~jmp_reads (s : sub term) =
-  let def live d =
-    let live =
+    ~phi_writes:_ ~jmp_reads (s : sub term) =
+  (* Only an immediate def kills; a memory def and every phi leave the
+     live set alone. *)
+  let def d =
+    let kill =
       match Var.typ (Def.lhs d) with
-      | Type.Imm _ ->
-        Core.Set.diff live (base_vars (def_writes d))
-      | Type.Mem _ | Type.Unk -> live
+      | Type.Imm _ -> base_vars (def_writes d)
+      | Type.Mem _ | Type.Unk -> Var.Set.empty
     in
-    Core.Set.union live (base_vars (def_reads d))
+    (kill, base_vars (def_reads d))
   in
-  let phi live p =
-    Core.Set.union live (base_vars (phi_reads p))
-  in
-  let jmp live j =
-    Core.Set.union live (base_vars (jmp_reads j))
-  in
-  Hike_bir_flow.run ~graph:(Sub.to_graph s) ~sub:s ~rev:true
+  let phi p = (Var.Set.empty, base_vars (phi_reads p)) in
+  let jmp j = base_vars (jmp_reads j) in
+  Hike_bir_flow.liveness ~graph:(Sub.to_graph s) ~sub:s
     ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
-    ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
     ~def ~phi ~jmp
 
 (* The per-run analysis context: one fold over the sub's blocks builds

@@ -46,51 +46,104 @@ let walk_discards ~(target : tid) (rel : edge_rel) : bool =
   | Exact ts -> not (Core.Set.mem ts target)
   | Any -> false
 
-(* Denotation of a block's jumps. *)
-let denote_jump
-    ~(preserved : Int.Set.t)
-    ~(callee : Tid.t -> Cbat_call_effects.callee)
+(* A block's static jump facts, built once per solve at first visit:
+   each jump with its edge cond, disabled continuation and classification,
+   plus the block's call facts.  The callee summary is read per visit —
+   it grows while a recursion is tentative. *)
+type jump_plan = {
+  jp_jmp : jmp term;
+  jp_cond : exp option;
+  jp_disabled : exp option;
+  jp_rel : edge_rel;
+  jp_resolved : bool;
+  (* The summary's effective preserved set, keyed physically by the
+     summary it was derived from. *)
+  mutable jp_preserved : (Int.Set.t * Int.Set.t) option;
+}
+
+type block_plan = {
+  bp_term : blk term;
+  bp_call_facts : var list * bool;
+  bp_has_conds : bool;
+  bp_jumps : jump_plan list;
+}
+
+let plan_block
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
     ~(rctx : Cbat_runctx.refine_ctx)
-    (b : blk term)  (env : AI.t) ~(entry : AI.t) ~(target : tid)
+    (source : tid) : block_plan =
+  match Core.Map.find rctx.Cbat_runctx.rc_blocks source with
+  | None -> invalid_arg "hike: source tid does not represent block"
+  | Some bf ->
+    let b = bf.Cbat_runctx.bf_term in
+    let conds = Core.Map.find edge_conds source in
+    let bp_jumps =
+      Term.enum jmp_t b |> Seq.to_list
+      |> List.map ~f:(fun jmp ->
+          { jp_jmp = jmp;
+            jp_cond = Option.bind conds ~f:(fun m ->
+                Core.Map.find m (Term.tid jmp));
+            jp_disabled = Core.Map.find disabled (Term.tid jmp);
+            jp_rel = edge_rel_of ~resolved jmp;
+            jp_resolved = Core.Map.mem resolved (Term.tid jmp);
+            jp_preserved = None }) in
+    { bp_term = b; bp_call_facts = bf.Cbat_runctx.bf_call_facts;
+      bp_has_conds = Option.is_some conds; bp_jumps }
+
+(* The plan of [source], memoized for the solve. *)
+let plans_of ~resolved ~edge_conds ~disabled ~rctx : tid -> block_plan =
+  let memo : block_plan Tid.Table.t = Tid.Table.create () in
+  fun source ->
+    match Hashtbl.find memo source with
+    | Some p -> p
+    | None ->
+      let p = plan_block ~resolved ~edge_conds ~disabled ~rctx source in
+      Hashtbl.set memo ~key:source ~data:p;
+      p
+
+(* Denotation of a block's jumps. *)
+let denote_jump
+    ~(preserved : Int.Set.t)
+    ~(callee : Tid.t -> Cbat_call_effects.callee)
+    ~(rctx : Cbat_runctx.refine_ctx)
+    (plan : block_plan)  (env : AI.t) ~(entry : AI.t) ~(target : tid)
     : AI.t =
   (* The backward refinement's entry state IS the source block's IN
-     state — the env this jump transfers.  Per jmp: the edge's own cond
-     and the disabled continuation (the next edge's cond), both from the
-     run's tables. *)
-  let call_facts =
-    lazy (match Core.Map.find rctx.rc_blocks (Term.tid b) with
-    | Some bf -> bf.bf_call_facts
-    | None -> failwith "hike: no call facts for block (rctx)")
-  in
-  let lookup_cond jmp =
-    Core.Map.find edge_conds (Term.tid b)
-    |> Option.bind ~f:(fun by_jmp ->
-        Core.Map.find by_jmp (Term.tid jmp)) in
-  let per_jump acc jmp =
-    let edge_cond = lookup_cond jmp in
-    let rel = edge_rel_of ~resolved jmp in
+     state — the env this jump transfers. *)
+  let b = plan.bp_term in
+  let per_jump acc (jp : jump_plan) =
+    let jmp = jp.jp_jmp in
+    let rel = jp.jp_rel in
     (* Observes the disabled continuation (the widening landmarks); the
        observation needs the walk, so it rides the same sol-carrying
        arm. *)
-    Option.iter (Core.Map.find disabled (Term.tid jmp))
+    Option.iter jp.jp_disabled
       ~f:(fun dc ->
         Cbat_backward.acquire_unsat ~entry
           ~landmarks:rctx.rc_landmarks ~cache:rctx.rc_prefix
           ~witness:rctx.rc_nonneg
           env b dc);
     let env =
-      match edge_cond with
+      match jp.jp_cond with
       | Some acc_cond ->
         Cbat_backward.refine_edge_inline
           ~entry ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
     let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
-      let written_lanes, _ = Lazy.force call_facts in
-      Cbat_call_effects.transfer ~abi:rctx.Cbat_runctx.rc_abi ~preserved
+      let written_lanes, _ = plan.bp_call_facts in
+      let kept =
+        Option.map summary ~f:(fun ws ->
+            match jp.jp_preserved with
+            | Some (ws0, p) when phys_equal ws0 ws -> p
+            | _ ->
+              let p = Cbat_call_effects.preserved_with_summary
+                  ~abi:rctx.Cbat_runctx.rc_abi ~preserved ws in
+              jp.jp_preserved <- Some (ws, p);
+              p) in
+      Cbat_call_effects.transfer ?kept ~abi:rctx.Cbat_runctx.rc_abi ~preserved
         ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
         env
     in
@@ -111,7 +164,7 @@ let denote_jump
         match site_callee with
         | Cbat_call_effects.Blocked -> AI.bottom
         | Cbat_call_effects.Summary summary ->
-          let _, pushed = Lazy.force call_facts in
+          let _, pushed = plan.bp_call_facts in
           call_site_transfer ~summary ~pushed
     in
     let leads () = if env_leads ~target rel then env else AI.bottom in
@@ -121,19 +174,19 @@ let denote_jump
         (* Traps ride the same frame-keep rule as ABI calls; a trap
            pushes no retaddr. *)
         call_site_transfer ~summary:None ~pushed:false
-      | Call c -> (
-        match Core.Map.find resolved (Term.tid jmp) with
-        | Some _ ->
+      | Call c ->
+        if jp.jp_resolved then
           (* A resolved transfer is the intra-sub jump the concrete
              machine performs: FULL IDENTITY — no callee effects; any
              other target is unreachable. *)
           leads ()
-        | None -> inspect_call c)
+        else inspect_call c
       | Goto (Direct _) | Ret (Direct _) -> leads ()
       | Goto (Indirect _)
       | Ret (Indirect _) -> env in
     AI.join acc env_res in
-  Seq.fold (reachable_jumps env (Term.enum jmp_t b))
+  Seq.fold
+    (reachable_jumps_by ~jmp:(fun jp -> jp.jp_jmp) env (Seq.of_list plan.bp_jumps))
     ~init:AI.bottom
     ~f:per_jump
 
@@ -141,33 +194,26 @@ let denote_jump
 let denote_block
     ~(preserved : Int.Set.t)
     ~(callee : Tid.t -> Cbat_call_effects.callee)
-    ~(resolved : Tid.Set.t Tid.Map.t)
-    ~(edge_conds : exp Tid.Map.t Tid.Map.t)
-    ~(disabled : exp Tid.Map.t)
+    ~(plan_of : tid -> block_plan)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(source : tid) (env : AI.t)
     : target:tid -> AI.t =
- match (Core.Map.find rctx.Cbat_runctx.rc_blocks source) with
-   | Some bf ->
-     let b = bf.Cbat_runctx.bf_term in
-     (* The block's postcondition depends only on the source block's
-        IN state: one denotation per (block, state), shared by every
-        successor edge. *)
-     let postcond =
-       match Core.Map.find !(rctx.Cbat_runctx.rc_post) source with
-       | Some (e0, p0) when phys_equal e0 env -> p0
-       | _ ->
-         let p =
-           if Core.Map.mem edge_conds source then
-             Cbat_backward.denote_defs_cached rctx.Cbat_runctx.rc_prefix b env
-           else denote_defs b env in
-         rctx.Cbat_runctx.rc_post :=
-           Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
-         p
-     in
-     fun ~target ->
-       denote_jump ~preserved ~callee ~resolved ~edge_conds ~disabled
-         ~rctx
-         b postcond ~entry:env ~target
-   | None -> fun ~target:_ ->
-       invalid_arg "hike: source tid does not represent block"
+  let plan = plan_of source in
+  let b = plan.bp_term in
+  (* The block's postcondition depends only on the source block's
+     IN state: one denotation per (block, state), shared by every
+     successor edge. *)
+  let postcond =
+    match Core.Map.find !(rctx.Cbat_runctx.rc_post) source with
+    | Some (e0, p0) when phys_equal e0 env -> p0
+    | _ ->
+      let p =
+        if plan.bp_has_conds then
+          Cbat_backward.denote_defs_cached rctx.Cbat_runctx.rc_prefix b env
+        else denote_defs b env in
+      rctx.Cbat_runctx.rc_post :=
+        Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
+      p
+  in
+  fun ~target ->
+    denote_jump ~preserved ~callee ~rctx plan postcond ~entry:env ~target

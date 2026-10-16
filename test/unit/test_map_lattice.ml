@@ -292,6 +292,35 @@ let tests : unit Alcotest.test list =
 
 
 
+
+    pin "MAP-34"
+      "equality and inclusion read an explicit top binding as an absent key, find a difference at any position, and a write that changes nothing keeps the wrapper"
+      (fun () ->
+        let widened = Map.widen_join (Map.add Map.top ~key:5 ~data:3)
+            (Map.add Map.top ~key:5 ~data:4) in
+        check "MAP-34.explicit-top-eq"
+          (Map.equal widened Map.top && Map.equal Map.top widened);
+        check "MAP-34.explicit-top-precedes"
+          (Map.precedes widened Map.top && Map.precedes Map.top widened);
+        let many v_last =
+          List.fold_left (fun m k -> Map.add m ~key:k ~data:1)
+            Map.top (List.init 20 Fun.id)
+          |> fun m -> Map.add m ~key:99 ~data:v_last in
+        check "MAP-34.differs-last" (not (Map.equal (many 1) (many 2)));
+        check "MAP-34.differs-first"
+          (not (Map.equal (Map.add (many 1) ~key:0 ~data:7) (many 1)));
+        check "MAP-34.same" (Map.equal (many 1) (many 1));
+        let m = Map.add Map.top ~key:5 ~data:3 in
+        check "MAP-34.add-same" (Map.add m ~key:5 ~data:3 == m);
+        check "MAP-34.add-top-absent" (Map.add m ~key:6 ~data:IntLattice.top == m);
+        check "MAP-34.keep-all" (Map.filter_keys m ~f:(fun _ -> true) == m);
+        check "MAP-34.drop" (not (Map.filter_keys m ~f:(fun _ -> false) == m));
+        let e = AI.add_word AI.top ~key:(v64 "RAX") ~data:(Ws.singleton (w64 1)) in
+        let d = Ws.singleton (w64 2) in
+        let e = AI.add_word e ~key:(v64 "RBX") ~data:d in
+        check "MAP-34.ai-same-write" (AI.add_word e ~key:(v64 "RBX") ~data:d == e);
+        check "MAP-34.ai-join-self" (AI.join e e == e));
+
   ]
 
 let () = run "map_lattice" tests

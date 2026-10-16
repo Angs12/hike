@@ -36,10 +36,16 @@ val indirect_callee :
   callee:(Tid.t -> callee) ->
   env:AI.t -> exp -> callee
 
+(* The preserved set a callee summary derives from the base set.  A
+   caller that reuses it passes it as [transfer]'s [~kept], which then
+   skips its own derivation. *)
+val preserved_with_summary :
+  abi:Hike_abi.t -> preserved:Core.Int.Set.t -> Core.Int.Set.t -> Core.Int.Set.t
+
 (* The caller's post-call state: the preserved caller-saved GPRs kept,
    the rest topped; the frame kept at/above the highest possible
    call-time RSP outside the escapes — every call alike, trap or ABI —
    with the whole-memory top as the fallback on any doubt.  A pushed
    site's SP gains one word — the popped retaddr. *)
 val transfer :
-  abi:Hike_abi.t -> preserved:Core.Int.Set.t -> site:site -> AI.t -> AI.t
+  ?kept:Core.Int.Set.t -> abi:Hike_abi.t -> preserved:Core.Int.Set.t -> site:site -> AI.t -> AI.t

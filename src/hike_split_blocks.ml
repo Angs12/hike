@@ -298,24 +298,16 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
                Core.Set.union acc (Exp.free_vars (Arg.rhs arg))
            | _ -> acc)
   in
-  let def live d =
-    Core.Set.union
-      (Core.Set.diff live (Model.def_writes d))
-      (Model.def_reads d)
-  in
-  let phi live p =
-    Core.Set.union (Core.Set.diff live (Model.phi_writes p))
-      (Model.phi_reads p)
-  in
-  let jmp live j = Core.Set.union live (Model.jmp_input_reads ~abi j) in
+  let def d = (Model.def_writes d, Model.def_reads d) in
+  let phi p = (Model.phi_writes p, Model.phi_reads p) in
+  let jmp j = Model.jmp_input_reads ~abi j in
   let graph = Sub.to_graph sub in
   let block_ids =
     Base.List.map blks ~f:Term.tid |> Core.Set.of_list (module Tid)
   in
   let live =
-    Hike_bir_flow.run ~graph ~sub ~rev:true
+    Hike_bir_flow.liveness ~graph ~sub
       ~initial:(Tid.Map.singleton Graphs.Tid.exit exit_seed)
-      ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
       ~def ~phi ~jmp
   in
   Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->

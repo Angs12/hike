@@ -56,13 +56,15 @@ let equal (e1 : t) e2 : bool =
   MemEnv.equal e1.memories e2.memories &&
   WordEnv.equal e1.words e2.words
 
+(* A write that leaves the maps physically unchanged keeps the record,
+   so physically keyed caches still hit. *)
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
-  {memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data;
-   words = e.words}
+  let memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data in
+  if phys_equal memories e.memories then e else {memories; words = e.words}
 
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
-  {memories = e.memories;
-   words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data}
+  let words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data in
+  if phys_equal words e.words then e else {memories = e.memories; words}
 
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
   WordEnv.find i env.words (Cbat_var_id.intern v)
@@ -73,11 +75,11 @@ let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
 (* Drop dead virtual temps; machine regs are the ABI surface and stay.
    Missing keys read top, so dropping only weakens. *)
 let gc (e : t) ~(keep : Int.Set.t) : t =
-  { e with
-    words =
-      WordEnv.filter_keys e.words ~f:(fun k ->
-          (not (Cbat_var_id.is_virtual k))
-          || Core.Set.mem keep (Cbat_var_id.base_of k)) }
+  let words =
+    WordEnv.filter_keys e.words ~f:(fun k ->
+        (not (Cbat_var_id.is_virtual k))
+        || Core.Set.mem keep (Cbat_var_id.base_of k)) in
+  if phys_equal words e.words then e else { e with words }
 
 
 
@@ -105,15 +107,19 @@ let pp ppf (e : t) =
       pp_memories e.memories
   end
 
+(* The join's result record is the first operand itself when both
+   component maps come back physically unchanged. *)
+let rebuilt (e1 : t) memories words : t =
+  if phys_equal memories e1.memories && phys_equal words e1.words then e1
+  else { memories; words }
+
 let join (e1 : t) (e2 : t) : t =
-  { memories = MemEnv.join e1.memories e2.memories;
-    words = WordEnv.join e1.words e2.words;
-  }
+  rebuilt e1 (MemEnv.join e1.memories e2.memories)
+    (WordEnv.join e1.words e2.words)
 
 let widen_join (e1 : t) (e2 : t) : t =
-  { memories = MemEnv.widen_join e1.memories e2.memories;
-    words = WordEnv.widen_join e1.words e2.words;
-  }
+  rebuilt e1 (MemEnv.widen_join e1.memories e2.memories)
+    (WordEnv.widen_join e1.words e2.words)
 
 
 
@@ -256,7 +262,8 @@ let precedes (e1 : t) (e2 : t) : bool =
    and the lane's keys are base vars, so membership is a direct set
    lookup. *)
 let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
-  { env with words = WordEnv.filter_keys env.words ~f:(Core.Set.mem preserved) }
+  let words = WordEnv.filter_keys env.words ~f:(Core.Set.mem preserved) in
+  if phys_equal words env.words then env else { env with words }
 
 (* Apply [f] to every memory cell; the words stay. *)
 let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =

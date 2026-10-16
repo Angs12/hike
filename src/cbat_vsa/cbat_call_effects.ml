@@ -93,25 +93,29 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
 #endif
     AI.top_memories env
 
-let transfer ~(abi : Hike_abi.t) ~(preserved : Int.Set.t) ~(site : site)
-    (env : AI.t) : AI.t =
+let preserved_with_summary ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
+    (ws : Int.Set.t) : Int.Set.t =
+  Base.List.fold abi.Hike_abi.caller_saved_gprs
+    ~init:preserved ~f:(fun acc v ->
+        let id = Cbat_var_id.intern v in
+        if Core.Set.mem ws id then acc
+        else if
+          Base.List.exists abi.Hike_abi.return_regs ~f:(Var.same v)
+        then acc
+        else Core.Set.add acc id)
+
+let transfer ?kept ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
+    ~(site : site) (env : AI.t) : AI.t =
   let word_bits = Hike_abi.word_bits abi in
   let rsp = abi.Hike_abi.sp in
   (* A callee's kill summary keeps the caller-saved GPRs it provably
      never writes; the return regs are the call's own lanes.  No
      summary keeps only the base set. *)
   let preserved =
-    match site.summary with
-    | Some ws ->
-      Base.List.fold abi.Hike_abi.caller_saved_gprs
-        ~init:preserved ~f:(fun acc v ->
-            let id = Cbat_var_id.intern v in
-            if Core.Set.mem ws id then acc
-            else if
-              Base.List.exists abi.Hike_abi.return_regs ~f:(Var.same v)
-            then acc
-            else Core.Set.add acc id)
-    | None -> preserved
+    match kept, site.summary with
+    | Some k, _ -> k
+    | None, Some ws -> preserved_with_summary ~abi ~preserved ws
+    | None, None -> preserved
   in
   (* The escape: the registers the call block wrote. *)
   let escape =

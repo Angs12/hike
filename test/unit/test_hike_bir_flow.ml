@@ -69,6 +69,61 @@ let tests : unit Alcotest.test list =
         check "reverse phi transfer" (Core.Set.mem reverse_entry 2);
         check "reverse ret transfer" (Core.Set.mem reverse_entry 8);
         check "reverse exit seed" (Core.Set.mem reverse_entry 16));
+
+    pin "FLOW-02"
+      "liveness (compiled gen/kill) equals the closure-driven reverse flow over a loop with in-block kills and a non-killing phi"
+      (fun () ->
+        let x = v64 "live_x" and y = v64 "live_y" and z = v64 "live_z" in
+        let sub, tids =
+          sub_of "bir_live"
+            [ [ Def.create x (Bil.Var y); Def.create y (Bil.Var z) ],
+              [ (1, mk_goto) ];
+              [ Def.create z (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Var z));
+                Def.create x (Bil.Var z) ],
+              [ (1, mk_goto); (2, mk_goto) ];
+              [ Def.create y (Bil.Var x) ], [ (0, mk_ret) ] ]
+        in
+        let loop = Term.find blk_t sub tids.(1) |> Base.Option.value_exn in
+        let builder =
+          Blk.Builder.init ~copy_defs:true ~copy_phis:true ~copy_jmps:true loop
+        in
+        Blk.Builder.add_phi builder
+          (Phi.of_list x [ (tids.(0), Bil.Var y); (tids.(1), Bil.Var z) ]);
+        let loop = Blk.Builder.result builder in
+        let sub =
+          Term.map blk_t sub ~f:(fun blk ->
+              if Tid.equal (Term.tid blk) tids.(1) then loop else blk)
+        in
+        let set vs = Core.Set.of_list (module Var) vs in
+        let dreads d = Exp.free_vars (Def.rhs d) in
+        let dwrites d = set [ Def.lhs d ] in
+        let preads p =
+          Phi.values p
+          |> Seq.fold ~init:Var.Set.empty ~f:(fun acc (_, e) ->
+                 Core.Set.union acc (Exp.free_vars e))
+        in
+        let jreads j = Exp.free_vars (Jmp.cond j) in
+        let graph = Sub.to_graph sub in
+        let initial = Tid.Map.singleton Graphs.Tid.exit (set [ z ]) in
+        let reference =
+          Hike_bir_flow.run ~graph ~sub ~rev:true ~initial
+            ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
+            ~def:(fun live d ->
+                Core.Set.union (Core.Set.diff live (dwrites d)) (dreads d))
+            ~phi:(fun live p -> Core.Set.union live (preads p))
+            ~jmp:(fun live j -> Core.Set.union live (jreads j))
+        in
+        let compiled =
+          Hike_bir_flow.liveness ~graph ~sub ~initial
+            ~def:(fun d -> (dwrites d, dreads d))
+            ~phi:(fun p -> (Var.Set.empty, preads p))
+            ~jmp:jreads
+        in
+        let same a b = Core.Map.equal Core.Set.equal a b in
+        check "before" (same reference.before compiled.before);
+        check "after" (same reference.after compiled.after);
+        check "loop carries z live in"
+          (Core.Set.mem (Core.Map.find_exn compiled.before tids.(1)) z));
   ]
 
 let () = run "bir_flow" tests

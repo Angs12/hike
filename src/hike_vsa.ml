@@ -73,13 +73,17 @@ let blocked_callees ~(lookup : lookup_fn)
       || Vsa.AI.equal (Graphlib.Std.Solution.get sol (Term.tid blk)) Vsa.AI.bottom
       then acc
       else
-        let _, post = Vsa.fold_block_states ~sol blk ~init:() ~f:(fun _ _ _ () -> ()) in
+        (* Only an indirect target reads the post-state; a direct
+           call's block is not replayed. *)
+        let post =
+          lazy (snd (Vsa.fold_block_states ~sol blk ~init:()
+                       ~f:(fun _ _ _ () -> ()))) in
         Base.List.fold calls ~init:acc ~f:(fun acc c ->
             let target =
               match Call.target c with
               | Direct t -> Some t
               | Indirect e -> (
-                match Vsa.denote_imm_exp e post with
+                match Vsa.denote_imm_exp e (Lazy.force post) with
                 | Ok ws -> Hike_resolve.resolve_target ~lookup ws
                 | Error _ -> None)
             in
