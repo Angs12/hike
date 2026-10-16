@@ -50,7 +50,7 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
            | Some d_sp ->
                let bindings =
                  Term.enum def_t blk
-                 |> Seq.fold ~init:[] ~f:(fun acc d ->
+                 |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
                         match
                           ( Model.addr_of_rhs (Def.rhs d),
                             Model.store_data_of_rhs (Def.rhs d) )
@@ -60,18 +60,15 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
                             | Some a -> (
                                 match slot_of_start a d_sp with
                                 | Some i ->
-                                    { sb_slot = i; sb_def = d }
-                                    :: Base.List.filter acc ~f:(fun b ->
-                                           not (Int.equal b.sb_slot i))
+                                    Core.Map.set acc ~key:i
+                                      ~data:{ sb_slot = i; sb_def = d }
                                 | None -> acc)
                             | None -> acc)
                         | _ -> acc)
                in
                Core.Map.set sites ~key:btid
                  ~data:
-                   ( Base.List.sort bindings ~compare:(fun a b ->
-                        Int.compare a.sb_slot b.sb_slot),
-                     blk ))
+                   (Core.Map.data bindings, blk))
 
 let site_bindings_of_sub ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->

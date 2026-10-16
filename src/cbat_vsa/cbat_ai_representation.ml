@@ -251,16 +251,12 @@ let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
   WordEnv.precedes e1.words e2.words
 
-(* Top every word key not in [preserved]; the memories stay. *)
+(* Top every word key not in [preserved]; the memories stay.  An absent
+   key reads top, so the others are dropped.  Both the set's elements
+   and the lane's keys are base vars, so membership is a direct set
+   lookup. *)
 let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
-  (* Both the set's elements and the lane's keys are base vars, so
-     membership is a direct set lookup, not a Var.same scan. *)
-  let words = WordEnv.fold env.words ~init:env.words
-    ~f:(fun ~key ~data acc ->
-      if Core.Set.mem preserved key
-      then acc
-      else WordEnv.add acc ~key ~data:(WordSet.top (WordSet.bitwidth data))) in
-  { env with words }
+  { env with words = WordEnv.filter_keys env.words ~f:(Core.Set.mem preserved) }
 
 (* Apply [f] to every memory cell; the words stay. *)
 let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =

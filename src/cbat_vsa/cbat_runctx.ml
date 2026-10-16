@@ -21,13 +21,6 @@ open Graphlib.Std
 module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
-(* Mutable per-analysis state: the solution values.  The fixpoint builds
-   one per sub and the call abstraction one per callee — Tids are only
-   unique per sub, so each context owns its own. *)
-type fix_state = {
-  fs_sol : AI.t Tid.Map.t;
-}
-
 (* Static per-block facts, one per sub block: the block's term, the
    convention's integer-arg lanes the block writes plus the SP-push
    marker, and the may-read set at block entry (the GC keep-set). *)
@@ -38,8 +31,6 @@ type block_facts = {
 }
 
 type refine_ctx = {
-  (* Mutable state, owned by this context. *)
-  rc_state : fix_state;
   (* The last postcondition per source block, keyed physically by the
      entry state it was computed from: a k-successor pred denotes once
      per visit instead of once per edge. *)
@@ -66,9 +57,6 @@ type refine_ctx = {
      indirect call site's summary derivation reads it. *)
   rc_sub_lookup : int64 -> Tid.t option;
 }
-
-let with_sol (rc : refine_ctx) (sol : AI.t Tid.Map.t) : refine_ctx =
-  { rc with rc_state = { fs_sol = sol } }
 
 (* Static per-block call facts: the convention's integer-arg lanes the
    block writes, and whether the block's call pushes a return address
@@ -128,9 +116,6 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
     (s : sub term) : refine_ctx = {
   rc_nonneg = (fun ~env:_ _ -> false);
   rc_landmarks = Cbat_landmarks.create ();
-  rc_state = {
-    fs_sol = Tid.Map.empty;
-  };
   rc_post = ref Tid.Map.empty;
   rc_prefix = ref Tid.Map.empty;
   rc_abi = abi;

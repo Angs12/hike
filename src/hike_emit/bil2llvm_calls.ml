@@ -136,20 +136,11 @@ let set_arg_attrs_of ctx fn args =
         Llvm.add_function_attr fn attr (Llvm.AttrIndex.Param i))
 
 let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
-  let args = get_args ctx sub_tid in
-  Llvm.iter_params
-    (fun param ->
-      let arg =
-        Base.List.find_exn args ~f:(fun arg ->
-            Base.String.equal
-              (Var.name (Arg.lhs arg))
-              (Llvm.value_name param))
-      in
-      let value = lane_value_of arg param in
+  Base.List.iteri (get_args ctx sub_tid) ~f:(fun i arg ->
+      let value = lane_value_of arg (Llvm.param fn i) in
       insert_local scope blk_tid (Arg.lhs arg) value;
       (* A parameter dominates every reader: bind it sub-wide too. *)
       bind_ssaval scope (Arg.lhs arg) value)
-    fn
 
 let create_fun_declaration ?name ctx sub_tid =
   let name = Base.Option.value name ~default:(Tid.name sub_tid) in

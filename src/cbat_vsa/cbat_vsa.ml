@@ -371,22 +371,14 @@ let rec static_graph_vsa
   
   let sol_default = Solution.default init in
   (* The initial solution seeds the store; from here the store is the only
-     home for per-block values, versions, and the caches they key. *)
-  let rc_cell =
-    ref
-      (Cbat_runctx.with_sol rctx
-         (Solution.enum init
-          |> Seq.fold ~init:Tid.Map.empty
-               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v))) in
-  let get n =
-    Option.value (Core.Map.find (!rc_cell).rc_state.fs_sol n) ~default:sol_default in
-  let set n v =
-    let rc = !rc_cell in
-    rc_cell :=
-      Cbat_runctx.with_sol rc
-        (Core.Map.set rc.rc_state.fs_sol ~key:n ~data:v) in
-  let mk_sol () =
-    Solution.create (!rc_cell).rc_state.fs_sol sol_default in
+     home for per-block values. *)
+  let sol_store =
+    ref (Solution.enum init
+         |> Seq.fold ~init:Tid.Map.empty
+              ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v)) in
+  let get n = Option.value (Core.Map.find !sol_store n) ~default:sol_default in
+  let set n v = sol_store := Core.Map.set !sol_store ~key:n ~data:v in
+  let mk_sol () = Solution.create !sol_store sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = visit_budget wto in
@@ -401,7 +393,7 @@ let rec static_graph_vsa
      refinement.  A dispatch extra-edge has no jmp and cannot be
      witnessed. *)
   let edge_forward_dead ~(p : Tid.t) ~(v : Tid.t) : bool =
-    match Core.Map.find (!rc_cell).rc_blocks p with
+    match Core.Map.find rctx.rc_blocks p with
     | None -> false
     | Some bf ->
       let conds = Core.Map.find edge_conds p in
@@ -442,7 +434,7 @@ let rec static_graph_vsa
     (* Dead bindings never reach the join; the keep-set depends only on
        the visited block, not on the predecessor. *)
     let keep =
-      Option.value_map (Core.Map.find (!rc_cell).rc_blocks v)
+      Option.value_map (Core.Map.find rctx.rc_blocks v)
         ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
     in
     let incoming =
@@ -455,11 +447,10 @@ let rec static_graph_vsa
                 Cbat_attr_census.bump "bottomskip.edge.total";
 #endif
                 let p_entry = Stages.time `Glue (fun () -> get p) in
-                let rc = !rc_cell in
                 let res = Stages.time `Denote (fun () ->
                   Cbat_forward.denote_block ~preserved ~callee ~resolved
                         ~edge_conds ~disabled:disabled_conds
-                        ~rctx:rc
+                        ~rctx
                         ~source:p p_entry ~target:v) in
                 let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
 #ifdef VSA_DEBUG

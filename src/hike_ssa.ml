@@ -166,20 +166,26 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     (* The SP restore def lands at the call's continuation when that
        block's only predecessor is the call block. *)
-    let sub =
-      Base.List.fold call_blocks ~init:sub ~f:(fun acc (blk, cs) ->
+    let restores =
+      Base.List.fold call_blocks ~init:Tid.Map.empty ~f:(fun acc (blk, cs) ->
           Base.List.fold cs ~init:acc ~f:(fun acc site ->
               match continuation_of site with
               | Some ft when
                   Core.Set.mem machine_blk_tids (Term.tid blk)
                   && preds_of ft = [ Term.tid blk ] ->
-                  Term.map blk_t acc ~f:(fun b ->
-                      if Tid.equal (Term.tid b) ft then
-                        with_top_def b
-                          (Def.create sp
-                             (Bil.BinOp (Bil.PLUS, Bil.Var sp, restore_word ~abi)))
-                      else b)
+                  let restore =
+                    Def.create sp
+                      (Bil.BinOp (Bil.PLUS, Bil.Var sp, restore_word ~abi)) in
+                  Core.Map.add_multi acc ~key:ft ~data:restore
               | _ -> acc))
+    in
+    let sub =
+      if Core.Map.is_empty restores then sub
+      else
+        Term.map blk_t sub ~f:(fun b ->
+            match Core.Map.find restores (Term.tid b) with
+            | Some defs -> Base.List.fold (Base.List.rev defs) ~init:b ~f:with_top_def
+            | None -> b)
     in
     let blks = Term.enum blk_t sub |> Seq.to_list in
     (* The mint plan per call block: the ret lanes it versions. *)
