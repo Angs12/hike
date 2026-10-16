@@ -309,31 +309,19 @@ let addr_mapper (addr : exp) =
    slot or at [addr]. *)
 let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
     ?(addr : exp option) (d : def term) : def term =
+  (* Re-points every mem node at [mem_var]; a mem-defining lhs follows. *)
+  let repoint ?addr mem_var d =
+    let d = Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e) in
+    if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
+  in
   match conv with
   | Keep -> (
       match addr with
       | Some a -> Def.map_exp d ~f:(fun e -> (addr_mapper a)#map_exp e)
       | None -> d)
-  | Conv_region id ->
-      let mem_var = Model.region_mem ~addr_bits:bits id in
-
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
-      in
-
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_window ->
-      let mem_var = Model.window_mem ~addr_bits:bits in
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
-      in
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_global id ->
-      let mem_var = Model.sec_comp_mem ~addr_bits id in
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
-      in
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
+  | Conv_region id -> repoint ?addr (Model.region_mem ~addr_bits:bits id) d
+  | Conv_window -> repoint ?addr (Model.window_mem ~addr_bits:bits) d
+  | Conv_global id -> repoint (Model.sec_comp_mem ~addr_bits id) d
   | Conv_slot (i, byte_offset) ->
       let slot = Model.arg_slot ~addr_bits i in
       let addr =
