@@ -396,39 +396,20 @@ module Pieces = struct
 
   let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
 
-  let min_elem (ps : t) : Cbat_word.t option =
+  let extremum (f : C.t -> Cbat_word.t option)
+      ~(better : Cbat_word.t -> Cbat_word.t -> Cbat_word.t) (ps : t)
+    : Cbat_word.t option =
     List.fold ps ~init:None ~f:(fun acc p ->
-        match C.min_elem p, acc with
-        | None, acc -> acc
-        | Some m, None -> Some m
-        | Some m, Some a -> Some (if Cbat_word.compare m a < 0 then m else a))
+        Cbat_word.keep_better ~better acc (f p))
 
-  let max_elem (ps : t) : Cbat_word.t option =
-    List.fold ps ~init:None ~f:(fun acc p ->
-        match C.max_elem p, acc with
-        | None, acc -> acc
-        | Some m, None -> Some m
-        | Some m, Some a -> Some (if Cbat_word.compare m a > 0 then m else a))
+  let min_elem = extremum C.min_elem ~better:(Cbat_word.min_by ~signed:false)
+  let max_elem = extremum C.max_elem ~better:(Cbat_word.max_by ~signed:false)
 
-  let min_elem_signed (ps : t) : Cbat_word.t option =
-    List.fold ps ~init:None ~f:(fun acc p ->
-        match C.min_elem_signed p, acc with
-        | None, acc -> acc
-        | Some m, None -> Some m
-        | Some m, Some a ->
-          Some
-            (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) < 0
-             then m else a))
+  let min_elem_signed =
+    extremum C.min_elem_signed ~better:(Cbat_word.min_by ~signed:true)
 
-  let max_elem_signed (ps : t) : Cbat_word.t option =
-    List.fold ps ~init:None ~f:(fun acc p ->
-        match C.max_elem_signed p, acc with
-        | None, acc -> acc
-        | Some m, None -> Some m
-        | Some m, Some a ->
-          Some
-            (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) > 0
-             then m else a))
+  let max_elem_signed =
+    extremum C.max_elem_signed ~better:(Cbat_word.max_by ~signed:true)
 
   (* Saturating sum of the pieces' cardinalities. *)
   let cardinality (ps : t) : Cbat_word.t =
@@ -633,21 +614,10 @@ module Pieces = struct
         in
         sum <= budget)
 
-  (* Merge two ascending word lists, dropping repeats.  The subtrahend
-     pieces' hulls may interleave, so their enumerations are merged, not
-     concatenated. *)
-  let merge_distinct (xs : Cbat_word.t list) (ys : Cbat_word.t list)
-    : Cbat_word.t list =
-    let rec go acc xs ys =
-      match xs, ys with
-      | [], rest | rest, [] -> List.rev_append acc rest
-      | x :: xt, y :: yt ->
-        let c = Cbat_word.compare x y in
-        if c < 0 then go (x :: acc) xt ys
-        else if c > 0 then go (y :: acc) xs yt
-        else go (x :: acc) xt yt
-    in
-    go [] xs ys
+  (* The subtrahend pieces' hulls may interleave, so their enumerations
+     are merged, not concatenated. *)
+  let merge_distinct =
+    Cbat_vsa_utils.merge_dedup ~compare:Cbat_word.compare
 
   (* [a] minus the union of [bs]: exact when the cheap side enumerates,
      the sound CLP identity otherwise. *)

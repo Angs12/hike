@@ -26,6 +26,33 @@ let fin_set_size : int = 16
 (* Max pieces of a canonical piece union; a larger union is one piece. *)
 let max_pieces : int = 64
 
+(* The ascending merge of two lists ordered by [compare]; an element
+   equal to the head of the other list is kept once, from the left. *)
+let merge_dedup ~(compare : 'a -> 'a -> int) (xs : 'a list) (ys : 'a list)
+  : 'a list =
+  let rec go acc xs ys =
+    match xs, ys with
+    | [], rest | rest, [] -> List.rev_append acc rest
+    | x :: xt, y :: yt ->
+      let c = compare x y in
+      if c < 0 then go (x :: acc) xt ys
+      else if c > 0 then go (y :: acc) xs yt
+      else go (x :: acc) xt yt
+  in
+  go [] xs ys
+
+(* Pairwise merge of ordered streams down to one. *)
+let rec merge_balanced ~(merge : 'a list -> 'a list -> 'a list)
+  : 'a list list -> 'a list = function
+  | [] -> []
+  | [ s ] -> s
+  | streams ->
+    let rec pairs = function
+      | a :: b :: rest -> merge a b :: pairs rest
+      | rest -> rest
+    in
+    merge_balanced ~merge (pairs streams)
+
 open !Core
 open Bap.Std
 

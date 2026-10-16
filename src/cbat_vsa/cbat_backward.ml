@@ -678,18 +678,12 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
                       let l = Cbat_word.max alo l in
                       let h = Cbat_word.min ahi h in
                       hull ~wrapping:false w l h) in
-                let rec collect k acc =
+                let rec pieces k acc =
                   if Cbat_word.(<=) k k1 then
-                    let acc =
-                      List.fold (piece k) ~init:acc
-                        ~f:(fun acc p ->
-                          match acc with
-                          | Some a -> Some (WordSet.union a p)
-                          | None -> Some p)
-                    in
-                    collect (Cbat_word.add k (Cbat_word.one w)) acc
-                  else acc in
-                collect k0 None
+                    pieces (Cbat_word.add k (Cbat_word.one w))
+                      (List.rev_append (piece k) acc)
+                  else List.rev acc in
+                List.reduce (pieces k0 []) ~f:WordSet.union
               | _ -> wide_hull ()
             end
           | _ -> wide_hull ()
@@ -1113,30 +1107,13 @@ let load_address_constraint ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                   List.concat_map qs ~f:(fun q ->
                       if Cbat_clp.is_bottom (Cbat_clp.intersection q h) then [ q ]
                       else subtract_run q h)) in
-            let merge_words a b =
-              let rec go acc a b =
-                match a, b with
-                | [], rest | rest, [] -> List.rev_append acc rest
-                | x :: xs, y :: ys ->
-                  let c = Cbat_word.compare x y in
-                  if c < 0 then go (x :: acc) xs b
-                  else if c > 0 then go (y :: acc) a ys
-                  else go (x :: acc) xs ys in
-              go [] a b in
-            let rec merge_streams = function
-              | [] -> []
-              | [ ws ] -> ws
-              | streams ->
-                let rec pairs = function
-                  | a :: b :: rest -> merge_words a b :: pairs rest
-                  | rest -> rest in
-                merge_streams (pairs streams) in
             (* Coverage ranges may overlap: merge their ordered grids
                before reading each covered address once. *)
             let covered =
               List.concat_map small ~f:(fun h ->
                   List.map (Cbat_clp.split_wrapped h) ~f:Cbat_clp.iter)
-              |> merge_streams in
+              |> Cbat_vsa_utils.merge_balanced
+                   ~merge:(Cbat_vsa_utils.merge_dedup ~compare:Cbat_word.compare) in
             let kept =
               List.filter covered ~f:(fun x ->
                   singleton_keep line (Cbat_clp.singleton x)) in

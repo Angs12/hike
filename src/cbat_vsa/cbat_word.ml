@@ -551,6 +551,24 @@ let int64_pair (lo : t) (hi : t) : (int64 * int64) option =
   | Some lo, Some hi -> Some (lo, hi)
   | _ -> None
 
+let signed_view = signed
+
+let order ~(signed : bool) (a : t) (b : t) : int =
+  if signed then compare (signed_view a) (signed_view b) else compare a b
+
+let min_by ~(signed : bool) (m : t) (a : t) : t =
+  if order ~signed m a < 0 then m else a
+
+let max_by ~(signed : bool) (m : t) (a : t) : t =
+  if order ~signed m a > 0 then m else a
+
+let keep_better ~(better : t -> t -> t) (acc : t option) (cand : t option)
+  : t option =
+  match cand, acc with
+  | None, acc -> acc
+  | Some m, None -> Some m
+  | Some m, Some a -> Some (better m a)
+
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 
 (* The BAP<->VSA boundary moves BITS through [Bitvec]'s bignum

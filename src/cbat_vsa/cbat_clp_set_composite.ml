@@ -111,20 +111,6 @@ let segments (t : t) (ends : int list) : S.t list =
   List.folding_map ends ~init:0 ~f:(fun lo e ->
       (e, plain (lift1 (S.Extract (Some (e - 1), lo)) t)))
 
-(* The ascending merge (dedup) of two ascending lane-end lists — both
-   sides' ends are ascending by construction, so no sort runs. *)
-let merge_ends (xs : int list) (ys : int list) : int list =
-  let rec go acc xs ys =
-    match xs, ys with
-    | [], ys -> List.rev_append acc ys
-    | xs, [] -> List.rev_append acc xs
-    | x :: xt, y :: yt ->
-      if x < y then go (x :: acc) xt ys
-      else if y < x then go (y :: acc) xs yt
-      else go (x :: acc) xt yt
-  in
-  go [] xs ys
-
 (* [op] lane by lane at both sides' lane boundaries.  A side's segments
    over-approximate it (their product contains it). *)
 let lanewise (op : S.t -> S.t -> S.t) (a : t) (b : t) : t =
@@ -132,7 +118,8 @@ let lanewise (op : S.t -> S.t -> S.t) (a : t) (b : t) : t =
   | Scalar a, Scalar b -> Scalar (op a b)
   | _ when bitwidth a <> bitwidth b -> Scalar (op (plain a) (plain b))
   | _ ->
-    let ends = merge_ends (lane_ends a) (lane_ends b) in
+    let ends =
+      Cbat_vsa_utils.merge_dedup ~compare:Int.compare (lane_ends a) (lane_ends b) in
     make_lanes
       (List.map2_exn (segments a ends) (segments b ends) ~f:(fun x y -> Scalar (op x y)))
 

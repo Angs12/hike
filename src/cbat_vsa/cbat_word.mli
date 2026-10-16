@@ -94,6 +94,14 @@ val to_int64_opt : t -> int64 option
 (* Both bounds as int64, or none when either does not fit. *)
 val int64_pair : t -> t -> (int64 * int64) option
 
+(* [min_by ~signed m a] is the smaller of a new candidate [m] and the
+   accumulator [a], ties keeping [a]; [max_by] the larger. *)
+val min_by : signed:bool -> t -> t -> t
+val max_by : signed:bool -> t -> t -> t
+
+(* Fold a candidate extremum into an optional accumulator. *)
+val keep_better : better:(t -> t -> t) -> t option -> t option -> t option
+
 (* The little-endian value of [len] bytes at [off]; bytes past the end
    read as zero. *)
 val le_int64 : Bytes.t -> off:int -> len:int -> int64

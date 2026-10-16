@@ -83,9 +83,7 @@ let stack_cardinality (offs : P.t) : word =
 
 (* The single-progression hull of a piece union. *)
 let hull_of_pieces (ps : P.t) : clp option =
-  match P.to_list ps with
-  | [] -> None
-  | p :: rest -> Some (List.fold rest ~init:p ~f:Clp.union)
+  List.reduce (P.to_list ps) ~f:Clp.union
 
 let pieces_of_finset (s : fset) : P.t = Exact.pieces s
 
@@ -196,11 +194,8 @@ let offsets_signed_extrema (offs : P.t)
       (match acc with
        | None -> Some (lo, hi)
        | Some (alo, ahi) ->
-         Some
-           ((if Cbat_word.compare (Cbat_word.signed lo) (Cbat_word.signed alo)
-                < 0 then lo else alo),
-            (if Cbat_word.compare (Cbat_word.signed hi) (Cbat_word.signed ahi)
-                > 0 then hi else ahi)))
+         Some (Cbat_word.min_by ~signed:true lo alo,
+               Cbat_word.max_by ~signed:true hi ahi))
     | _ -> acc
   in
   List.fold (P.to_list offs) ~init:None ~f:fold
@@ -540,9 +535,8 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
        | None, acc -> acc
        | Some (lo, hi), None -> Some (lo, hi)
        | Some (lo, hi), Some (alo, ahi) ->
-         Some
-           ((if Cbat_word.compare lo alo < 0 then lo else alo),
-            (if Cbat_word.compare hi ahi > 0 then hi else ahi)))
+         Some (Cbat_word.min_by ~signed:false lo alo,
+               Cbat_word.max_by ~signed:false hi ahi))
   in
   go None t
 
@@ -574,11 +568,7 @@ let extremum (leaf : t -> word option)
   let rec go acc (t : t) =
     match t with
     | Many ps -> List.fold ps ~init:acc ~f:go
-    | q ->
-      (match leaf q, acc with
-       | None, acc -> acc
-       | Some m, None -> Some m
-       | Some m, Some a -> Some (better m a))
+    | q -> Cbat_word.keep_better ~better acc (leaf q)
   in
   go None t
 
@@ -592,7 +582,7 @@ let min_elem (t : t) : word option =
        | Clp ps -> P.min_elem ps
        | Exact s -> Exact.min_elem s
        | Many _ -> None)
-    (fun m a -> if Cbat_word.compare m a < 0 then m else a)
+    (Cbat_word.min_by ~signed:false)
     t
 
 let max_elem (t : t) : word option =
@@ -605,7 +595,7 @@ let max_elem (t : t) : word option =
        | Clp ps -> P.max_elem ps
        | Exact s -> Exact.max_elem s
        | Many _ -> None)
-    (fun m a -> if Cbat_word.compare m a > 0 then m else a)
+    (Cbat_word.max_by ~signed:false)
     t
 
 (* Stack-family extrema on the entry-relative offset line. *)
@@ -622,16 +612,17 @@ let stack_bounds (t : t) : (int64 * int64) option =
   Option.bind (offset_extrema t) ~f:(fun (lo, hi) -> Cbat_word.int64_pair lo hi)
 
 
+let signed_better ~(dir : int) : Cbat_word.t -> Cbat_word.t -> Cbat_word.t =
+  if dir < 0 then Cbat_word.min_by ~signed:true
+  else Cbat_word.max_by ~signed:true
+
 (* The signed extreme of one leaf; [dir] < 0 is the minimum, > 0 the
    maximum.  A sign-spanning piece has no signed extreme on that side;
    a signed-positive projection's signed and unsigned extrema agree. *)
 let signed_leaf ~(dir : int) (q : t) : word option =
   let pick (a, b) = if dir < 0 then a else b in
   let clamp = if dir < 0 then Stdlib.Int64.min_int else Stdlib.Int64.max_int in
-  let better m a =
-    let c = Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) in
-    if (if dir < 0 then c < 0 else c > 0) then m else a
-  in
+  let better = signed_better ~dir in
   let via_offsets_base base offs =
     Option.bind (offsets_signed_extrema offs)
       ~f:(fun ex ->
@@ -660,10 +651,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
                  Clp.max_elem p
                | _ -> None)
         in
-        match r, acc with
-        | None, acc -> acc
-        | Some m, None -> Some m
-        | Some m, Some a -> Some (better m a))
+        Cbat_word.keep_better ~better acc r)
   in
   match q with
   | Rel (Origin.Vla tid, offs) -> (
@@ -681,11 +669,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
   | Many _ -> None
 
 let extremum_signed ~(dir : int) (t : t) : word option =
-  extremum (signed_leaf ~dir)
-    (fun m a ->
-       let c = Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) in
-       if (if dir < 0 then c < 0 else c > 0) then m else a)
-    t
+  extremum (signed_leaf ~dir) (signed_better ~dir) t
 
 let min_elem_signed (t : t) : word option = extremum_signed ~dir:(-1) t
 let max_elem_signed (t : t) : word option = extremum_signed ~dir:1 t
@@ -1074,14 +1058,6 @@ let filter_addresses (t : t)
     | `Parts parts ->
       List.fold_right parts ~init:acc ~f:(fun (q, verdict) acc ->
           match verdict with `Keep -> q :: acc | `Drop -> acc) in
-  let rec merge_streams = function
-    | [] -> []
-    | [ ps ] -> ps
-    | streams ->
-      let rec pairs = function
-        | a :: b :: rest -> P.merge_progressions a b :: pairs rest
-        | rest -> rest in
-      merge_streams (pairs streams) in
   let filter line (ps : P.t) : P.t option =
     let progs = P.to_list ps in
     if List.exists progs ~f:Clp.is_infinite then None
@@ -1090,7 +1066,7 @@ let filter_addresses (t : t)
         (* Source grids can interleave; merge their survivor streams. *)
         List.concat_map progs ~f:(fun p ->
             List.map (Clp.split_wrapped p) ~f:(bisect line []))
-        |> merge_streams in
+        |> Utils.merge_balanced ~merge:P.merge_progressions in
       Some (P.of_progressions kept) in
   match t with
   | Rel (Origin.Vla _, _) | Many _ -> t

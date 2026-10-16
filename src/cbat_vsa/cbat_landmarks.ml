@@ -437,7 +437,7 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
             Some v)
         in
         List.fold candidates ~init:lo_base ~f:(fun acc v ->
-            if cmp v acc < 0 then v else acc)
+            Cbat_word.min_by ~signed v acc)
     in
     let extrap_hi =
       let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
@@ -456,7 +456,7 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
             Some v)
         in
         List.fold candidates ~init:hi_base ~f:(fun acc v ->
-            if cmp v acc > 0 then v else acc)
+            Cbat_word.max_by ~signed v acc)
     in
     if cmp extrap_lo extrap_hi > 0 then data_new
     else

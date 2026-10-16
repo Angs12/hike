@@ -267,16 +267,8 @@ let it_intersections (m : 'a IT.t) (k : Key.t) : (Key.t * 'a) Sequence.t =
    windows occurs in both streams, with the same stored value. *)
 let merge_candidates (left : (Key.t * Val.t) list)
     (right : (Key.t * Val.t) list) : (Key.t * Val.t) list =
-  let rec merge acc left right =
-    match left, right with
-    | [], rest | rest, [] -> List.rev_append acc rest
-    | ((lk, _) as l) :: ls, ((rk, _) as r) :: rs ->
-      let c = Key.compare lk rk in
-      if c < 0 then merge (l :: acc) ls right
-      else if c > 0 then merge (r :: acc) left rs
-      else merge (l :: acc) ls rs
-  in
-  merge [] left right
+  Utils.merge_dedup left right
+    ~compare:(fun (lk, _) (rk, _) -> Key.compare lk rk)
 
 let it_remove_intersections (m : 'a IT.t) (k : Key.t) : 'a IT.t =
   Sequence.fold (it_intersections m k) ~init:m ~f:(fun m (k', _) ->
