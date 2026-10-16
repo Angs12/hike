@@ -249,6 +249,12 @@ let read_open t frame e index =
 (* An entry's summary for the solve in [frame]: final, or tentative
    while the entry is on the stack (the read joins [frame] to its
    cycle). *)
+(* A block's (pre, post) when the solve reached it. *)
+let reached_env envs (blk : blk term) : (Vsa.AI.t * Vsa.AI.t) option =
+  match Core.Map.find envs (Term.tid blk) with
+  | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) -> Some (pre, post)
+  | _ -> None
+
 let rec summary t frame (e : entry) : S.t =
   match e.status with
   | Fresh ->
@@ -623,8 +629,8 @@ and code_words t (f : func) : int64 list =
   in
   Term.enum blk_t f.solved |> Seq.to_list
   |> Base.List.concat_map ~f:(fun blk ->
-      match Core.Map.find f.envs (Term.tid blk) with
-      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+      match reached_env f.envs blk with
+      | Some (pre, post) ->
         let jmps = Term.enum jmp_t blk |> Seq.to_list in
         let calls =
           Base.List.exists jmps ~f:(fun j ->
@@ -651,8 +657,8 @@ and materialised_words t (f : func) : int64 list =
   in
   Term.enum blk_t f.solved |> Seq.to_list
   |> Base.List.concat_map ~f:(fun blk ->
-      match Core.Map.find f.envs (Term.tid blk) with
-      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+      match reached_env f.envs blk with
+      | Some (pre, post) ->
         Term.enum def_t blk |> Seq.to_list
         |> Base.List.filter ~f:(fun d ->
             match Term.get_attr d Disasm.insn with
@@ -775,8 +781,8 @@ let unresolved_call t (f : func) : bool =
   let index = Hike_transfer.index_of_sub f.solved in
   Term.enum blk_t f.solved
   |> Seq.exists ~f:(fun blk ->
-      match Core.Map.find f.envs (Term.tid blk) with
-      | Some (pre, post) when not (Vsa.AI.equal pre Vsa.AI.bottom) ->
+      match reached_env f.envs blk with
+      | Some (pre, post) ->
         Term.enum jmp_t blk
         |> Seq.exists ~f:(fun j ->
             match indirect_target j with
