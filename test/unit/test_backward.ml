@@ -2088,6 +2088,71 @@ let tests : unit Alcotest.test list =
              `Zero);
         Alcotest.check pair "BK-112.cell-wins" (true, false)
           (survivors ~tag:"d" ~endian:LittleEndian ~slots:[] ~store:true `Le20));
+
+    (* The cell entries a load leaves owed to the stores that wrote them:
+       delivery needs a store certain to write exactly the read's bytes
+       in the read's shape; any other store that may touch them blocks. *)
+    pin "BK-113"
+      "a store delivers a cell entry only when it certainly writes the \
+       read's exact bytes in its shape; every other store that may touch \
+       the entry blocks it, and a store on another memory leaves it"
+      (fun () ->
+        let d = Var.create ~is_virtual:true ~fresh:false "bk113_d" (Type.Imm 64) in
+        let d32 = Var.create ~is_virtual:true ~fresh:false "bk113_d32" (Type.Imm 32) in
+        let a = Var.create ~is_virtual:true ~fresh:false "bk113_a" (Type.Imm 64) in
+        let m2 = Var.create ~is_virtual:false ~fresh:false "bk113_m2" (Type.Mem (`r64, `r8)) in
+        let addr k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let entry ?(bits = 64) ?(endian = LittleEndian) at =
+          let k = t_key_of (Ws.singleton (w64 at)) in
+          Vsa.Test_seam.owe_cell Vsa.Test_seam.no_cells ~mem:t_m
+            ~range:(Mem.Key.expand k ~bytes:(bits / 8)) ~bits ~endian
+            (bk_iv64 ~lo:0 ~hi:9) in
+        let run ?(mem = t_m) ?(bits = `r64) ?(endian = LittleEndian) ?(data = d)
+            ~at ce =
+          let cells = ref ce in
+          let env =
+            Vsa.Test_seam.constrain_operands ~cells
+              ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+              (Bil.Store (Bil.Var mem, at, Bil.Var data, endian, bits))
+              (Ws.top 64) in
+          (env, !cells) in
+        let owed = Vsa.Test_seam.cells_owed in
+        let bounded env v w = not (Ws.is_top (AI.find_word w env v)) in
+        let env, ce = run ~at:(addr 0x1000) (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.deliver" true
+          (bounded env d 64 && Ws.elem (w64 9) (AI.find_word 64 env d)
+           && not (Ws.elem (w64 10) (AI.find_word 64 env d)) && not (owed ce));
+        let env, ce = run ~at:(addr 0x1000) ~bits:`r32 ~data:d32 (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.width-drops" true
+          (not (bounded env d32 32) && not (owed ce));
+        let env, ce =
+          run ~at:(addr 0x1000) ~endian:BigEndian (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.endian-drops" true
+          (not (bounded env d 64) && not (owed ce));
+        let env, ce = run ~at:(addr 0x1004) (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.misaligned-blocks" true
+          (not (bounded env d 64) && not (owed ce));
+        let env, ce = run ~at:(addr 0x1004) (entry 0x1008) in
+        Alcotest.(check bool) "BK-113.store-extent-blocks" true
+          (not (bounded env d 64) && not (owed ce));
+        let env, ce = run ~at:(Bil.Var a) (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.unbounded-blocks" true
+          (not (bounded env d 64) && not (owed ce));
+        let env, ce = run ~at:(addr 0x2000) (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.disjoint-keeps" true
+          (not (bounded env d 64) && owed ce);
+        let env, ce = run ~mem:m2 ~at:(addr 0x1000) (entry 0x1000) in
+        Alcotest.(check bool) "BK-113.other-memory-keeps" true
+          (not (bounded env d 64) && owed ce);
+        let cells = ref (entry 0x1000) in
+        let _ =
+          Vsa.Test_seam.constrain_operands ~cells
+            ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+            (Bil.Store (Bil.Store (Bil.Var t_m, addr 0x2000, Bil.Var d,
+                                   LittleEndian, `r64),
+                        addr 0x3000, Bil.Var d, LittleEndian, `r64))
+            (Ws.top 64) in
+        Alcotest.(check bool) "BK-113.computed-memory-blocks" false (owed !cells));
   ]
 
 let () = run "backward" tests

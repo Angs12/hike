@@ -703,6 +703,13 @@ module Test_seam = struct
   let fold_block_states = fold_block_states
   let reachable_jumps = reachable_jumps
   let constrain_edge = Cbat_backward.constrain_edge
+  type cells = Cbat_backward.cell_env
+  let no_cells = Cbat_backward.no_cells
+  let owe_cell ce ~mem ~range ~bits ~endian pc =
+    Cbat_backward.cell_add ce
+      { Cbat_backward.pm = mem; prange = range; pc; pbits = bits;
+        pendian = endian }
+  let cells_owed ce = not (Core.Map.is_empty ce)
   let constrain_operands = Cbat_backward.constrain_operands
   let mk_rctx = mk_rctx_with_oracle
   let normalize_round = normalize_round

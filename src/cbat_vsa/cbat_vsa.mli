@@ -187,7 +187,15 @@ module Test_seam : sig
   (* One backward rule per node kind, the mirror of the forward transfer —
      the forward transfer — env + expression + the constraint the value
      must satisfy -> the refined env. *)
-  val constrain_operands : env:AI.t -> ?cells:Cbat_backward.pending list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
+  (* The cell constraints owed to stores, and the one entry a load of
+     [bits] bits over [range] adds for [mem]. *)
+  type cells
+  val no_cells : cells
+  val owe_cell :
+    cells -> mem:var -> range:Cbat_ai_memmap.Key.t -> bits:int ->
+    endian:endian -> WordSet.t -> cells
+  val cells_owed : cells -> bool
+  val constrain_operands : env:AI.t -> ?cells:cells ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* One fixpoint run's context: the static per-block facts, the
      convention facts, and the run's mutable state. *)

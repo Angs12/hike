@@ -53,6 +53,8 @@ module Key : sig
   (* The touched byte hull of a read anchored at [k]: the address hull
      grown by the access size. *)
   val expand : t -> bytes:int -> t
+
+  val compare : t -> t -> int
 end
 
 
