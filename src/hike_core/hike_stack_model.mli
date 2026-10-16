@@ -90,7 +90,6 @@ val equal_ptr_storage : ptr_storage -> ptr_storage -> bool
 
 (* One def, one memory node — structural, so the emitter's
    constructors pattern-match it. *)
-(* One def, one memory node. *)
 type mem_node = [ `Load of exp * exp * Size.t
                 | `Store of exp * exp * exp * Size.t ]
 
@@ -120,7 +119,6 @@ val blk_boundary_reads : blk term -> Var.Set.t
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val def_writes : def term -> Var.Set.t
 val phi_writes : phi term -> Var.Set.t
-val blk_free_vars : blk term -> Var.Set.t
 val word_bits : int -> int
 val is_true_cond : exp -> bool
 

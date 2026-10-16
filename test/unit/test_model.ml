@@ -671,7 +671,7 @@ let tests : unit Alcotest.test list =
              (Core.Set.of_list (module Var)
                 (abi.Abi.return_regs @ [ abi.Abi.sp ])));
         check "MOD-41 block uses respect local definitions"
-          (Core.Set.equal (Model.blk_free_vars block)
+          (Core.Set.equal (Blk.free_vars block)
              (Var.Set.singleton rax)));
 
     (* The allocation is opened where its base is computed (ADR 0030). *)

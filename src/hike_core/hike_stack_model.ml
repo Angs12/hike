@@ -160,8 +160,6 @@ let equal_ptr_storage (a : ptr_storage) (b : ptr_storage) : bool =
       true
   | _ -> false
 
-
-
 (* A def keeps exactly one inline mem node, so one scan serves every
    consumer. *)
 type mem_node =
@@ -185,8 +183,7 @@ let mem_node_of (e : exp) : mem_node option =
 
 let mem_node_count (e : exp) : int = List.length (mem_nodes e)
 
-let reads_mem (e : exp) : bool =
-  match mem_node_of e with Some _ -> true | None -> false
+let reads_mem (e : exp) : bool = Option.is_some (mem_node_of e)
 
 (* The address and size of the rhs's memory access, if it has one. *)
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
@@ -495,7 +492,6 @@ let blk_boundary_reads (blk : blk term) : Var.Set.t =
 let def_writes (d : def term) : Var.Set.t = Var.Set.singleton (Def.lhs d)
 let phi_writes (p : phi term) : Var.Set.t = Var.Set.singleton (Phi.lhs p)
 
-let blk_free_vars (blk : blk term) : Var.Set.t = Blk.free_vars blk
 
 let blk_reads ~(abi : Abi.t) (blk : blk term) : Var.Set.t =
   Blk.elts blk

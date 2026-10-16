@@ -6,14 +6,12 @@
 
 open Bap.Std
 
-let mem_count (e : exp) : int = Hike_stack_model.mem_node_count e
-
 (* The first memory node stays inline (the one the VSA's
    classification describes); every distinct later load becomes a
    fresh synthetic def; equal later nodes share one def. *)
 let split_def (d : def term) : def term list =
   let rhs = Def.rhs d in
-  if mem_count rhs <= 1 then [ d ]
+  if Hike_stack_model.mem_node_count rhs <= 1 then [ d ]
   else
     let later = ref ([] : (exp * var) list) in
     let seen = ref 0 in
@@ -59,7 +57,7 @@ let split_sub (sub : sub term) : sub term =
     |> Seq.filter_map ~f:(fun blk ->
         let bad =
           Term.enum def_t blk
-          |> Seq.exists ~f:(fun d -> mem_count (Def.rhs d) > 1) in
+          |> Seq.exists ~f:(fun d -> Hike_stack_model.mem_node_count (Def.rhs d) > 1) in
         if bad then Some (Term.tid blk) else None)
     |> Seq.to_list
   in

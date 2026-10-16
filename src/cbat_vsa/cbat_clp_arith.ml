@@ -90,14 +90,12 @@ let mul_core (p1 : t) (p2 : t) : t =
     | None -> bottom sz
     | Some e2 ->
       (* Singleton case is exact. *)
-      if W.is_zero (step_of p1) || is_one (cardn_of p1) then
-        let base = W.mul (base_of p2) (base_of p1) in
-        let step = W.mul (step_of p2) (base_of p1) in
-        create base ~step ~cardn:(cardn_of p2)
-      else if W.is_zero (step_of p2) || is_one (cardn_of p2) then
-        let base = W.mul (base_of p1) (base_of p2) in
-        let step = W.mul (step_of p1) (base_of p2) in
-        create base ~step ~cardn:(cardn_of p1)
+      let scale a b = (* [a] a singleton: scale [b] by its base *)
+        let base = W.mul (base_of b) (base_of a) in
+        let step = W.mul (step_of b) (base_of a) in
+        create base ~step ~cardn:(cardn_of b) in
+      if W.is_zero (step_of p1) || is_one (cardn_of p1) then scale p1 p2
+      else if W.is_zero (step_of p2) || is_one (cardn_of p2) then scale p2 p1
       else
         let base = mul_exact (base_of p1) (base_of p2) in
         let e'_exact = mul_exact e1 e2 in
@@ -114,9 +112,6 @@ let mul_core (p1 : t) (p2 : t) : t =
 
 let mul (p1 : t) (p2 : t) : t = arcs2 mul_core p1 p2
 
-
-
-
 (* Fixed bit positions of [p]: below the step's 2-power (the residue class)
    and above the highest bit where [min_p] and [max_p] differ. *)
 let fixed_bits (p : t) (min_p : word) (max_p : word) : word =
@@ -132,8 +127,6 @@ let fixed_bits (p : t) (min_p : word) (max_p : word) : word =
         (W.ones (sz - msb - 1)) in
     W.lshift sized (W.of_int ~width:sz (msb + 1)) in
   W.logor low high
-
-
 
 (* The general AND arm's per-operand facts: both extrema and the fixed-bit
    mask. *)
@@ -219,7 +212,6 @@ let logand_rule ?f (cp1 : t) (cp2 : t) : t =
 let logand (p1 : t) (p2 : t) : t =
   arcs2 (fun a b -> logand_rule a b) p1 p2
 
-
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
 
 (* [q] is [lnot p].  When [p] is create-normalized (Finite or Circular)
@@ -291,7 +283,6 @@ let logxor_arcs (qs1 : xor_operand list) (qs2 : xor_operand list)
 
 let logxor (p1 : t) (p2 : t) : t = arcs2 logxor_core p1 p2
 
-
 (* Overshift image is sign extension. *)
 let overshift_sign_extend (sz : int) : t =
   create ~width:sz ~step:(W.ones sz)
@@ -329,10 +320,9 @@ let cap_amount (p2 : t) (cap : W.t) (min_p2 : W.t) (e2 : W.t) : t list =
   else
     part ~step:(step_of p2) min_p2 cap
 
-
-(* Overshift: exact, overshifted, straddling. *)
 let compare_width = 64
 
+(* Overshift: exact, overshifted, straddling. *)
 let split_shift_parts ~(sz1 : int) ~(overshift : t)
     ~(exact : t -> W.t -> W.t -> t) (p2 : t) : t list option =
   let open Monads.Std.Monad.Option.Syntax in
@@ -396,7 +386,6 @@ let lshift (p1 : t) (p2 : t) : t =
     (fun a b -> union_all ~width:(bitwidth a) (lshift_parts a b))
     p1 p2
 
-
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
   (* Widths match after coercion. *)
   let _, b1twos = factor_2s (base_of p1) in
@@ -450,7 +439,6 @@ let rshift (p1 : t) (p2 : t) : t =
   arcs2
     (fun a b -> union_all ~width:(bitwidth a) (rshift_parts a b))
     p1 p2
-
 
 let rec arshift_parts (p1 : t) (p2 : t) : t list =
   let sz1 = bitwidth p1 in
@@ -522,7 +510,6 @@ let arshift (p1 : t) (p2 : t) : t =
   arcs2
     (fun a b -> union_all ~width:(bitwidth a) (arshift_parts a b))
     p1 p2
-
 
 let split_at_n (p : t) n : t * t =
   
@@ -666,9 +653,7 @@ let cast_parts ct (sz : int) (p : t) : t list =
 let cast ct sz p : t =
   union_all ~width:(bitwidth p) (cast_parts ct sz p)
 
-
 let extract ?hi:hi ?lo:lo (p : t) : t = extract_internal ?hi ?lo p
-
 
 let extract_parts ?hi:hi ?lo:lo (p : t) : t list = extract_internal_parts ?hi ?lo p
 
@@ -683,8 +668,6 @@ let concat (p1 : t) (p2 : t) : t =
   let p2' = cast Bil.UNSIGNED width p2 in
   
   (add p1_shifted p2')
-
-
 
 (* BAP div truncates; ediv is Euclidean. *)
 let div_core (p1 : t) (p2 : t) : t =
@@ -720,7 +703,6 @@ let div_core (p1 : t) (p2 : t) : t =
   | Some x -> x)
 
 let div (p1 : t) (p2 : t) : t = arcs2 div_core p1 p2
-
 
 let sdiv_word (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
 let smod_word (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
@@ -790,7 +772,6 @@ let sdiv_core (p1 : t) (p2 : t) : t =
 
 let sdiv (p1 : t) (p2 : t) : t = arcs2 sdiv_core p1 p2
 
-
 (* The unsigned residue bound: x mod k lands in [0, k-1] for every k >
    0, exactly [lo mod k, hi mod k] when lo and hi share their quotient,
    and x itself when every divisor exceeds x or the divisor is {0}
@@ -828,7 +809,6 @@ let modulo_core (p1 : t) (p2 : t) : t =
     | _ -> sub p1 (mul (div p1 p2) p2)
 
 let modulo (p1 : t) (p2 : t) : t = arcs2 modulo_core p1 p2
-
 
 (* The signed residue bound for a positive constant divisor: |r| <=
    k-1, refined to the exact sub-interval inside one truncated

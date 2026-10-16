@@ -283,7 +283,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     let vars =
       Base.List.fold blks ~init:(Core.Set.union call_lanes boundary)
-        ~f:(fun acc blk -> Core.Set.union acc (Model.blk_free_vars blk))
+        ~f:(fun acc blk -> Core.Set.union acc (Blk.free_vars blk))
       |> Core.Set.filter ~f:renamable
     in
     (* The definition census: for each var, the block tids whose defs or
@@ -516,7 +516,7 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
         Core.Set.union acc
           (Core.Set.union phi_reads
              (Core.Set.union boundary_reads
-                (Model.blk_free_vars blk
+                (Blk.free_vars blk
                 |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))))
   |> Core.Set.filter ~f:(fun v ->
          not

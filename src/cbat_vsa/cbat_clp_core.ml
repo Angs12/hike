@@ -38,7 +38,6 @@ type t = {
 }
 [@@deriving bin_io, sexp, compare]
 
-
 let base_of (p : t) : W.t = p.base
 let step_of (p : t) : W.t = p.step
 let cardn_of (p : t) : W.t = p.cardn
@@ -203,9 +202,6 @@ let of_list ~width l : t =
   | None -> bottom width
   | Some x -> x)
 
-
-
-
 (* Cardinality as a (width+1)-bit W.t; exact for a finite CLP. *)
 let cardinality (p : t) : W.t = cardn_of p
 
@@ -224,7 +220,6 @@ let finite_end (p : t) : W.t option =
   if W.is_zero (cardn_of p) then None
   else Some (W.add (base_of p) (W.mul (step_of p) (W.pred n)))
 
-
 let lnot (p : t) : t =
   match finite_end p with
   | None -> bottom (bitwidth p)
@@ -233,7 +228,6 @@ let lnot (p : t) : t =
     | Ascending -> {p with base = W.lnot p.base; dir = Descending}
     | Descending -> {p with base = W.lnot p.base; dir = Ascending}
     | Finite | Circular -> {p with base = W.lnot e}
-
 
 let iter (p : t) : W.t list =
   let p = forward p in
@@ -258,7 +252,6 @@ let nearest_pred (i : W.t) (p : t) : W.t option =
     else if W.(>=) diff end' then !!(W.add end' (base_of p)) else
       !!(W.sub i rm)
 
-
 let nearest_inf_pred (w : W.t) (base : W.t) (step : W.t) : W.t =
   if W.is_zero step then base else
     let diff = W.sub w base in
@@ -267,7 +260,6 @@ let nearest_inf_pred (w : W.t) (base : W.t) (step : W.t) : W.t =
 
 let nearest_succ (i : W.t) (p : t) : W.t option =
   Option.map ~f:W.lnot (nearest_pred (W.lnot i) (lnot p))
-
 
 let nearest_inf_succ (w : W.t) (base : W.t) (step : W.t) : W.t =
   W.lnot (nearest_inf_pred (W.lnot w) (W.lnot base) step)
@@ -498,7 +490,6 @@ let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =
   (* [a2,b2] wraps the rebase and covers [a1,b1]. *)
   else if W.(>) (W.sub a2_rel b1_rel) (W.sub zero b2_rel) then (a2,b1)
   else (a1, b2)
-
 
 (* Rotate without changing step/cardinality. *)
 let translate (p : t) i : t =
@@ -854,7 +845,6 @@ let rec intersection (p1 : t) (p2 : t) : t =
           | Circular, Finite -> intersection p2 p1
       ))
 
-
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
 (* The remainder past a removed run [i] ending at [i_end], per the
@@ -938,15 +928,11 @@ let diff (p1 : t) (p2 : t) : t =
           else if is_circular p1 then diff_circular p1 i_end cardn
           else diff_finite p1 i i_end cardn ~fallback:enumerate_or_identity
 
-
-
-
 type idx = int
 let get_idx = bitwidth
 let precedes = subset
 let join = union
 let meet = intersection
-
 
 let widen_join (p1 : t) (p2 : t) : t =
   (* From bottom the new iterate is itself the widening step; the later
@@ -1026,7 +1012,6 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
             else try_create extrap_lo hi2
       | _ -> widen_join p1 p2
   else join p1 p2
-
 
 let pp ppf (p : t) =
   let p = forward p in
