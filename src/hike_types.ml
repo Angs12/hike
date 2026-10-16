@@ -476,6 +476,32 @@ let sub_of_program (prog : program term) : sub term Tid.Map.t =
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
       Core.Map.set m ~key:(Term.tid s) ~data:s)
 
+(* A sub's pointer versions: its inferred ones and those its callers
+   prove. *)
+let ptr_vars_of ~(pks : Var.Set.t Tid.Map.t) ~(inferred : ptr_facts Tid.Map.t)
+    (sub : sub term) : Var.Set.t =
+  let vars =
+    Core.Map.find inferred (Term.tid sub)
+    |> Base.Option.value ~default:ptr_facts_empty
+    |> fun pf -> pf.vars
+  in
+  Core.Set.union vars
+    (Core.Map.find pks (Term.tid sub) |> Base.Option.value ~default:Var.Set.empty)
+
+(* Every direct call of [sub], in order, with its block. *)
+let fold_direct_calls (sub : sub term) ~(init : 'a)
+    ~(f : 'a -> blk term -> Tid.t -> 'a) : 'a =
+  Term.enum blk_t sub
+  |> Seq.fold ~init ~f:(fun acc blk ->
+         Term.enum jmp_t blk
+         |> Seq.fold ~init:acc ~f:(fun acc j ->
+                match Jmp.kind j with
+                | Call c -> (
+                    match Call.target c with
+                    | Direct t -> f acc blk t
+                    | Indirect _ -> acc)
+                | _ -> acc))
+
 (* The whole-program pointer-kind fixpoint.  A value is a pointer when
    the VSA proves its denotation is a stack/VLA address, or it flows
    from one: a copy, an address offset, an ite; a callee parameter a
@@ -507,60 +533,38 @@ let ptr_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
           in
           Core.Map.set acc ~key:(Term.tid sub) ~data:pf)
     in
-    let ptr_vars_of sub =
-      let vars =
-        Core.Map.find inferred' (Term.tid sub)
-        |> Base.Option.value ~default:ptr_facts_empty
-        |> fun pf -> pf.vars
-      in
-      Core.Set.union vars
-        (Core.Map.find pks (Term.tid sub)
-        |> Base.Option.value ~default:Var.Set.empty)
-    in
+    let ptr_vars_of = ptr_vars_of ~pks ~inferred:inferred' in
     let pks' =
       Base.List.fold subs ~init:pks ~f:(fun pks caller ->
           let ctv = ptr_vars_of caller in
-          Term.enum blk_t caller
-          |> Seq.fold ~init:pks ~f:(fun pks blk ->
-                 Term.enum jmp_t blk
-                 |> Seq.fold ~init:pks ~f:(fun pks j ->
-                        match Jmp.kind j with
-                        | Call c -> (
-                            match Call.target c with
-                            | Direct t -> (
-                                match Core.Map.find sub_of t with
-                                | Some callee ->
-                                    (* the version the caller passes ->
-                                       the callee's parameter *)
-                                    let pks =
-                                      Base.List.fold
-                                        (Hike_stack_model.sig_args callee)
-                                        ~init:pks ~f:(fun pks a ->
-                                          let r = Arg.lhs a in
-                                          let v =
-                                            Base.Option.value ~default:r
-                                              (passed_at blk r)
-                                          in
-                                          if
-                                            Core.Set.mem ctv v
-                                            || is_address_reg ~facts v
-                                            || ptr_kind_of ~facts ~blk
-                                                 (Arg.rhs a)
-                                          then add pks t r
-                                          else pks)
-                                    in
-                                    (* the callee's pointer return -> the
-                                       caller's minted version *)
-                                    Core.Set.fold
-                                      (ptr_returns ~facts callee
-                                         (ptr_vars_of callee))
-                                      ~init:pks ~f:(fun pks r ->
-                                        match minted_at blk r with
-                                        | Some v -> add pks (Term.tid caller) v
-                                        | None -> pks)
-                                | None -> pks)
-                            | Indirect _ -> pks)
-                        | _ -> pks)))
+          fold_direct_calls caller ~init:pks ~f:(fun pks blk t ->
+              match Core.Map.find sub_of t with
+              | Some callee ->
+                  (* the version the caller passes -> the callee's
+                     parameter *)
+                  let pks =
+                    Base.List.fold (Hike_stack_model.sig_args callee)
+                      ~init:pks ~f:(fun pks a ->
+                        let r = Arg.lhs a in
+                        let v =
+                          Base.Option.value ~default:r (passed_at blk r)
+                        in
+                        if
+                          Core.Set.mem ctv v
+                          || is_address_reg ~facts v
+                          || ptr_kind_of ~facts ~blk (Arg.rhs a)
+                        then add pks t r
+                        else pks)
+                  in
+                  (* the callee's pointer return -> the caller's minted
+                     version *)
+                  Core.Set.fold
+                    (ptr_returns ~facts callee (ptr_vars_of callee))
+                    ~init:pks ~f:(fun pks r ->
+                      match minted_at blk r with
+                      | Some v -> add pks (Term.tid caller) v
+                      | None -> pks)
+              | None -> pks))
     in
     if Core.Map.equal Var.Set.equal pks pks' then (pks', inferred')
     else fix pks' pks inferred'
@@ -648,16 +652,7 @@ let run (proj : Project.t) : Project.t =
       | Some facts ->
           let sub_of = sub_of_program prog in
           let pks, inferred = ptr_kinds ~facts ~sub_of prog in
-          let ptr_vars_of_sub sub =
-            let vars =
-              Core.Map.find inferred (Term.tid sub)
-              |> Base.Option.value ~default:ptr_facts_empty
-              |> fun pf -> pf.vars
-            in
-            Core.Set.union vars
-              (Core.Map.find pks (Term.tid sub)
-              |> Base.Option.value ~default:Var.Set.empty)
-          in
+          let ptr_vars_of_sub = ptr_vars_of ~pks ~inferred in
           let prog =
             Term.map sub_t prog ~f:(fun sub ->
                 let pf =

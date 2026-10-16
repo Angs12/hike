@@ -328,7 +328,98 @@ let normalize_round (s : Sub.t) : Sub.t =
                 [ Def.create t x; d ]
               | None -> [ d ]))
 
-let rec static_graph_vsa
+#ifdef VSA_DEBUG
+(* Forward witness: every guard cond from [p] to [v] denotates false on
+   the pred's entry state, so the edge is dead without the backward
+   refinement.  A dispatch extra-edge has no jmp and cannot be
+   witnessed. *)
+let edge_forward_dead ~(rctx : Cbat_runctx.refine_ctx) ~edge_conds ~get
+    ~(p : Tid.t) ~(v : Tid.t) : bool =
+  match Core.Map.find rctx.rc_blocks p with
+  | None -> false
+  | Some bf ->
+    let conds = Core.Map.find edge_conds p in
+    Term.enum jmp_t bf.bf_term
+    |> Seq.filter ~f:(fun j ->
+        match Jmp.kind j with
+        | Goto (Direct t) | Ret (Direct t) -> Tid.equal t v
+        | Call c -> (
+            match Call.return c with
+            | Some (Direct t) -> Tid.equal t v
+            | _ -> false)
+        | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false)
+    |> Seq.exists ~f:(fun j ->
+        match
+          Option.bind conds ~f:(fun m -> Core.Map.find m (Term.tid j))
+        with
+        | None -> false
+        | Some cond -> (
+            match Cbat_transfer.denote_imm_exp cond (get p) with
+            | Ok w -> not (WordSet.elem Cbat_word.b1 w)
+            | Error _ -> false))
+
+(* The dead-edge census of one denoted edge. *)
+let debug_edge_result ~rctx ~edge_conds ~get ~p ~v (res : AI.t) : unit =
+  Cbat_attr_census.bump "bottomskip.edge.total";
+  if AI.equal res AI.bottom then begin
+    Cbat_attr_census.bump "bottomskip.edge.bottom";
+    if edge_forward_dead ~rctx ~edge_conds ~get ~p ~v then
+      Cbat_attr_census.bump "bottomskip.edge.forward_dead"
+    else Cbat_attr_census.bump "bottomskip.edge.refine_only"
+  end
+
+(* The dead-edge census of one block entry. *)
+let debug_entry ~rctx ~edge_conds ~get ~preds ~v (incoming : AI.t) : unit =
+  if not (List.is_empty preds) then begin
+    Cbat_attr_census.bump "bottomskip.entry.total";
+    if AI.equal incoming AI.bottom then begin
+      Cbat_attr_census.bump "bottomskip.entry.bottom";
+      if List.for_all preds ~f:(fun p ->
+          edge_forward_dead ~rctx ~edge_conds ~get ~p ~v)
+      then Cbat_attr_census.bump "bottomskip.entry.forward_dead"
+      else Cbat_attr_census.bump "bottomskip.entry.refine_only"
+    end
+  end
+
+(* Counts the head's arm and names it for the churn witness. *)
+let debug_head_arm (arm : Cbat_landmarks.arm) : string =
+  Cbat_attr_census.bump
+    (match arm with
+     | Cbat_landmarks.Finite _ -> "widen.head.finite"
+     | Cbat_landmarks.Zero -> "widen.head.zero"
+     | Cbat_landmarks.Inf -> "widen.head.inf");
+  match arm with
+  | Cbat_landmarks.Finite n -> Printf.sprintf "finite:%d" n
+  | Cbat_landmarks.Zero -> "zero"
+  | Cbat_landmarks.Inf -> "inf"
+
+(* The churn census of one changed block state. *)
+let debug_churn ~(head : bool) ~(has_widened : bool) ~(head_arm : string)
+    (v : Tid.t) (old : AI.t) (new_val : AI.t) : unit =
+  let mono = Stages.time `Equal (fun () -> AI.precedes old new_val) in
+  Cbat_attr_census.bump
+    (Printf.sprintf "churn.%s.%s" (if head then "head" else "plain")
+       (if mono then "grow" else "nonmono"));
+  let detail, same_repr = AI.diff old new_val in
+  if same_repr > 0 then Cbat_attr_census.bump "churn.repr.same";
+  if has_widened then
+    Cbat_attr_census.note
+      (Printf.sprintf "churn.head.%s" (Tid.name v))
+      ~limit:16
+      (Printf.sprintf "churn(head) %s %s arm=%s %s\n    %s"
+         (Tid.name v) (if mono then "grow" else "nonmono")
+         (if String.is_empty head_arm then "pre-warm" else head_arm)
+         (AI.head_summary new_val) detail)
+  else
+    Cbat_attr_census.note
+      (Printf.sprintf "churn.%s" (if head then "head" else "plain"))
+      ~limit:3
+      (Printf.sprintf "churn%s %s %s\n    %s"
+         (if head then "(head)" else "") (Tid.name v)
+         (if mono then "grow" else "nonmono") detail)
+#endif
+
+let static_graph_vsa
     ~(abi : Hike_abi.t)
     ~def_reads ~def_writes ~phi_reads ~phi_writes ~jmp_reads
     ?(callee : Tid.t -> Cbat_call_effects.callee =
@@ -387,36 +478,69 @@ let rec static_graph_vsa
   let head_warmed (v : Tid.t) : bool =
     Option.value ~default:0 (Hashtbl.find head_visits v)
     > head_warmup_visits in
+  (* The join of the predecessors' denoted edges: the first edge seeds
+     it, each later edge joins in as it is denoted, in predecessor
+     order.  Dead bindings never reach the join; the keep-set depends
+     only on the visited block, not on the predecessor. *)
 #ifdef VSA_DEBUG
-  (* Forward witness: every guard cond from [p] to [v] denotates false on
-     the pred's entry state, so the edge is dead without the backward
-     refinement.  A dispatch extra-edge has no jmp and cannot be
-     witnessed. *)
-  let edge_forward_dead ~(p : Tid.t) ~(v : Tid.t) : bool =
-    match Core.Map.find rctx.rc_blocks p with
-    | None -> false
-    | Some bf ->
-      let conds = Core.Map.find edge_conds p in
-      Term.enum jmp_t bf.bf_term
-      |> Seq.filter ~f:(fun j ->
-          match Jmp.kind j with
-          | Goto (Direct t) | Ret (Direct t) -> Tid.equal t v
-          | Call c -> (
-              match Call.return c with
-              | Some (Direct t) -> Tid.equal t v
-              | _ -> false)
-          | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false)
-      |> Seq.exists ~f:(fun j ->
-          match
-            Option.bind conds ~f:(fun m -> Core.Map.find m (Term.tid j))
-          with
-          | None -> false
-          | Some cond -> (
-              match Cbat_transfer.denote_imm_exp cond (get p) with
-              | Ok w -> not (WordSet.elem Cbat_word.b1 w)
-              | Error _ -> false))
-  in
+  let head_arm = ref "" in
 #endif
+  let incoming_of (v : Tid.t) ~(preds : Tid.t list) ~(old : AI.t) : AI.t =
+    let keep =
+      Option.value_map (Core.Map.find rctx.rc_blocks v)
+        ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
+    in
+    let out p =
+      Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
+        (Hashtbl.find block_to_head p) (fun () ->
+          let p_entry = Stages.time `Glue (fun () -> get p) in
+          let res = Stages.time `Denote (fun () ->
+              Cbat_forward.denote_block ~preserved ~callee ~resolved
+                ~edge_conds ~disabled:disabled_conds
+                ~rctx
+                ~source:p p_entry ~target:v) in
+          let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
+#ifdef VSA_DEBUG
+          debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;
+#endif
+          res) in
+    if List.is_empty preds then old
+    else
+      Option.value ~default:old
+        (List.fold preds ~init:None ~f:(fun acc p ->
+             let res = out p in
+             match acc with
+             | None -> Some res
+             | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
+  in
+  (* A warm head whose join grew widens by the landmark module's arm:
+     Finite extrapolates; Zero advances and joins; Inf widens.
+     Consumption is per key — each key reads its own row first, the
+     head's arm is the fallback, and the clear spends only what was
+     consumed. *)
+  let widen_at_head (v : Tid.t) ~(old : AI.t) ~(incoming : AI.t) : AI.t =
+    let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
+    Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
+      (fun () ->
+        let arm =
+          Cbat_landmarks.head_arm rctx.Cbat_runctx.rc_landmarks v in
+#ifdef VSA_DEBUG
+        head_arm := debug_head_arm arm;
+#endif
+        match arm with
+        | Cbat_landmarks.Finite n ->
+          Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming)
+        | Cbat_landmarks.Zero ->
+          Stages.time `Widen (fun () ->
+              AI.advance_join_landmarks ~head:v
+                ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
+                incoming)
+        | Cbat_landmarks.Inf ->
+          Stages.time `Widen (fun () ->
+              AI.widen_with_landmarks ~head:v
+                ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
+                incoming))
+  in
   let process_vertex (v : Tid.t) : bool =
     Stages.time `Scaffold (fun () ->
     incr total_processed;
@@ -431,58 +555,10 @@ let rec static_graph_vsa
     end;
     let old = get v in
     let preds = preds v in
-    (* Dead bindings never reach the join; the keep-set depends only on
-       the visited block, not on the predecessor. *)
-    let keep =
-      Option.value_map (Core.Map.find rctx.rc_blocks v)
-        ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
-    in
-    let incoming =
-      if List.is_empty preds then old
-      else
-        let out p =
-            Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
-              (Hashtbl.find block_to_head p) (fun () ->
+    let incoming = incoming_of v ~preds ~old in
 #ifdef VSA_DEBUG
-                Cbat_attr_census.bump "bottomskip.edge.total";
-#endif
-                let p_entry = Stages.time `Glue (fun () -> get p) in
-                let res = Stages.time `Denote (fun () ->
-                  Cbat_forward.denote_block ~preserved ~callee ~resolved
-                        ~edge_conds ~disabled:disabled_conds
-                        ~rctx
-                        ~source:p p_entry ~target:v) in
-                let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
-#ifdef VSA_DEBUG
-                (if AI.equal res AI.bottom then begin
-                   Cbat_attr_census.bump "bottomskip.edge.bottom";
-                   if edge_forward_dead ~p ~v then
-                     Cbat_attr_census.bump "bottomskip.edge.forward_dead"
-                   else Cbat_attr_census.bump "bottomskip.edge.refine_only"
-                 end);
-#endif
-                res) in
-        (* The first predecessor's edge seeds the join; each later edge
-           joins in as it is denoted, in predecessor order. *)
-        Option.value ~default:old
-          (List.fold preds ~init:None ~f:(fun acc p ->
-               let res = out p in
-               match acc with
-               | None -> Some res
-               | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
-    in
-#ifdef VSA_DEBUG
-    (if not (List.is_empty preds) then
-       Cbat_attr_census.bump "bottomskip.entry.total");
-    (if AI.equal incoming AI.bottom && not (List.is_empty preds) then begin
-       Cbat_attr_census.bump "bottomskip.entry.bottom";
-       if List.for_all preds ~f:(fun p -> edge_forward_dead ~p ~v) then
-         Cbat_attr_census.bump "bottomskip.entry.forward_dead"
-       else Cbat_attr_census.bump "bottomskip.entry.refine_only"
-     end);
-#endif
-#ifdef VSA_DEBUG
-    let head_arm = ref "" in
+    debug_entry ~rctx ~edge_conds ~get ~preds ~v incoming;
+    head_arm := "";
 #endif
     let has_widened = Core.Set.mem heads v && head_warmed v in
     let new_val =
@@ -491,41 +567,7 @@ let rec static_graph_vsa
         let j = Stages.time `Join (fun () -> AI.join old incoming) in
         if Stages.time `Equal (fun () -> AI.equal old j)
         then old
-        else begin
-        (* The module owns the arm decision: Finite extrapolates; Zero
-           advances and joins; Inf widens.  Consumption is per key —
-           each key reads its own row first, the head's arm is the
-           fallback, and the clear spends only what was consumed. *)
-        let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
-        Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
-          (fun () ->
-            let arm =
-              Cbat_landmarks.head_arm rctx.Cbat_runctx.rc_landmarks v in
-#ifdef VSA_DEBUG
-            Cbat_attr_census.bump
-              (match arm with
-               | Cbat_landmarks.Finite _ -> "widen.head.finite"
-               | Cbat_landmarks.Zero -> "widen.head.zero"
-               | Cbat_landmarks.Inf -> "widen.head.inf");
-            (match arm with
-             | Cbat_landmarks.Finite n -> head_arm := Printf.sprintf "finite:%d" n
-             | Cbat_landmarks.Zero -> head_arm := "zero"
-             | Cbat_landmarks.Inf -> head_arm := "inf");
-#endif
-            match arm with
-            | Cbat_landmarks.Finite n ->
-              Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming)
-            | Cbat_landmarks.Zero ->
-              Stages.time `Widen (fun () ->
-                  AI.advance_join_landmarks ~head:v
-                    ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
-                    incoming)
-            | Cbat_landmarks.Inf ->
-              Stages.time `Widen (fun () ->
-                  AI.widen_with_landmarks ~head:v
-                    ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
-                    incoming))
-        end
+        else widen_at_head v ~old ~incoming
       end else
         Stages.time `Join (fun () -> AI.join old incoming)
     in
@@ -535,28 +577,8 @@ let rec static_graph_vsa
     then false
     else begin
 #ifdef VSA_DEBUG
-      (let head = Core.Set.mem heads v in
-       let mono = Stages.time `Equal (fun () -> AI.precedes old new_val) in
-       Cbat_attr_census.bump
-         (Printf.sprintf "churn.%s.%s" (if head then "head" else "plain")
-            (if mono then "grow" else "nonmono"));
-       let detail, same_repr = AI.diff old new_val in
-       if same_repr > 0 then Cbat_attr_census.bump "churn.repr.same";
-       if has_widened then
-         Cbat_attr_census.note
-           (Printf.sprintf "churn.head.%s" (Tid.name v))
-           ~limit:16
-           (Printf.sprintf "churn(head) %s %s arm=%s %s\n    %s"
-              (Tid.name v) (if mono then "grow" else "nonmono")
-              (if String.is_empty !head_arm then "pre-warm" else !head_arm)
-              (AI.head_summary new_val) detail)
-       else
-         Cbat_attr_census.note
-           (Printf.sprintf "churn.%s" (if head then "head" else "plain"))
-           ~limit:3
-           (Printf.sprintf "churn%s %s %s\n    %s"
-              (if head then "(head)" else "") (Tid.name v)
-              (if mono then "grow" else "nonmono") detail));
+      debug_churn ~head:(Core.Set.mem heads v) ~has_widened
+        ~head_arm:!head_arm v old new_val;
 #endif
       Stages.time `Glue (fun () -> set v new_val);
       true

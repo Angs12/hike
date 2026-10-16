@@ -66,8 +66,13 @@ type frontier = {
   mutable jumps : Core.Int64.Set.t;
 }
 
+(* The first occurrence of each address, in order. *)
+let first_occurrences (addrs : int64 list) : int64 list =
+  let seen = Core.Hash_set.create (module Core.Int64) in
+  Base.List.filter addrs ~f:(fun a -> Core.Hash_set.strict_add seen a |> Result.is_ok)
+
 let frontier_create ~(subroutines : int64 list) : frontier =
-  let symtab = Base.List.stable_dedup subroutines ~compare:Int64.compare in
+  let symtab = first_occurrences subroutines in
   let seen = Core.Hashtbl.create (module Core.Int64) in
   let symtab_addresses =
     Base.List.fold symtab ~init:Core.Int64.Set.empty ~f:(fun addresses a ->
@@ -120,7 +125,7 @@ let frontier_take_found f : int64 list * int64 list =
   let words =
     Base.List.rev f.found
     |> Base.List.filter ~f:(fun w -> not (Core.Set.mem f.jumps w))
-    |> Base.List.stable_dedup ~compare:Int64.compare
+    |> first_occurrences
   in
   let addresses = Core.Set.to_list (Core.Set.diff f.found_addresses f.jumps) in
   f.found <- [];

@@ -50,7 +50,8 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
            && Stdlib.Int64.compare off bss_size < 0
          then Some (Stdlib.Int64.to_int off, name)
          else None)
-  |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+  |> Core.Int.Map.of_alist_reduce ~f:(fun first _ -> first)
+  |> Core.Map.to_alist
 
 (* Every word the loader's relocation facts name: a load-time relocation
    result, so a word at one of these addresses is not its file bytes. *)

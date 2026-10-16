@@ -76,6 +76,41 @@ let restore_word ~(abi : Abi.t) : exp =
        (Cbat_word.of_int ~width:(Model.word_bits abi.Abi.word) abi.Abi.word))
 
 (* The SP restore def at a call's single-pred continuation. *)
+#ifdef VSA_DEBUG
+let debug_graph g =
+  Graphs.Tid.nodes g
+  |> Seq.iter ~f:(fun n ->
+         Format.eprintf "SSA-DBG %s -> [%s]@." (Tid.name n)
+           (String.concat ","
+              (Graphs.Tid.Node.succs n g |> Seq.to_list
+              |> Base.List.map ~f:Tid.name)))
+
+let debug_frontiers g frontier =
+  Format.eprintf "SSA-DBG dom-tree: %d nodes; frontiers: %s@."
+    (Base.List.length (Graphs.Tid.nodes g |> Seq.to_list))
+    (String.concat ","
+       (Graphs.Tid.nodes g
+        |> Seq.to_list
+        |> Base.List.filter_map ~f:(fun n ->
+               let fr = Graphlib.Std.Frontier.enum frontier n |> Seq.to_list in
+               if Base.List.is_empty fr then None
+               else
+                 Some
+                   (Tid.name n ^ "=>"
+                    ^ String.concat "," (Base.List.map fr ~f:Tid.name)))))
+
+let debug_vars vars =
+  Format.eprintf "SSA-DBG vars(%d): [%s]@." (Core.Set.length vars)
+    (String.concat "," (Core.Set.to_list vars |> Base.List.map ~f:Var.name))
+
+let debug_var_sites ~iterated_frontier v (tids : Tid.t list) =
+  let bs = Graphs.Tid.start :: tids |> Core.Set.of_list (module Tid) in
+  Format.eprintf "SSA-DBG var %s sites=[%s] idf=[%s]@." (Var.name v)
+    (String.concat "," (Base.List.map tids ~f:Tid.name))
+    (String.concat ","
+       (Core.Set.to_list (iterated_frontier bs) |> Base.List.map ~f:Tid.name))
+#endif
+
 let with_top_def (blk : blk term) (d : def term) : blk term =
   Term.prepend def_t blk d
 
@@ -194,7 +229,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
           match Call.target c with
           | Direct t -> ret_lanes_of ~subs ~abi t
           | Indirect _ -> abi.Abi.return_regs)
-      |> Base.List.dedup_and_sort ~compare:Var.compare
+      |> Var.Set.of_list |> Core.Set.to_list
     in
     let ret_mint_sites =
       Base.List.fold call_blocks ~init:Var.Map.empty
@@ -208,40 +243,15 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     (* The dom/phi machinery walks the BIR's own CFG ([g] above). *)
 #ifdef VSA_DEBUG
-    let () =
-      Graphs.Tid.nodes g
-      |> Seq.iter ~f:(fun n ->
-             Format.eprintf "SSA-DBG %s -> [%s]@." (Tid.name n)
-               (String.concat ","
-                  (Graphs.Tid.Node.succs n g |> Seq.to_list
-                  |> Base.List.map ~f:Tid.name)))
-    in
+    debug_graph g;
 #endif
     let dom =
       Graphlib.Std.Graphlib.dominators (module Graphs.Tid) g Graphs.Tid.start
     in
     let frontier = Graphlib.Std.Graphlib.dom_frontier (module Graphs.Tid) g dom in
 #ifdef VSA_DEBUG
-    let () =
-      Format.eprintf "SSA-DBG dom-tree: %d nodes; frontiers: %s@."
-        (Base.List.length (Graphs.Tid.nodes g |> Seq.to_list))
-        (String.concat ","
-           (Graphs.Tid.nodes g
-            |> Seq.to_list
-            |> Base.List.filter_map ~f:(fun n ->
-                   let fr =
-                     Graphlib.Std.Frontier.enum frontier n |> Seq.to_list
-                   in
-                   if Base.List.is_empty fr then None
-                   else
-                     Some
-                       (Tid.name n ^ "=>"
-                        ^ String.concat ","
-                            (Base.List.map fr ~f:Tid.name)))))
-    in
+    debug_frontiers g frontier;
 #endif
-
-
     let df bs =
       Core.Set.fold bs ~init:Tid.Set.empty ~f:(fun dfs b ->
           Graphlib.Std.Frontier.enum frontier b
@@ -316,28 +326,14 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       else Term.append phi_t blk (Phi.of_list v (Base.List.map preds ~f:(fun p -> (p, Bil.Var v))))
     in
 #ifdef VSA_DEBUG
-    let () =
-      Format.eprintf "SSA-DBG vars(%d): [%s]@." (Core.Set.length vars)
-        (String.concat ","
-           (Core.Set.to_list vars |> Base.List.map ~f:Var.name))
-    in
+    debug_vars vars;
 #endif
     let sub =
       Core.Set.to_list vars
       |> Base.List.fold ~init:sub ~f:(fun sub v ->
 #ifdef VSA_DEBUG
-          let dbg_tids = def_sites_of v in
-          let dbg_sites = Base.List.map dbg_tids ~f:Tid.name in
-          let dbg_bs =
-            Graphs.Tid.start :: dbg_tids |> Core.Set.of_list (module Tid)
-          in
-          Format.eprintf "SSA-DBG var %s sites=[%s] idf=[%s]@." (Var.name v)
-            (String.concat "," dbg_sites)
-            (String.concat ","
-               (Core.Set.to_list (iterated_frontier dbg_bs)
-                |> Base.List.map ~f:Tid.name));
+          debug_var_sites ~iterated_frontier v (def_sites_of v);
 #endif
-
           let sites = def_sites_of v in
           let sites =
             sites

@@ -385,13 +385,14 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   in
   let tile name ~(comps : Model.sec_comp list) ~lo ~hi ~words ~is_const ~bss
       ~copy_relocs ~arr =
-    let sorted =
-      Base.List.sort comps ~compare:(fun a b ->
-          Int.compare a.Model.lo_w b.Model.lo_w)
-    in
+    (* The producer's components are in word order. *)
+#ifdef VSA_DEBUG
+    assert (Base.List.is_sorted comps ~compare:(fun a b ->
+        Int.compare a.Model.lo_w b.Model.lo_w));
+#endif
     let owners = ref [] in
     let cursor = ref 0 in
-    Base.List.iter sorted ~f:(fun c ->
+    Base.List.iter comps ~f:(fun c ->
         if c.Model.lo_w > !cursor then begin
           let g =
             create_run_global (Model.sec_res_name !counter) ~copy_relocs

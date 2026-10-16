@@ -31,8 +31,8 @@ let resolved_addr resolved =
   if resolved then Bil.Var (Hike_synth.module_addr ~addr_bits:64 0x4000L)
   else Bil.Int (Word.zero 64)
 
-let rd ?(resolved = false) ?(width = 8) ?(extents = []) (ws : Ws.t) =
-  A.range_of_denotation ~extents ~word:8 ~entry ~spans:[] ~synth:Hike_synth.empty
+let rd ?(resolved = false) ?(width = 8) (ws : Ws.t) =
+  A.range_of_denotation ~word:8 ~entry ~spans:[] ~synth:Hike_synth.empty
     ~address:(resolved_addr resolved) ~width ws
 
 let spans_of () =
@@ -40,7 +40,7 @@ let spans_of () =
     { A.ds_sec = S.Rodata; ds_lo = 0x5000L; ds_hi = 0x501FL; ds_slots = [] } ]
 
 let rd_spans ?(resolved = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:(spans_of ()) ~synth:Hike_synth.empty
+  A.range_of_denotation ~word:8 ~entry ~spans:(spans_of ()) ~synth:Hike_synth.empty
     ~address:(resolved_addr resolved) ~width ws
 
 (* Fixture stack frame: the mem, the SP and the frame pointer. *)
@@ -262,7 +262,7 @@ let tests : unit Alcotest.test list =
                  ds_slots = [] } ]
            in
            match
-             A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:top_span
+             A.range_of_denotation ~word:8 ~entry ~spans:top_span
                ~synth:Hike_synth.empty ~address:(Bil.Var (Hike_synth.module_addr ~addr_bits:64 (-8L))) ~width:8 ws
            with
            | None, [ p ] ->
@@ -720,16 +720,16 @@ let tests : unit Alcotest.test list =
     pin "SEC-51" "AT1-TC1: the query-failed claim is the plain full-line claim"
       (fun () ->
         check "SEC-51"
-          (plain (A.top_claim ~extents:[] ~cause:A.Query_failed ~entry ~word:8)));
+          (plain (A.top_claim ~cause:A.Query_failed ~entry ~word:8)));
 
     pin "SEC-52" "AT1-TC2: the foreign claim is the plain full-line claim"
       (fun () ->
-        check "SEC-52" (plain (A.top_claim ~extents:[] ~cause:A.Foreign ~entry ~word:8)));
+        check "SEC-52" (plain (A.top_claim ~cause:A.Foreign ~entry ~word:8)));
 
     pin "SEC-53" "AT1-TC3: the unbounded-stack claim clamps below the entry"
       (fun () ->
         check "SEC-53"
-          (clamped (A.top_claim ~extents:[] ~cause:A.Unbounded_stack ~entry ~word:8)));
+          (clamped (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8)));
 
 
 
