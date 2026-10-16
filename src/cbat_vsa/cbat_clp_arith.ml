@@ -358,12 +358,15 @@ let lshift_parts (p1 : t) (p2 : t) : t list =
   | None -> [ bottom sz1 ]
   | Some parts -> parts)
 
+(* The union of the parts a rule produces; no part is the bottom of [width]. *)
+let union_all ~(width : int) (parts : t list) : t =
+  match parts with
+  | [] -> bottom width
+  | x :: rest -> List.fold rest ~init:x ~f:union
+
 let lshift (p1 : t) (p2 : t) : t =
   arcs2
-    (fun a b ->
-      match lshift_parts a b with
-      | [] -> bottom (bitwidth a)
-      | x :: rest -> List.fold rest ~init:x ~f:union)
+    (fun a b -> union_all ~width:(bitwidth a) (lshift_parts a b))
     p1 p2
 
 
@@ -418,10 +421,7 @@ let rec rshift_parts (p1 : t) (p2 : t) : t list =
 
 let rshift (p1 : t) (p2 : t) : t =
   arcs2
-    (fun a b ->
-      match rshift_parts a b with
-      | [] -> bottom (bitwidth a)
-      | x :: rest -> List.fold rest ~init:x ~f:union)
+    (fun a b -> union_all ~width:(bitwidth a) (rshift_parts a b))
     p1 p2
 
 
@@ -493,10 +493,7 @@ let rec arshift_parts (p1 : t) (p2 : t) : t list =
 
 let arshift (p1 : t) (p2 : t) : t =
   arcs2
-    (fun a b ->
-      match arshift_parts a b with
-      | [] -> bottom (bitwidth a)
-      | x :: rest -> List.fold rest ~init:x ~f:union)
+    (fun a b -> union_all ~width:(bitwidth a) (arshift_parts a b))
     p1 p2
 
 
@@ -594,9 +591,7 @@ let extract_hi_parts ?hi ?signed (p : t) : t list =
   List.concat_map (split_wrapped p) ~f:(extract_hi_one ?hi ?signed)
 
 let extract_hi ?hi ?signed (p : t) : t =
-  match extract_hi_parts ?hi ?signed p with
-  | [] -> bottom (bitwidth p)
-  | x :: rest -> List.fold rest ~init:x ~f:union
+  union_all ~width:(bitwidth p) (extract_hi_parts ?hi ?signed p)
 
 let extract_internal ?hi ?(lo = 0) ?(signed = false) (p : t) : t =
   let hi = Option.map hi ~f:(fun hi -> hi - lo) in
@@ -642,9 +637,7 @@ let cast_parts ct (sz : int) (p : t) : t list =
   | Bil.HIGH -> extract_internal_parts ~lo:(width - sz) p
 
 let cast ct sz p : t =
-  match cast_parts ct sz p with
-  | [] -> bottom (bitwidth p)
-  | x :: rest -> List.fold rest ~init:x ~f:union
+  union_all ~width:(bitwidth p) (cast_parts ct sz p)
 
 
 let extract ?hi:hi ?lo:lo (p : t) : t = extract_internal ?hi ?lo p
