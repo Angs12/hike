@@ -55,7 +55,6 @@ module Ssa = Hike_ssa
 (** The width-coercion pass: every exp the later passes read is made
     width-honest once, so the VSA and the emitter read uniform widths. *)
 module Coerce = Hike_coerce
-module Concat = Hike_concat
 
 (** The FP temp widths: every [intrinsic:xN]/[intrinsic:yN] occurrence
     carries its own width, and a mapped FP call's target names its

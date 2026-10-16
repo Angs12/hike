@@ -21,7 +21,6 @@ module Jump = Hike_jump
 module Split_mem = Hike_split_mem
 module Split_blocks = Hike_split_blocks
 module Coerce = Hike_coerce
-module Concat = Hike_concat
 module Fp = Hike_fp
 module Stack_model = Hike_stack_model
 module Variadic = Hike_variadic
