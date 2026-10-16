@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs hike-convlir over the corpus, asserts every lift exits 0, and writes
-# the full diagnostics catalogue.
+# Lifts the corpus with the installed hike executable (Hike.Drive, ADR
+# 0032), asserts every lift exits 0, and writes the full diagnostics
+# catalogue.
 #
 # Usage: run_corpus.sh [corpus_dir] [out_dir]
 #
@@ -8,11 +9,9 @@
 # rc_<name>.txt.  Plus diagnostics.txt (every `hike:` line, every class)
 # and a one-line summary.
 #
-# The lift is INCREMENTAL: an emission is reused when the plugin and the
+# The lift is INCREMENTAL: an emission is reused when the toolchain and the
 # binary are both unchanged — the lift's only inputs — recorded as a stamp
-# beside it.  FRESH=1 forces a full re-lift.  bap's own cache stays disabled
-# (--no-cache): it cannot tell a stale rewrite from a fresh one, while this
-# stamp is keyed on exactly the two things the lift reads.
+# beside it.  FRESH=1 forces a full re-lift.
 #
 # STRICT: a non-zero lift rc is a loud failure (exit 1).  Diagnostics are
 # catalogue-only: recorded and summarised, never asserted on.
@@ -20,6 +19,7 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 
 CORPUS="${1:-/tmp/corpus-o2}"
 OUT="${2:-/tmp/hike-emit}"
@@ -30,8 +30,9 @@ if [ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]; then
   exit 2
 fi
 
-# Bind every emission in $OUT to the plugin that produced it: a later
-# consumer compares this copy with the installed plugin's provenance.
+# Bind every emission in $OUT to the build that produced it: a later
+# consumer compares this copy with the installed provenance, which also
+# records the hike executable's hash.
 LIBDIR="$(opam var lib 2>/dev/null || true)"
 PROV="$LIBDIR/hike/hike.cmxs.provenance"
 if [ ! -f "$PROV" ]; then
@@ -41,13 +42,17 @@ fi
 cp "$PROV" "$OUT/.plugin_provenance"
 PROV_SHA="$(sha256sum "$PROV" | cut -d' ' -f1)"
 
-# The whole toolchain the lift reads: the hike plugin (through its
-# provenance, which covers the installed bundle), the bap binary, and bap's
-# own plugin objects.  A stamp naming only the hike plugin would serve a
-# stale emission after a bap upgrade or a lifter rebuild — the
-# stale-IR-green class the gate exists to stop.
-BAP_BIN="$(command -v bap 2>/dev/null || true)"
-TOOLCHAIN_SHA="$({ sha256sum "$BAP_BIN" 2>/dev/null
+# The whole toolchain the lift reads: the hike executable, its build
+# (through the provenance), and the bap plugin objects it loads.  A stamp
+# naming only the hike build would serve a stale emission after a bap
+# upgrade or a lifter rebuild — the stale-IR-green class the gate exists
+# to stop.
+HIKE_BIN="$(hike_exe)"
+if [ ! -x "$HIKE_BIN" ]; then
+  echo "FATAL: no installed hike executable at $HIKE_BIN (dune install)" >&2
+  exit 2
+fi
+TOOLCHAIN_SHA="$({ sha256sum "$HIKE_BIN" 2>/dev/null
                    find "$LIBDIR" -maxdepth 3 -path '*bap*' \
                      \( -name '*.cmxs' -o -name '*.cmxa' -o -name '*.cma' \) -print 2>/dev/null \
                      | sort | xargs sha256sum 2>/dev/null
@@ -80,8 +85,8 @@ for f in $BINS; do
     cached=$((cached + 1))
     printf 'CACHED %s\n' "$f"
   else
-    timeout 300 bap "$CORPUS/$f" --pass=hike-convlir --no-cache \
-      --hike-output-file="$OUT/out_$f.ll" \
+    rm -f "$OUT/out_$f.ll"
+    timeout 300 "$HIKE_BIN" "$CORPUS/$f" -o "$OUT/out_$f.ll" \
       >"$OUT/stdout_$f.txt" 2>"$OUT/err_$f.txt"
     rc=$?
     echo "$rc" >"$OUT/rc_$f.txt"

@@ -28,8 +28,8 @@ def check_lift(binary, row, stem, timeout, level=None):
     samples = row["samples"]
     if samples[0]["rc"]:
         return {"stage": "lift", "rc": samples[0]["rc"]}
-    ir = Path(next(arg.split("=", 1)[1] for arg in samples[0]["command"]
-                   if arg.startswith("--hike-output-file=")))
+    command = samples[0]["command"]
+    ir = Path(command[command.index("-o") + 1])
     if level is not None:
         optimized = Path(f"{stem}.ll")
         step = run([os.environ.get("HIKE_OPT", "opt-21"), f"-O{level}",
@@ -56,7 +56,8 @@ def check_lift(binary, row, stem, timeout, level=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--reference-lib", required=True, type=Path)
+    parser.add_argument("--reference", required=True, type=Path,
+                        help="a saved build: its hike executable and hike.cmxs.provenance")
     parser.add_argument("--cpu", type=int)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=120)
@@ -67,8 +68,9 @@ def main():
         parser.error("repeats and time/ratio limits must be finite and positive")
     if args.cpu is not None and args.cpu not in os.sched_getaffinity(0):
         parser.error("CPU is outside the available affinity set")
-    if not (args.reference_lib / "hike" / "hike.cmxs.provenance").is_file():
-        parser.error("reference lib must contain hike/hike.cmxs.provenance")
+    if not ((args.reference / "hike").is_file()
+            and (args.reference / "hike.cmxs.provenance").is_file()):
+        parser.error("reference must contain hike and hike.cmxs.provenance")
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().parents[2] / "src" / "progs"
@@ -96,7 +98,7 @@ def main():
     (args.output / "compilation.json").write_text(json.dumps(records, indent=2) + "\n")
     timing_output = args.output / "lifts"
     command = [sys.executable, str(Path(__file__).with_name("performance.py")),
-               "--output", str(timing_output), "--reference-lib", str(args.reference_lib.resolve()),
+               "--output", str(timing_output), "--reference", str(args.reference.resolve()),
                "--repeats", str(args.repeats), "--timeout", str(args.timeout),
                "--max-ratio", str(args.max_ratio)]
     if args.cpu is not None:

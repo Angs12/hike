@@ -19,11 +19,14 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def lift_command(binary, stem, arguments, entry="plugin"):
-    if entry == "drive":
-        return ["hike", str(binary), "-o", f"{stem}.ll"]
-    return ["bap", str(binary), "--pass=hike-convlir", "--no-cache",
-            f"--hike-output-file={stem}.ll", *arguments]
+def installed_hike():
+    """The installed lift entry (Hike.Drive, ADR 0032) the provenance hashes."""
+    bindir = subprocess.check_output(["opam", "var", "bin"], text=True).strip()
+    return Path(bindir) / "hike"
+
+
+def lift_command(hike, binary, stem):
+    return [str(hike), str(binary), "-o", f"{stem}.ll"]
 
 
 def summarize(binary_hash, samples):
@@ -68,7 +71,7 @@ def profile(binary, stem, args):
                "-o", f"{stem}.stat", "--", "perf", "record", "-F", "99",
                "-e", "cpu-clock", "--call-graph", "dwarf,8192",
                "-o", f"{stem}.perf.data", "--",
-               *lift_command(binary, stem, args.bap_arg, args.entry)]
+               *lift_command(args.hike, binary, stem)]
     result = measure(command, Path(f"{stem}.log"), args.timeout, os.environ.copy())
     if Path(f"{stem}.perf.data").exists():
         with Path(f"{stem}.report.txt").open("wb") as report:
@@ -89,8 +92,9 @@ def main():
     parser.add_argument("binaries", nargs="*", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--reference-lib", type=Path,
-                        help="interleave a saved opam lib directory with the current plugin")
+    parser.add_argument("--reference", type=Path,
+                        help="interleave a saved build: a directory holding its hike "
+                             "executable and hike.cmxs.provenance")
     parser.add_argument("--cpu", type=int, help="pin both builds to the same CPU")
     parser.add_argument("--profile", action="store_true",
                         help="capture perf once per binary after all timing runs")
@@ -98,10 +102,6 @@ def main():
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--budget", type=float)
     parser.add_argument("--max-ratio", type=float, default=1.15)
-    parser.add_argument("--bap-arg", action="append", default=[])
-    parser.add_argument("--entry", choices=["plugin", "drive"], default="plugin",
-                        help="lift the current build through the bap plugin or hike; "
-                             "an interleaved reference always runs the plugin")
     args = parser.parse_args()
     if not args.binaries:
         corpus = Path(os.environ.get("HIKE_CORPUS", "/tmp/corpus-o2"))
@@ -111,7 +111,7 @@ def main():
         limits.append(args.budget)
     if args.repeats < 1 or any(not math.isfinite(n) or n <= 0 for n in limits):
         parser.error("repeats and time/ratio limits must be finite and positive")
-    if args.baseline and args.reference_lib:
+    if args.baseline and args.reference:
         parser.error("use either a recorded baseline or an interleaved reference")
     if args.profile and not shutil.which("perf"):
         parser.error("--profile requires perf on PATH")
@@ -121,19 +121,22 @@ def main():
     baseline = {}
     if args.baseline:
         recorded = json.loads(args.baseline.read_text())
-        if recorded["arguments"] != args.bap_arg:
-            parser.error("baseline BAP arguments differ")
+        if recorded.get("entry") != "hike":
+            parser.error("baseline was not recorded through the hike executable")
         baseline = recorded["binaries"]
+    args.hike = installed_hike()
     lib = Path(subprocess.check_output(["ocamlfind", "query", "hike"], text=True).strip())
     provenance = lib / "hike.cmxs.provenance"
-    manifest = {"arguments": args.bap_arg, "entry": args.entry,
+    manifest = {"entry": "hike", "hike": str(args.hike),
                 "affinity": sorted(os.sched_getaffinity(0)),
                 "plugin_provenance": provenance.read_text() if provenance.exists() else None,
                 "binaries": {}}
-    if args.reference_lib:
-        provenance = args.reference_lib / "hike" / "hike.cmxs.provenance"
-        if not provenance.exists():
-            parser.error("reference lib must contain hike/hike.cmxs.provenance")
+    reference_hike = None
+    if args.reference:
+        reference_hike = args.reference.resolve() / "hike"
+        provenance = args.reference / "hike.cmxs.provenance"
+        if not (reference_hike.is_file() and provenance.is_file()):
+            parser.error("reference must contain hike and hike.cmxs.provenance")
         manifest["reference_provenance"] = provenance.read_text()
     failed = False
     for index, binary in enumerate(args.binaries):
@@ -142,18 +145,14 @@ def main():
         samples = []
         reference = []
         for run in range(args.repeats):
-            labels = ["reference", "current"] if args.reference_lib else ["current"]
+            labels = ["reference", "current"] if args.reference else ["current"]
             if run % 2:
                 labels.reverse()
             for label in labels:
                 stem = args.output / f"{index}-{binary.name}-{run}-{label}"
-                env = os.environ.copy()
-                if label == "reference":
-                    env["OCAMLPATH"] = str(args.reference_lib.resolve()) + (
-                        os.pathsep + env["OCAMLPATH"] if env.get("OCAMLPATH") else "")
-                entry = "plugin" if label == "reference" else args.entry
-                sample = measure(lift_command(binary, stem, args.bap_arg, entry),
-                                 Path(f"{stem}.log"), args.timeout, env)
+                hike = reference_hike if label == "reference" else args.hike
+                sample = measure(lift_command(hike, binary, stem),
+                                 Path(f"{stem}.log"), args.timeout, os.environ.copy())
                 target = reference if label == "reference" else samples
                 target.append(sample)
                 print(f"RUN {binary.name} {label} {run + 1}/{args.repeats}: "

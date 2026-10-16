@@ -6,7 +6,7 @@
 #
 # Usage: matrix.sh <stage>
 #   stages: opts compilers protector protector-strip strip recomp
-#           performance --reference-lib DIR [performance options]
+#           performance --reference DIR [performance options]
 # Each stage prints one line per cell: PASS/FAIL counts + the red list.
 
 set -u
@@ -58,9 +58,7 @@ cell () {
       continue
     fi
     [ "$strip" = "strip" ] && objcopy --strip-all "$bin"
-    if ! bap "$bin" \
-         --pass=hike-convlir --hike-output-file="$ll" \
-         --cache-dir="$dir/.cache-$name" >>"$log" 2>&1; then
+    if ! timeout 600 "$(hike_exe)" "$bin" -o "$ll" >>"$log" 2>&1; then
       echo "  $name: LIFT-FAIL" >> "$log"; reds="$reds $name(lift)"
       continue
     fi

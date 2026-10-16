@@ -5,7 +5,8 @@
 # Usage: coreutils_pipeline.sh [workdir] [stage]
 #   stage: all|clone|build|collect|lift|link|suite|summary (default all)
 #   workdir default /tmp/opencode/coreutils-test
-# Needs a fresh plugin, plus git, autoconf/automake, make, bap, llc, gcc.
+# Needs a fresh install (the hike executable), plus git, autoconf/automake,
+# make, llc, gcc.
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
