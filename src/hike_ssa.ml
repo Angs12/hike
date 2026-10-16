@@ -75,7 +75,6 @@ let restore_word ~(abi : Abi.t) : exp =
     (Cbat_word.to_word
        (Cbat_word.of_int ~width:(Model.word_bits abi.Abi.word) abi.Abi.word))
 
-(* The SP restore def at a call's single-pred continuation. *)
 #ifdef VSA_DEBUG
 let debug_graph g =
   Graphs.Tid.nodes g
@@ -111,6 +110,7 @@ let debug_var_sites ~iterated_frontier v (tids : Tid.t list) =
        (Core.Set.to_list (iterated_frontier bs) |> Base.List.map ~f:Tid.name))
 #endif
 
+(* The SP restore def at a call's single-pred continuation. *)
 let with_top_def (blk : blk term) (d : def term) : blk term =
   Term.prepend def_t blk d
 
@@ -120,6 +120,188 @@ let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
     (Phi.values phi
     |> Seq.map ~f:(fun (s, e) -> if Tid.equal s src then (s, exp) else (s, e))
     |> Seq.to_list)
+
+(* Phi placement: for each renamable var, a phi at the iterated
+   dominance frontier of its def sites (the entry, its writes, the ret
+   mints, and for the SP the machine call blocks with a continuation). *)
+let place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
+    ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of
+    (sub : sub term) : sub term =
+  let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
+    if
+      Term.enum phi_t blk |> Seq.exists ~f:(fun p -> Var.same (Phi.lhs p) v)
+    then blk
+    else Term.append phi_t blk (Phi.of_list v (Base.List.map preds ~f:(fun p -> (p, Bil.Var v))))
+  in
+#ifdef VSA_DEBUG
+  debug_vars vars;
+#endif
+  Core.Set.to_list vars
+    |> Base.List.fold ~init:sub ~f:(fun sub v ->
+#ifdef VSA_DEBUG
+        debug_var_sites ~iterated_frontier v (def_sites_of v);
+#endif
+        let sites = def_sites_of v in
+        let sites =
+          sites
+          @ Base.Option.value (Core.Map.find ret_mint_sites v) ~default:[]
+        in
+        let sites =
+          if Var.same v sp then
+            sites
+            @ Base.List.filter_map call_blocks ~f:(fun (blk, cs) ->
+                  if
+                    Core.Set.mem machine_blk_tids (Term.tid blk)
+                    && Base.List.exists cs ~f:has_continuation
+                  then Some (Term.tid blk)
+                  else None)
+          else sites
+        in
+        let bs = Graphs.Tid.start :: sites |> Core.Set.of_list (module Tid) in
+
+        iterated_frontier bs
+        |> Core.Set.to_list
+        |> Base.List.fold ~init:sub ~f:(fun sub tid ->
+               match Term.find blk_t sub tid with
+               | None -> sub
+               | Some blk ->
+                   Term.update blk_t sub
+                     (insert_phi ~preds:(preds_of tid) blk v)))
+
+(* The rename walk, dominator-tree ordered from [start]: every def and
+   phi takes a fresh version, every read the live one, and each block's
+   argument and ret versions are stamped. *)
+let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of ~call_info
+    ~call_blk_tids ~machine_blk_tids (sub : sub term) : sub term =
+  (* The rename walk, dominator-tree ordered from [start]. *)
+  let vars_tbl : var list Var.Table.t = Core.Hashtbl.create (module Var) in
+  let nums : int Var.Table.t = Core.Hashtbl.create (module Var) in
+  (* Each var's live version: the top entry, when it is versioned. *)
+  let live_vers () : (var * var) list =
+    Core.Hashtbl.to_alist vars_tbl
+    |> Base.List.filter_map ~f:(fun (k, vs) ->
+           match vs with
+           | d :: _ when Var.index d > 0 -> Some (k, d)
+           | _ -> None)
+  in
+  let top v =
+    match Core.Hashtbl.find vars_tbl v with Some (d :: _) -> d | _ -> v
+  in
+  let new_name x =
+    Core.Hashtbl.change nums x ~f:(function
+      | None -> Some 1
+      | Some k -> Some (k + 1));
+    let y = Var.with_index x (Core.Hashtbl.find_exn nums x) in
+    Core.Hashtbl.add_multi vars_tbl ~key:x ~data:y;
+    y
+  in
+  let substitute =
+    (object
+      inherit Exp.mapper
+
+      method! map_sym z =
+        match Core.Hashtbl.find vars_tbl z with
+        | Some (d :: _) -> d
+        | _ -> z
+    end)#map_exp
+  in
+  let stamps : Versions.t Tid.Map.t ref = ref Tid.Map.empty in
+  (* The dominator tree's immediate children, indexed once; the rename
+     walk queries it per node (any dom-tree order is a valid walk). *)
+  let dom_children : Tid.t list Tid.Map.t =
+    Graphs.Tid.nodes g
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m n ->
+           match Graphlib.Std.Tree.parent dom n with
+           | Some p ->
+             let cs = Base.Option.value (Core.Map.find m p) ~default:[] in
+             Core.Map.set m ~key:p ~data:(n :: cs)
+           | None -> m)
+  in
+  let children tid =
+    Base.Option.value (Core.Map.find dom_children tid) ~default:[]
+  in
+  let rec walk sub' tid =
+    let minted = ref [] in
+    let sub' =
+      match Term.find blk_t sub' tid with
+      | None -> sub'
+      | Some blk ->
+          let blk =
+            Term.map phi_t blk ~f:(fun phi ->
+                Phi.with_lhs phi (new_name (Phi.lhs phi)))
+          in
+          let blk =
+            Term.map def_t blk ~f:(fun d ->
+                let d = Def.with_rhs d (substitute (Def.rhs d)) in
+                (* The name-routed lanes (slots, call args, the
+                   window) keep their base name: readers find them
+                   by name. *)
+                if renamable (Def.lhs d) then
+                  let d =
+                    if Hike_def_slots.def_is_dyn_alloc d then
+                      Hike_def_slots.set_sp_before (top sp) d
+                    else d
+                  in
+                  Def.with_lhs d (new_name (Def.lhs d))
+                else d)
+          in
+          let blk = Term.map jmp_t blk ~f:(Jmp.map_exp ~f:substitute) in
+          (* The argument map reads BEFORE the call's ret mints: an
+             argument lane passes the machine's current value, not
+             the callee's future result. *)
+          let arg_vers = live_vers () in
+          if Core.Set.mem call_blk_tids tid then
+            Base.List.iter (mint_of (call_info blk)) ~f:(fun v ->
+                minted := (v, new_name v) :: !minted);
+          stamps :=
+            Core.Map.set !stamps ~key:tid
+              ~data:
+                { Versions.args = arg_vers;
+                  rets = !minted };
+          Term.update blk_t sub' blk
+    in
+    (* The successors' phis take this block's tops; the SP incoming
+       from a call block carries the pushed word. *)
+    let sub' =
+      Base.List.fold (succs_of tid) ~init:sub' ~f:(fun acc s ->
+          match Term.find blk_t acc s with
+          | Some dst ->
+              Term.update blk_t acc
+                (Term.map phi_t dst ~f:(fun phi ->
+                     let base = Var.base (Phi.lhs phi) in
+                     let exp =
+                       if
+                         Var.same base sp
+                         && Core.Set.mem machine_blk_tids tid
+                       then
+                         Bil.BinOp (Bil.PLUS, Bil.Var (top base), restore_word ~abi)
+                       else Bil.Var (top base)
+                     in
+                     set_incoming phi ~src:tid exp))
+          | None -> acc)
+    in
+    let sub' = Base.List.fold (children tid) ~init:sub' ~f:walk in
+    (* Pop this block's names: defs, phis, and minted rets. *)
+    (match Term.find blk_t sub' tid with
+     | Some blk ->
+         let pop v =
+           Core.Hashtbl.change vars_tbl (Var.base v) ~f:(function
+               | Some (_ :: xs) -> Some xs
+               | xs -> xs)
+         in
+         Term.enum phi_t blk |> Seq.iter ~f:(fun phi -> pop (Phi.lhs phi));
+         Term.enum def_t blk |> Seq.iter ~f:(fun d -> pop (Def.lhs d));
+         Base.List.iter !minted ~f:(fun (v, _) -> pop (Var.base v))
+     | None -> ());
+    sub'
+  in
+  let sub = walk sub Graphs.Tid.start in
+  !stamps
+  |> Core.Map.fold ~init:sub ~f:(fun ~key ~data sub ->
+           match Term.find blk_t sub key with
+           | None -> sub
+           | Some blk ->
+               Term.update blk_t sub (Term.set_attr blk versions_tag data))
 
 let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     ~(subs : sub term Tid.Map.t) (sub : sub term) : sub term =
@@ -319,178 +501,13 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     let def_sites_of v =
       Base.Option.value (Core.Map.find def_sites v) ~default:[]
     in
-    let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
-      if
-        Term.enum phi_t blk |> Seq.exists ~f:(fun p -> Var.same (Phi.lhs p) v)
-      then blk
-      else Term.append phi_t blk (Phi.of_list v (Base.List.map preds ~f:(fun p -> (p, Bil.Var v))))
-    in
-#ifdef VSA_DEBUG
-    debug_vars vars;
-#endif
     let sub =
-      Core.Set.to_list vars
-      |> Base.List.fold ~init:sub ~f:(fun sub v ->
-#ifdef VSA_DEBUG
-          debug_var_sites ~iterated_frontier v (def_sites_of v);
-#endif
-          let sites = def_sites_of v in
-          let sites =
-            sites
-            @ Base.Option.value (Core.Map.find ret_mint_sites v) ~default:[]
-          in
-          let sites =
-            if Var.same v sp then
-              sites
-              @ Base.List.filter_map call_blocks ~f:(fun (blk, cs) ->
-                    if
-                      Core.Set.mem machine_blk_tids (Term.tid blk)
-                      && Base.List.exists cs ~f:has_continuation
-                    then Some (Term.tid blk)
-                    else None)
-            else sites
-          in
-          let bs = Graphs.Tid.start :: sites |> Core.Set.of_list (module Tid) in
-
-          iterated_frontier bs
-          |> Core.Set.to_list
-          |> Base.List.fold ~init:sub ~f:(fun sub tid ->
-                 match Term.find blk_t sub tid with
-                 | None -> sub
-                 | Some blk ->
-                     Term.update blk_t sub
-                       (insert_phi ~preds:(preds_of tid) blk v)))
+      place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
+        ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of sub
     in
-    (* The rename walk, dominator-tree ordered from [start]. *)
-    let vars_tbl : var list Var.Table.t = Core.Hashtbl.create (module Var) in
-    let nums : int Var.Table.t = Core.Hashtbl.create (module Var) in
-    (* Each var's live version: the top entry, when it is versioned. *)
-    let live_vers () : (var * var) list =
-      Core.Hashtbl.to_alist vars_tbl
-      |> Base.List.filter_map ~f:(fun (k, vs) ->
-             match vs with
-             | d :: _ when Var.index d > 0 -> Some (k, d)
-             | _ -> None)
-    in
-    let top v =
-      match Core.Hashtbl.find vars_tbl v with Some (d :: _) -> d | _ -> v
-    in
-    let new_name x =
-      Core.Hashtbl.change nums x ~f:(function
-        | None -> Some 1
-        | Some k -> Some (k + 1));
-      let y = Var.with_index x (Core.Hashtbl.find_exn nums x) in
-      Core.Hashtbl.add_multi vars_tbl ~key:x ~data:y;
-      y
-    in
-    let substitute =
-      (object
-        inherit Exp.mapper
-
-        method! map_sym z =
-          match Core.Hashtbl.find vars_tbl z with
-          | Some (d :: _) -> d
-          | _ -> z
-      end)#map_exp
-    in
-    let stamps : Versions.t Tid.Map.t ref = ref Tid.Map.empty in
-    (* The dominator tree's immediate children, indexed once; the rename
-       walk queries it per node (any dom-tree order is a valid walk). *)
-    let dom_children : Tid.t list Tid.Map.t =
-      Graphs.Tid.nodes g
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m n ->
-             match Graphlib.Std.Tree.parent dom n with
-             | Some p ->
-               let cs = Base.Option.value (Core.Map.find m p) ~default:[] in
-               Core.Map.set m ~key:p ~data:(n :: cs)
-             | None -> m)
-    in
-    let children tid =
-      Base.Option.value (Core.Map.find dom_children tid) ~default:[]
-    in
-    let rec walk sub' tid =
-      let minted = ref [] in
-      let sub' =
-        match Term.find blk_t sub' tid with
-        | None -> sub'
-        | Some blk ->
-            let blk =
-              Term.map phi_t blk ~f:(fun phi ->
-                  Phi.with_lhs phi (new_name (Phi.lhs phi)))
-            in
-            let blk =
-              Term.map def_t blk ~f:(fun d ->
-                  let d = Def.with_rhs d (substitute (Def.rhs d)) in
-                  (* The name-routed lanes (slots, call args, the
-                     window) keep their base name: readers find them
-                     by name. *)
-                  if renamable (Def.lhs d) then
-                    let d =
-                      if Hike_def_slots.def_is_dyn_alloc d then
-                        Hike_def_slots.set_sp_before (top sp) d
-                      else d
-                    in
-                    Def.with_lhs d (new_name (Def.lhs d))
-                  else d)
-            in
-            let blk = Term.map jmp_t blk ~f:(Jmp.map_exp ~f:substitute) in
-            (* The argument map reads BEFORE the call's ret mints: an
-               argument lane passes the machine's current value, not
-               the callee's future result. *)
-            let arg_vers = live_vers () in
-            if Core.Set.mem call_blk_tids tid then
-              Base.List.iter (mint_of (call_info blk)) ~f:(fun v ->
-                  minted := (v, new_name v) :: !minted);
-            stamps :=
-              Core.Map.set !stamps ~key:tid
-                ~data:
-                  { Versions.args = arg_vers;
-                    rets = !minted };
-            Term.update blk_t sub' blk
-      in
-      (* The successors' phis take this block's tops; the SP incoming
-         from a call block carries the pushed word. *)
-      let sub' =
-        Base.List.fold (succs_of tid) ~init:sub' ~f:(fun acc s ->
-            match Term.find blk_t acc s with
-            | Some dst ->
-                Term.update blk_t acc
-                  (Term.map phi_t dst ~f:(fun phi ->
-                       let base = Var.base (Phi.lhs phi) in
-                       let exp =
-                         if
-                           Var.same base sp
-                           && Core.Set.mem machine_blk_tids tid
-                         then
-                           Bil.BinOp (Bil.PLUS, Bil.Var (top base), restore_word ~abi)
-                         else Bil.Var (top base)
-                       in
-                       set_incoming phi ~src:tid exp))
-            | None -> acc)
-      in
-      let sub' = Base.List.fold (children tid) ~init:sub' ~f:walk in
-      (* Pop this block's names: defs, phis, and minted rets. *)
-      (match Term.find blk_t sub' tid with
-       | Some blk ->
-           let pop v =
-             Core.Hashtbl.change vars_tbl (Var.base v) ~f:(function
-                 | Some (_ :: xs) -> Some xs
-                 | xs -> xs)
-           in
-           Term.enum phi_t blk |> Seq.iter ~f:(fun phi -> pop (Phi.lhs phi));
-           Term.enum def_t blk |> Seq.iter ~f:(fun d -> pop (Def.lhs d));
-           Base.List.iter !minted ~f:(fun (v, _) -> pop (Var.base v))
-       | None -> ());
-      sub'
-    in
-    let sub = walk sub Graphs.Tid.start in
     let sub =
-      !stamps
-      |> Core.Map.fold ~init:sub ~f:(fun ~key ~data sub ->
-             match Term.find blk_t sub key with
-             | None -> sub
-             | Some blk ->
-                 Term.update blk_t sub (Term.set_attr blk versions_tag data))
+      rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of
+        ~call_info ~call_blk_tids ~machine_blk_tids sub
     in
     Term.set_attr sub ssa_tag ()
 

@@ -314,159 +314,158 @@ let thunk_name_of (sub_tid : tid) : string =
 let thunk_tid_of (sub_tid : tid) : tid =
   Tid.for_name (Tid.name sub_tid ^ ":thunk")
 
+(* Whether [sub_tid] gets a twin.  Every non-entry sub carries one when
+   the synthetic indirect convention can serve it: an address handed to
+   an external (a data word, a call argument) is callable through the
+   machine convention.  An external has no body to forward to; a
+   signature with lanes the convention does not carry (a promoted
+   pointer parameter) stays untwinned. *)
+let thunk_eligible ctx (sub_tid : tid) : bool =
+  let conv_lane v =
+    Hike_stack_model.is_arg_slot (Var.base v)
+    || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
+    || Base.List.exists
+         (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
+         ~f:(fun a -> Var.same (Arg.lhs a) v)
+  in
+  (not (is_extern ctx sub_tid))
+  && (not (Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid)))
+  && Base.List.for_all (get_args ctx sub_tid) ~f:(fun a ->
+         conv_lane (Arg.lhs a))
+
 (* The twin unpacks the window into the promoted body's slot
    parameters and forwards the register lanes.  Internal linkage: the
    consumer's optimizer inlines it where the call site resolves. *)
 let create_thunk ctx (sub_tid : tid) =
+  if not (thunk_eligible ctx sub_tid) then ()
+  else
   let llvm_ctx = ctx.llvm_ctx in
   let llvm_module = ctx.llvm_module in
-  (* Every non-entry sub carries a twin when the synthetic indirect
-     convention can serve it: an address handed to an external (a data
-     word, a call argument) is callable through the machine convention.
-     An external has no body to forward to; a signature with lanes the
-     convention does not carry (a promoted pointer parameter) stays
-     untwinned. *)
-  if is_extern ctx sub_tid then ()
-  else
   let arity = count_slot_args (get_args ctx sub_tid) in
-  if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then ()
-  else begin
-    let conv_lane v =
-      Hike_stack_model.is_arg_slot (Var.base v)
-      || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
-      || Base.List.exists
-           (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
-           ~f:(fun a -> Var.same (Arg.lhs a) v)
-    in
-    if not (Base.List.for_all (get_args ctx sub_tid) ~f:(fun a ->
-                conv_lane (Arg.lhs a)))
-    then ()
-    else begin
-    let args = get_args ctx sub_tid in
-    let rets = get_rets ctx sub_tid in
-    (* The twin is the machine-convention face: its return is the
-       synthetic convention's (the ABI's integer return registers),
-       never the callee's own carrier list.  Its body extracts the
-       lanes the convention can carry and drops the rest (the vector
-       return has no synthetic carrier). *)
-    let conv_rets =
-      Base.List.map ctx.abi.Abi.return_regs ~f:(fun reg ->
-          Arg.create ~intent:Out reg (Var reg))
-    in
-    let word = ctx.abi.Abi.word in
-    let window_var = Hike_stack_model.hike_window_var ~word in
-    (* The twin carries the synthetic indirect convention — exactly
-       what a pointer call passes. *)
-    let conv = ctx.abi in
-    let twin_args = window_conv_args ~word conv in
-    let ret_typ = ret_type_of_rets ctx conv_rets in
-      let arg_typs =
-        Base.List.map twin_args ~f:(fun a ->
-            if Var.same (Arg.lhs a) window_var then
-              Llvm.pointer_type llvm_ctx
-            else lane_type ctx a)
-      in
-      let fn_typ =
-        Llvm.function_type ret_typ (Array.of_list arg_typs)
-      in
-      let fn =
-        Llvm.define_function (thunk_name_of sub_tid) fn_typ llvm_module
-      in
-      Llvm.set_linkage Llvm.Linkage.Internal fn;
-      Base.List.iteri twin_args ~f:(fun i a ->
-          Llvm.set_value_name (Var.name (Arg.lhs a)) (Llvm.param fn i));
-      register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
-      (* The twin's body: unpack the window, forward, return. *)
-      let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-      let window = Llvm.param fn (Base.List.length twin_args - 1) in
-      let slot_vals =
-        Base.List.init arity ~f:(fun i ->
-            let off =
-              Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-                (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
-            in
-            (* The slot lane is the caller's cell address: the twin
-               forwards the window GEP'd at the slot. *)
-            Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
-              builder)
-      in
-      (* Forwards [sub]'s own parameter order: each register lane by name
-         from the twin's convention, each slot as the window GEP'd at its
-         cell, and the window itself. *)
-      let param_named (v : var) : Llvm.llvalue =
-        let n = Var.name v in
-        match
-          Base.List.findi twin_args ~f:(fun _ a -> Var.name (Arg.lhs a) = n)
-        with
-        | Some (i, _) -> Llvm.param fn i
-        | None ->
-            failwith
-              ("hike-emit: thunk: the lane " ^ n
-              ^ " is not in the twin's convention (sub "
-              ^ Tid.name sub_tid ^ ")")
-      in
-      (* A forwarded value takes its lane's type: the twin's convention
-         is integer-honest, and a callee lane the kind pass typed ptr
-         receives the register's bits as a pointer. *)
-      let forward (a : Arg.t) (v : Bil2llvm_value.t) : Llvm.llvalue =
-        Bil2llvm_value.ll
-          (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits builder
-             ~ptr:(lane_is_ptr a) v)
-      in
-      let call_args =
-        Base.List.map args ~f:(fun a ->
-            let v = Arg.lhs a in
-            if Hike_stack_model.is_arg_slot v then
-              let i =
-                match Hike_synth.index_of ctx.synth v with
-                | Some i -> i
-                | None ->
-                    failwith
-                      ("hike-emit: thunk: the slot parameter "
-                     ^ Var.name v
-                     ^ " carries no slot index")
-              in
-              (match Base.List.nth slot_vals i with
-               | Some s -> s
-               | None ->
-                   failwith
-                     ("hike-emit: thunk: the slot "
-                    ^ Int.to_string i
-                    ^ " is outside the twin's slots"))
-            else if Var.same v window_var then window
-            else forward a (Bil2llvm_value.Int (param_named v)))
-      in
-      let callee_fn, callee_typ = get_func ctx sub_tid in
-      let r =
-        Llvm.build_call callee_typ callee_fn
-          (Array.of_list call_args) "" builder
-      in
-      let n_callee = Base.List.length rets in
-      let lane_value (i : int) (a : Arg.t) : Llvm.llvalue =
-        let v =
-          if i >= n_callee then lane_value_of a (Llvm.undef (lane_type ctx a))
-          else
-            lane_value_of (Base.List.nth_exn rets i)
-              (match rets with
-               | [ _ ] -> r
-               | _ -> Llvm.build_extractvalue r i "" builder)
+  let args = get_args ctx sub_tid in
+  let rets = get_rets ctx sub_tid in
+  (* The twin is the machine-convention face: its return is the
+     synthetic convention's (the ABI's integer return registers),
+     never the callee's own carrier list.  Its body extracts the
+     lanes the convention can carry and drops the rest (the vector
+     return has no synthetic carrier). *)
+  let conv_rets =
+    Base.List.map ctx.abi.Abi.return_regs ~f:(fun reg ->
+        Arg.create ~intent:Out reg (Var reg))
+  in
+  let word = ctx.abi.Abi.word in
+  let window_var = Hike_stack_model.hike_window_var ~word in
+  (* The twin carries the synthetic indirect convention — exactly
+     what a pointer call passes. *)
+  let conv = ctx.abi in
+  let twin_args = window_conv_args ~word conv in
+  let ret_typ = ret_type_of_rets ctx conv_rets in
+  let arg_typs =
+    Base.List.map twin_args ~f:(fun a ->
+        if Var.same (Arg.lhs a) window_var then
+          Llvm.pointer_type llvm_ctx
+        else lane_type ctx a)
+  in
+  let fn_typ =
+    Llvm.function_type ret_typ (Array.of_list arg_typs)
+  in
+  let fn =
+    Llvm.define_function (thunk_name_of sub_tid) fn_typ llvm_module
+  in
+  Llvm.set_linkage Llvm.Linkage.Internal fn;
+  Base.List.iteri twin_args ~f:(fun i a ->
+      Llvm.set_value_name (Var.name (Arg.lhs a)) (Llvm.param fn i));
+  register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
+  (* The twin's body: unpack the window, forward, return. *)
+  let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+  let window = Llvm.param fn (Base.List.length twin_args - 1) in
+  let slot_vals =
+    Base.List.init arity ~f:(fun i ->
+        let off =
+          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+            (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
         in
-        (* The synthetic lane is integer-honest; a callee lane the kind
-           pass typed ptr is re-coerced like a forwarded argument. *)
-        forward a v
-      in
-      (match conv_rets with
-       | [] -> ignore (Llvm.build_ret_void builder)
-       | [ a ] -> ignore (Llvm.build_ret (lane_value 0 a) builder)
-       | _ ->
-         let agg = ref (Llvm.undef ret_typ) in
-         Base.List.iteri conv_rets ~f:(fun i a ->
-             agg := Llvm.build_insertvalue !agg (lane_value i a) i "" builder);
-         ignore (Llvm.build_ret !agg builder));
-      ctx.thunks :=
-        (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
-    end
-    end
+        (* The slot lane is the caller's cell address: the twin
+           forwards the window GEP'd at the slot. *)
+        Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
+          builder)
+  in
+  (* Forwards [sub]'s own parameter order: each register lane by name
+     from the twin's convention, each slot as the window GEP'd at its
+     cell, and the window itself. *)
+  let param_named (v : var) : Llvm.llvalue =
+    let n = Var.name v in
+    match
+      Base.List.findi twin_args ~f:(fun _ a -> Var.name (Arg.lhs a) = n)
+    with
+    | Some (i, _) -> Llvm.param fn i
+    | None ->
+        failwith
+          ("hike-emit: thunk: the lane " ^ n
+          ^ " is not in the twin's convention (sub "
+          ^ Tid.name sub_tid ^ ")")
+  in
+  (* A forwarded value takes its lane's type: the twin's convention
+     is integer-honest, and a callee lane the kind pass typed ptr
+     receives the register's bits as a pointer. *)
+  let forward (a : Arg.t) (v : Bil2llvm_value.t) : Llvm.llvalue =
+    Bil2llvm_value.ll
+      (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits builder
+         ~ptr:(lane_is_ptr a) v)
+  in
+  let call_args =
+    Base.List.map args ~f:(fun a ->
+        let v = Arg.lhs a in
+        if Hike_stack_model.is_arg_slot v then
+          let i =
+            match Hike_synth.index_of ctx.synth v with
+            | Some i -> i
+            | None ->
+                failwith
+                  ("hike-emit: thunk: the slot parameter "
+                 ^ Var.name v
+                 ^ " carries no slot index")
+          in
+          (match Base.List.nth slot_vals i with
+           | Some s -> s
+           | None ->
+               failwith
+                 ("hike-emit: thunk: the slot "
+                ^ Int.to_string i
+                ^ " is outside the twin's slots"))
+        else if Var.same v window_var then window
+        else forward a (Bil2llvm_value.Int (param_named v)))
+  in
+  let callee_fn, callee_typ = get_func ctx sub_tid in
+  let r =
+    Llvm.build_call callee_typ callee_fn
+      (Array.of_list call_args) "" builder
+  in
+  let n_callee = Base.List.length rets in
+  let lane_value (i : int) (a : Arg.t) : Llvm.llvalue =
+    let v =
+      if i >= n_callee then lane_value_of a (Llvm.undef (lane_type ctx a))
+      else
+        lane_value_of (Base.List.nth_exn rets i)
+          (match rets with
+           | [ _ ] -> r
+           | _ -> Llvm.build_extractvalue r i "" builder)
+    in
+    (* The synthetic lane is integer-honest; a callee lane the kind
+       pass typed ptr is re-coerced like a forwarded argument. *)
+    forward a v
+  in
+  (match conv_rets with
+   | [] -> ignore (Llvm.build_ret_void builder)
+   | [ a ] -> ignore (Llvm.build_ret (lane_value 0 a) builder)
+   | _ ->
+     let agg = ref (Llvm.undef ret_typ) in
+     Base.List.iteri conv_rets ~f:(fun i a ->
+         agg := Llvm.build_insertvalue !agg (lane_value i a) i "" builder);
+     ignore (Llvm.build_ret !agg builder));
+  ctx.thunks :=
+    (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
+
 
 let create_return ctx scope blk_tid llvm_builder cur_sub =
   let rets =

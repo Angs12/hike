@@ -1264,6 +1264,9 @@ let rec constrain_operands ~(env : AI.t)
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
+  (* The recursive call on a sub-expression, in [env] unless given. *)
+  let recur ?(env = env) e produced =
+    constrain_operands ~env ~cells ~nonneg ~landmarks e produced in
   match e with
   | Bil.Var v ->
     meet_var ~landmarks env v produced
@@ -1282,12 +1285,12 @@ let rec constrain_operands ~(env : AI.t)
     end
     else env
   | Bil.UnOp (Bil.NOT, a) ->
-    constrain_operands ~env ~cells ~nonneg ~landmarks a (WordSet.lnot produced)
+    recur a (WordSet.lnot produced)
   | Bil.UnOp (Bil.NEG, a) ->
-    constrain_operands ~env ~cells ~nonneg ~landmarks a (WordSet.neg produced)
+    recur a (WordSet.neg produced)
   | Bil.Cast (Bil.HIGH, sz, a) ->
     Option.value_map (high_cast_constraint env a sz produced) ~default:env
-      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
+      ~f:(fun a' -> recur a a')
   | Bil.Cast (ct, _, a) ->
     (match ct with
      | Bil.SIGNED | Bil.UNSIGNED ->
@@ -1295,24 +1298,24 @@ let rec constrain_operands ~(env : AI.t)
          (ext_cast_constraint
             ~is_signed:(match ct with Bil.SIGNED -> true | _ -> false)
             env a produced) ~default:env
-         ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
+         ~f:(fun a' -> recur a a')
      | _ ->
        Option.value_map (low_cast_constraint env a produced) ~default:env
-         ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a'))
+         ~f:(fun a' -> recur a a'))
   | Bil.Extract (hi, lo, a) ->
     Option.value_map (extract_constraint env a hi lo produced) ~default:env
-      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
+      ~f:(fun a' -> recur a a')
   | Bil.Concat (a, b) ->
     (* The inverse splits the window on the width boundary. *)
     (match denote_imm_exp b env with
      | Ok b_ws ->
        let bw = WordSet.bitwidth b_ws in
        let cw = WordSet.bitwidth produced in
-       if bw >= cw then constrain_operands ~env ~cells ~nonneg ~landmarks a produced
+       if bw >= cw then recur a produced
        else
-         let env = constrain_operands ~env ~cells ~nonneg ~landmarks a
+         let env = recur a
              (WordSet.extract ~hi:(cw - 1) ~lo:bw produced) in
-         constrain_operands ~env ~cells ~nonneg ~landmarks b
+         recur ~env b
            (WordSet.extract ~hi:(bw - 1) ~lo:0 produced)
      | Error _ -> env)
   | Bil.Ite (c, t, f) ->
@@ -1322,10 +1325,10 @@ let rec constrain_operands ~(env : AI.t)
     (match denote_imm_exp c env with
      | Ok c_ws when Cbat_word.is_one (WordSet.cardinality c_ws) ->
        if WordSet.elem Cbat_word.b0 c_ws
-       then constrain_operands ~env ~cells ~nonneg ~landmarks f produced
-       else constrain_operands ~env ~cells ~nonneg ~landmarks t produced
+       then recur f produced
+       else recur t produced
      | Ok _ | Error _ -> env)
-  | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
+  | Bil.Let (_, _, body) -> recur body produced
   | Bil.Load (m, a, en, s) ->
     (* An address that reads no memory denotes the same before and after
        the cell step (which only writes the memory), so one denotation
@@ -1359,7 +1362,7 @@ let rec constrain_operands ~(env : AI.t)
         | _ -> ())
      | _ -> ());
     Option.value_map addr_cstr ~default:env
-      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
+      ~f:(fun a' -> recur ~env a a')
   | Bil.Store (m, a, u, en, s) ->
     (* The store consumes the first pending entry whose range it
        overwrites: the constraint speaks about the store's data or
@@ -1400,7 +1403,7 @@ let rec constrain_operands ~(env : AI.t)
                     Option.value_map (Base.Result.ok (denote_imm_exp u env))
                       ~default:c.pc ~f:(WordSet.meet c.pc) in
                   if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
-                  else constrain_operands ~env ~cells ~nonneg ~landmarks u data_cstr
+                  else recur u data_cstr
                 | _ -> env)))
      | _ -> env)
   | Bil.BinOp (Bil.AND, a, b) when WordSet.bitwidth produced = 1 ->
@@ -1408,8 +1411,8 @@ let rec constrain_operands ~(env : AI.t)
     if WordSet.elem Cbat_word.b1 produced
        && not (WordSet.elem Cbat_word.b0 produced)
     then
-      let env = constrain_operands ~env ~cells ~nonneg ~landmarks a produced in
-      constrain_operands ~env ~cells ~nonneg ~landmarks b produced
+      let env = recur a produced in
+      recur ~env b produced
     else
       (* AND = false: which operand is false is unknown — identity. *)
       env
@@ -1418,8 +1421,8 @@ let rec constrain_operands ~(env : AI.t)
     if WordSet.elem Cbat_word.b0 produced
        && not (WordSet.elem Cbat_word.b1 produced)
     then
-      let env = constrain_operands ~env ~cells ~nonneg ~landmarks a produced in
-      constrain_operands ~env ~cells ~nonneg ~landmarks b produced
+      let env = recur a produced in
+      recur ~env b produced
     else env
   | Bil.BinOp (op, a, b) ->
     (match op with
@@ -1446,7 +1449,7 @@ let rec constrain_operands ~(env : AI.t)
        let deliver (e : exp) (c : wordset option) (env : AI.t) : AI.t =
          match e, c with
          | Bil.Int _, _ | Bil.Let _, _ -> env
-         | _, Some c' -> constrain_operands ~env ~cells ~nonneg ~landmarks e c'
+         | _, Some c' -> recur ~env e c'
          | _ -> env in
        (match denote_imm_exp a env, denote_imm_exp b env with
         | Ok a_ws, Ok b_ws ->

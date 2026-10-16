@@ -329,6 +329,76 @@ let create_sub ctx scope sub =
         (String.concat ","
            (Core.Set.to_list lane_reads |> Base.List.map ~f:Var.name))
 
+(* Every sub whose start address escapes as a VALUE — a loader
+   relocation word, a section image word, or a BIR constant (an
+   address-taken def) — earns a public face: the machine-convention
+   wrapper a foreign caller reaches through the word.  An unescaped
+   sub needs none: every call the program itself makes is a direct
+   arm that forwards the caller's window slots. *)
+let escaped_starts ~(spec : section_spec) ~(synth : Hike_synth.table)
+    ~(subs_list : sub term list) ~(sub_starts : tid Core.Int64.Map.t) : Tid.Set.t =
+  let is_start v = Core.Map.mem sub_starts v in
+  let from_relative =
+    Base.List.fold spec.spec_relative ~init:Core.Int64.Set.empty
+      ~f:(fun acc (_, rv) ->
+        if is_start rv then Core.Set.add acc rv else acc)
+  in
+  let from_images =
+    Base.List.fold spec.spec_sections ~init:Core.Int64.Set.empty
+      ~f:(fun acc -> function
+        | Some { Hike_stack_model.sm_image = Some bytes; _ } ->
+          let n = Bytes.length bytes in
+          let wb = spec.spec_word in
+          let rec go off acc =
+            if off + wb > n then acc
+            else
+              let w = Cbat_word.le_int64 bytes ~off ~len:wb in
+              go (off + wb)
+                (if is_start w then Core.Set.add acc w else acc)
+          in
+          go 0 acc
+        | _ -> acc)
+  in
+  let from_bir =
+    Base.List.fold subs_list ~init:Core.Int64.Set.empty
+      ~f:(fun acc sub ->
+        Term.enum blk_t sub
+        |> Seq.fold ~init:acc ~f:(fun acc blk ->
+            let consts acc e =
+              (object
+                 inherit [ Core.Int64.Set.t ] Exp.visitor
+                 method! visit_int w acc =
+                   match Word.to_int64 w with
+                   | Ok x when is_start x -> Core.Set.add acc x
+                   | _ -> acc
+                 method! visit_var v acc =
+                   match Hike_synth.module_addr_of synth v with
+                   | Some x when is_start x -> Core.Set.add acc x
+                   | _ -> acc
+               end)#visit_exp
+                e acc
+            in
+            let acc =
+              Term.enum def_t blk
+              |> Seq.fold ~init:acc ~f:(fun acc d -> consts acc (Def.rhs d))
+            in
+            let acc =
+              Term.enum phi_t blk
+              |> Seq.fold ~init:acc ~f:(fun acc p ->
+                  Base.Sequence.fold (Phi.values p) ~init:acc
+                    ~f:(fun acc (_, e) -> consts acc e))
+            in
+            Term.enum jmp_t blk
+            |> Seq.fold ~init:acc ~f:(fun acc j -> consts acc (Jmp.cond j))))
+  in
+  Core.Set.fold
+    (Core.Set.union from_relative (Core.Set.union from_images from_bir))
+    ~init:Tid.Set.empty ~f:(fun acc v ->
+      match Core.Map.find sub_starts v with
+      | Some t -> Core.Set.add acc t
+      | None -> acc)
+
+
 (* The emission entry: signature collection, declarations, bodies.
    Phase order — sigs, thunks, bodies, initializers — is load-bearing;
    the body loop opens one [sub_scope] per sub and drops it at the
@@ -365,74 +435,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
           | None -> m)
   in
-  (* Every sub whose start address escapes as a VALUE — a loader
-     relocation word, a section image word, or a BIR constant (an
-     address-taken def) — earns a public face: the machine-convention
-     wrapper a foreign caller reaches through the word.  An unescaped
-     sub needs none: every call the program itself makes is a direct
-     arm that forwards the caller's window slots. *)
-  let escaped =
-    let is_start v = Core.Map.mem sub_starts v in
-    let from_relative =
-      Base.List.fold spec.spec_relative ~init:Core.Int64.Set.empty
-        ~f:(fun acc (_, rv) ->
-          if is_start rv then Core.Set.add acc rv else acc)
-    in
-    let from_images =
-      Base.List.fold spec.spec_sections ~init:Core.Int64.Set.empty
-        ~f:(fun acc -> function
-          | Some { Hike_stack_model.sm_image = Some bytes; _ } ->
-            let n = Bytes.length bytes in
-            let wb = spec.spec_word in
-            let rec go off acc =
-              if off + wb > n then acc
-              else
-                let w = Cbat_word.le_int64 bytes ~off ~len:wb in
-                go (off + wb)
-                  (if is_start w then Core.Set.add acc w else acc)
-            in
-            go 0 acc
-          | _ -> acc)
-    in
-    let from_bir =
-      Base.List.fold subs_list ~init:Core.Int64.Set.empty
-        ~f:(fun acc sub ->
-          Term.enum blk_t sub
-          |> Seq.fold ~init:acc ~f:(fun acc blk ->
-              let consts acc e =
-                (object
-                   inherit [ Core.Int64.Set.t ] Exp.visitor
-                   method! visit_int w acc =
-                     match Word.to_int64 w with
-                     | Ok x when is_start x -> Core.Set.add acc x
-                     | _ -> acc
-                   method! visit_var v acc =
-                     match Hike_synth.module_addr_of synth v with
-                     | Some x when is_start x -> Core.Set.add acc x
-                     | _ -> acc
-                 end)#visit_exp
-                  e acc
-              in
-              let acc =
-                Term.enum def_t blk
-                |> Seq.fold ~init:acc ~f:(fun acc d -> consts acc (Def.rhs d))
-              in
-              let acc =
-                Term.enum phi_t blk
-                |> Seq.fold ~init:acc ~f:(fun acc p ->
-                    Base.Sequence.fold (Phi.values p) ~init:acc
-                      ~f:(fun acc (_, e) -> consts acc e))
-              in
-              Term.enum jmp_t blk
-              |> Seq.fold ~init:acc ~f:(fun acc j -> consts acc (Jmp.cond j))))
-    in
-    Core.Set.fold
-      (Core.Set.union from_relative (Core.Set.union from_images from_bir))
-      ~init:Tid.Set.empty ~f:(fun acc v ->
-        match Core.Map.find sub_starts v with
-        | Some t -> Core.Set.add acc t
-        | None -> acc)
-  in
+  let escaped = escaped_starts ~spec ~synth ~subs_list ~sub_starts in
   (* A sub earns a public face iff its address escapes; its signature
      must still fit the machine convention.  The synthetic conventions:
      the indirect call and every escaped sub.  Their signatures are
@@ -507,12 +510,15 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let is_entry sub = Term.has_attr sub Sub.entry_point in
   (* The executable owns one TLS block. Its size and alignment reproduce
      PT_TLS's Variant-II layout, including any first-byte padding. *)
+  let tls_initializer ?resolve (tls : Hike_spec.tls_spec) =
+    Bil2llvm_section.image_initializer ?resolve ctx llvm_ctx llvm_module
+      ~word:abi.Abi.word ~arr:tls.tls_image ~base_addr:tls.tls_lo
+      ~prefix:tls.tls_prefix
+      ~zero_tail:(Int64.to_int tls.tls_memsz - Bytes.length tls.tls_image)
+  in
   (match spec.spec_tls with
    | Some tls when tls.Hike_spec.tls_memsz > 0L ->
-     let init = Bil2llvm_section.image_initializer ~resolve:false ctx llvm_ctx llvm_module
-         ~word:abi.Abi.word ~arr:tls.tls_image ~base_addr:tls.tls_lo
-         ~prefix:tls.tls_prefix
-         ~zero_tail:(Int64.to_int tls.tls_memsz - Bytes.length tls.tls_image) in
+     let init = tls_initializer ~resolve:false tls in
      let g = Llvm.declare_global (Llvm.type_of init) "hike_tls_block" llvm_module in
      Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
      Llvm.set_initializer (Llvm.const_null (Llvm.type_of init)) g;
@@ -556,11 +562,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     (match !(ctx.tls) with
      | None -> ()
      | Some (g, tls) ->
-       Llvm.set_initializer
-         (Bil2llvm_section.image_initializer ctx llvm_ctx llvm_module
-            ~word:abi.Abi.word ~arr:tls.tls_image ~base_addr:tls.tls_lo
-            ~prefix:tls.tls_prefix
-            ~zero_tail:(Int64.to_int tls.tls_memsz - Bytes.length tls.tls_image)) g);
+       Llvm.set_initializer (tls_initializer tls) g);
     (* The initializer rule consults the loader's relocation facts
        (in the emission address index); function-pointer data lands on a
        promoted sub's thunk through the same address map. *)

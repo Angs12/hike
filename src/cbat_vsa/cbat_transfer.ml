@@ -38,6 +38,46 @@ let dbg_one_line (e : exp) : string =
   Format.fprintf fmt "%a" Exp.pp e;
   Format.pp_print_flush fmt ();
   Buffer.contents bs
+
+(* B16 census: both operands are stack singletons.  The cardinality
+   gate reads the saturated stack-span for a StackOff, so this shape
+   can only reach the overlap fall-through. *)
+let stack_singleton (v : wordset) : bool =
+  match WordSet.stack_offsets v with
+  | Some o -> Word_ops.is_one (WordSet.Clp.cardinality o)
+  | None -> false
+
+let debug_b16_eq (v1 : wordset) (v2 : wordset) : unit =
+  if stack_singleton v1 && stack_singleton v2 && WordSet.equal v1 v2 then
+    Format.eprintf "DBG B16 stack-singleton-eq GATE-FIRED\n%!"
+
+let debug_b16_pair ~(negate : bool) (v1 : wordset) (v2 : wordset) : unit =
+  if stack_singleton v1 && stack_singleton v2 then
+    Format.eprintf "DBG B16 stack-singleton-pair %s %s\n%!"
+      (if WordSet.equal v1 v2 then "equal-2reach" else "distinct")
+      (if negate then "neq" else "eq")
+
+(* The coercion pass promises uniform BIR widths; a hit here is a
+   contract violation answered by top.  Bounded output: the first
+   [dbg_left] hits carry the exp, then silence. *)
+let debug_width_mismatch op e1 e2 (v1 : wordset) (v2 : wordset) : unit =
+  let w1 = WordSet.bitwidth v1 and w2 = WordSet.bitwidth v2 in
+  if w1 <> w2 && !dbg_left > 0 then begin
+    decr dbg_left;
+    Format.eprintf "DBG denote_binop width-mismatch w1=%d w2=%d e=%s\n%!" w1
+      w2 (dbg_one_line (Bil.BinOp (op, e1, e2)))
+  end
+
+(* A def's value is stored at its lhs's declared width; a divergent
+   store is the source of downstream mismatches. *)
+let debug_store_width (v : var) (e : exp) (p : wordset) : unit =
+  let lw = match Var.typ v with Type.Imm n -> n | _ -> 0 in
+  let pw = WordSet.bitwidth p in
+  if lw > 0 && pw <> lw && !dbg_left > 0 then begin
+    decr dbg_left;
+    Format.eprintf "DBG denote_def store-width lhs=%s:%d width=%d rhs=%s\n%!"
+      (Var.name v) lw pw (dbg_one_line e)
+  end
 #endif
 
 (* The binop's result width: a comparison answers one bit, every other op
@@ -77,16 +117,6 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
         else if Cbat_word.(>=) (sgn v1_min) (sgn v2_max) then return bfalse
         else return bool_top
     end in
-#ifdef VSA_DEBUG
-  (* B16 census: both operands are stack singletons.  The cardinality
-     gate reads the saturated stack-span for a StackOff, so this shape
-     can only reach the overlap fall-through. *)
-  let stack_singleton (v : wordset) : bool =
-    match WordSet.stack_offsets v with
-    | Some o -> Word_ops.is_one (WordSet.Clp.cardinality o)
-    | None -> false
-  in
-#endif
   (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     (* Same-origin relatives compare by their offsets: a single offset on
@@ -106,20 +136,14 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
     if Cbat_word.is_zero v1_size || Cbat_word.is_zero v2_size then bool_bottom
     else if Word_ops.is_one v1_size && Word_ops.is_one v2_size then begin
 #ifdef VSA_DEBUG
-      (if stack_singleton v1 && stack_singleton v2 && WordSet.equal v1 v2 then
-         Format.eprintf "DBG B16 stack-singleton-eq GATE-FIRED\n%!"
-       else ());
+      debug_b16_eq v1 v2;
 #endif
       wordset_of_bool
         (if negate then not (WordSet.equal v1 v2) else WordSet.equal v1 v2)
     end
     else if WordSet.overlap v1 v2 then begin
 #ifdef VSA_DEBUG
-      (if stack_singleton v1 && stack_singleton v2 then
-         Format.eprintf "DBG B16 stack-singleton-pair %s %s\n%!"
-           (if WordSet.equal v1 v2 then "equal-2reach" else "distinct")
-           (if negate then "neq" else "eq")
-       else ());
+      debug_b16_pair ~negate v1 v2;
 #endif
       bool_top
     end
@@ -459,15 +483,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp e1 env >>= val_as_imm >>= fun v1 ->
     denote_exp e2 env >>= val_as_imm >>= fun v2 ->
 #ifdef VSA_DEBUG
-    (* The coercion pass promises uniform BIR widths; a hit here is a
-       contract violation answered by top.  Bounded output: the first
-       [dbg_left] hits carry the exp, then silence. *)
-    (let w1 = WordSet.bitwidth v1 and w2 = WordSet.bitwidth v2 in
-     if w1 <> w2 && !dbg_left > 0 then begin
-       decr dbg_left;
-       Format.eprintf "DBG denote_binop width-mismatch w1=%d w2=%d e=%s\n%!" w1
-         w2 (dbg_one_line (Bil.BinOp (op, e1, e2)))
-     end);
+    debug_width_mismatch op e1 e2 v1 v2;
 #endif
     return_imm @@ denote_binop op v1 v2
   | Bil.Load (m, a, e, s) ->
@@ -699,15 +715,7 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
         in
         let p = vla_seed df env p in
 #ifdef VSA_DEBUG
-        (* A def's value is stored at its lhs's declared width; a divergent
-           store is the source of downstream mismatches. *)
-        (let lw = match Var.typ v with Type.Imm n -> n | _ -> 0 in
-         let pw = WordSet.bitwidth p in
-         if lw > 0 && pw <> lw && !dbg_left > 0 then begin
-           decr dbg_left;
-           Format.eprintf "DBG denote_def store-width lhs=%s:%d width=%d rhs=%s\n%!"
-             (Var.name v) lw pw (dbg_one_line e)
-         end);
+        debug_store_width v e p;
 #endif
         vla_confirm v env p;
         AI.add_word env ~key:v ~data:p
