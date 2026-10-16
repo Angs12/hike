@@ -44,7 +44,7 @@ let dbg_one_line (e : exp) : string =
    can only reach the overlap fall-through. *)
 let stack_singleton (v : wordset) : bool =
   match WordSet.stack_offsets v with
-  | Some o -> Word_ops.is_one (WordSet.Clp.cardinality o)
+  | Some o -> Word_ops.is_one (WordSet.cardinality (WordSet.stack_word o))
   | None -> false
 
 let debug_b16_eq (v1 : wordset) (v2 : wordset) : unit =
