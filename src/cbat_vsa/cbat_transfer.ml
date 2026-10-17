@@ -276,8 +276,9 @@ let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
   Option.map (image_raw bytes off ~endian ~bits) ~f:(fun v ->
       Cbat_word.of_int64 ~width:bits v)
 
-(* An address set the image rule can enumerate exactly. *)
-let image_load_card_cap = 64
+(* An address set the image rule can enumerate exactly; a dispatch table
+   (wc, cksum: 109 entries) must fit. *)
+let image_load_card_cap = 4096
 
 (* The image-backed load: an address set fully bounded inside ONE
    threaded image, with no stored cell intersecting the access extent
