@@ -140,6 +140,19 @@ let ws_run_binary (path : string) (run_sub : Vsa.section_image list -> sub term 
       Ok (List.map (run_sub (section_images proj)) subs)
   with e -> Error (Run_error e)
 
+(* Load a binary through the production driver and apply [run_sub] to each
+   sub of the discovered program, with the run's solved facts. *)
+let ws_run_discovered (path : string)
+    (run_sub : Hike.Kb.facts -> sub term -> 'a) :
+    ('a list, ws_binary_error) result =
+  try
+    match Hike.Drive.load path with
+    | Error e -> Error (Load_error e)
+    | Ok proj ->
+      let { Hike.Drive.program; facts; _ } = Hike.Drive.run proj in
+      Ok (List.map (run_sub facts) (Term.enum sub_t program |> Seq.to_list))
+  with e -> Error (Run_error e)
+
 let sp_of (proj : Project.t) : var = Hike.Abi.sp (Project.target proj)
 
 (* Run [f]; wall time in seconds. *)

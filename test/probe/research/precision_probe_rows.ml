@@ -60,7 +60,6 @@ let shape_of (ws : Ws.t) : shape option =
 module Sub_stats = struct
   type t = {
     sname : string;
-    mutable sub_ms : int;
     (* all-defs series (8 buckets) *)
     mutable def_exact : int;
     mutable def_b2_3 : int;
@@ -102,7 +101,7 @@ module Sub_stats = struct
   }
 
   let create (name : string) : t =
-    { sname = name; sub_ms = 0;
+    { sname = name;
       def_exact = 0; def_b2_3 = 0; def_b4_8 = 0; def_b9_64 = 0;
       def_b65p = 0; def_top = 0; def_bottom_live = 0;
       def_bottom_dead = 0;
@@ -175,7 +174,6 @@ module Sub_stats = struct
 
   (* Accumulate one sub into the BIN sum (w_max takes max). *)
   let add_sum (dst : t) (src : t) : unit =
-    dst.sub_ms <- dst.sub_ms + src.sub_ms;
     dst.def_exact <- dst.def_exact + src.def_exact;
     dst.def_b2_3 <- dst.def_b2_3 + src.def_b2_3;
     dst.def_b4_8 <- dst.def_b4_8 + src.def_b4_8;

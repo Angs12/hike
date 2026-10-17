@@ -1,7 +1,8 @@
-(* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
+(* Precision measurement driver: per-sub TSV precision buckets + BIN rollup,
+   measured over the production solve (Hike.Drive.run's facts).
    Usage: dune exec test/probe/research/precision_probe.exe -- <binary> [<binary> ...]
-   Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
-   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 4 ldstk_sh,
+   Gate-free: every def is denoted.
+   Columns: binary, sub, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 4 ldstk_sh,
    4 defstk_sh (see [row_of]).
    L2a diag mode (HIKE_VSA_DIAG_BOTTOM=1) adds DIAG/DIAG_SUM lines; OFF output is plain. *)
 
@@ -300,7 +301,7 @@ type bin_report = {
 
 (* Per-sub columns as strings (binary prefixed by caller). *)
 let row_of (s : Sub_stats.t) : string list =
-  [ s.Sub_stats.sname; string_of_int s.Sub_stats.sub_ms;
+  [ s.Sub_stats.sname;
     string_of_int s.Sub_stats.def_exact;
     string_of_int s.Sub_stats.def_b2_3;
     string_of_int s.Sub_stats.def_b4_8;
@@ -360,16 +361,18 @@ let print_bin_line (r : bin_report) : unit =
     (String.concat "\t" ("BIN" :: cols @ [ pct_filtered; pct_full; pct_bound ]));
   flush stdout
 
-(* One sub, one fixpoint + measurement walk. *)
-let run_sub (bname : string) (images : Vsa.section_image list) (sub : sub term) : outcome =
+(* One sub measured over the production solve: the block IN-states the
+   discovery worklist solved (with its summaries and resolved edges); a
+   block the solve never reached reads bottom. *)
+let run_sub (bname : string) (facts : Hike.Kb.facts) (sub : sub term) : outcome =
   try
-    let t0 = Unix.gettimeofday () in
-    let sol = Probe_common.run_sub_fixpoint ~images sub in
-    let t1 = Unix.gettimeofday () in
-    (* Per-block TAG state is the IN-state ([tags = sol]); the walk
-       re-denotes defs, so it reads the same images the solve read. *)
-    let st = Vsa.with_images images (fun () -> collect_stats bname sub sol sol) in
-    st.Sub_stats.sub_ms <- int_of_float ((t1 -. t0) *. 1000.0);
+    let sol =
+      Graphlib.Std.Solution.create
+        (Core.Map.map facts.Hike.Kb.envs ~f:fst) AI.bottom in
+    (* The walk re-denotes defs, so it reads the images the solve read. *)
+    let st =
+      Vsa.with_images facts.Hike.Kb.images
+        (fun () -> collect_stats bname sub sol sol) in
     Ok st
   with e ->
     Crash (describe_exn e, Printexc.get_backtrace ())
@@ -378,9 +381,9 @@ let run_binary (path : string) : bin_report =
   let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0; nloadfail = 0;
             sum = Sub_stats.create "BIN" } in
   let bname = Filename.basename path in
-  let run_one images sub =
+  let run_one facts sub =
     r.nsubs <- r.nsubs + 1;
-    match run_sub bname images sub with
+    match run_sub bname facts sub with
     | Ok st ->
       r.nok <- r.nok + 1;
       Sub_stats.add_sum r.sum st;
@@ -393,7 +396,7 @@ let run_binary (path : string) : bin_report =
        | _ -> Printf.printf "  backtrace:\n%s\n" bt);
       flush stdout
   in
-  match Probe_common.ws_run_binary path run_one with
+  match Probe_common.ws_run_discovered path run_one with
   | Ok _ -> print_bin_line r; r
   | Error (Probe_common.Load_error e) ->
     r.nloadfail <- 1;
