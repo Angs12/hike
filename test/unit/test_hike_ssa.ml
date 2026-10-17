@@ -334,6 +334,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ ext; sub ] () in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
         let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let sub =
           Term.enum sub_t prog

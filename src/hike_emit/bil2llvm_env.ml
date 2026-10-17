@@ -333,25 +333,19 @@ let lane_type ctx (a : Arg.t) : Llvm.lltype =
 let lane_value_of (a : Arg.t) (v : Llvm.llvalue) : Bil2llvm_value.t =
   if lane_is_ptr a then Bil2llvm_value.Ptr v else Bil2llvm_value.Int v
 
+(* A sub's lanes are its own signature; a tid that is no sub (the
+   indirect convention, the twins) takes the machine's. *)
 let get_args ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
-  | Some sub
-    when Base.Option.is_some (Term.first blk_t sub)
-         && not (Hike_stack_model.is_plt_trampoline_sub sub) ->
-    Hike_stack_model.sig_args sub
-  | Some _ | None ->
-    (* A declaration's interface is the machine's own convention: the
-       bodyless sub (an external the loader binds) and the trampoline
-       (the PLT stub — its absorbed body is the loader's protocol,
-       never the module's code) carry no lanes of their own. *)
+  | Some sub -> Hike_stack_model.sig_args sub
+  | None ->
     if Core.Set.mem ctx.synthetic sub_tid then synthetic_args ctx
     else reg_args ~intent:In (Abi.param_regs ctx.abi)
 
 let get_rets ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
-  | Some sub when Base.Option.is_some (Term.first blk_t sub) ->
-    Hike_stack_model.sig_rets sub
-  | Some _ | None ->
+  | Some sub -> Hike_stack_model.sig_rets sub
+  | None ->
     if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
     else reg_args ~intent:Out ctx.abi.Abi.return_regs
 

@@ -90,6 +90,12 @@ let compute_sub_sig ~(free_vars : var list)
         ]
       in
       (rets, args)
+    else if Model.is_declared sub then
+      (* A declaration's signature is the machine's own convention: the
+         loader binds the name, so it carries no lanes of its own. *)
+      ( rets,
+        Base.List.map (Abi.param_regs abi) ~f:(fun reg ->
+            Arg.create ~intent:In reg (Var reg)) )
     else
       (* The signature transcribes the sub term's own BIR args
          (promoted slots included). *)
@@ -153,10 +159,7 @@ let compute_sub_sig ~(free_vars : var list)
       in
       let args =
         if has_call then
-          let is_plt_sig = Model.is_declared sub in
-          let params =
-            if is_plt_sig then Abi.param_regs abi else abi.Abi.int_param_regs
-          in
+          let params = abi.Abi.int_param_regs in
           let is_param v = Base.List.exists params ~f:(Var.same v) in
           let param_args =
             Base.List.map params ~f:(fun reg ->

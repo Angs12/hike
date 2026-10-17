@@ -380,6 +380,24 @@ let tests : unit Alcotest.test list =
         check "TYPES-24"
           (Model.is_plt_trampoline_sub stamped
           && not (Model.is_plt_trampoline_sub stamped2)));
+
+    (* One lane source: a declaration's signature is the machine
+       convention, so a call, a declaration and the emitter agree. *)
+    pin "TYPES-26" "a bodyless declaration is signed with the machine convention"
+      (fun () ->
+        let target = x86 () in
+        let a = Abi.of_target target in
+        let signed = Types.sign_sub ~target (Sub.create ~name:"types26_ext" ()) in
+        check "TYPES-26 args are exactly the ABI's parameter registers, In"
+          (Base.List.equal Var.same
+             (Base.List.map (Model.sig_args signed) ~f:Arg.lhs)
+             (Abi.param_regs a)
+          && Base.List.for_all (Model.sig_args signed) ~f:(fun l ->
+                 Arg.intent l = Some In));
+        check "TYPES-26 rets are the return lanes"
+          (Base.List.equal Var.same
+             (Base.List.map (Model.sig_rets signed) ~f:Arg.lhs)
+             (Base.List.map (Types.return_lanes ~target signed) ~f:Arg.lhs)));
   ]
 
 let () = run "hike_types" tests
