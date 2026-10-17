@@ -222,6 +222,14 @@ module Test_seam : sig
     seeds:Var.Set.t ->
     AI.t -> blk term -> AI.t
 
+  (* The solver's edge step: the guard, then the walk; bottom when the
+     guard is proven unsatisfiable by the state. *)
+  val refine_edge_inline :
+    sol:(tid, AI.t) Solution.t ->
+    rctx:refine_ctx ->
+    discarded:bool ->
+    blk term -> AI.t -> exp -> AI.t
+
   (* The walk's env-write sites, named for the counting refine. *)
   type write_site = Cbat_backward.write_site = Output_write | Input_write
 

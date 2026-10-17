@@ -151,6 +151,61 @@ let tests : unit Alcotest.test list =
         check "SEAM-04"
           (Ws.elem (Cbat_word.of_int64 ~width:32 (-1L))
              (AI.find_word 32 out x)));
+    (* The edge step reads a guard no state satisfies as a dead edge. *)
+    pin "SEAM-05"
+      "refine_edge_inline: an empty guard meet is a dead edge; a satisfiable or merely narrowing guard, an unreached read and a discarded walk are not"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "dead_x" (Type.Imm 32) in
+        let zf = v1 "dead_zf" in
+        let c32 k = Bil.Int (Cbat_word.to_word (w32 k)) in
+        let edge ?(defs = []) ?(discarded = false) ?(landmarks = fun f -> f ())
+            xval cond =
+          let sub = straight_sub "dead_edge" defs in
+          let entry =
+            AI.add_word (anchored_entry ()) ~key:x ~data:xval in
+          let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi ~entry sub) in
+          let rctx = mk_rctx ~abi sub in
+          let blk = List.hd (Term.enum blk_t sub |> Seq.to_list) in
+          let env = Graphlib.Std.Solution.get sol (Term.tid blk) in
+          let out = ref AI.bottom in
+          Vsa.Test_seam.with_widening_head rctx (Some (Tid.for_name "dead_head"))
+            (fun () ->
+              out :=
+                Vsa.Test_seam.refine_edge_inline ~sol ~rctx ~discarded blk env cond);
+          (!out, rctx)
+        in
+        let two = Ws.of_list ~width:32 [ w32 1; w32 5 ] in
+        let dead out = AI.equal out AI.bottom in
+        let both =
+          Bil.BinOp (Bil.AND, Bil.BinOp (Bil.LT, Bil.Var x, c32 3),
+                     Bil.BinOp (Bil.LT, c32 2, Bil.Var x)) in
+        let o, _ = edge two both in
+        check "SEAM-05.empty-meet" (dead o);
+        let o, _ = edge two (Bil.BinOp (Bil.LT, Bil.Var x, c32 3)) in
+        check "SEAM-05.narrowing"
+          ((not (dead o)) && Ws.equal (AI.find_word 32 o x) (Ws.singleton (w32 1)));
+        let o, _ =
+          edge two
+            (Bil.BinOp (Bil.AND, Bil.BinOp (Bil.LT, Bil.Var x, c32 6),
+                        Bil.BinOp (Bil.LT, c32 0, Bil.Var x))) in
+        check "SEAM-05.satisfiable" ((not (dead o)) && Ws.equal (AI.find_word 32 o x) two);
+        let o, _ = edge ~discarded:true two both in
+        check "SEAM-05.discarded" (not (dead o));
+        let o, _ = edge (Ws.bottom 32) (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) in
+        check "SEAM-05.unreached-read" (not (dead o));
+        let o, _ =
+          edge ~defs:[ Def.create zf (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) ]
+            two (Bil.Var zf) in
+        check "SEAM-05.flag-def" (dead o);
+        let o, _ = edge two (Bil.BinOp (Bil.EQ, c32 3, c32 4)) in
+        check "SEAM-05.constants" (dead o);
+        let o, rctx = edge (Ws.singleton (w32 0)) (Bil.BinOp (Bil.EQ, Bil.Var x, c32 20)) in
+        check "SEAM-05.dead-with-landmark"
+          (dead o
+           && List.exists
+                (fun (e : Cbat_landmarks.lm_entry) -> Cbat_word.equal e.bound (w32 20))
+                (Cbat_landmarks.entries (Vsa.Test_seam.landmarks_of rctx)
+                   (Tid.for_name "dead_head") (Cbat_landmarks.Word x))));
   ]
 
 let () = run "seam" tests

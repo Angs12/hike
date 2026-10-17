@@ -176,5 +176,6 @@ val tag : t -> string
 
 (* Operand pre-images, with representation and origin dispatch owned by
    the value domain. Alternatives are joined before returning. *)
+val backward0 : value:Cbat_word.t -> result:t -> bool
 val backward1 : Cbat_preimage.unop -> arg:t -> result:t -> t
 val backward2 : Cbat_preimage.binop -> left:t -> right:t -> result:t -> t * t

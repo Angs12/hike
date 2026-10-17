@@ -263,6 +263,177 @@ let tests =
         List.iter
           (fun x -> check "INV-09.drop" (not (P.elem (W.of_int64 x) got)))
           [ 1L; 255L; Int64.minus_one ]);
+    pin "INV-10"
+      "a constant is admitted unless a result of its own width excludes it"
+      (fun () ->
+        let c = w 8 7 in
+        check "INV-10.in" (S.backward0 ~value:c ~result:(S.of_clp (iv 8 0 9)));
+        check "INV-10.out"
+          (not (S.backward0 ~value:c ~result:(S.of_clp (iv 8 8 20))));
+        check "INV-10.bottom"
+          (not (S.backward0 ~value:c ~result:(S.bottom 8)));
+        check "INV-10.width"
+          (S.backward0 ~value:c ~result:(S.of_clp (iv 16 8 20)));
+        let env =
+          Cbat_vsa.Test_seam.constrain_operands ~env:Cbat_vsa.AI.top
+            ~landmarks:(Cbat_landmarks.create ())
+            (Bil.Int (Word.of_int ~width:8 7))
+            (S.of_clp (iv 8 8 20))
+        in
+        check "INV-10.walk" (Cbat_vsa.AI.equal env Cbat_vsa.AI.bottom));
+    pin "INV-11"
+      "binary kernels keep every satisfying pair for wrapped results and \
+       signed divisors" (fun () ->
+        let ops =
+          [ Bil.PLUS; MINUS; TIMES; DIVIDE; SDIVIDE; MOD; SMOD; LSHIFT;
+            RSHIFT; ARSHIFT; AND; OR; XOR; EQ; NEQ; LT; LE; SLT; SLE ]
+        in
+        let lefts = [ P.top 8; iv 8 0xF0 0x20 ] in
+        let rights =
+          List.map (fun k -> P.singleton (w 8 k))
+            [ 1; 2; 3; 7; 0x80; 0xFD; 0xFE; 0xFF ]
+          @ [ iv 8 0xFB 0x05 ]
+        in
+        List.iter
+          (fun op ->
+            let comparison =
+              match op with
+              | Bil.EQ | NEQ | LT | LE | SLT | SLE -> true
+              | _ -> false
+            in
+            let results =
+              if comparison then [ iv 1 0 0; iv 1 1 1 ]
+              else [ iv 8 0xFB 0x07; iv 8 0xF0 0xFA; iv 8 0 0; iv 8 0x7F 0x81 ]
+            in
+            List.iter
+              (fun left ->
+                List.iter
+                  (fun right ->
+                    List.iter
+                      (fun result ->
+                        let a, b = P.backward2 (I.Op op) ~left ~right ~result in
+                        List.iter
+                          (fun x ->
+                            List.iter
+                              (fun y ->
+                                let undefined =
+                                  (op = Bil.DIVIDE || op = SDIVIDE || op = MOD
+                                  || op = SMOD)
+                                  && W.is_zero y
+                                in
+                                if not undefined then
+                                  let z =
+                                    Bil.Apply.binop op (W.to_word x)
+                                      (W.to_word y)
+                                    |> W.of_word
+                                  in
+                                  if
+                                    P.elem z result
+                                    && not (P.elem x a && P.elem y b)
+                                  then
+                                    Alcotest.failf
+                                      "pre-image excludes %a op %a = %a" W.pp x
+                                      W.pp y W.pp z)
+                              (P.elements right))
+                          (P.elements left))
+                      results)
+                  rights)
+              lefts)
+          ops);
+    pin "INV-12"
+      "unary kernels keep every satisfying input for wrapped results and \
+       a full-width extract" (fun () ->
+        let ops =
+          [ I.Lnot; I.Neg; I.Cast (Bil.LOW, 8); I.Cast (Bil.HIGH, 8);
+            I.Cast (Bil.SIGNED, 16); I.Cast (Bil.UNSIGNED, 16);
+            I.Extract (Some 7, 0); I.Extract (Some 11, 4);
+            I.Extract (Some 15, 8) ]
+        in
+        let arg = P.top 16 in
+        List.iter
+          (fun op ->
+            let rw =
+              match op with
+              | I.Lnot | I.Neg -> 16
+              | I.Cast (_, n) -> n
+              | I.Extract (Some hi, lo) -> hi - lo + 1
+              | I.Extract (None, _) -> 16
+            in
+            let results =
+              [ iv rw (1 lsl (rw - 1) |> fun h -> h + 3 |> fun v -> v mod (1 lsl rw))
+                  ((1 lsl (rw - 1)) - 3 + (1 lsl rw) |> fun v -> v mod (1 lsl rw));
+                iv rw 0 1;
+                P.singleton (w rw ((1 lsl rw) - 1)) ]
+            in
+            List.iter
+              (fun result ->
+                let got = P.backward1 op ~arg ~result in
+                List.iter
+                  (fun x ->
+                    if P.elem (I.word1 op x) result && not (P.elem x got) then
+                      Alcotest.failf "unary pre-image excludes %a" W.pp x)
+                  (P.elements arg))
+              results)
+          ops);
+    pin "INV-13"
+      "stack-relative inverses keep every satisfying value for each \
+       concrete base" (fun () ->
+        let bases =
+          List.map Int64.of_string
+            [ "0x7ffc00001008"; "0x7ffd12345678"; "0x4000000000000008" ]
+          |> List.map (fun b -> Int64.logor (Int64.logand b (Int64.lognot 15L)) 8L)
+        in
+        let off i = W.of_int64 (Int64.of_int i) |> fun x -> W.cast Bil.SIGNED 64 (W.cast Bil.LOW 16 x) in
+        let rel lo hi = S.stack_word (C.interval ~width:64 (off lo) (off hi)) in
+        let in_value base x u =
+          match S.relative_offsets u with
+          | Some offs -> P.elem (W.sub x (W.of_int64 base)) offs
+          | None -> S.elem x u
+        in
+        let check_case name op ~left ~right ~result ~left_offs ~right_vals
+            ~result_has =
+          let a, b = S.backward2 op ~left ~right ~result in
+          List.iter
+            (fun base ->
+              let bw = W.of_int64 base in
+              List.iter
+                (fun ox ->
+                  let x = W.add bw ox in
+                  List.iter
+                    (fun y ->
+                      let z =
+                        match op with
+                        | I.Op o ->
+                          Bil.Apply.binop o (W.to_word x) (W.to_word y)
+                          |> W.of_word
+                        | I.Concat -> assert false
+                      in
+                      if result_has base z && not (in_value base x a && S.elem y b)
+                      then
+                        Alcotest.failf "%s excludes base %Lx off %a y %a" name
+                          base W.pp ox W.pp y)
+                    right_vals)
+                left_offs)
+            bases
+        in
+        let offs lo hi = P.elements (C.interval ~width:64 (off lo) (off hi)) in
+        let plain xs = List.map (fun k -> w 64 k) xs in
+        check_case "INV-13.plus" (I.Op Bil.PLUS) ~left:(rel (-20) 20)
+          ~right:(S.of_clp (P.of_list ~width:64 (plain [ 3; 5 ])))
+          ~result:(rel 0 10) ~left_offs:(offs (-20) 20)
+          ~right_vals:(plain [ 3; 5 ])
+          ~result_has:(fun base z ->
+            P.elem (W.sub z (W.of_int64 base)) (C.interval ~width:64 (off 0) (off 10)));
+        check_case "INV-13.minus" (I.Op Bil.MINUS) ~left:(rel (-20) 20)
+          ~right:(S.singleton (w 64 4)) ~result:(rel (-30) (-10))
+          ~left_offs:(offs (-20) 20) ~right_vals:(plain [ 4 ])
+          ~result_has:(fun base z ->
+            P.elem (W.sub z (W.of_int64 base))
+              (C.interval ~width:64 (off (-30)) (off (-10))));
+        check_case "INV-13.eq-same-origin" (I.Op Bil.EQ) ~left:(rel (-20) 20)
+          ~right:(S.singleton (w 64 3)) ~result:(S.singleton W.b1)
+          ~left_offs:(offs (-20) 20) ~right_vals:(plain [ 3 ])
+          ~result_has:(fun _ z -> W.equal z W.b1));
   ]
 
 let () = run "preimage" tests

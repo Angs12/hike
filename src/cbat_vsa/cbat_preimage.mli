@@ -7,6 +7,12 @@ type binop = Op of Bil.binop | Concat
 val valid1 : unop -> arg:int -> result:int -> bool
 val valid2 : binop -> left:int -> right:int -> result:int -> bool
 
+(* Whether a constant can produce a result of [result_width] whose
+   members [result_has] decides: the zero-operand inverse. *)
+val admits :
+  value:Cbat_word.t -> result_width:int -> result_has:(Cbat_word.t -> bool) ->
+  bool
+
 (* Concrete semantics shared by the finite representation kernels.
    Undefined division supplies no exclusion evidence. *)
 val word1 : unop -> Cbat_word.t -> Cbat_word.t

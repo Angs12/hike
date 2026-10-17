@@ -202,26 +202,36 @@ let cells_fold (ce : cell_env) ~(init : 'a) ~(f : 'a -> cell -> 'a) : 'a =
    the meet empties, the trimmed piece when it narrows).  An empty meet
    is the excluded behavior: observed, the state unchanged — never the
    dead-path bottom.  A meet that does not narrow takes the identity.
-   A real narrowing is written back. *)
-let leaf_meet ~(landmarks : Cbat_landmarks.t) ~(key : Cbat_landmarks.key)
-    ~(cur : wordset) ~(meet : wordset -> wordset -> wordset)
+   A real narrowing is written back.  [on_empty] names the empty meet to
+   a caller that reads it as proof the edge is dead; the state is
+   unchanged either way. *)
+let leaf_meet ?(on_empty = ignore) ~(landmarks : Cbat_landmarks.t)
+    ~(key : Cbat_landmarks.key) ~(cur : wordset)
+    ~(meet : wordset -> wordset -> wordset)
     ~(write : wordset -> 'st -> 'st) (cstr : wordset) (st : 'st) : 'st =
   if WordSet.bitwidth cur <> WordSet.bitwidth cstr then st
   else begin
     let m = meet cur cstr in
     ignore (Cbat_landmarks.observe_unsat landmarks ~key ~p:cur ~cstr ~m);
-    if Cbat_word.is_zero (WordSet.cardinality m) then st
+    if Cbat_word.is_zero (WordSet.cardinality m) then (on_empty (); st)
     else if (not (WordSet.precedes m cur)) || WordSet.equal m cur then st
     else write m st
   end
 
-(* The leaf var's inverse: the meet, through the one leaf rule. *)
-let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
-    (v : var) (refined : wordset) : AI.t =
+(* The leaf var's inverse: the meet, through the one leaf rule.  An empty
+   meet against a value the state holds is proof the edge is dead
+   ([dead]); a bottom value is an unreached read, which proves nothing. *)
+let meet_var ?(dead : bool ref option) ~(landmarks : Cbat_landmarks.t)
+    (env : AI.t) (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
   | Type.Imm w ->
     let cur = AI.find_word w env v in
-    leaf_meet ~landmarks ~key:(Cbat_landmarks.Word v) ~cur ~meet:WordSet.meet
+    let on_empty () =
+      match dead with
+      | Some d when not (WordSet.is_bottom cur) -> d := true
+      | _ -> () in
+    leaf_meet ~on_empty ~landmarks ~key:(Cbat_landmarks.Word v) ~cur
+      ~meet:WordSet.meet
       ~write:(fun m env ->
 #ifdef VSA_DEBUG
         (match WordSet.stack_offsets cur, WordSet.stack_offsets m with
@@ -714,14 +724,14 @@ let rec reads_memory (e : exp) : bool =
   | Bil.Ite (c, t, f) -> reads_memory c || reads_memory t || reads_memory f
   | Bil.Let (_, a, b) -> reads_memory a || reads_memory b
 
-let rec constrain_operands ~(env : AI.t) ?(seed = false)
+let rec constrain_operands ~(env : AI.t) ?(seed = false) ?(dead : bool ref option)
     ?(cells : cell_env ref = ref no_cells)
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
   (* The recursive call on a sub-expression, in [env] unless given. *)
   let recur ?(env = env) e produced =
-    constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e produced in
+    constrain_operands ~seed ?dead ~env ~cells ~nonneg ~landmarks e produced in
   match e with
   | Bil.Var v ->
     if seed then (match Var.typ v with
@@ -729,13 +739,11 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
         ignore (meet_var ~landmarks env v produced);
         AI.add_word env ~key:v ~data:produced
       | _ -> env)
-    else meet_var ~landmarks env v produced
+    else meet_var ?dead ~landmarks env v produced
   | Bil.Int c ->
     (* The forward rule always produces the same constant: a disjoint
        produced value is the genuinely empty pre-image. *)
-    let cw = Cbat_word.bitwidth (Cbat_word.of_word c) in
-    if WordSet.bitwidth produced = cw
-       && not (WordSet.elem (Cbat_word.of_word c) produced)
+    if not (WordSet.backward0 ~value:(Cbat_word.of_word c) ~result:produced)
     then begin
 #ifdef VSA_DEBUG
       Format.eprintf "DBG INT-BOTTOM: const=%s produced=%a\n%!"
@@ -762,7 +770,7 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
        recur a c
      | Error _ -> env)
   | Bil.Concat (a,b) ->
-    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
+    constrain_binary ~seed ?dead ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
   | Bil.Ite (c, t, f) ->
     (* The branches are alternatives: a condition whose denotation names
        one branch constrains that branch; any other condition leaves the
@@ -863,12 +871,12 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
        cells := no_cells;
        env)
   | Bil.BinOp (op,a,b) ->
-    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
+    constrain_binary ~seed ?dead ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
   | Bil.Unknown _ -> env
 
 (* Numeric inverses join their alternatives before the effectful walk
    delivers either projection. *)
-and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
+and constrain_binary ~seed ?dead ~env ~cells ~nonneg ~landmarks op a b produced =
   match (denote_imm_exp a env, denote_imm_exp b env) with
   | Ok left, Ok right ->
       let signed =
@@ -928,10 +936,19 @@ and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
       in
       let deliver side env e c =
         match e with
-        | Bil.Int _ | Bil.Let _ -> env
+        | Bil.Int k ->
+          (* A constant operand the projection excludes cannot produce
+             the result. *)
+          (match dead with
+           | Some d when not seed
+                         && not (WordSet.backward0 ~value:(Cbat_word.of_word k) ~result:c) ->
+             d := true
+           | _ -> ());
+          env
+        | Bil.Let _ -> env
         | _ ->
           guarded side produced (fun () ->
-              constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e c)
+              constrain_operands ~seed ?dead ~env ~cells ~nonneg ~landmarks e c)
       in
       let env = deliver 'L' env a x in
       deliver 'R' env b y
@@ -991,9 +1008,9 @@ and constrain_cell_on_trace ?denoted ~(landmarks : Cbat_landmarks.t) ~(env : AI.
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}
    lives here only. *)
-let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
-    (cond : exp) : AI.t =
-  constrain_operands ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
+let constrain_edge ?(dead : bool ref option) ~(env : AI.t)
+    ~(landmarks : Cbat_landmarks.t) (cond : exp) : AI.t =
+  constrain_operands ?dead ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
 
 (* A produced-width dummy for mem defs: their constraint derivation reads
    the cells, never the width. *)
@@ -1184,7 +1201,7 @@ let walk ~(locus : locus)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
-    ~(seeds : Var.Set.t)
+    ~(seeds : Var.Set.t) ?(dead : bool ref option)
     (env : AI.t) (blk : blk term) : AI.t =
   (* The walked block's IN state, handed in by the caller — no
      solution lookup, no snapshot copy. *)
@@ -1206,7 +1223,7 @@ let walk ~(locus : locus)
     let ce = meet_owed ~on_write:ignore pre !words in
     let before = !cells in
     let env' =
-      constrain_operands ~env:ce ~cells ~landmarks
+      constrain_operands ?dead ~env:ce ~cells ~landmarks
         ~nonneg:(fun e -> witness ~env:ce e)
         (Def.rhs d) cstr'
     in
@@ -1225,8 +1242,12 @@ let walk ~(locus : locus)
          (match locus.at_def ~post:(fun () -> AI.find_word w post v) ~cstr with
           | None ->
             (* The produced value cannot satisfy the constraint: it
-               does not hold before this def. *)
-            ()
+               does not hold before this def.  A value the replay
+               produced there makes the edge dead. *)
+            (match dead with
+             | Some d when not (WordSet.is_bottom (AI.find_word w post v)) ->
+               d := true
+             | _ -> ())
           | Some cstr' ->
             locus.record_output st d cstr';
             invert_def d pre cstr')
@@ -1264,22 +1285,22 @@ let rooted ~(landmarks : Cbat_landmarks.t) (cond : exp) (f : unit -> 'a) : 'a =
 
 (* The refinement walk (the state-writer locus): the constraint meets
    the produced values (the producer subtraction). *)
-let walk_block ?(on_write : write_site -> unit = ignore)
+let walk_block ?(on_write : write_site -> unit = ignore) ?dead
     ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
     ~seeds env blk =
   walk ~locus:(writer_locus ~on_write)
     ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
-    ~witness ~seeds env blk
+    ~witness ~seeds ?dead env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
-let refine_edge ?(on_write : write_site -> unit = ignore)
+let refine_edge ?(on_write : write_site -> unit = ignore) ?dead
     ~(entry : AI.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(seeds : Var.Set.t)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
-  walk_block ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
+  walk_block ~on_write ?dead ~rctx ~entry ~landmarks:rctx.rc_landmarks
     ~witness:rctx.rc_nonneg ~seeds env blk
 
 (* The disabled continuation observed through the same rules, the
@@ -1315,15 +1336,21 @@ let refine_edge_inline
     : AI.t =
   let env_in = env in
   let landmarks = rctx.rc_landmarks in
+  (* The guard and the walk run exactly as before; [dead] only names a
+     proof that no state satisfies the guard, which makes the edge's
+     result bottom once every landmark has been observed. *)
+  let dead = ref false in
   let env = rooted ~landmarks acc_cond (fun () ->
-      constrain_edge ~env ~landmarks acc_cond) in
+      constrain_edge ~dead ~env ~landmarks acc_cond) in
   (* No constraint derived: nothing to deliver. *)
   if discarded then env_in
   else if AI.equal env AI.bottom then env
   else
     let seeds = cond_seeds ~env acc_cond in
-    if Core.Set.is_empty seeds then env
-    else
-      Stages.time `Walk (fun () ->
-          rooted ~landmarks acc_cond (fun () ->
-              refine_edge ~entry ~rctx ~seeds env b))
+    let refined =
+      if Core.Set.is_empty seeds then env
+      else
+        Stages.time `Walk (fun () ->
+            rooted ~landmarks acc_cond (fun () ->
+                refine_edge ~dead ~entry ~rctx ~seeds env b)) in
+    if !dead then AI.bottom else refined

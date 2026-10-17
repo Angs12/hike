@@ -1937,6 +1937,10 @@ let inverse_plain2 op ~left ~right ~result =
       in
       (Clp x, Clp y)
 
+let backward0 ~value ~result =
+  Cbat_preimage.admits ~value ~result_width:(bitwidth result)
+    ~result_has:(fun v -> elem v result)
+
 let backward1 op ~arg ~result =
   if
     (not (is_bottom arg || is_bottom result))

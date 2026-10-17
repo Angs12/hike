@@ -31,6 +31,13 @@ let word1 op x =
   | Cast (c, n) -> W.cast c n x
   | Extract (hi, lo) -> W.extract_exn ?hi ~lo x
 
+(* A constant's only possible value is itself: it is admitted unless a
+   result of its own width excludes it.  Another width supplies no
+   evidence. *)
+let admits ~(value : W.t) ~(result_width : int) ~(result_has : W.t -> bool) :
+    bool =
+  result_width <> W.bitwidth value || result_has value
+
 (* Undefined arithmetic supplies no evidence for excluding an input. *)
 let word2 op x y =
   let bool b = if b then W.b1 else W.b0 in

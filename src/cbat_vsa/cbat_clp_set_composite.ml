@@ -257,6 +257,8 @@ let tag t =
   match t with Scalar s -> S.tag s | Lanes ls -> sprintf "Lanes%d" (List.length ls)
 #endif
 
+let backward0 ~value ~result = S.backward0 ~value ~result:(plain result)
+
 let backward1 op ~arg ~result =
   let answer = S.backward1 op ~arg:(plain arg) ~result:(plain result) in
   if S.is_bottom answer then Scalar (S.bottom (bitwidth arg))

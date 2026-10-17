@@ -702,7 +702,11 @@ module Test_seam = struct
   let denote_imm_exp = denote_imm_exp
   let fold_block_states = fold_block_states
   let reachable_jumps = reachable_jumps
-  let constrain_edge = Cbat_backward.constrain_edge
+  let constrain_edge ~env ~landmarks cond =
+    Cbat_backward.constrain_edge ~env ~landmarks cond
+  let refine_edge_inline ~sol ~rctx ~discarded blk env cond =
+    Cbat_backward.refine_edge_inline
+      ~entry:(Solution.get sol (Term.tid blk)) ~rctx ~discarded blk env cond
   type cells = Cbat_backward.cell_env
   let no_cells = Cbat_backward.no_cells
   let owe_cell ce ~mem ~range ~bits ~endian pc =
