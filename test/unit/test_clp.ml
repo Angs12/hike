@@ -196,24 +196,20 @@ let tests : unit Alcotest.test list =
           && Ws.equal (Ws.lnot (Ws.of_list ~width:3 [ w3 5 ])) (Ws.of_list ~width:3 [ w3 2 ])
           && Ws.equal (Ws.neg (Ws.of_list ~width:3 [ w3 5 ])) (Ws.of_list ~width:3 [ w3 3 ])));
 
-    pin "CLP-35" "P5: not_implemented ~top degrades to top without raising"
-      (fun () ->
-        check "CLP-35" (Cbat_vsa_utils.not_implemented ~top:42 "policy5-probe" = 42));
-
-
-
-    pin "CLP-37" "P5: the top-path hit emits a warning log line (section cbat_vsa)"
+    pin "CLP-37"
+      "P5: not_implemented returns its top and emits a warning log line (section cbat_vsa)"
       (fun () ->
         let hits = ref [] in
         Bap_future.Std.Stream.observe Bap.Std.Event.stream (fun ev ->
             match ev with
             | Event.Log.Message info -> hits := (info.section, info.message) :: !hits
             | _ -> ());
-        ignore (Cbat_vsa_utils.not_implemented ~top:7 "policy5-log-probe");
+        let returned = Cbat_vsa_utils.not_implemented ~top:7 "policy5-log-probe" in
         check "CLP-37"
-          (List.exists
-             (fun (sec, msg) -> sec = "cbat_vsa" && contains_substring msg "policy5-log-probe")
-             !hits));
+          (returned = 7
+          && List.exists
+               (fun (sec, msg) -> sec = "cbat_vsa" && contains_substring msg "policy5-log-probe")
+               !hits));
 
     pin "CLP-38" "A1: meet wrap {10..18} n {16..19} is NOT bottom (live path)"
       (fun () ->

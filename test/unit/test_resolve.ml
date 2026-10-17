@@ -122,7 +122,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j1', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ j1 ] ()) j1
+          produce (x86_target ()) (Program.create ~subs:[ j1 ] ()) j1
         in
         check "RES-06"
           (match jmps_of_blk j1' 0 with
@@ -148,7 +148,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j9', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ j9 ] ()) j9
+          produce (x86_target ()) (Program.create ~subs:[ j9 ] ()) j9
         in
         check "RES-22"
           (match jmps_of_blk j9' 0 with
@@ -175,7 +175,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j1b', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ j1b ] ()) j1b
+          produce (x86_target ()) (Program.create ~subs:[ j1b ] ()) j1b
         in
         check "RES-07"
           (match jmps_of_blk j1b' 0 with
@@ -211,13 +211,13 @@ let tests : unit Alcotest.test list =
           |> armed [ 0x3008L; 0x3010L ]
         in
         let envs, j2', ba' =
-          produce Theory.Target.unknown
+          produce (x86_target ())
             ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
             (Program.create ~subs:[ j2 ] ()) j2
         in
         let facts =
           { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
-               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+               ~block_addrs:ba' ~target:(x86_target ())) with
             foreign_slots = Core.Int64.Set.empty }
         in
         let j2'' =
@@ -254,7 +254,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j5', _ =
-          produce Theory.Target.unknown
+          produce (x86_target ())
             ~block_addrs:[ (0x3008L, j5_tids.(1)) ]
             (Program.create ~subs:[ j5 ] ()) j5
         in
@@ -290,7 +290,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let envs6, _, _ =
-          produce Theory.Target.unknown
+          produce (x86_target ())
             ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
             (Program.create ~subs:[ j6 ] ()) j6
         in
@@ -340,7 +340,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j7', _ =
-          produce Theory.Target.unknown
+          produce (x86_target ())
             ~block_addrs:
             [ (0x3008L, j7_tids.(5)); (0x3010L, j7_tids.(6));
               (0x9000L, Tid.create ()) ]
@@ -379,7 +379,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j4', _ =
-          produce Theory.Target.unknown
+          produce (x86_target ())
             ~block_addrs:[ (0x3008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
             (Program.create ~subs:[ j4 ] ()) j4
         in
@@ -404,7 +404,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j3', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ j3 ] ()) j3
+          produce (x86_target ()) (Program.create ~subs:[ j3 ] ()) j3
         in
         check "RES-15"
           (match jmps_of_blk j3' 0 with
@@ -601,7 +601,7 @@ let tests : unit Alcotest.test list =
             [ (0x2000L, tids.(0)); (0x2008L, tids.(1)); (0x2010L, tids.(2));
               (0x2018L, tids.(3)); (0x2020L, tids.(4)); (0x3000L, tids.(5));
               (0x3008L, tids.(6)); (0x2028L, tids.(7)) ]
-            ~images Theory.Target.unknown
+            ~images (x86_target ())
             (Program.create ~subs:[ stamped ] ()) stamped
         in
         (* The dispatch materializes after the solve, in split-blocks:
@@ -609,7 +609,7 @@ let tests : unit Alcotest.test list =
            base gives the guards' delta coordinate. *)
         let facts =
           { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
-               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+               ~block_addrs:ba' ~target:(x86_target ())) with
             images;
             foreign_slots = Core.Int64.Set.empty }
         in
@@ -710,12 +710,12 @@ let tests : unit Alcotest.test list =
         in
         let block_addrs = Base.List.init 7 ~f:(fun i -> (addrs.(i), tids.(i))) in
         let envs, sub26', ba' =
-          produce ~block_addrs ~images Theory.Target.unknown
+          produce ~block_addrs ~images (x86_target ())
             (Program.create ~subs:[ stamped ] ()) stamped
         in
         let facts =
           { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
-               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+               ~block_addrs:ba' ~target:(x86_target ())) with
             images;
             foreign_slots = Core.Int64.Set.empty }
         in

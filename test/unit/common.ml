@@ -2,6 +2,10 @@
 open Bap.Std
 open Bap_core_theory
 module W = Word
+(* The x86-64 target BAP declares with its registers and roles (the one a
+   loaded project carries); [of_string "x86_64-gnu-elf"] names only the
+   register-less family. *)
+let x86_target () : Theory.Target.t = Theory.Target.of_string "bap:x86_64-gnu-elf"
 (* The word-set view of [Cbat_clp]: a value is the canonical piece union,
    built from progressions and acted on by the [Pieces] operations.  The
    single-progression layer is [Cbat_clp] itself. *)
@@ -94,10 +98,9 @@ module MV = Cbat_vsa.Mem.Val
    fixpoint so unit pins exercise the same representation the default
    entry seeds. *)
 let anchored_entry () : AI.t =
-  let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
-  let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
-  let e = AI.add_word AI.top ~key:rsp ~data:(Ws.stack_word_i64 0L) in
-  AI.add_word e ~key:rbp ~data:(Ws.stack_word_i64 0L)
+  let abi = Hike.Abi.x86_64_sysv in
+  let e = AI.add_word AI.top ~key:abi.Hike.Abi.sp ~data:(Ws.stack_word_i64 0L) in
+  AI.add_word e ~key:abi.Hike.Abi.frame_pointer ~data:(Ws.stack_word_i64 0L)
 
 let w32 = Cbat_word.of_int ~width:32
 let w33 = Cbat_word.of_int ~width:33
@@ -134,8 +137,23 @@ let v64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.I
 let v1 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 1)
 let memv (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Mem (`r64, `r8))
 
-(* Fixture stack pointer. *)
-let sp = v64 "RSP"
+(* The fixtures' registers come from the SysV ABI module, never from
+   their names: the stack pointer, the integer parameter registers in
+   order, and the return registers in order. *)
+let sysv = Hike.Abi.x86_64_sysv
+let sp = sysv.Hike.Abi.sp
+let int_param n = Base.List.nth_exn sysv.Hike.Abi.int_param_regs n
+let int_ret n = Base.List.nth_exn sysv.Hike.Abi.return_regs n
+let callee_saved n = Base.List.nth_exn sysv.Hike.Abi.callee_saved n
+let thread_pointer = sysv.Hike.Abi.thread_pointer
+let frame_ptr = sysv.Hike.Abi.frame_pointer
+
+
+let abi_cf = sysv.Hike.Abi.carry_flag
+let abi_pf = sysv.Hike.Abi.parity_flag
+let abi_zf = sysv.Hike.Abi.zero_flag
+let abi_sf = sysv.Hike.Abi.sign_flag
+let abi_of = sysv.Hike.Abi.overflow_flag
 
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
@@ -179,10 +197,10 @@ module Hv = Hike.Vsa
 
 (* The analysis facts over no envs and no addresses: the pre-solver
    world every top-identity consumer reads. *)
-let top_facts : Hike.Kb.facts =
+let top_facts () : Hike.Kb.facts =
   Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
     ~block_addrs:(Core.Map.empty (module Addr))
-    ~target:Theory.Target.unknown
+    ~target:(x86_target ())
 
 (* The fixtures' callees: a sub of [prog] writes the registers its
    own defs write; any other target writes anything. *)
@@ -216,7 +234,7 @@ let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
 
 (* Runs the production attribution protocol over fixture analysis facts. *)
 let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
-  let target = Theory.Target.unknown in
+  let target = (x86_target ()) in
   let prog = Program.create ~subs () in
   let acc =
     Seq.fold (Term.enum sub_t prog) ~init:Tid.Map.empty ~f:(fun acc sub ->
@@ -256,7 +274,7 @@ let fixture_facts (subs : sub term list) :
       ~f:(fun (m, stamped, ok) sub ->
         let envs, sub', _ =
           solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
-            Theory.Target.unknown sub
+            (x86_target ()) sub
         in
         (Core.Map.merge m envs
            ~f:(fun ~key:_ el ->
@@ -266,7 +284,7 @@ let fixture_facts (subs : sub term list) :
          ok && not (Core.Map.is_empty envs)))
   in
   (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
-     ~block_addrs:(Core.Map.empty (module Addr)) ~target:Theory.Target.unknown,
+     ~block_addrs:(Core.Map.empty (module Addr)) ~target:(x86_target ()),
    Base.List.rev stamped,
    ok && not (Core.Map.is_empty all_envs))
 

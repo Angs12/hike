@@ -12,7 +12,7 @@ exact-equality assertion fails under that inversion.
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
 | HSB-03 | `position_pair`: representable offsets map to `base + offset` | replace the two `position_of_offset` binds with `Some lo`/`Some hi` | pin FAILs: bounded offsets return raw offsets, not positions |
-| HSB-06 | `stack_floor ~entry = entry + Int64.min_int` (the below-entry bound) | change `Stdlib.Int64.min_int` to `Stdlib.Int64.max_int` | pin FAILs: the concrete constant `-4611686018427387896` changes |
+| HSB-06 | `stack_floor ~entry = entry + Int64.min_int` (the below-entry bound), pinned at literal entries 0, 1 and -1 | change `Stdlib.Int64.min_int` to `Stdlib.Int64.max_int` | pin FAILs: the concrete constant `-4611686018427387896` changes |
 | HSB-08 | `positions_of_offsets`: a finite offset interval projects to exact positions | swap `~f:position_pair` for a constant `Some (0L, 0L)` | pin FAILs: bounds become `(0,0)`, not `base-16, base-8` |
 | HSB-12 | `unsigned_bounds`: plain extrema as int64; a stack value projects absolutely | return `(Ws.offset_extrema …)`'s raw words instead of `min_elem`/`max_elem` | pin FAILs: the stack case answers offsets (`-8`), not positions |
 | HSB-15 | `full_bounds`: a swapped hull spans the whole scope | drop the `lo > hi` arm (fall through to the direction tests) | pin FAILs: `(10, -10)` no longer returns `(flo, cei)` |

@@ -5,10 +5,12 @@
 open Bap.Std
 open Core
 
-(* Per-(key, bound, is_upper) entry; smaller distance wins. *)
+(* Per-(key, inequality, is_upper) entry; smaller distance wins.  An
+   entry without a guard is identified by its bound. *)
 type lm_entry = {
   bound : Cbat_word.t;
   is_upper : bool;
+  guard : string option;       (* the program inequality it measures *)
   mutable dist : int option;   (* current distance *)
   mutable dist_p : int option;  (* previous distance *)
 }
@@ -86,12 +88,13 @@ type row = { key : key; entries : lm_entry list }
 type t = {
   rows : (Tid.t, row list) Hashtbl.t;
   mutable widening_at_head : Tid.t option;  (* head currently widened; None outside a cycle *)
+  mutable guard : (unit -> string) option;  (* the comparison being inverted *)
 }
 
 (* One fresh table per solve — the widening state is the run's, never
    the process's. *)
 let create () : t =
-  { rows = Hashtbl.create (module Tid); widening_at_head = None }
+  { rows = Hashtbl.create (module Tid); widening_at_head = None; guard = None }
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 let with_widening_head (t : t) (head : Tid.t option) (f : unit -> 'a) : 'a =
@@ -102,6 +105,18 @@ let with_widening_head (t : t) (head : Tid.t option) (f : unit -> 'a) : 'a =
 (* Whether a cycle head is being widened; outside one, no observation
    records anything. *)
 let in_cycle (t : t) : bool = Option.is_some t.widening_at_head
+
+(* Run [f] with [guard] naming the comparison whose operands it inverts:
+   the landmarks it records measure that inequality, so a boundary that
+   follows the other operand's iterate stays one landmark.  Outside a
+   cycle nothing records, so the name is never built. *)
+let with_guard (t : t) (guard : unit -> string) (f : unit -> 'a) : 'a =
+  if not (in_cycle t) then f ()
+  else begin
+    let prev = t.guard in
+    t.guard <- Some guard;
+    Fun.protect ~finally:(fun () -> t.guard <- prev) f
+  end
 
 (* The row [key] holds at [head], if any. *)
 let find_row (t : t) (h : Tid.t) (key : key) : row option =
@@ -117,17 +132,19 @@ let keys_at (t : t) (h : Tid.t) : key list =
   Option.value_map (Hashtbl.find t.rows h) ~default:[]
     ~f:(List.map ~f:(fun r -> r.key))
 
-(* No entry cap.  The upsert keeps one entry per (bound, is_upper) with the
-   smallest distance, so a row grows only with the distinct boundaries its
-   key is measured against — and the same-line acquisition guard is what
-   keeps those stable.  A head that grinds to the visit budget is bounded
-   by that budget, not by a cap here.
-
-   The upsert: one entry per (bound, is_upper); a smaller distance wins and
-   the history is preserved — only [advance] rotates it. *)
+(* No entry cap.  The upsert keeps one entry per (inequality, is_upper)
+   with the smallest distance: a guarded entry follows its inequality
+   whatever boundary the other operand's iterate gives it, so a row grows
+   only with the program's comparisons.  An unguarded entry is one per
+   (bound, is_upper).  The history is preserved — only [advance] rotates
+   it. *)
 let upsert (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   let same (e : lm_entry) =
-    Cbat_word.equal e.bound entry.bound && Bool.equal e.is_upper entry.is_upper
+    Bool.equal e.is_upper entry.is_upper
+    && (match e.guard, entry.guard with
+        | Some a, Some b -> String.equal a b
+        | None, None -> Cbat_word.equal e.bound entry.bound
+        | Some _, None | None, Some _ -> false)
   in
   if List.exists entries ~f:same then
     List.map entries ~f:(fun e ->
@@ -148,6 +165,7 @@ let record (t : t) ~(head : Tid.t) ~(key : key) ~(bound : Cbat_word.t)
      closer later reading pairs against it. *)
   let entry =
     { bound; is_upper; dist = Some dist;
+      guard = Option.map t.guard ~f:(fun name -> name ());
       dist_p = if warmed then Some dist else None } in
   let rows = Option.value (Hashtbl.find t.rows head) ~default:[] in
   let rows =

@@ -19,8 +19,8 @@ let tests : unit Alcotest.test list =
       "the seam builder wires the non-negativity oracle — the SLT row on a provably non-negative load is the interval [0,4]"
       (fun () ->
         let m = memv "sc_m" in
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
+        let rsp = sp in
+        let rbp = frame_ptr in
         let x = Var.create ~is_virtual:false ~fresh:false "sc_x" (Type.Imm 32) in
         let zf = v1 "sc_zf" in
         let addr =
@@ -98,8 +98,8 @@ let tests : unit Alcotest.test list =
       "TIMES by a negative literal is not a non-negativity proof — the SLT row on x = y * -1 leaves x unconstrained"
       (fun () ->
         let m = memv "sc_neg_m" in
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
+        let rsp = sp in
+        let rbp = frame_ptr in
         let y = Var.create ~is_virtual:false ~fresh:false "sc_neg_y" (Type.Imm 32) in
         let x = Var.create ~is_virtual:false ~fresh:false "sc_neg_x" (Type.Imm 32) in
         let zf = v1 "sc_neg_zf" in

@@ -29,12 +29,12 @@ let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
 let t4_fixture_ref = Lazy.from_fun (fun () ->
 let t4_fixture () : sub term * string * string =
   let m = memv "prom_m" in
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let slot0 = ivar64 "hike_slot0" in
   let slot1 = ivar64 "hike_slot1" in
   let acc = v64 "prom_acc" in
-  let rdi = v64 "RDI" in
-  let rsi = v64 "RSI" in
+  let rdi = int_param 0 in
+  let rsi = int_param 1 in
   let ld0 =
     Def.create (v64 "prom_ld0")
       (Bil.Load (Bil.Var m, Bil.Var slot0, LittleEndian, `r64))
@@ -195,10 +195,10 @@ let pr_a6_sub () : sub term * blk term * jmp term * def term =
    stores it (mem[RBP-0xC0] := RAX) in one straight-line block. *)
 let prwc_mk_defs () : def term * def term * def term * def term * def term * var list =
   let m = memv "prwc_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let rax = v64 "RAX" in
-  let gp_args = Base.List.map ~f:v64 [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ] in
+  let rsp = sp in
+  let rbp = frame_ptr in
+  let rax = int_ret 0 in
+  let gp_args = Base.List.init 6 ~f:int_param in
   ( Def.create rbp (Bil.Var rsp),
     Def.create rax (Bil.Var (List.nth gp_args 0)),
     Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8)))),
@@ -221,8 +221,8 @@ let prwc_mk_defs () : def term * def term * def term * def term * def term * var
    store/load pair at [RBP-16] and an indexed store at [RBP-16+i*8]. *)
 let rw_frame () : sub term =
   let m = memv "rw_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let i = v64 "rw_i" in
   let push =
     Def.create m
@@ -265,9 +265,9 @@ let rw_frame () : sub term =
    the runtime piece and rebase the indexed access into its region. *)
 let rw_abi_index () : sub term =
   let m = memv "rw_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let rax = v64 "RAX" in
+  let rsp = sp in
+  let rbp = frame_ptr in
+  let rax = int_ret 0 in
   let c = v1 "rw_c" in
   let push =
     Def.create m
@@ -310,8 +310,8 @@ let rw_abi_index () : sub term =
    base still routes to the storage's base + displacement. *)
 let rw_reload () : sub term =
   let m = memv "rw_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let p = v64 "rw_p" in
   let push =
     Def.create m
@@ -363,8 +363,8 @@ let rw_accesses_named (sub : sub term) (name : string) : def term list =
    window-value def. *)
 let rw_window () : sub term =
   let m = memv "rw_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let push =
     Def.create m
       (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Var rbp, LittleEndian, `r64))
@@ -394,7 +394,7 @@ let rw_window () : sub term =
    the second half, leaving the register spills alone. *)
 let rw_variadic ~(overflow : bool) () : sub term =
   let m = memv "rw_va_m" in
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let ov = v64 "rw_va_ov" in
   let k n = Cbat_word.to_word (w64 n) |> fun w -> Bil.Int w in
   let store reg off =
@@ -405,8 +405,8 @@ let rw_variadic ~(overflow : bool) () : sub term =
            Bil.Var reg, LittleEndian, `r64 ))
   in
   let regs =
-    [ store (v64 "RSI") 0x28; store (v64 "RDX") 0x20;
-      store (v64 "RCX") 0x18; store (v64 "R8") 0x10 ]
+    [ store (int_param 1) 0x28; store (int_param 2) 0x20;
+      store (int_param 3) 0x18; store (int_param 4) 0x10 ]
   in
   let overflow_defs =
     if overflow then
@@ -466,7 +466,7 @@ let rw_sec () : sub term =
    cells (slots 0 and 2, so the arity is 3 and the gap is real). *)
 let pr_slot_callee () : sub term * def term * def term =
   let m = memv "pr_slot_m" in
-  let rbp = v64 "RBP" in
+  let rbp = frame_ptr in
   let d_rbp = Def.create rbp (Bil.Var sp) in
   let ld0 =
     Def.create (v64 "pr_slot_l0")
@@ -552,7 +552,7 @@ let tests : unit Alcotest.test list =
                ( Bil.Var keep_m,
                  Bil.BinOp
                    ( Bil.PLUS,
-                     Bil.Var (v64 "RSP"),
+                     Bil.Var sp,
                      Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w ),
                  LittleEndian,
                  `r64 ))
@@ -563,7 +563,7 @@ let tests : unit Alcotest.test list =
                ( Bil.Var keep_m,
                  Bil.BinOp
                    ( Bil.PLUS,
-                     Bil.Var (v64 "RSP"),
+                     Bil.Var sp,
                      Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w ),
                  Bil.Int (Cbat_word.to_word (w64 3)),
                  LittleEndian,
@@ -715,7 +715,7 @@ let tests : unit Alcotest.test list =
         in
         check "PR-23"
           (match
-             ( Base.Option.map (find (v64 "RBP")) ~f:Def.rhs,
+             ( Base.Option.map (find frame_ptr) ~f:Def.rhs,
                Base.Option.bind st42 ~f:(fun d ->
                    Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst) )
            with
@@ -736,7 +736,7 @@ let tests : unit Alcotest.test list =
                  match Cu.addr_of_rhs (Def.rhs d) with
                  | Some (a, _) ->
                      Core.Set.exists (Exp.free_vars a) ~f:(fun v ->
-                         String.equal (Var.name (Var.base v)) "RAX")
+                         Var.same (Var.base v) (int_ret 0))
                  | None -> false)
         in
         check "PR-39"
@@ -908,7 +908,7 @@ let tests : unit Alcotest.test list =
     pin "PR-34" "the caller binds the slot address (the store's own address)"
       (fun () ->
         let m = memv "pr_sc_m" in
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let frame =
           Def.create rsp
             (Bil.BinOp

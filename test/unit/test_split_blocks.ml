@@ -46,7 +46,7 @@ let materialize_facts ~(program : program term) ~(words : Cbat_vsa.WordSet.t)
         Base.List.find_map subs ~f:(fun (v, t) ->
             Base.Option.some_if (Int64.equal a v) t))
       ~block_envs:Tid.Map.empty ~block_addrs
-      ~target:Theory.Target.unknown
+      ~target:(x86_target ())
   in
   { facts with
     Hike.Kb.sub_addrs;

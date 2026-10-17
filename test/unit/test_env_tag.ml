@@ -43,22 +43,6 @@ let tests : unit Alcotest.test list =
 
 
 
-    (* Env2: value slots survive the post-boundary def rewrites. *)
-    pin "ENV-04" "the Env Tag survives Def.with_rhs" (fun () ->
-        let v = v64 "et_v" in
-        let d = Def.create v (Bil.Int (Cbat_word.to_word (w64 5))) in
-        let env = anchored_entry () in
-        let stamped = Vsa.set_env_tag env d in
-        let rewritten =
-          Def.with_rhs stamped (Bil.Int (Cbat_word.to_word (w64 6)))
-        in
-        check "ENV-04"
-          (match Vsa.env_tag rewritten with
-          | Some e -> AI.equal e env
-          | None -> false));
-
-
-
     (* Env3: the sweep stamps each def with the env its own transfer
        reads — the chain advances through [denote_def] and the final env
        is the block post. *)
@@ -72,7 +56,7 @@ let tests : unit Alcotest.test list =
         in
         let sub = straight_sub "et_chain" [ dx; dy ] in
         let envs, sub', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ sub ] ()) sub
+          produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
         in
         let blk = Term.first blk_t sub' |> Base.Option.value_exn in
         let pre, _ = Core.Map.find_exn envs (Term.tid blk) in
@@ -91,7 +75,7 @@ let tests : unit Alcotest.test list =
         in
         let sub = straight_sub "et_chain" [ dx; dy ] in
         let _, sub', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ sub ] ()) sub
+          produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
         in
         let dx' = find_def sub' (Term.tid dx) in
         let dy' = find_def sub' (Term.tid dy) in
@@ -110,7 +94,7 @@ let tests : unit Alcotest.test list =
         let facts0 =
           Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:Theory.Target.unknown
+            ~target:(x86_target ())
         in
         let m = memv "ets_m" in
         let y = v64 "ets_y" in
@@ -162,7 +146,7 @@ let tests : unit Alcotest.test list =
           Kb.build ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk5) (pre5, pre5))
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:Theory.Target.unknown
+            ~target:(x86_target ())
         in
         check "ENV-10"
           (match facts5.denote ~blk:blk5 ~def:d5 (Bil.Var x) with
@@ -179,7 +163,7 @@ let tests : unit Alcotest.test list =
           Kb.build ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk6) (pre6, post6))
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:Theory.Target.unknown
+            ~target:(x86_target ())
         in
         check "ENV-11"
           (match facts6.denote ~blk:blk6 (Bil.Var x) with

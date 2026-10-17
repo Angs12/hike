@@ -16,11 +16,11 @@ let w0_64 = Bil.Int (Word.zero 64)
 let x = v64 "t13_x"
 let y = v64 "t13_y"
 let t = v64 "t13_t"
-let zf = v1 "ZF"
-let cf = v1 "CF"
-let sf = v1 "SF"
-let ovf = v1 "OF"
-let pf = v1 "PF"
+let zf = abi_zf
+let cf = abi_cf
+let sf = abi_sf
+let ovf = abi_of
+let pf = abi_pf
 
 let xv = Bil.Var x
 let yv = Bil.Var y
@@ -314,15 +314,12 @@ let tests : unit Alcotest.test list =
 
 
     (* unconditional jumps untouched. *)
-    pin "JMP-42" "unconditional untouched" (fun () ->
+    pin "JMP-42" "unconditional untouched: the condition and the defs survive" (fun () ->
         let s = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
         let s' = compile_sub s in
-        check "JMP-42" (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))));
-
-    pin "JMP-43" "unconditional defs untouched" (fun () ->
-        let s = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
-        let s' = compile_sub s in
-        check "JMP-43" (Int.equal (Base.List.length (defs_of s')) 5));
+        check "JMP-42"
+          (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))
+          && Int.equal (Base.List.length (defs_of s')) 5));
 
     pin "JMP-44" "jb over CF := 1 compiles to the const-true branch and CF dies" (fun () ->
         let s =
@@ -509,15 +506,19 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let src = Bil.Var (Var.create ~is_virtual:true ~fresh:true
             "cast_source" (Type.Imm 8)) in
+        (* LOW:width(kind:middle(src)) for an 8-bit source: a narrower
+           width is a low cast of the source, the source's own width is
+           the source, a wider one keeps the extension kind. *)
+        let table kind =
+          [ (16, 4), Bil.Cast (Bil.LOW, 4, src);
+            (16, 8), src;
+            (16, 12), Bil.Cast (kind, 12, src);
+            (4, 2), Bil.Cast (Bil.LOW, 2, src) ] in
         Base.List.iter [ Bil.UNSIGNED; Bil.SIGNED ] ~f:(fun kind ->
-            Base.List.iter [ (16, 4); (16, 8); (16, 12); (4, 2) ]
-              ~f:(fun (middle, width) ->
+            Base.List.iter (table kind) ~f:(fun ((middle, width), expected) ->
                 let rhs = Bil.Var (Var.create ~is_virtual:true ~fresh:true
                     "cast_other" (Type.Imm width)) in
                 let cast = Bil.Cast (Bil.LOW, width, Bil.Cast (kind, middle, src)) in
-                let expected =
-                  if width = 8 then src
-                  else Bil.Cast ((if width < 8 then Bil.LOW else kind), width, src) in
                 let s = sub_of_defs_and_jmp "cast_widths"
                     [ Def.create zf (Bil.BinOp (Bil.EQ, cast, rhs)) ] (Bil.Var zf) in
                 check "JMP-52"

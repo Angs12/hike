@@ -124,7 +124,7 @@ let tests : unit Alcotest.test list =
     (* SP-RESTORE: the direct call rebinds sp to post-push + 8. *)
     pin "EMIT-06" "the call-pushed word rides the restore def at the continuation; no SP phi survives"
       (fun () ->
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let m = memv "sp_m" in
         let callee_tid = Tid.for_name "sp_callee" in
         (* The push: RSP := RSP - 8; mem[RSP] := retaddr. *)
@@ -190,7 +190,7 @@ let tests : unit Alcotest.test list =
               [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 1)));
                   Def.create x
                     (Bil.BinOp
-                       (Bil.PLUS, Bil.Var (v64 "RSP"),
+                       (Bil.PLUS, Bil.Var sp,
                         Bil.Int (Cbat_word.to_word (w64 1)))) ],
                 [ (1,
                    fun t ->
@@ -223,7 +223,7 @@ let tests : unit Alcotest.test list =
         let binding () : def term =
           Def.create wfam
             (Bil.BinOp
-               (Bil.PLUS, Bil.Var (v64 "RDI"),
+               (Bil.PLUS, Bil.Var (int_param 0),
                 Bil.Int (Cbat_word.to_word (w64 1))))
         in
         let build_mismatched () : string =
@@ -333,7 +333,7 @@ let tests : unit Alcotest.test list =
         let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
         let envs, sub = Vsa.stamp_envs_of_sol ~sol sub in
         let facts = Hike.Kb.build ~block_envs:envs ~lookup:(fun _ -> None)
-            ~block_addrs:Addr.Map.empty ~target:Theory.Target.unknown in
+            ~block_addrs:Addr.Map.empty ~target:(x86_target ()) in
         let tls = Some { Hike_spec.tls_lo = 0x5000L; tls_memsz = 8L;
                          tls_align = 8; tls_base = -8L; tls_prefix = 0;
                          tls_image = Bytes.make 8 '\000' } in
@@ -650,7 +650,7 @@ let tests : unit Alcotest.test list =
               [ (2, mk_goto) ];
               [], [ (1, fun t -> mk_jmp_to t (Bil.Var (v1 "c")));
                     (3, mk_goto) ];
-              [ Def.create (v64 "RAX") (Bil.Var x) ], [ (4, mk_ret) ];
+              [ Def.create (int_ret 0) (Bil.Var x) ], [ (4, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let ir = emit_ir [ sub ] in
@@ -662,7 +662,7 @@ let tests : unit Alcotest.test list =
       "a runtime-stack sub lowers the cursor under each SP decrement, leaves a \
        pure increment alone, and restores the entry cursor before the return"
       (fun () ->
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let w (x : int) = Cbat_word.to_word (w64 x) in
         let sub =
           straight_sub "emit_rstack"
@@ -692,7 +692,7 @@ let tests : unit Alcotest.test list =
       "a bounded sub gets no cursor traffic, and an alloca frame past a page \
        is probed"
       (fun () ->
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let w (x : int) = Cbat_word.to_word (w64 x) in
         let sub bytes name =
           straight_sub name
@@ -719,8 +719,8 @@ let tests : unit Alcotest.test list =
       "a pointer masked by an integer stays a pointer (ptrmask); a pointer \
        difference is an integer"
       (fun () ->
-        let rsp = v64 "RSP" and rbp = v64 "RBP" in
-        let rax = v64 "RAX" and rbx = v64 "RBX" in
+        let rsp = sp and rbp = frame_ptr in
+        let rax = int_ret 0 and rbx = callee_saved 0 in
         let m = memv "emit_mask_m" in
         let w (x : int) = Cbat_word.to_word (w64 x) in
         let d_dec = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rbx)) in
@@ -787,8 +787,8 @@ let tests : unit Alcotest.test list =
     pin "EMIT-50" "a register xchg carries no markers and stays plain"
       (fun () ->
         let m = memv "regx_m" in
-        let rbx = v64 "RBX" in
-        let r12 = v64 "R12" in
+        let rbx = callee_saved 0 in
+        let r12 = callee_saved 2 in
         let t = v64 "regx_t" in
         let sub, _ =
           sub_of "regx_sub"
@@ -868,7 +868,7 @@ let tests : unit Alcotest.test list =
               [Def.create (Hike.Atomic.lane "address" 64) (Bil.Int (atomic_w 0x2000))],
               [(3,mk_marker (Tid.for_name "intrinsic:x86:atomic_neg_64"))];
               [Def.create old (Bil.Int (atomic_w 9))], [(3,mk_goto)];
-              [Def.create (v64 "RAX") (Bil.Var old)], [(0,mk_ret)] ] in
+              [Def.create (int_ret 0) (Bil.Var old)], [(0,mk_ret)] ] in
         let ir = emit_ir [sub] in
         check "EMIT-56"
           (contains_substring ir "call i64 @hike.atomic.neg.64"

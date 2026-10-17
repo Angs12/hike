@@ -676,11 +676,11 @@ let tests : unit Alcotest.test list =
            accumulated negatives `~c1 & ~c2` (x = {25} exactly)"
           (Ws.equal (in_x l3_tid) (Ws.singleton (w32 25)));
         let m = memv "t01_m" in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let sub2, tids =
           sub_of "t01_straight"
-            [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+            [ [ Def.create rbp (Bil.Var sp);
                 Def.create m
                   (Bil.Store
                      ( Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32 )) ],
@@ -707,14 +707,14 @@ let tests : unit Alcotest.test list =
        after the store meets the cell down to {5}"
       (fun () ->
         let mem = memv "t5_m" in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let addr = Var.create ~is_virtual:true ~fresh:false "t5_addr" (Type.Imm 64) in
         let t = Var.create ~is_virtual:true ~fresh:false "t5_t" (Type.Imm 32) in
         let addr_e = Bil.Var addr in
         let addr_lit = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let sub, tids =
           sub_of "t5_store_load"
-            [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+            [ [ Def.create rbp (Bil.Var sp);
                 Def.create addr addr_lit;
                 Def.create mem
                   (Bil.Store
@@ -767,7 +767,7 @@ let tests : unit Alcotest.test list =
        data's producing load"
       (fun () ->
         let mem = memv "t5r_m" in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let ta = Var.create ~is_virtual:true ~fresh:false "t5r_a" (Type.Imm 32) in
         let tb = Var.create ~is_virtual:true ~fresh:false "t5r_b" (Type.Imm 32) in
         let t2 = Var.create ~is_virtual:true ~fresh:false "t5r_t" (Type.Imm 32) in
@@ -775,7 +775,7 @@ let tests : unit Alcotest.test list =
         let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let sub, _ =
           sub_of "t5_store_row"
-            [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+            [ [ Def.create rbp (Bil.Var sp);
                 Def.create ta (Bil.Load (Bil.Var mem, ka, LittleEndian, `r32));
                 Def.create tb (Bil.Var ta);
                 Def.create mem (Bil.Store (Bil.Var mem, kb, Bil.Var tb, LittleEndian, `r32));
@@ -847,7 +847,7 @@ let tests : unit Alcotest.test list =
           let hull_addr = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Var hu) in
           let sub_h, _ =
             sub_of "t5_store_row_hull"
-              [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+              [ [ Def.create rbp (Bil.Var sp);
                   Def.create ha (Bil.Load (Bil.Var hmem, hka, LittleEndian, `r32));
                   Def.create hb (Bil.Var ha);
                   Def.create hmem (Bil.Store (Bil.Var hmem, hkb, Bil.Var hb, LittleEndian, `r32));
@@ -932,7 +932,7 @@ let tests : unit Alcotest.test list =
       "C3: a cell constraint crosses the block boundary — the store is in another block, and        the guard block's walk delivers the constrained cell"
       (fun () ->
         let mem = memv "cb_m" in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let ta = Var.create ~is_virtual:true ~fresh:false "cb_a" (Type.Imm 32) in
         let tb = Var.create ~is_virtual:true ~fresh:false "cb_b" (Type.Imm 32) in
         let t2 = Var.create ~is_virtual:true ~fresh:false "cb_t" (Type.Imm 32) in
@@ -940,7 +940,7 @@ let tests : unit Alcotest.test list =
         let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let sub, tids =
           sub_of "cb_carry"
-            [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+            [ [ Def.create rbp (Bil.Var sp);
                 Def.create ta (Bil.Load (Bil.Var mem, ka, LittleEndian, `r32));
                 Def.create tb (Bil.Var ta);
                 Def.create mem (Bil.Store (Bil.Var mem, kb, Bil.Var tb, LittleEndian, `r32)) ],
@@ -1012,7 +1012,7 @@ let tests : unit Alcotest.test list =
             ~(load_endian : endian) ~(seed_wide : Mem.Key.t list)
             ~(seed_data : Ws.t) : AI.t * var * var * AI.t =
           let mem = memv "pf_m" in
-          let rbp = v64 "RBP" in
+          let rbp = frame_ptr in
           (* The producing chain runs at the store's own width. *)
           let data_w = Size.in_bits store_sz in
           let data_sz = store_sz in
@@ -1023,7 +1023,7 @@ let tests : unit Alcotest.test list =
           let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
           let sub, _ =
             sub_of "pf_store_row"
-              [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+              [ [ Def.create rbp (Bil.Var sp);
                   Def.create ta (Bil.Load (Bil.Var mem, ka, LittleEndian, data_sz));
                   Def.create tb (Bil.Var ta);
                   Def.create mem
@@ -1056,7 +1056,7 @@ let tests : unit Alcotest.test list =
           in
           (refined, ta, tb, forward)
         in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let k24 = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 24))) in
         let key_ofw w =
@@ -1097,7 +1097,7 @@ let tests : unit Alcotest.test list =
       "A: a cell meet whose intersection is empty leaves the env unchanged (the stored value        stays, no dead-path bottom)"
       (fun () ->
         let m = memv "pina_m" in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
         let key = key_of (Ws.stack_word_i64 (-8L)) in
         let cell5 =
@@ -1216,7 +1216,7 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub0 |> Seq.to_list |> List.find (fun b -> Term.tid b = l1_tid)
         in
         let t = Var.create ~is_virtual:true ~fresh:false "f1b4_t" (Type.Imm 32) in
-        let rbp = v64 "RBP" in
+        let rbp = frame_ptr in
         let gb =
           with_jmps
             (blk_of_defs
@@ -1268,7 +1268,7 @@ let tests : unit Alcotest.test list =
                (Bil.Load
                   ( Bil.Var mem,
                     Bil.BinOp
-                      (Bil.MINUS, Bil.Var (v64 "RBP"), Bil.Int (Cbat_word.to_word (w64 8))),
+                      (Bil.MINUS, Bil.Var frame_ptr, Bil.Int (Cbat_word.to_word (w64 8))),
                     LittleEndian,
                     `r32 ))
                env)
@@ -1339,6 +1339,41 @@ let tests : unit Alcotest.test list =
           (match Cbat_landmarks.steps lm h lw with
            | Cbat_landmarks.Finite 1 -> true
            | _ -> false));
+
+    (* A comparison is one inequality (Simon & King): the boundary its
+       operand records follows the other operand's iterate, yet stays one
+       landmark whose distance shrinks, so it pairs and fires. *)
+    pin "INT-38"
+      "LM identity: a boundary that moves with the other operand is one landmark per guard"
+      (fun () ->
+        let h = Tid.for_name "lm_guard_head" in
+        let lm = Cbat_landmarks.create () in
+        let record ~guard bound dist =
+          Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
+              let go () =
+                Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 bound)
+                  ~is_upper:true ~warmed:false ~dist in
+              if guard then Cbat_landmarks.with_guard lm (fun () -> "i < n") go
+              else go ()) in
+        record ~guard:true 100 10;
+        Cbat_landmarks.advance lm h lw;
+        record ~guard:true 101 9;
+        check "LM identity: the moved boundary updates the one entry"
+          (List.length (Cbat_landmarks.entries lm h lw) = 1);
+        check "LM identity: the paired reading fires ((9) / (10 - 9) = 9)"
+          (match Cbat_landmarks.steps lm h lw with
+           | Cbat_landmarks.Finite 9 -> true
+           | _ -> false);
+        let lm' = Cbat_landmarks.create () in
+        let h' = Tid.for_name "lm_unguarded_head" in
+        let bare bound dist =
+          Cbat_landmarks.record lm' ~key:lw ~head:h' ~bound:(w32 bound)
+            ~is_upper:true ~warmed:false ~dist in
+        bare 100 10;
+        Cbat_landmarks.advance lm' h' lw;
+        bare 101 9;
+        check "LM identity: without a guard the moved boundary is a new entry"
+          (List.length (Cbat_landmarks.entries lm' h' lw) = 2));
 
     (* The magnitude's own edge: |2^63| overflows int64, so the
        difference must cap, never raise. *)

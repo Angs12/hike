@@ -16,14 +16,6 @@ let vcast (c : Bil.cast) (w : int) (v : var) : exp = Bil.Cast (c, w, Bil.Var v)
 
 let tests : unit Alcotest.test list =
   [
-    (* CO-01: the common lifted shape — a 32-bit register against a 64-bit
-       zero literal retypes the literal down; no cast node. *)
-
-
-    (* CO-02: a wider literal the narrower width cannot represent keeps the
-       reference resolution (the register widens). *)
-
-
     (* CO-03: the fit test follows the op's signedness — a sign-extended
        all-ones literal narrows under SLT. *)
     pin "CO-03" "a sign-extended all-ones literal narrows under SLT"
@@ -63,16 +55,6 @@ let tests : unit Alcotest.test list =
             , Bil.BinOp (Bil.EQ, Bil.Var y, int64 0) )
         in
         check "CO-05" (Exp.equal (coerce e) e));
-
-    (* CO-06: a non-comparison op's result carries the common operand
-       width, so the wider literal cannot narrow — the register widens. *)
-
-
-    (* CO-07: no literal — the narrower operand casts to the wider. *)
-
-
-    (* CO-08: a narrower literal retypes in place — zero filler. *)
-
 
     (* CO-09: the filler follows the op's signedness — the signed ops
        sign-extend a narrower all-ones literal. *)
@@ -114,14 +96,6 @@ let tests : unit Alcotest.test list =
         let blk' = Hike.Coerce.coerce_block blk in
         let rhs' = Term.enum def_t blk' |> Seq.hd_exn |> Def.rhs in
         check "CO-11" (Exp.equal rhs' (vcast UNSIGNED 64 rhs)));
-
-    (* CO-12: an exactly-representable wider literal retypes to the lhs
-       width (no cast node). *)
-
-
-    (* CO-13: a wider non-literal truncates to the lhs width (the
-       emitter's def-birth rule). *)
-
 
     (* CO-14: a store's data is exactly its size. *)
     pin "CO-14" "store data coerces to the store size" (fun () ->
@@ -178,9 +152,6 @@ let tests : unit Alcotest.test list =
         let y = v64 "co18_y" in
         let e = Bil.Concat (Bil.Cast (Bil.HIGH, 0, Bil.Var x), Bil.Var y) in
         check "CO-18" (Exp.equal (Hike.Coerce.coerce_exp e) (Bil.Var y)));
-
-    (* CO-19: the dropped operand's def is then width-honest — the rhs is
-       the surviving operand, coerced to the lhs width. *)
 
     (* A Let expression's value width is the body's width, independent of
        the temporary binder's width. *)

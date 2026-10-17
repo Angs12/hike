@@ -23,17 +23,18 @@ let ori_01 () =
     (Stdlib.Int64.equal (Stdlib.Int64.sub st.Origin.hi st.Origin.lo)
        (Stdlib.Int64.mul 2L (Int64.shift_left 1L 23)))
 
-(* ORI-02: the ADT is total and names every origin. *)
+(* ORI-02: every origin has a name.  The match is exhaustive, so a new
+   constructor stops compiling here until it is listed. *)
 let ori_02 () =
-  let all =
-    [ Origin.Abs;
-      Origin.Stack; Origin.Fs;
-      Origin.Rip Hike_section.Rodata ]
+  let listed (o : Origin.t) : Origin.t =
+    match o with
+    | Origin.Abs | Origin.Stack | Origin.Fs | Origin.Rip _ -> o
   in
-  List.iter all ~f:(fun o ->
-      let n = Origin.name o in
-      check (sprintf "name %s nonempty" n) (String.length n > 0));
-  check "four origins" (List.length all = 4)
+  List.iter
+    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ]
+    ~f:(fun o ->
+        let n = Origin.name (listed o) in
+        check (sprintf "name %s nonempty" n) (String.length n > 0))
 
 (* The accessor's name answer, for the pin asserts. *)
 let origin_name (o : Origin.t option) : string option =
@@ -81,8 +82,6 @@ let ori_07 () =
   check "stored frame pointer reads back Stack"
     (Option.equal Origin.equal (round_trip (-8L)) (Some Origin.Stack))
 
-(* ORI-08: a caller-frame pointer (a Stack value at/above the word)
-   stored to a cell reads back Stack. *)
 (* ORI-18: the D10 namespace test — the stack-line origins answer
    true; a plain or module-relative origin answers false. *)
 let ori_18 () =
@@ -217,7 +216,7 @@ let ori_26 () =
 let ori_27 () =
   let m = memv "ori27_m" in
   ignore m;
-  let rsp = v64 "RSP" and rax = v64 "RAX" in
+  let rsp = sp and rax = int_ret 0 in
   let f = v1 "ori27_f" in
   let w (i : int64) = Cbat_word.to_word (i2w i) in
   let sub =

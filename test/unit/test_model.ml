@@ -64,7 +64,7 @@ let mk_store off data (sz : size) : def term =
 
 (* The [pr_b] layout fixture mem var, frame base, and MINUS/rbp load. *)
 let pr_b_m = memv "pr_b_m"
-let pr_b_rbp = v64 "RBP"
+let pr_b_rbp = frame_ptr
 
 let pr_b_mk_ld name off : def term =
   Def.create (v64 name)
@@ -78,7 +78,7 @@ let pr_b_mk_ld name off : def term =
          `r64 ))
 
 (* The [pr_c] args fixture frame base and PLUS/rbp load. *)
-let pr_c_rbp = v64 "RBP"
+let pr_c_rbp = frame_ptr
 
 let pr_c_args_ld name off (sz : size) : def term =
   Def.create (v64 name)
@@ -170,7 +170,7 @@ let tests : unit Alcotest.test list =
     pin "MOD-18"
       "PR-N3: the split RMW's hoisted read addresses the caller's slot pointer"
       (fun () ->
-        let n3_rbp = v64 "RBP" in
+        let n3_rbp = frame_ptr in
         let n3_d_rbp = Def.create n3_rbp (Bil.Var sp) in
         let n3_addr =
           Bil.BinOp
@@ -240,7 +240,7 @@ let tests : unit Alcotest.test list =
           Def.create c4_t
             (Bil.Load (Bil.Var pr_c_m, minus_addr sp 16L, LittleEndian, `r64))
         in
-        let c4_zf = v1 "ZF" in
+        let c4_zf = abi_zf in
         let c4_flag =
           Def.create c4_zf
             (Bil.BinOp
@@ -278,7 +278,7 @@ let tests : unit Alcotest.test list =
           Def.create c4_t
             (Bil.Load (Bil.Var pr_c_m, minus_addr sp 16L, LittleEndian, `r64))
         in
-        let c4_zf = v1 "ZF" in
+        let c4_zf = abi_zf in
         let c4_flag =
           Def.create c4_zf
             (Bil.BinOp
@@ -333,22 +333,53 @@ let tests : unit Alcotest.test list =
     (* Lane E: the register/convention facts (Hike_abi, ADR 0008: SP is the
        only stack-semantics register, fp an ordinary callee-saved GPR) and
        the KB carrier's table semantics. *)
-    pin "MOD-33" "PR-E1: the stack pointer is RSP, and only RSP (SP-only, ADR 0008)"
+    pin "MOD-33" "PR-E1: the stack pointer is the target's stack-pointer register, and only it (SP-only, ADR 0008)"
       (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
+        let target = x86_target () in
+        let abi = Abi.of_target target in
         check "MOD-33"
-          (Var.equal (Var.base abi.Abi.sp) (Var.base (named "RSP"))
-          && Abi.is_sp abi (named "RSP")
-          && not (Abi.is_sp abi (named "RBP"))));
+          (Var.same abi.Abi.sp (Abi.sp target)
+          && Abi.is_sp abi abi.Abi.sp
+          && not (Abi.is_sp abi abi.Abi.frame_pointer)));
 
     pin "MOD-34"
-      "PR-E1: RBP is an ordinary callee-saved GPR — no frame-pointer fact exists"
+      "PR-E1: the frame pointer is an ordinary callee-saved register; it and the flags come from the target's roles"
       (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        check "MOD-34"
-          (Abi.is_callee_saved abi (named "RBP")
-          && names_are abi.Abi.callee_saved
-               [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ]));
+        let target = x86_target () in
+        let abi = Abi.of_target target in
+        let sysv = Abi.x86_64_sysv in
+        check "MOD-34 callee-saved, not the stack pointer"
+          (Abi.is_callee_saved abi abi.Abi.frame_pointer
+           && not (Abi.is_sp abi abi.Abi.frame_pointer));
+        check "MOD-34 the target's roles name the SysV record's registers"
+          (Var.same abi.Abi.frame_pointer sysv.Abi.frame_pointer
+           && Var.same abi.Abi.zero_flag sysv.Abi.zero_flag
+           && Var.same abi.Abi.carry_flag sysv.Abi.carry_flag
+           && Var.same abi.Abi.sign_flag sysv.Abi.sign_flag
+           && Var.same abi.Abi.overflow_flag sysv.Abi.overflow_flag
+           && Var.same abi.Abi.parity_flag sysv.Abi.parity_flag);
+        check "MOD-34 the accessors answer the target's own role registers"
+          (Base.List.for_all
+             Theory.Role.Register.
+               [ frame_pointer, Abi.frame_pointer target;
+                 zero_flag, Abi.zero_flag target;
+                 carry_flag, Abi.carry_flag target;
+                 sign_flag, Abi.sign_flag target;
+                 overflow_flag, Abi.overflow_flag target;
+                 parity_flag, Abi.parity_flag target ]
+             ~f:(fun (role, v) ->
+                 match Theory.Target.reg target role with
+                 | Some r -> Var.equal (Var.reify r) v
+                 | None -> false));
+        let fails f = try ignore (f ()); false with Failure _ -> true in
+        check "MOD-34 a target without the role has no such register: the lookup fails"
+          (fails (fun () -> Abi.zero_flag Theory.Target.unknown)
+           && fails (fun () -> Abi.frame_pointer Theory.Target.unknown));
+        check "MOD-34 the flags are among the call-clobbered arithmetic flags"
+          (Base.List.for_all
+             [ abi.Abi.zero_flag; abi.Abi.carry_flag; abi.Abi.sign_flag;
+               abi.Abi.overflow_flag; abi.Abi.parity_flag ]
+             ~f:(Abi.is_flag_reg abi)));
 
 
 
@@ -362,21 +393,20 @@ let tests : unit Alcotest.test list =
              (named "RSP")
           && Hike.Abi.addr_size_bits Theory.Target.unknown = 0));
 
-    pin "MOD-38" "PR-E1: the x86_64-gnu-elf target reifies RSP as the SP"
+    pin "MOD-38" "PR-E1: the x86_64-gnu-elf target reifies the SysV stack pointer as the SP"
       (fun () ->
-        let x86 = Theory.Target.of_string "x86_64-gnu-elf" in
+        let x86 = x86_target () in
         check "MOD-38"
           (Theory.Target.matches x86 "x86_64-gnu-elf"
+          && Var.same (Hike.Abi.sp x86) Abi.x86_64_sysv.Abi.sp
           && Abi.is_sp (Hike.Abi.of_target x86) (Hike.Abi.sp x86)));
 
     pin "MOD-39"
-      "PR-E1: the word size — SysV carries the x86-64 word; of_target derives bits/8"
+      "PR-E1: the x86-64 word is 8 bytes, in the SysV record and in the target's record"
       (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        let x86 = Theory.Target.of_string "x86_64-gnu-elf" in
         check "MOD-39"
-          (abi.Abi.word = 8
-          && Hike.Abi.((of_target x86).Abi.word) = Theory.Target.bits x86 / 8));
+          (Abi.x86_64_sysv.Abi.word = 8
+          && Hike.Abi.((of_target (x86_target ())).Abi.word) = 8));
 
     (* The ONE thread-pointer offset rule: the classification and the
        width semantics.  A bare constant is a summand, never a base;
@@ -411,7 +441,7 @@ let tests : unit Alcotest.test list =
              Tp_absent);
         check "MOD-43.dynamic"
           (tp_offset_equal
-             (at (BinOp (PLUS, Var tp, Var (v64 "RDX"))))
+             (at (BinOp (PLUS, Var tp, Var (int_ret 1))))
              (Tp_based None));
         check "MOD-43.signed-cast"
           (tp_offset_equal
@@ -434,7 +464,7 @@ let tests : unit Alcotest.test list =
                      Cast (LOW, 64, Concat (int (-8), int 1)))))
              (Tp_based (Some 1L)));
         check "MOD-43.foreign"
-          (tp_offset_equal (at (Var (v64 "RAX"))) Tp_absent));
+          (tp_offset_equal (at (Var (int_ret 0))) Tp_absent));
 
     (* The ONE window denotation: stack-symbolic, ordered, entirely
        at/above the args base.  Both the promotion's window stamp and
@@ -473,7 +503,7 @@ let tests : unit Alcotest.test list =
         let module Model = Hike.Stack_model in
         let abi = Hike.Abi.x86_64_sysv in
         let rdi = Var.base (Base.List.hd_exn abi.Abi.int_param_regs) in
-        let rax = named "RAX" in
+        let rax = Var.base (int_ret 0) in
         let rbx = named "RBX" in
         let dst = named "term_phi_dst" in
         let d = Def.create rdi (Bil.Var rax) in

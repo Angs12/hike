@@ -24,8 +24,8 @@ let bk_iv32 ~lo ~hi =
        ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (s_r32 lo))
 
 (* The load-cell fixture: one memory var keyed by absolute offset words. *)
-let t_rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64)
-let t_rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64)
+let t_rsp = sp
+let t_rbp = frame_ptr
 let t_idx = Var.create ~is_virtual:true ~fresh:false "t_idx" (Type.Imm 64)
 let t_m = Var.create ~is_virtual:false ~fresh:false "t_m" (Type.Mem (`r64, `r8))
 
@@ -83,7 +83,7 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
     | Ok ws -> ws
     | Error _ -> failwith "a4: the guard does not denote"
   in
-  let cell st = cell_at (memv "a4_m") (v64 "RBP") st in
+  let cell st = cell_at (memv "a4_m") frame_ptr st in
   ( Ws.elem Cbat_word.b0 cond_ws,
     Ws.elem exit (cell head_in),
     not (Ws.elem exit (cell (Graphlib.Std.Solution.get sol body_tid))) )
@@ -92,8 +92,8 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
    end in [zf]'s guard, the edge takes zf = {1}, and the refined edge
    state is returned.  [m] is the block's memory, top at entry. *)
 let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let sub, tids =
     sub_of name
       [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
@@ -123,7 +123,7 @@ let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t
 
 (* The [RBP - 8] cell address the write-site pins store and load. *)
 let wr_addr =
-  Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"), Bil.Int (Cbat_word.to_word (w64 8)))
+  Bil.BinOp (Bil.MINUS, Bil.Var frame_ptr, Bil.Int (Cbat_word.to_word (w64 8)))
 
 let wr_v32 (n : string) = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 32)
 
@@ -200,7 +200,7 @@ let tests : unit Alcotest.test list =
         in
         let sol5 = run_anchored sub5 in
         let cell5 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub5 sol5 body5)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub5 sol5 body5)
         in
         check "BK-05"
           (not (Ws.is_top cell5) && not (Ws.elem (w32 10) cell5)));
@@ -214,7 +214,7 @@ let tests : unit Alcotest.test list =
         let m = memv "l3c1_m" in
         let sub1, body1, _ = mk_l3c1_loop ~extra_header_defs:[] ~pre_cf_defs:[] in
         let sol1 = run_anchored sub1 in
-        let cell1 = cell_at m (v64 "RBP") (iter_state_of sub1 sol1 body1) in
+        let cell1 = cell_at m frame_ptr (iter_state_of sub1 sol1 body1) in
         check "BK-06" (bounded_above cell1 (w32 9)));
 
     pin "BK-07"
@@ -230,7 +230,7 @@ let tests : unit Alcotest.test list =
             ~pre_cf_defs:[ Def.create t (Bil.Int (Cbat_word.to_word (w32 42))) ]
         in
         let sol2 = run_anchored sub2 in
-        let cell2 = cell_at m (v64 "RBP") (iter_state_of sub2 sol2 body2) in
+        let cell2 = cell_at m frame_ptr (iter_state_of sub2 sol2 body2) in
         check "BK-07" (Ws.is_bottom cell2));
 
     pin "BK-08"
@@ -245,7 +245,7 @@ let tests : unit Alcotest.test list =
             ~pre_cf_defs:[]
         in
         let sol3 = run_anchored sub3 in
-        let cell3 = cell_at m (v64 "RBP") (iter_state_of sub3 sol3 body3) in
+        let cell3 = cell_at m frame_ptr (iter_state_of sub3 sol3 body3) in
         check "BK-08" (Ws.is_top cell3));
 
     pin "BK-09"
@@ -254,7 +254,7 @@ let tests : unit Alcotest.test list =
        11 ∉; non-top)"
       (fun () ->
         let m4 = memv "l3c1_m4" in
-        let rsp4 = v64 "RSP" in
+        let rsp4 = sp in
         let t4 = Var.create ~is_virtual:false ~fresh:false "l3c1_t4" (Type.Imm 32) in
         let v4 = Var.create ~is_virtual:false ~fresh:false "l3c1_v4" (Type.Imm 32) in
         let addr4 =
@@ -277,7 +277,7 @@ let tests : unit Alcotest.test list =
         let b_tid = tids4.(1) in
         let sol4 = run_anchored sub4 in
         let cell4 =
-          cell_at m4 (v64 "RBP") (Graphlib.Std.Solution.get sol4 b_tid)
+          cell_at m4 frame_ptr (Graphlib.Std.Solution.get sol4 b_tid)
         in
         check "BK-09"
           ((not (Ws.is_top cell4))
@@ -300,7 +300,7 @@ let tests : unit Alcotest.test list =
         in
         let sol1 = run_anchored sub1 in
         let cell1 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub1 sol1 body1)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub1 sol1 body1)
         in
         check "BK-11" (bounded_above cell1 (w32 3)));
 
@@ -315,7 +315,7 @@ let tests : unit Alcotest.test list =
         in
         let sol2 = run_anchored sub2 in
         let cell2 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub2 sol2 body2)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub2 sol2 body2)
         in
         check "BK-12"
           ((not (Ws.is_top cell2))
@@ -336,7 +336,7 @@ let tests : unit Alcotest.test list =
         in
         let sol3 = run_anchored sub3 in
         let cell3 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub3 sol3 body3)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub3 sol3 body3)
         in
         check "BK-13" (l3c2_in_high cell3 half (w32 0xFFFFFFFE)));
 
@@ -350,7 +350,7 @@ let tests : unit Alcotest.test list =
         in
         let sol4 = run_anchored sub4 in
         let cell4 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub4 sol4 body4)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub4 sol4 body4)
         in
         check "BK-14" (bounded_above cell4 (w32 3)));
 
@@ -364,7 +364,7 @@ let tests : unit Alcotest.test list =
         in
         let sol5 = run_anchored sub5 in
         let cell5 =
-          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub5 sol5 body5)
+          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub5 sol5 body5)
         in
         check "BK-15" (bounded_above cell5 (w32 3)));
 
@@ -564,7 +564,7 @@ let tests : unit Alcotest.test list =
        the env unchanged (the shrunk catch-all, never asserts)"
       (fun () ->
         let m4 = memv "l3c5_m" in
-        let rsp4 = v64 "RSP" in
+        let rsp4 = sp in
         let t4 = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
         let addr4 =
           Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (Cbat_word.to_word (w64 8)))
@@ -609,11 +609,11 @@ let tests : unit Alcotest.test list =
           | _ -> failwith "BK-35: fixture block layout changed"
         in
         let icell =
-          cell_at (memv "l3b1_m") (v64 "RSP")
+          cell_at (memv "l3b1_m") sp
             (Graphlib.Std.Solution.get sol1 body1)
         in
         let ecell =
-          cell_at (memv "l3b1_m") (v64 "RSP")
+          cell_at (memv "l3b1_m") sp
             (Graphlib.Std.Solution.get sol1 (Term.tid exit1))
         in
         check "BK-35"
@@ -633,8 +633,8 @@ let tests : unit Alcotest.test list =
        the RSP anchor (the symbolic segment base at offset 0) and the \
        caller-saved rdi is topped (no AI.top degradation)"
       (fun () ->
-        let rsp = v64 "RSP" in
-        let rdi = v64 "RDI" in
+        let rsp = sp in
+        let rdi = int_param 0 in
         let sub, tids =
           sub_of "l37_intr"
             [ [], [ (1, mk_goto) ];
@@ -702,13 +702,13 @@ let tests : unit Alcotest.test list =
         let sub4, body4 =
           let f = Var.create ~is_virtual:false ~fresh:false "l39_f" (Type.Imm 32) in
           let t2 = Var.create ~is_virtual:false ~fresh:false "l39_t2" (Type.Imm 32) in
-          let of2 = v1 "OF" in
-          let sf2 = v1 "SF" in
-          let zf2 = v1 "ZF" in
+          let of2 = abi_of in
+          let sf2 = abi_sf in
+          let zf2 = abi_zf in
           mk_l39_loop ~seed:(w32 0) ~c:(w32 3) ~body_op:Bil.PLUS ~body_k:(w32 1)
             ~mk_cond:(fun ~cf:_ ~ofv:_ ~sf:_ ~zf:_ -> l39_jle zf2 sf2 of2)
             ~extra_header_defs:(fun m ->
-              let rsp2 = v64 "RSP" in
+              let rsp2 = sp in
               let addr2 =
                 Bil.BinOp (Bil.MINUS, Bil.Var rsp2, Bil.Int (Cbat_word.to_word (w64 16)))
               in
@@ -1323,7 +1323,7 @@ let tests : unit Alcotest.test list =
         in
         let sol1 = run_anchored sub1 in
         let cell1 =
-          cell_at m (v64 "RBP") (iter_state_of sub1 sol1 body1)
+          cell_at m frame_ptr (iter_state_of sub1 sol1 body1)
         in
         check "BK-86" (bounded_above cell1 (w32 99)));
 
@@ -1437,7 +1437,7 @@ let tests : unit Alcotest.test list =
           | Error _ -> failwith "a4: the guard does not denote"
         in
         let body_cell =
-          cell_at (memv "a4_m") (v64 "RBP")
+          cell_at (memv "a4_m") frame_ptr
             (Graphlib.Std.Solution.get sol body_tid)
         in
         check "BK-92.keeps" (Ws.elem (s_r32 0xFFFFFFFE) body_cell);
@@ -1482,7 +1482,7 @@ let tests : unit Alcotest.test list =
           | Ok ws -> ws
           | Error _ -> failwith "a4: the guard does not denote"
         in
-        let cell st = cell_at (memv "a4_m") (v64 "RBP") st in
+        let cell st = cell_at (memv "a4_m") frame_ptr st in
         check "BK-93.live" (Ws.elem Cbat_word.b0 cond_ws);
         check "BK-93.head-keeps" (Ws.elem (w32 4) (cell head_in));
         check "BK-93.body-excludes"
@@ -1523,7 +1523,7 @@ let tests : unit Alcotest.test list =
           mk_l3c6_storehead_loop ~nested:true ~seed:(Some (w32 0)) ~bound:(w32 2) in
         let sol = run_anchored sub in
         let cell =
-          cell_at (memv "l3c6_m") (v64 "RBP") (iter_state_of sub sol head_tid) in
+          cell_at (memv "l3c6_m") frame_ptr (iter_state_of sub sol head_tid) in
         check "BK-98" (bounded_above cell (w32 2)));
 
     pin "BK-99"
@@ -1535,7 +1535,7 @@ let tests : unit Alcotest.test list =
           mk_l3c6_storehead_loop ~nested:false ~seed:(Some (w32 0)) ~bound:(w32 2) in
         let sol = run_anchored sub in
         let cell =
-          cell_at (memv "l3c6_m") (v64 "RBP") (iter_state_of sub sol head_tid) in
+          cell_at (memv "l3c6_m") frame_ptr (iter_state_of sub sol head_tid) in
         check "BK-99" (bounded_above cell (w32 2)));
 
     (* ---------------------------------------------------------------- *)
@@ -1552,8 +1552,8 @@ let tests : unit Alcotest.test list =
        once"
       (fun () ->
         let m = memv "w5_m" in
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
+        let rsp = sp in
+        let rbp = frame_ptr in
         let x = Var.create ~is_virtual:false ~fresh:false "w5_x" (Type.Imm 32) in
         let zf = v1 "w5_zf" in
         let addr =
@@ -1722,7 +1722,7 @@ let tests : unit Alcotest.test list =
         check "BK-101.guarded"
           (not (Ws.elem (w32 50) (AI.find_word 32 out (Var.base x))));
         check "BK-101.rewritten-kept"
-          (Ws.elem (w32 50) (cell_at m (v64 "RBP") out)));
+          (Ws.elem (w32 50) (cell_at m frame_ptr out)));
 
     pin "BK-102"
       "a store's cell takes its data's constraint: x is stored, the guard \
@@ -1739,7 +1739,7 @@ let tests : unit Alcotest.test list =
               Def.create zf
                 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
         in
-        check "BK-102" (bounded_above (cell_at m (v64 "RBP") out) (w32 6)));
+        check "BK-102" (bounded_above (cell_at m frame_ptr out) (w32 6)));
 
     pin "BK-103"
       "a store's cell overwritten later takes nothing from the first \
@@ -1758,7 +1758,7 @@ let tests : unit Alcotest.test list =
               Def.create zf
                 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
         in
-        check "BK-103" (Ws.elem (w32 50) (cell_at m (v64 "RBP") out)));
+        check "BK-103" (Ws.elem (w32 50) (cell_at m frame_ptr out)));
 
     pin "BK-104"
       "a guard on a loaded value narrows the load's address to the slots \
@@ -1777,7 +1777,7 @@ let tests : unit Alcotest.test list =
           Vsa.with_images images (fun () ->
               wr_refine "w104" m zf
                 [ Def.create i
-                    (Bil.BinOp (Bil.AND, Bil.Var (v64 "RDI"), Bil.Int (Cbat_word.to_word (w64 3))));
+                    (Bil.BinOp (Bil.AND, Bil.Var (int_param 0), Bil.Int (Cbat_word.to_word (w64 3))));
                   Def.create x
                     (Bil.Load
                        ( Bil.Var m,
@@ -1876,7 +1876,7 @@ let tests : unit Alcotest.test list =
                 [ Def.create i
                     (Bil.BinOp
                        ( Bil.AND,
-                         Bil.Var (v64 "RDI"),
+                         Bil.Var (int_param 0),
                          Bil.Int (Cbat_word.to_word (w64 0xF)) ));
                   Def.create x
                     (Bil.Load
@@ -2069,7 +2069,7 @@ let tests : unit Alcotest.test list =
                                       LittleEndian, `r32)) ]
                     else [])
                    @ [ Def.create i
-                         (Bil.BinOp (Bil.AND, Bil.Var (v64 "RDI"), addr 8));
+                         (Bil.BinOp (Bil.AND, Bil.Var (int_param 0), addr 8));
                        Def.create x
                          (Bil.Load (Bil.Var m,
                                     Bil.BinOp (Bil.PLUS, addr 0x4000, Bil.Var i),

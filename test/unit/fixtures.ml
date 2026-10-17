@@ -92,7 +92,7 @@ let mk_flag_sub ~(mixed : bool) :
   let defU = Def.create (v64 "t3_u") (Bil.Int (Cbat_word.to_word (w64 42))) in
   let defC =
     Def.create t
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var g, Bil.Var (v64 "RSP")), LittleEndian, `r64))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var g, Bil.Var sp), LittleEndian, `r64))
   in
   let sub, tids =
     sub_of "t3_flag"
@@ -131,9 +131,9 @@ type caller_alias_fixture = {
 }
 
 let mk_caller_alias () : caller_alias_fixture =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let rbx = v64 "RBX" in
+  let rsp = sp in
+  let rbp = frame_ptr in
+  let rbx = callee_saved 0 in
   let rdi = v64 "rdi" in
   let r2 = v64 "t4_r2" in
   let m = memv "t4_m" in
@@ -249,8 +249,8 @@ let mk_p3_anchor_sub () : sub term =
 (* Backward-refinement loop fixtures (moved verbatim from test_backward.ml). *)
 let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * tid =
   let m = memv "l3a_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3a_v" (Type.Imm 32) in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -292,11 +292,11 @@ let jump_target =
   let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
   Theory.Target.declare ~package:"test" "jump-flags" ~bits:64 ~byte:8
     ~regs:Theory.Role.Register.[
-        [zero_flag], [flag "ZF"];
-        [carry_flag], [flag "CF"];
-        [sign_flag], [flag "SF"];
-        [overflow_flag], [flag "OF"];
-        [parity_flag], [flag "PF"]]
+        [zero_flag], [flag (Var.name sysv.Hike.Abi.zero_flag)];
+        [carry_flag], [flag (Var.name sysv.Hike.Abi.carry_flag)];
+        [sign_flag], [flag (Var.name sysv.Hike.Abi.sign_flag)];
+        [overflow_flag], [flag (Var.name sysv.Hike.Abi.overflow_flag)];
+        [parity_flag], [flag (Var.name sysv.Hike.Abi.parity_flag)]]
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let sub = Hike.Jump.compile_sub jump_target sub in
@@ -311,7 +311,7 @@ let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_o
 
 let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
   (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3a_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3a_m") frame_ptr)
 
 (* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
 
@@ -319,8 +319,8 @@ let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
 let mk_l3c1_loop ~(extra_header_defs : def term list) ~(pre_cf_defs : def term list)
     : sub term * tid * jmp term =
   let m = memv "l3c1_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c1_t" (Type.Imm 32) in
   let cf = v1 "l3c1_cf" in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -344,8 +344,8 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) ~(pre_cf_defs : def term l
 let mk_l3c2_loop ~(prologue : bool) ~(seed : Cbat_word.t option) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
     ~(body_op : Bil.binop) ~(body_k : Cbat_word.t) ~(flag : bool) : sub term * tid =
   let m = memv "l3c2_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c2_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c2_u" (Type.Imm 32) in
   let cf = v1 "l3c2_cf" in
@@ -386,8 +386,8 @@ let mk_l3_chain_loop ~(name : string) ~(seed : Cbat_word.t option)
     ~(v_w : int) ~(chain : exp option) ~(cond : exp) ~(body_k : Cbat_word.t) :
     sub term * tid =
   let m = memv (name ^ "_m") in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false (name ^ "_t") (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false (name ^ "_v") (Type.Imm v_w) in
   let u = Var.create ~is_virtual:false ~fresh:false (name ^ "_u") (Type.Imm 32) in
@@ -418,7 +418,7 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") frame_ptr)
 
 (* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
 
@@ -426,8 +426,8 @@ let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
 let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
     ~(body_k : Cbat_word.t) : sub term * tid =
   let m = memv "l3c4_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3c4_v" (Type.Imm v_w) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
@@ -454,8 +454,8 @@ let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp 
 let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~(cmp : Bil.binop) ~(body_k : Cbat_word.t)
     : sub term * tid =
   let m = memv "l3c4_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
   let w = Var.create ~is_virtual:false ~fresh:false "l3c4_w" (Type.Imm 32) in
@@ -486,7 +486,7 @@ let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") frame_ptr)
 
 (* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
 
@@ -497,7 +497,7 @@ let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") frame_ptr)
 
 (* L3c-6: the -O0 store-head loop — the counter's increment store lives
    in the WALKED head block (the do-while merge), the guard's bound is a
@@ -508,8 +508,8 @@ let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
 let mk_l3c6_storehead_loop ~(nested : bool) ~(seed : Cbat_word.t option)
     ~(bound : Cbat_word.t) : sub term * tid =
   let m = memv "l3c6_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c6_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c6_u" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3c6_v" (Type.Imm 32) in
@@ -553,7 +553,7 @@ let mk_l3c6_storehead_loop ~(nested : bool) ~(seed : Cbat_word.t option)
 (* Seeded RMW counter (traverse shape). Returns (sub, body tid, header tid). *)
 let mk_l3b1_loop () : sub term * tid * tid =
   let m = memv "l3b1_m" in
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let t = Var.create ~is_virtual:false ~fresh:false "l3b1_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3b1_u" (Type.Imm 32) in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -608,17 +608,17 @@ let mk_cmp_defs ~(e : exp) ~(c : Cbat_word.t) ~(t : var) ~(cf : var) ~(ofv : var
 
 (* Corpus jle shape, one or two chained loops. Returns (sub, l1, b1, l2 option). *)
 let lm_jle_loop ~(k1 : Cbat_word.t) ?(k2 : Cbat_word.t option) () : sub term * tid * tid * tid option =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let iv = Bil.Var i in
   (* Canonical -O0 cmp emission; returns the defs and the jle cond. *)
   let cmp_defs (c : Cbat_word.t) : def term list * exp =
     let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
-    let cf = v1 "CF" in
-    let ofv = v1 "OF" in
-    let sf = v1 "SF" in
-    let zf = v1 "ZF" in
+    let cf = abi_cf in
+    let ofv = abi_of in
+    let sf = abi_sf in
+    let zf = abi_zf in
     (mk_cmp_defs ~e:iv ~c ~t ~cf ~ofv ~sf ~zf, l39_jle zf sf ofv)
   in
   let defs1, cond1 = cmp_defs k1 in
@@ -651,11 +651,11 @@ let lm_jle_loop ~(k1 : Cbat_word.t) ?(k2 : Cbat_word.t option) () : sub term * t
 (* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
 let lm_jne_loop ~(k : Cbat_word.t) () : sub term * tid * tid =
   let kw = Cbat_word.to_word k in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
   let t = Var.create ~is_virtual:false ~fresh:false "lm_ne_t" (Type.Imm 32) in
-  let zf = v1 "ZF" in
+  let zf = abi_zf in
   let iv = Bil.Var i in
   let cond_taken = Bil.UnOp (Bil.NOT, Bil.Var zf) in
   let cond_fallthrough = Bil.Var zf in
@@ -689,14 +689,14 @@ let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) 
     ~(mk_cond : cf:var -> ofv:var -> sf:var -> zf:var -> exp)
     ~(extra_header_defs : var -> def term list) : sub term * tid =
   let m = memv "l39_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l39_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l39_u" (Type.Imm 32) in
-  let cf = v1 "CF" in
-  let ofv = v1 "OF" in
-  let sf = v1 "SF" in
-  let zf = v1 "ZF" in
+  let cf = abi_cf in
+  let ofv = abi_of in
+  let sf = abi_sf in
+  let zf = abi_zf in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
   let cond = mk_cond ~cf ~ofv ~sf ~zf in
@@ -719,11 +719,11 @@ let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) 
 (* Record-path fixture: bare-flag guard with unique def. Returns (sub, body tid). *)
 let mk_l39b5_loop () : sub term * tid =
   let m = memv "l39_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let v = Var.create ~is_virtual:false ~fresh:false "l39b5_v" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l39b5_u" (Type.Imm 32) in
-  let cf = v1 "CF" in
+  let cf = abi_cf in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let sub, tids =
     sub_of "l39b5_loop"
@@ -744,13 +744,13 @@ let mk_l39b5_loop () : sub term * tid =
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") frame_ptr)
 
 (* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
 
 (* Call-in-loop fixture. Returns (sub, header tid, rsp). *)
 let mk_e1_loop_sub () : sub term * tid * var =
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let m = memv "e1_m" in
   let sub, tids =
     sub_of "e1_loop"
@@ -766,7 +766,7 @@ let mk_e1_loop_sub () : sub term * tid * var =
 
 (* Straight-line call fixture. Returns (sub, post tid, rsp). *)
 let mk_e1_flat_sub () : sub term * tid * var =
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let m = memv "e1_m" in
   let sub, tids =
     sub_of "e1_flat"
@@ -788,14 +788,14 @@ let e1_rsp_at (sub : sub term) (tid : tid) (rsp : var) : Ws.t =
 (* RBP loop with dead epilogue def. Returns (sub, body tid). *)
 let mk_l6_rbp_loop () : sub term * tid =
   let m = memv "l6_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "l6_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l6_u" (Type.Imm 32) in
-  let cf = v1 "CF" in
-  let ofv = v1 "OF" in
-  let sf = v1 "SF" in
-  let zf = v1 "ZF" in
+  let cf = abi_cf in
+  let ofv = abi_of in
+  let sf = abi_sf in
+  let zf = abi_zf in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
   let c = w32 63 in
@@ -821,7 +821,7 @@ let mk_l6_rbp_loop () : sub term * tid =
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
-  cell_at (memv "l6_m") (v64 "RBP") (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
+  cell_at (memv "l6_m") frame_ptr (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
 
 (* The secondary guarded-refinement shapes: inline-arithmetic record
    operand, NOT-edge, const-first flip, nested BinOp. *)
@@ -830,8 +830,8 @@ let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
 let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
     ~(mk_cond : t:var -> exp) : sub term * tid =
   let m = memv "r2_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
+  let rsp = sp in
+  let rbp = frame_ptr in
   let t = Var.create ~is_virtual:false ~fresh:false "r2_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "r2_u" (Type.Imm 32) in
   let f = v1 "r2_f" in
@@ -874,12 +874,12 @@ let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : B
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (v64 "RBP"))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") frame_ptr)
 
 (* Indexed-loop twin (C4a/R11): i := 0; body indexed store + inc; exit singleton store.
    The two tests differ only in the var-name prefix; the divergent pins stay in the tests. *)
 let mk_indexed_loop ~pfx : sub term * def term =
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let i = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_i") (Type.Imm 32) in
   let t = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_t") (Type.Imm 32) in
   let m = memv (pfx ^ "_m") in
@@ -931,9 +931,9 @@ type escape_fixture = {
    + call + post reload. The C3/A1/A4c near-copies differ only in the prefix,
    the fp offset, and the outgoing payloads; the divergent pins stay in the tests. *)
 let mk_escape_caller ~pfx ~fp_off ~seed ~(outs : (int * escape_payload) list) () : escape_fixture =
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let fp = v64 (pfx ^ "_fp") in
-  let rdi = v64 "RDI" in
+  let rdi = int_param 0 in
   let r2 = v64 (pfx ^ "_r2") in
   let m = memv (pfx ^ "_m") in
   let callee = mk_selfloop_callee (pfx ^ "_callee") in
@@ -966,7 +966,7 @@ let mk_escape_caller ~pfx ~fp_off ~seed ~(outs : (int * escape_payload) list) ()
 
 let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let m = memv "wc_m" in
-  let rbp = v64 "RBP" in
+  let rbp = frame_ptr in
   let x = Var.create ~is_virtual:false ~fresh:false "wc_x" (Type.Imm 32) in
   let g1 = v1 "wc_g1" in
   let g2 = v1 "wc_g2" in
@@ -979,7 +979,7 @@ let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let store_k k = Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word k), LittleEndian, `r32)) in
   let sub, tids =
     sub_of "wc_chain"
-      [ [ Def.create rbp (Bil.Var (v64 "RSP")) ], [ (1, mk_goto) ];
+      [ [ Def.create rbp (Bil.Var sp) ], [ (1, mk_goto) ];
         [ Def.create f1 (Bil.Var g1) ], [ (3, fun t -> mk_jmp_to t (Bil.Var f1)); (2, mk_goto) ];
         [ Def.create f2 (Bil.Var g2) ], [ (4, fun t -> mk_jmp_to t (Bil.Var f2)); (5, mk_goto) ];
         [ store_k (w32 5) ], [ (6, mk_goto) ];
@@ -1035,13 +1035,13 @@ let emit_ir_spec ?(types = fun prog -> prog) (spec : B2l.section_spec)
      SSA pass materializes the phis the emitter renders. *)
   let prog = Hike.Atomic.normalize ~addr_bits:64 prog in
   let prog = Hike.Fp.run_program prog in
-  let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
+  let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
   let prog = Hike.Split_blocks.normalize prog in
-  let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+  let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
   (* The types pass runs on the SSA program; a fixture stamps its own. *)
   let prog = types prog in
   B2l.emit_program llvm_ctx llvm_module
-    ~target:Theory.Target.unknown ~addr_bits:64
+    ~target:(x86_target ()) ~addr_bits:64
     ~symtab:None ~synth:(Hike_synth.table_of_program prog) spec prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;

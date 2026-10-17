@@ -913,13 +913,28 @@ and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
           if WordSet.is_bottom c then snd (Lazy.force excluded) else c
         else y
       in
-      let deliver env e c =
+      (* A comparison is one inequality whatever the iterate gives each
+         operand: the landmarks its operands record are named by it. *)
+      let guarded side c f =
+        match op with
+        | Cbat_preimage.Op
+            ((Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE) as cmp) ->
+          Cbat_landmarks.with_guard landmarks
+            (fun () ->
+               Format.asprintf "%s %c %a" (Exp.to_string (Bil.BinOp (cmp, a, b)))
+                 side WordSet.pp c)
+            f
+        | _ -> f ()
+      in
+      let deliver side env e c =
         match e with
         | Bil.Int _ | Bil.Let _ -> env
-        | _ -> constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e c
+        | _ ->
+          guarded side produced (fun () ->
+              constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e c)
       in
-      let env = deliver env a x in
-      deliver env b y
+      let env = deliver 'L' env a x in
+      deliver 'R' env b y
   | _ -> env
 
 (* The load's cell fact meets the env's memory at the denoted address:
@@ -1240,6 +1255,13 @@ let cond_seeds ~(env : AI.t) (cond : exp) : Var.Set.t =
         else acc
       | _ -> acc)
 
+(* The guard names the landmarks its walk records: a constraint carried
+   back through the block's defs still measures the edge's own
+   inequality, however the iterate moves the bound it arrives with. *)
+let rooted ~(landmarks : Cbat_landmarks.t) (cond : exp) (f : unit -> 'a) : 'a =
+  Cbat_landmarks.with_guard landmarks
+    (fun () -> "edge " ^ Exp.to_string cond) f
+
 (* The refinement walk (the state-writer locus): the constraint meets
    the produced values (the producer subtraction). *)
 let walk_block ?(on_write : write_site -> unit = ignore)
@@ -1269,7 +1291,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
   (* Outside a cycle no observation records, so the walk has no effect. *)
-  if Cbat_landmarks.in_cycle landmarks then begin
+  if Cbat_landmarks.in_cycle landmarks then rooted ~landmarks disabled (fun () -> begin
     (* The observer seeds the requested facts even when the live state
        excludes them. This temporary environment never enters the solve. *)
     let constrained = constrain_operands ~seed:true ~env ~landmarks disabled
@@ -1283,7 +1305,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
           (walk ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
              constrained blk)
     end
-  end
+  end)
 
 let refine_edge_inline
     ~(entry : AI.t)
@@ -1292,7 +1314,9 @@ let refine_edge_inline
     (b : blk term) (env : AI.t) (acc_cond : exp)
     : AI.t =
   let env_in = env in
-  let env = constrain_edge ~env ~landmarks:rctx.rc_landmarks acc_cond in
+  let landmarks = rctx.rc_landmarks in
+  let env = rooted ~landmarks acc_cond (fun () ->
+      constrain_edge ~env ~landmarks acc_cond) in
   (* No constraint derived: nothing to deliver. *)
   if discarded then env_in
   else if AI.equal env AI.bottom then env
@@ -1301,4 +1325,5 @@ let refine_edge_inline
     if Core.Set.is_empty seeds then env
     else
       Stages.time `Walk (fun () ->
-          refine_edge ~entry ~rctx ~seeds env b)
+          rooted ~landmarks acc_cond (fun () ->
+              refine_edge ~entry ~rctx ~seeds env b))

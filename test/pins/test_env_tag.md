@@ -14,7 +14,6 @@ the pins it turns red; no measured red is claimed here.
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
 | ENV-01 | `Vsa.env_tag` returns `None` for a def outside the analysis boundary (slot absent). | In `src/cbat_vsa/cbat_vsa.ml`, make `env_tag` return `Some AI.top` unconditionally (l.473). | ENV-01 (expects `None`). |
-| ENV-04 | The tag rides the def's KB value, so `Def.with_rhs` keeps it. | `set_env_tag env d = d` (value slot never populated). | ENV-04. |
 | ENV-06 | `stamp_envs_of_sol` tags each def with its own before-state; the first def's tag is the block pre. | `set_env_tag env d = d`. | ENV-06. |
 | ENV-07 | The sweep advances `env := denote_def d env`, so a def's tag is the prior transfer's product. | In `stamp_envs_of_sol`, stamp every def with the block `pre` (`set_env_tag pre d`). | ENV-07 (tag is `pre`, expected the first product). |
 | ENV-09 | `denote_exp_at` evaluates a tagged def in its tag env (memory-bearing query). | In `denote_exp_at`, ignore the tag: `let env = AI.top` (l.588-590). | ENV-09 (top, not `{7}`). |

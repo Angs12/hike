@@ -16,7 +16,6 @@ module Hsb = Hike_stack_bounds
 let wof64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
 let ones64 = Cbat_word.ones 64
 let base = Ws.stack_base
-let floor = Int64.add base Int64.min_int
 let cei = Int64.max_int
 
 let wc (a : Cbat_word.t) (b : Cbat_word.t) : bool = Cbat_word.equal a b
@@ -47,7 +46,8 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "HSB-06"
           (Hsb.stack_floor ~entry:0L = Int64.min_int
-          && Hsb.stack_floor ~entry:base = floor));
+          && Hsb.stack_floor ~entry:1L = -9223372036854775807L
+          && Hsb.stack_floor ~entry:(-1L) = Int64.max_int));
 
 
 

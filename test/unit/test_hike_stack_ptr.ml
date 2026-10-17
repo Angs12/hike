@@ -190,7 +190,7 @@ let tests : unit Alcotest.test list =
             check "SPTR-06"
               (rc = 0 && contains_substring text "ret i64 42"
                && not (contains_substring text "load i64"))
-        | _ -> check "SPTR-06" true);
+        | _ -> Alcotest.skip ());
 
   ]
 

@@ -315,10 +315,10 @@ let tests : unit Alcotest.test list =
         check "MAP-34.add-top-absent" (Map.add m ~key:6 ~data:IntLattice.top == m);
         check "MAP-34.keep-all" (Map.filter_keys m ~f:(fun _ -> true) == m);
         check "MAP-34.drop" (not (Map.filter_keys m ~f:(fun _ -> false) == m));
-        let e = AI.add_word AI.top ~key:(v64 "RAX") ~data:(Ws.singleton (w64 1)) in
+        let e = AI.add_word AI.top ~key:(int_ret 0) ~data:(Ws.singleton (w64 1)) in
         let d = Ws.singleton (w64 2) in
-        let e = AI.add_word e ~key:(v64 "RBX") ~data:d in
-        check "MAP-34.ai-same-write" (AI.add_word e ~key:(v64 "RBX") ~data:d == e);
+        let e = AI.add_word e ~key:(callee_saved 0) ~data:d in
+        check "MAP-34.ai-same-write" (AI.add_word e ~key:(callee_saved 0) ~data:d == e);
         check "MAP-34.ai-join-self" (AI.join e e == e));
 
     pin "MAP-35"

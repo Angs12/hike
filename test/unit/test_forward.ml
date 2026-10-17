@@ -32,7 +32,7 @@ let img_fixture =
    pointer is stored and reloaded in a loop.  Returns the sub, its block
    tids and the pointer register. *)
 let sp_roundtrip () =
-  let m, rsp, rbp = memv "t19_m", v64 "RSP", v64 "t19_rbp" in
+  let m, rsp, rbp = memv "t19_m", sp, v64 "t19_rbp" in
   let rax = v64 "t19_rax" in
   let rn = v64 "t19_n" in
   let lit k = Bil.Int (Cbat_word.to_word (w64 k)) in
@@ -445,7 +445,7 @@ let tests : unit Alcotest.test list =
         let sub, tids, rax = sp_roundtrip () in
         let envs, _, _ =
           solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
-            Theory.Target.unknown sub
+            (x86_target ()) sub
         in
         (* The RELOAD block's post state holds the reloaded value; the
            through-pointer reads keep the band only if that value is

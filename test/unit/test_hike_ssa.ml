@@ -11,7 +11,7 @@ let guard v k =
   Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int (Cbat_word.to_word (w64 k)))
 
 
-let ret_reg = v64 "RAX"
+let ret_reg = int_ret 0
 
 let tests : unit Alcotest.test list =
   [
@@ -38,8 +38,8 @@ let tests : unit Alcotest.test list =
               [ (0, mk_ret) ] ]
         in
         let prog = Program.create ~subs:[ callee; caller ] () in
-        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let caller' =
           Term.enum sub_t prog
           |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ret_caller")
@@ -65,7 +65,7 @@ let tests : unit Alcotest.test list =
           && Base.Option.is_some
                (Base.Option.filter stamped ~f:(fun v ->
                     Var.index v > 0
-                    && String.equal (Var.name (Var.base v)) "RAX")));
+                    && Var.same (Var.base v) (int_ret 0))));
         (* The continuation reads the stamped version. *)
         let cont =
           Term.enum blk_t caller'
@@ -122,8 +122,8 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let sub =
           Term.enum sub_t prog |> Seq.hd_exn
         in
@@ -157,7 +157,7 @@ let tests : unit Alcotest.test list =
         let sub =
           let b = Blk.Builder.create () in
           Blk.Builder.add_def b
-            (Def.create v (Bil.Var (v64 "RDI")));
+            (Def.create v (Bil.Var (int_param 0)));
           ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
           Blk.Builder.result b
         in
@@ -167,18 +167,20 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
+        let abi = Hike.Abi.of_target (x86_target ()) in
+        let free = Hike.Ssa.free_regs_ssa ~abi sub in
         check "SSA-03"
           (Hike.Stack_model.is_ssa sub
-          && Hike.Ssa.free_regs_ssa
-               ~abi:(Hike.Abi.of_target Theory.Target.unknown) sub
-             = [ v64 "RDI" ]));
+          && Base.List.exists free ~f:(Var.same (int_param 0))
+          && Base.List.for_all free ~f:(fun v ->
+                 Var.same v (int_param 0) || Hike.Abi.is_return_reg abi v)));
 
     pin "SSA-04" "a call return and bypass value meet in a join phi"
       (fun () ->
-        let ret_reg = v64 "RAX" in
+        let ret_reg = int_ret 0 in
         let callee, _ = sub_of "ssa4_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee
@@ -215,7 +217,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ callee; sub ] () in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let caller =
           Term.enum sub_t prog
           |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ssa4_caller")

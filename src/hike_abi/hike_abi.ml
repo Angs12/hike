@@ -5,10 +5,14 @@ open Bap_core_theory
 open Theory.Role.Register
 open Bap.Std.Bil.Types
 
-(* No frame-pointer fact: SP is the only register granted stack semantics;
-   RBP is an ordinary callee-saved GPR. *)
+(* SP is the only register granted stack semantics (ADR 0008).  The frame
+   pointer is carried as the convention's NAME for fixtures and
+   diagnostics: its stack-ness, like any register's, is proven by the
+   analysis, never assumed from this field. *)
 type t = {
   sp : var;                      (* stack pointer *)
+  frame_pointer : var;           (* the conventional frame register (RBP);
+                                    an ordinary callee-saved GPR *)
   thread_pointer : var;          (* the TLS base register *)
   int_param_regs : var list;     (* SysV integer/pointer arg registers *)
   vector_param_regs : var list;  (* FP/vector arg registers (YMM0-7) *)
@@ -20,6 +24,11 @@ type t = {
   env_regs : var list;           (* process-global environment registers
                                     (the x87 control word, MXCSR): never
                                     call-crossing, persistent per process *)
+  carry_flag : var;
+  parity_flag : var;
+  zero_flag : var;
+  sign_flag : var;
+  overflow_flag : var;
   flag_regs : var list;          (* the arithmetic flags: call-clobbered,
                                     undefined at sub entry *)
   word : int;                    (* target word size in bytes *)
@@ -38,8 +47,12 @@ let x86_64_sysv : t =
   let r64 name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 64) in
   let r256 name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 256) in
   let rax = r64 "RAX" in
+  let flag name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 1) in
+  let cf = flag "CF" and pf = flag "PF" and af = flag "AF"
+  and zf = flag "ZF" and sf = flag "SF" and ovf = flag "OF" in
   {
     sp = r64 "RSP";
+    frame_pointer = r64 "RBP";
     thread_pointer = r64 "FS_BASE";
     int_param_regs =
       Base.List.map ~f:r64 [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ];
@@ -47,7 +60,7 @@ let x86_64_sysv : t =
       Base.List.map ~f:r256
         (Base.List.map ~f:(fun i -> "YMM" ^ Base.Int.to_string i)
            (Base.List.range 0 8));
-    return_regs = [ rax; r64 "RDX"; r256 "YMM0" ];
+    return_regs = [ rax; r64 "RDX"; r256 "YMM0"; r256 "YMM1" ];
     callee_saved = Base.List.map ~f:r64 [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ];
     caller_saved_gprs =
       Base.List.map ~f:r64
@@ -56,11 +69,12 @@ let x86_64_sysv : t =
     env_regs =
       [ Var.create ~is_virtual:false ~fresh:false "FPU_CONTROL" (Type.Imm 16);
         Var.create ~is_virtual:false ~fresh:false "MXCSR" (Type.Imm 32) ];
-    flag_regs =
-      Base.List.map
-        ~f:(fun name ->
-          Var.create ~is_virtual:false ~fresh:false name (Type.Imm 1))
-        [ "CF"; "PF"; "AF"; "ZF"; "SF"; "OF" ];
+    carry_flag = cf;
+    parity_flag = pf;
+    zero_flag = zf;
+    sign_flag = sf;
+    overflow_flag = ovf;
+    flag_regs = [ cf; pf; af; zf; sf; ovf ];
     word = 8;
     page_size = 4096L;
     red_zone = 128;
@@ -131,15 +145,38 @@ let addr_size_bits target =
 let addr_size_of_bits (bits : int) : [> `r32 | `r64 ] =
   if bits <= 32 then `r32 else `r64
 
-let sp target =
-  match Theory.Target.reg target stack_pointer with
+(* The stack pointer, the frame pointer and the arithmetic flags are the
+   target's own registers, found by role.  A target that declares none of
+   that role has no such register: the lookup fails rather than guess a
+   name. *)
+let by_role target role what =
+  match Theory.Target.reg target role with
   | Some v -> Var.reify v
-  | None -> x86_64_sysv.sp
+  | None ->
+    failwith
+      (Printf.sprintf "hike_abi: target %s declares no %s register"
+         (Theory.Target.to_string target) what)
+
+let sp target =
+  by_role target Theory.Role.Register.stack_pointer "stack-pointer"
 
 let thread_pointer target =
   match Theory.Target.reg target thread with
   | Some v -> Var.reify v
   | None -> x86_64_sysv.thread_pointer
+
+let frame_pointer target =
+  by_role target Theory.Role.Register.frame_pointer "frame-pointer"
+let carry_flag target =
+  by_role target Theory.Role.Register.carry_flag "carry-flag"
+let parity_flag target =
+  by_role target Theory.Role.Register.parity_flag "parity-flag"
+let zero_flag target =
+  by_role target Theory.Role.Register.zero_flag "zero-flag"
+let sign_flag target =
+  by_role target Theory.Role.Register.sign_flag "sign-flag"
+let overflow_flag target =
+  by_role target Theory.Role.Register.overflow_flag "overflow-flag"
 
 (* The one target the pipeline's facts are written against; unknown
    targets take the SysV fallback record. *)
@@ -165,6 +202,7 @@ let of_target (target : Theory.Target.t) : t =
   if is_primary_target target then
     {
       sp = sp target;
+      frame_pointer = frame_pointer target;
       thread_pointer = thread_pointer target;
       int_param_regs = x86_64_sysv.int_param_regs;
       vector_param_regs = x86_64_sysv.vector_param_regs;
@@ -173,6 +211,11 @@ let of_target (target : Theory.Target.t) : t =
       caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
       variadic_count_reg = x86_64_sysv.variadic_count_reg;
       env_regs = x86_64_sysv.env_regs;
+      carry_flag = carry_flag target;
+      parity_flag = parity_flag target;
+      zero_flag = zero_flag target;
+      sign_flag = sign_flag target;
+      overflow_flag = overflow_flag target;
       flag_regs = x86_64_sysv.flag_regs;
       word = Theory.Target.bits target / 8;
       page_size = x86_64_sysv.page_size;

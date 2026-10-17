@@ -1,6 +1,6 @@
 # Pins — test_emit_fp
 
-Module: `test/unit/test_emit_fp.ml` (group `emit_fp`, ids `FP-01`…`FP-35`),
+Module: `test/unit/test_emit_fp.ml` (group `emit_fp`, ids `FP-01`, `FP-32`, `FP-33`, `FP-35`),
 migrating `test_cbat/test_fp.ml`.  Every source `check` site is carried; none
 retired.
 
@@ -20,40 +20,7 @@ its closure — no cross-pin state.
 
 | id | mechanism | disable recipe | red evidence |
 | --- | --- | --- | --- |
-| FP-01 | `native_fp_op "@intrinsic:fmul_rne_ieee754_binary_64" = Some FMUL`; the render arm emits `fmul`. | Delete the `fmul_rne_ieee754_binary_64` row from `native_fp_table` (`src/bil2llvm_fp.ml:17`). | `check_bound` red: `native_fp_op` returns `None`; the call degrades to an external intrinsic. |
-| FP-02 | `fmul_rne_ieee754_binary_32` → `FMUL`, emits `fmul`. | Delete that row (`bil2llvm_fp.ml:18`). | `check_bound` red (None). |
-| FP-03 | `fadd_rne_ieee754_binary_64` → `FADD`, emits `fadd`. | Delete that row (`bil2llvm_fp.ml:19`). | `check_bound` red (None). |
-| FP-04 | `fadd_rne_ieee754_binary_32` → `FADD`, emits `fadd`. | Delete that row (`bil2llvm_fp.ml:20`). | `check_bound` red (None). |
-| FP-05 | `fsub_rne_ieee754_binary_64` → `FSUB`, emits `fsub`. | Delete that row (`bil2llvm_fp.ml:21`). | `check_bound` red (None). |
-| FP-06 | `fsub_rne_ieee754_binary_32` → `FSUB`, emits `fsub`. | Delete that row (`bil2llvm_fp.ml:22`). | `check_bound` red (None). |
-| FP-07 | `fdiv_rne_ieee754_binary_64` → `FDIV`, emits `fdiv`. | Delete that row (`bil2llvm_fp.ml:23`). | `check_bound` red (None). |
-| FP-08 | `fdiv_rne_ieee754_binary_32` → `FDIV`, emits `fdiv`. | Delete that row (`bil2llvm_fp.ml:24`). | `check_bound` red (None). |
-| FP-09 | `frem_rne_ieee754_binary_64` → `FREM`, emits `frem`. | Delete that row (`bil2llvm_fp.ml:25`). | `check_bound` red (None). |
-| FP-10 | `frem_rne_ieee754_binary_32` → `FREM`, emits `frem`. | Delete that row (`bil2llvm_fp.ml:26`). | `check_bound` red (None). |
-| FP-11 | `forder_rne_ieee754_binary_64` → `FORDER`, emits `fcmp olt`. | Delete that row (`bil2llvm_fp.ml:27`). | `check_bound` red (None). |
-| FP-12 | `forder_rne_ieee754_binary_32` → `FORDER`, emits `fcmp olt`. | Delete that row (`bil2llvm_fp.ml:28`). | `check_bound` red (None). |
-| FP-13 | `is_nan_rne_ieee754_binary_64` → `ISNAN`, emits `fcmp uno`. | Delete that row (`bil2llvm_fp.ml:29`). | `check_bound` red (None). |
-| FP-14 | `is_nan_rne_ieee754_binary_32` → `ISNAN`, emits `fcmp uno`. | Delete that row (`bil2llvm_fp.ml:30`). | `check_bound` red (None). |
-| FP-15 | `is_nan_ieee754_binary` (unwidth'd) → `ISNAN`, emits `fcmp uno`. | Delete that row (`bil2llvm_fp.ml:31`). | `check_bound` red (None). |
-| FP-16 | `is_nan_rne_ieee754_binary` (unwidth'd) → `ISNAN`, emits `fcmp uno`. | Delete that row (`bil2llvm_fp.ml:32`). | `check_bound` red (None). |
-| FP-17 | `forder_ieee754_binary` (unwidth'd) → `FORDER`, emits `fcmp olt`. | Delete that row (`bil2llvm_fp.ml:33`). | `check_bound` red (None). |
-| FP-18 | `forder_rne_ieee754_binary` (unwidth'd) → `FORDER`, emits `fcmp olt`. | Delete that row (`bil2llvm_fp.ml:34`). | `check_bound` red (None). |
-| FP-19 | `cast_sfloat_rne_ieee754_binary_64` → `SFLOAT`, emits `sitofp`. | Delete that row (`bil2llvm_fp.ml:35`). | `check_bound` red (None). |
-| FP-20 | `cast_sint_rne_ieee754_binary_64` → `SINT`, emits `fptosi`. | Delete that row (`bil2llvm_fp.ml:36`). | `check_bound` red (None). |
-| FP-21 | `cast_sint_rne_ieee754_binary_32` → `SINT`, emits `fptosi`. | Delete that row (`bil2llvm_fp.ml:37`). | `check_bound` red (None). |
-| FP-22 | `fconvert_rne_ieee754_binary_64` → `FCONVERT 64`, emits `fpext`. | Delete that row (`bil2llvm_fp.ml:39`). | `check_bound` red (None). |
-| FP-23 | `fconvert_rne_ieee754_binary_32` → `FCONVERT 32`, emits `fptrunc`. | Delete that row (`bil2llvm_fp.ml:40`). | `check_bound` red (None). |
-| FP-24 | `fmul_rne_ieee754_binary` (unwidth'd) → `FMUL`, emits `fmul`. | Delete that row (`bil2llvm_fp.ml:41`). | `check_bound` red (None). |
-| FP-25 | `fadd_rne_ieee754_binary` (unwidth'd) → `FADD`, emits `fadd`. | Delete that row (`bil2llvm_fp.ml:42`). | `check_bound` red (None). |
-| FP-26 | `fsub_rne_ieee754_binary` (unwidth'd) → `FSUB`, emits `fsub`. | Delete that row (`bil2llvm_fp.ml:43`). | `check_bound` red (None). |
-| FP-27 | `fdiv_rne_ieee754_binary` (unwidth'd) → `FDIV`, emits `fdiv`. | Delete that row (`bil2llvm_fp.ml:44`). | `check_bound` red (None). |
-| FP-28 | `frem_rne_ieee754_binary` (unwidth'd) → `FREM`, emits `frem`. | Delete that row (`bil2llvm_fp.ml:45`). | `check_bound` red (None). |
-| FP-29 | `hlt` → `FHLT`, emits `unreachable`. | Delete that row (`bil2llvm_fp.ml:46`). | `check_bound` red (None); `FHLT`'s `create_interrupt` arm is not reached. |
+| FP-01 | Every native-FP intrinsic the lifter emits (add/sub/mul/div/rem, forder and is_nan with and without `rne`, the widthed and unwidthed names, the casts, `hlt`) maps to its constructor through `native_fp_op` and emits its native instruction (`hike_native_fp.ml` `native_fp_table`; the render arms). The names are spelled out in the pin, so a dropped row is a red. | Delete any row from `native_fp_table`. | `check_bound` red (None) for that name. |
 | FP-32 | A caller of an unmapped intrinsic name is a loud failure at emission — the external-emission fallback is deleted (the atomic lane), so no module carries a silent external intrinsic call. | Restore a warn-and-external arm in `create_call`'s `is_intrinsic_name` branch. | FP-32 FAILs: `emit_ir` returns without raising "unmapped intrinsic call". |
 | FP-33 | `SFLOAT`'s source width is the operand value's own LLVM type: a `[:u64]` load gives `sitofp i64`, a `[:u32]`-shaped one gives `sitofp i32` (no name/spill-slot test). | In the `SFLOAT` arm, coerce the operand to i32 before `build_sitofp` (`bil2llvm_fp.ml:160-166`). | `check "FP-GPR: a [:u64] load feeds sitofp i64 …"` red: both bases emit `sitofp i32`. |
 | FP-35 | A converted operand temp routes through the memory dispatch: its load uses a real pointer address (the residue alloca GEP), never `inttoptr` (raw model lane). | In `create_native_fp_call`'s `arg_value`, replace the tagged `Some d -> mem_access … (Def.rhs d)` arm with `create_exp … (Bil.Var av)` (`bil2llvm_fp.ml:146-150`). | `check "FP-OPERAND: a region-mem operand load uses a real pointer address …"` red: the load reads the raw model lane. |
-| FP-36 | `forder_ieee754_binary_64` maps to FORDER and emits `fcmp olt` | delete the row from `native_fp_table` | pin FAILs: `native_fp_op` answers `None` (the degradation is a CORRECT soft-float call, so only this check sees it) |
-| FP-37 | `forder_ieee754_binary_32` maps to FORDER and emits `fcmp olt` | as FP-36 | pin FAILs: `None` |
-| FP-38 | `is_nan_ieee754_binary_64` maps to ISNAN and emits `fcmp uno` | as FP-36 | pin FAILs: `None` |
-| FP-39 | `is_nan_ieee754_binary_32` maps to ISNAN and emits `fcmp uno` | as FP-36 | pin FAILs: `None` |
-| FP-40 | `cast_sfloat_rne_ieee754_binary_32` maps to SFLOAT and emits `sitofp` | as FP-36 | pin FAILs: `None` |

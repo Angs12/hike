@@ -335,7 +335,7 @@ let tests : unit Alcotest.test list =
         let old = walk 0x6AL and new_ = walk 0x6BL in
         Hike_origin.Regions.install [];
         let entries =
-          [ { Cbat_landmarks.bound = q64 0x2070L; is_upper = true;
+          [ { Cbat_landmarks.bound = q64 0x2070L; is_upper = true; guard = None;
               dist = Some 4; dist_p = Some 5 } ] in
         check "WS-43 (the translated walk stays in its section)"
           (match Cbat_landmarks.extrapolate ~steps:2 ~old ~new_ ~entries with
@@ -571,7 +571,7 @@ let tests : unit Alcotest.test list =
                ~cardn:(Cbat_word.of_int ~width:65 n) (w64 0)) in
         let old = stride8 8 and new_ = stride8 9 in
         let entries =
-          [ { Cbat_landmarks.bound = w64 200; is_upper = true;
+          [ { Cbat_landmarks.bound = w64 200; is_upper = true; guard = None;
               dist = Some 1; dist_p = Some 10 } ] in
         (match Cbat_landmarks.extrapolate ~steps:2 ~old ~new_ ~entries with
          | `Extrapolated d ->

@@ -65,15 +65,6 @@ let fp_prog (subs : sub term list) : program term =
 
 let tests : unit Alcotest.test list =
   [
-    (* HFP-01: the def's lhs and its read carry the width. *)
-    pin "HFP-01" "a temp def and its read carry the lifter's width"
-      (fun () ->
-        let sub = the_sub (fp_prog [ fp_fixture "intrinsic:not_mapped" 64 ]) in
-        let names = def_lhs_names sub @ var_names sub in
-        check "HFP-01: the temp's identity carries its width"
-          (Base.List.mem names "intrinsic:x0:64" ~equal:String.equal
-          && not (Base.List.mem names "intrinsic:x0" ~equal:String.equal)));
-
     (* HFP-02: the same source name at two widths stays two identities. *)
     pin "HFP-02" "a 32-bit and a 64-bit temp def stay distinct"
       (fun () ->
@@ -83,9 +74,10 @@ let tests : unit Alcotest.test list =
                                 fp_fixture "intrinsic:not_mapped" 64 ]))
             ~f:def_lhs_names
         in
-        check "HFP-02: both widths are distinct identities"
+        check "HFP-02: both widths are distinct identities, never the bare name"
           (Base.List.mem names "intrinsic:x0:32" ~equal:String.equal
-          && Base.List.mem names "intrinsic:x0:64" ~equal:String.equal));
+          && Base.List.mem names "intrinsic:x0:64" ~equal:String.equal
+          && not (Base.List.mem names "intrinsic:x0" ~equal:String.equal)));
 
     (* HFP-03: an untagged mapped target takes the table's sized spelling
        for the nearest preceding temp def's width. *)

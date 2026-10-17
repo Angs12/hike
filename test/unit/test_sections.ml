@@ -44,7 +44,7 @@ let rd_spans ?(resolved = false) ?(width = 8) (ws : Ws.t) =
     ~address:(resolved_addr resolved) ~width ws
 
 (* Fixture stack frame: the mem, the SP and the frame pointer. *)
-let mem_rbp () = (memv "at_m", v64 "RSP", v64 "RBP")
+let mem_rbp () = (memv "at_m", sp, frame_ptr)
 
 (* The fixture's one installed context: the solve, the one install, and
    the stamped subs the seam reads. *)
@@ -168,7 +168,7 @@ let to_floor (t, ps) =
 (* S2's shape: a heap-pointing GPR store beside the [RSP-16] cell
    write; the base register is the control (RBP vs RBX). *)
 let heap_store_sub name m_name (base : var) : sub term =
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let m = memv m_name in
   let def_heap =
     Def.create base (Bil.Int (Cbat_word.to_word (w64 0x400000)))
@@ -198,7 +198,7 @@ let heap_store_sub name m_name (base : var) : sub term =
    variable store reaches the return cell, so it lives in the residue. *)
 let residue_layout name (mask : int64) =
   let m = memv (name ^ "_m") in
-  let rsp = v64 "RSP" in
+  let rsp = sp in
   let u = v64 (name ^ "_u") and n = v64 (name ^ "_n") in
   let def_n =
     Def.create n
@@ -738,7 +738,7 @@ let tests : unit Alcotest.test list =
            in
            let sub = straight_sub "at_slot" [ sec_load 0x4008L ] in
            let ctx =
-             A.attribute ~facts:top_facts ~word:8 ~entry ~spans:slot_spans
+             A.attribute ~facts:(top_facts ()) ~word:8 ~entry ~spans:slot_spans
                (Program.create ~subs:[ sub ] ())
            in
            Base.List.is_empty (A.global_comps_of ~word:8 ~spans:slot_spans ctx)
@@ -773,7 +773,7 @@ let tests : unit Alcotest.test list =
     pin "SEC-55"
       "C1: the narrow r16 store converts to the region mem, keeping its address and width"
       (fun () ->
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let m = memv "c1_m" in
         let def_wide =
           Def.create m
@@ -878,8 +878,8 @@ let tests : unit Alcotest.test list =
       "R12: a Region binding of occupied span 8 bytes allocates 16 (aligned once, no width factor)"
       (fun () ->
         let m = memv "r12_m" in
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
+        let rsp = sp in
+        let rbp = frame_ptr in
         let d_rbp = Def.create rbp (Bil.Var rsp) in
         let d =
           Def.create (v64 "r12_t")
@@ -912,7 +912,7 @@ let tests : unit Alcotest.test list =
       "B2a: the residue's window reserve is the def-backed members' proven reach — the call escape does not size it"
       (fun () ->
         let m = memv "b2a_m" in
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let callee = mk_selfloop_callee "b2a_callee" in
         let callee_tid = Term.tid callee in
         let def_out =
@@ -959,7 +959,7 @@ let tests : unit Alcotest.test list =
     pin "SEC-66"
       "S2 (fp-GPR): an untagged heap-RBP store does NOT degrade the sub (the rsp cell keeps Region storage — stack-ness is the value proof alone)"
       (fun () ->
-        let sub = heap_store_sub "s2_heap_rbp" "s2_m" (v64 "RBP") in
+        let sub = heap_store_sub "s2_heap_rbp" "s2_m" frame_ptr in
         let ctx = fixture_ctx [ sub ] in
         check "SEC-66"
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
@@ -1144,7 +1144,7 @@ let tests : unit Alcotest.test list =
       "storage selection: an unbounded stack extent selects the runtime stack"
       (fun () ->
         let m = memv "sel_top_m" in
-        let rsp = v64 "RSP" and u = v64 "sel_top_u" in
+        let rsp = sp and u = v64 "sel_top_u" in
         let def_st =
           Def.create m
             (Bil.Store

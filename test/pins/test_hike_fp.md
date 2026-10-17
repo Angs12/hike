@@ -22,7 +22,6 @@ Every pin builds its own subs inside its closure; no emitter runs here.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| HFP-01 | the pass qualifies a temp def's lhs and every read of it by the width the lifter wrote (`intrinsic:x0` at 64 bits becomes `intrinsic:x0:64`). | In `qualify`, return `v` unchanged. | HFP-01 FAILs: the name carries no width. |
 | HFP-02 | the same source name at two widths stays two identities: a 32-bit def and a 64-bit def of `intrinsic:x0` become `intrinsic:x0:32` and `intrinsic:x0:64`. | Make `qualify` use a fixed width. | HFP-02 FAILs: both defs collapse to one name. |
 | HFP-03 | a mapped FP call whose target carries no width is rewritten to the table's sized spelling for the nearest preceding temp def's width. | Drop the `sized_name` rewrite in `tag_targets`. | HFP-03 FAILs: the target keeps the untagged spelling. |
 | HFP-04 | an already-sized target and a non-mapped target are untouched by the width qualification (the table's rows are sound) | size every target unconditionally | pin FAILs: the unmapped target is rewritten |

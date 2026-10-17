@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the VLA fixtures (src/progs/synth/vla_*.c, alloca_vla.c) with GCC
+# Builds the VLA fixtures (src/synth/vla_*.c, alloca_vla.c) with GCC
 # and Clang at several optimization levels, lifts each with the
 # uninstalled drive executable, rebuilds it through opt/llc/gcc and
 # compares stdout and exit code with the native binary for 0, 1 and 3
@@ -15,7 +15,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-/tmp/vla-fixtures}"
 LEVELS="${2:-O0 O2}"
-SRC="$ROOT/src/progs/synth"
+SRC="$ROOT/src/synth"
 mkdir -p "$OUT/bin" "$OUT/lift"
 
 dune build --root "$ROOT" -j 4 src/drive/main.exe 2>&1 | tail -3

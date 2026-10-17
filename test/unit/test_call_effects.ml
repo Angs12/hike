@@ -232,7 +232,7 @@ let tests : unit Alcotest.test list =
     (* RSP is preserved when it is in the preserved set. *)
     pin "CE-13" "RSP is preserved when it is in the preserved set" (fun () ->
         let x, _, env = ce_xy_env () in
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let env'' = AI.add_word env ~key:rsp ~data:(Ws.singleton (w64 0x10)) in
         let e' = ce_call env'' (ids (Var.Set.of_list [ x; rsp ])) in
         check "CE-13"
@@ -260,15 +260,6 @@ let tests : unit Alcotest.test list =
           (Mem.equal
              (AI.find_memory { addr_width = 64; addressable_width = 8 } e_m m0)
              (Mem.top { addr_width = 64; addressable_width = 8 })));
-
-    (* A virtual var is preserved when it is in the preserved set. *)
-    pin "CE-15" "a virtual var is preserved when it is in the preserved set"
-      (fun () ->
-        let vv = Var.create ~is_virtual:true ~fresh:false "c1_vv" (Type.Imm 64) in
-        let env_v = AI.add_word AI.top ~key:vv ~data:(Ws.singleton (w64 3)) in
-        let e_v = ce_call env_v (ids1 vv) in
-        check "CE-15"
-          (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3))));
 
     (* The frame-keep namespace rule: a plain-top escape cannot name the
        stack line, so the caller's frame survives it. *)

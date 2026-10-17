@@ -9,7 +9,7 @@ TREE="$(cd "$HERE/../.." && pwd)"
 . "$HERE/lib.sh"
 
 WORK="${HIKE_MATRIX:-/tmp/hike-matrix}"
-SRC="$TREE/src/progs"
+SRC="$TREE/src/synth"
 LLC="${HIKE_LLC:-llc-21}"
 
 provenance_ok "$TREE" || exit $?
@@ -32,10 +32,6 @@ cell () {
   local srcs=() names=()
   local f name
   for f in "$SRC"/*.c; do
-    name="$(basename "$f" .c)"
-    srcs+=("$f"); names+=("$name")
-  done
-  for f in "$SRC"/synth/*.c; do
     name="$(basename "$f" .c)"
     srcs+=("$f"); names+=("$name")
   done

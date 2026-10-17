@@ -29,7 +29,7 @@ let tests : unit Alcotest.test list =
              Def.create mem (Bil.Store (Bil.Var mem, Bil.Int (bw64 0),
                                        Bil.Int (bw64 9), LittleEndian, `r64))) in
          let sub = straight_sub "global_writes" defs in
-         let sub = Hike.Dce.dce ~target:Theory.Target.unknown
+         let sub = Hike.Dce.dce ~target:(x86_target ())
              ~escape_roots:Var.Set.empty sub in
          let lhs = Base.List.map (dce_defs sub) ~f:Def.lhs in
          check "global and local stores all stay"
@@ -44,7 +44,7 @@ let tests : unit Alcotest.test list =
         let t = v64 "d1_t" in
         let t2 = v64 "d1_t2" in
         let m = memv "d1_m" in
-        let rsp = v64 "RSP" in
+        let rsp = sp in
         let exit_tid = Tid.create () in
         let sub, _ =
           sub_of "d1_epilogue"
@@ -66,7 +66,7 @@ let tests : unit Alcotest.test list =
                         (Call.create ~return:(Direct exit_tid)
                            ~target:(Direct exit_tid) ()))) ] ]
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
+        let sub' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub in
         let jmps = dce_jmps sub' in
         let epilogue_target_stays_varfree =
           match jmps with
@@ -96,8 +96,8 @@ let tests : unit Alcotest.test list =
     pin "DCE-03"
       "an ABI register def survives through the jump's boundary reads - a ret        reads the return registers, a call the parameter registers; the call block's memory write is the call's read, and an unread intrinsic temp dies"
       (fun () ->
-        let rax = v64 "RAX" in
-        let rdi = v64 "RDI" in
+        let rax = int_ret 0 in
+        let rdi = int_param 0 in
         let m = memv "d2_m" in
         let x0 = v64 "intrinsic:dead0" in
         let callee_tid = Tid.for_name "d2_callee" in
@@ -121,7 +121,7 @@ let tests : unit Alcotest.test list =
         in
         let sub' =
           Hike.Dce.dce
-            ~target:(Theory.Target.of_string "x86_64-gnu-elf")
+            ~target:(x86_target ())
             ~escape_roots:Var.Set.empty sub
         in
         let lhs_set =
@@ -129,8 +129,8 @@ let tests : unit Alcotest.test list =
         in
         check "DCE-03"
           (List.length lhs_set = 3
-          && Base.List.mem lhs_set ~equal:String.equal "RAX"
-          && Base.List.mem lhs_set ~equal:String.equal "RDI"
+          && Base.List.mem lhs_set ~equal:String.equal (Var.name (int_ret 0))
+          && Base.List.mem lhs_set ~equal:String.equal (Var.name (int_param 0))
           && Base.List.mem lhs_set ~equal:String.equal "d2_m"));
 
     (* Region stores survive independently of their readers. *)
@@ -143,7 +143,7 @@ let tests : unit Alcotest.test list =
           sub_of "d3_fission_dead"
             [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
         in
-        let sub_a' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub_a in
+        let sub_a' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub_a in
         let dead_count = List.length (dce_defs sub_a') in
         (* (b) loaded with result read: the whole chain survives. *)
         let t = v64 "d3_t" in
@@ -163,7 +163,7 @@ let tests : unit Alcotest.test list =
                      ~cond:(Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (bw64 0)))
                      (Goto (Direct (Tid.create ())))) ] ]
         in
-        let sub_b' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub_b in
+        let sub_b' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub_b in
         let live_count = List.length (dce_defs sub_b') in
         check "DCE-04" (dead_count = 2 && live_count = 3));
 
@@ -171,7 +171,7 @@ let tests : unit Alcotest.test list =
     pin "DCE-05"
       "the sp/frame_anchor lane survives iff used (the arg read roots it), the unused sp-value def dies on both paths"
       (fun () ->
-        let sp_ = v64 "RSP" in
+        let sp_ = sp in
         let hstk = v64 "frame_anchor" in
         let tmp = v64 "d4_tmp" in
         let arg_read = v64 "d4_arg_read" in
@@ -195,8 +195,8 @@ let tests : unit Alcotest.test list =
         in
         let precise_sub = mk_cond_sub "d4_precise" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
         let ctl_sub = mk_cond_sub "d4_ctl" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
-        let precise' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty precise_sub in
-        let ctl' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty ctl_sub in
+        let precise' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty precise_sub in
+        let ctl' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty ctl_sub in
         let names sub' =
           Base.List.map (dce_defs sub') ~f:(fun d -> Var.name (Var.base (Def.lhs d)))
         in
@@ -216,7 +216,7 @@ let tests : unit Alcotest.test list =
               [ (0, fun _ -> Jmp.create (Goto (Direct (Tid.create ())))) ] ]
         in
         let sub = Term.set_attr sub Sub.intrinsic () in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
+        let sub' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub in
         check "DCE-06"
           (List.length (dce_defs sub') = 1
           && Var.equal
@@ -247,7 +247,7 @@ let tests : unit Alcotest.test list =
                    Jmp.create (Call (Call.create ~target:(Direct callee) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
+        let sub' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub in
         let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
         check "DCE-10"
           (List.mem "stack_r0_mem" lhs
@@ -271,7 +271,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let sub' =
-          Hike.Dce.dce ~target:Theory.Target.unknown
+          Hike.Dce.dce ~target:(x86_target ())
             ~escape_roots:(Var.Set.singleton sm) sub
         in
         let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
@@ -295,7 +295,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let sub' =
-          Hike.Dce.dce ~target:Theory.Target.unknown
+          Hike.Dce.dce ~target:(x86_target ())
             ~escape_roots:Var.Set.empty sub
         in
         let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
@@ -335,14 +335,14 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
-        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         let phi_present =
           Term.enum blk_t sub
           |> Seq.exists ~f:(fun b -> not (Seq.is_empty (Term.enum phi_t b)))
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
+        let sub' = Hike.Dce.dce ~target:(x86_target ()) ~escape_roots:Var.Set.empty sub in
         let phi_gone =
           Term.enum blk_t sub'
           |> Base.Sequence.for_all ~f:(fun b -> Seq.is_empty (Term.enum phi_t b))
@@ -364,7 +364,7 @@ let tests : unit Alcotest.test list =
         in
         let roots = Tid.Map.singleton (Term.tid sub) (Var.Set.singleton sm) in
         let facts =
-          Hike.Kb.with_attribution top_facts ~spec:empty_spec
+          Hike.Kb.with_attribution (top_facts ()) ~spec:empty_spec
             ~escape_roots:roots
         in
         let carried =

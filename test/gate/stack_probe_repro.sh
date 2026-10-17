@@ -10,7 +10,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="${1:-$(mktemp -d)}"
 mkdir -p "$WORK"
-SRC="$ROOT/src/progs/synth/stack_probe_loop.S"
+SRC="$ROOT/src/synth/stack_probe_loop.S"
 
 gcc -pie -o "$WORK/stack_probe_loop" "$SRC" || exit 2
 if dune exec --root "$ROOT" -j 4 src/drive/main.exe -- \

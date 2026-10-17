@@ -11,9 +11,9 @@ open Hike_test.Fixtures
 module S = Hike.Summary
 
 let abi = Hike_abi.x86_64_sysv
-let rax = v64 "RAX"
-let rcx = v64 "RCX"
-let rsp = v64 "RSP"
+let rax = int_ret 0
+let rcx = int_param 3
+let rsp = sp
 
 (* The [ret] instruction's pop, which precedes the canonical return. *)
 let pop () = Def.create rsp Bil.(var rsp + int (Word.of_int64 ~width:64 8L))
@@ -25,7 +25,7 @@ let tail_to (callee : tid) : tid -> jmp term =
 
 let summarize ?(callee = fun _ -> None) (sub : sub term) : S.t =
   let envs, sub', block_addrs =
-    produce Theory.Target.unknown (Program.create ~subs:[ sub ] ()) sub in
+    produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub in
   S.of_solved ~abi ~callee ~slot:(fun _ -> None) ~lookup:(fun _ -> None)
     ~foreign_slots:Core.Int64.Set.empty ~block_addrs ~envs sub'
 

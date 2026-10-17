@@ -9,6 +9,7 @@ open Bap.Std
 type lm_entry = {
   bound : Cbat_word.t;
   is_upper : bool;
+  guard : string option;
   mutable dist : int option;
   mutable dist_p : int option;
 }
@@ -98,6 +99,11 @@ val extrapolate :
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a
+
+(* Run [f] with [name] naming the comparison whose operands it inverts:
+   landmarks recorded inside measure that inequality, one entry per
+   inequality and direction.  [name] is only called when one records. *)
+val with_guard : t -> (unit -> string) -> (unit -> 'a) -> 'a
 
 (* Whether a cycle head is being widened; outside one, no observation
    records anything. *)

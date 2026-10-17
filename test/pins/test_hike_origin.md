@@ -11,7 +11,7 @@ fails under that inversion.
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
 | ORI-01 | `facts Stack`: base = `segment_base` (2^62+8), certified 4, ±8 MiB clamps | change `facts Stack`'s `base` to `0L` | pin FAILs: the base assert fails |
-| ORI-02 | the ADT is total: three constructors, each with a name | drop a constructor from the `name` match | pin FAILs: the name assert fails (inexhaustible match) |
+| ORI-02 | every origin has a name; the listing match is exhaustive, so a new constructor stops compiling until it is listed | drop a constructor from the `name` match | pin FAILs: the name assert fails (inexhaustible match) |
 | ORI-03 | `origin`: a stack value reads `Some Stack`; a plain singleton, an absolute Clp, and a stack∪plain union read `None` | make `origin` answer `Some Abs` for `Clp _` | pin FAILs: the plain/absolute asserts fail |
 | ORI-07 | the store→load round-trip (frame): the load's stamped ADDRESS origin (a frame cell) is `Some Stack` | make `stamp_origin` use the loaded value for a load instead of the address | pin FAILs: the read-back origin is `Some Abs`/the value's |
 | ORI-18 | the D10 namespace test (`names_stack_line`): `Stack` names the stack line; `Abs` and `Rip _` name none | make `names_stack_line` answer `true` for `Abs` | pin FAILs: the absolute-origin assert fails |

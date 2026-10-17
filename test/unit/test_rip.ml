@@ -142,12 +142,12 @@ let tests = [
        let spec = { empty_spec with spec_sections = [Some meta];
                                    spec_comps = [comp] } in
        let sub = straight_sub "rip_emit"
-           [tagged (Def.create (v64 "RAX") (int 0x4010L));
-            tagged (Def.create (v64 "RDX")
+           [tagged (Def.create (int_ret 0) (int 0x4010L));
+            tagged (Def.create (int_ret 1)
                 (Bil.Load (Bil.Var (memv "rip_emit_mem"), int 0x4010L, LittleEndian, `r64)));
             tagged (Def.create (memv "rip_emit_mem")
                 (Bil.Store (Bil.Var (memv "rip_emit_mem"), int 0x4018L,
-                            Bil.Var (v64 "RAX"), LittleEndian, `r64)))] in
+                            Bil.Var (int_ret 0), LittleEndian, `r64)))] in
        let program = resolve (Program.create ~subs:[sub] ()) in
        let ir = emit_ir_spec spec (Term.enum sub_t program |> Seq.to_list) in
        check "value renders the owning global and its index"
@@ -165,10 +165,10 @@ let tests = [
        let address = Synth.module_addr ~addr_bits:64 0x2000L in
        let mem = Synth.bytes ~addr_bits:64 (Synth.Global 0) in
        let body, _ = sub_of "rip_face"
-           [ [Def.create (v64 "RAX")
+           [ [Def.create (int_ret 0)
                  (Bil.Load (Bil.Var mem, int 0L, LittleEndian, `r64))],
               [(1, fun t -> mk_jmp_to t
-                     (Bil.BinOp (Bil.EQ, Bil.Var (v64 "RAX"), Bil.Var address)));
+                     (Bil.BinOp (Bil.EQ, Bil.Var (int_ret 0), Bil.Var address)));
                (2, mk_goto)];
               [], [(0, mk_ret)]; [], [(0, mk_ret)] ] in
        let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
@@ -190,9 +190,9 @@ let tests = [
        let base = Synth.base ~addr_bits:64 (Synth.Global 7) in
        let addr = Bil.BinOp (Bil.PLUS,
            Bil.Var (Synth.module_addr ~addr_bits:64 0x4010L),
-           Bil.Var (v64 "RDI")) in
+           Bil.Var (int_param 0)) in
        let program = resolve (Program.create ~subs:[straight_sub "rip_index"
-           [Def.create (v64 "RAX")
+           [Def.create (int_ret 0)
               (Bil.Load (Bil.Var mem, addr, LittleEndian, `r64))]] ()) in
        check "the component has a runtime-relative byte index"
          (Exp.equal (Def.rhs (Base.List.hd_exn (defs program)))
@@ -202,7 +202,7 @@ let tests = [
   pin "RIP-06" "a marked RMW addresses the same component global and byte index as ordinary accesses; an unmarked RMW stays plain"
     (fun () ->
        let mem = Synth.bytes ~addr_bits:64 (Synth.Global 7) in
-       let loaded = v64 "RDX" in
+       let loaded = int_ret 1 in
        let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
                     sm_lo = 0x4008L; sm_hi = 0x401fL; sm_words = 3;
                     sm_image = Some (Bytes.make 24 '\000'); sm_copy_relocs = [] } in

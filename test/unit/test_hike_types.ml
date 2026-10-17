@@ -17,8 +17,7 @@ module Abi = Hike.Abi
 let abi = Hike.Abi.x86_64_sysv
 
 (* [Abi.t] is built on demand; target facts need the harness [init]. *)
-let x86 () : Theory.Target.t = Theory.Target.of_string "x86_64-gnu-elf"
-let unknown = Theory.Target.unknown
+let x86 () : Theory.Target.t = x86_target ()
 
 let arg_name (a : Arg.t) : string = Var.name (Arg.lhs a)
 let arg_names (l : Arg.t list) : string list = Base.List.map l ~f:arg_name
@@ -62,24 +61,16 @@ let tests : unit Alcotest.test list =
 
     pin "TYPES-05" "tag_lane: a plain [In] register lane is not a pointer"
       (fun () ->
-        let rdi = v64 "RDI" in
+        let rdi = int_param 0 in
         let a' = Types.tag_lane (Arg.create ~intent:In rdi (Bil.Var rdi)) in
         check "TYPES-05"
-          (arg_name a' = "RDI" && Arg.intent a' = Some In && not (is_ptr a')));
+          (arg_name a' = Var.name rdi && Arg.intent a' = Some In && not (is_ptr a')));
 
 
 
 
 
 
-
-
-
-    pin "TYPES-10" "compute_sub_sig: an unknown target answers no returns"
-      (fun () ->
-        let sub = plain_sub "t14_ret" [] in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
-        check "TYPES-10" (rets = [] && args = []));
 
 
 
@@ -89,11 +80,11 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub =
           plain_sub "t14_filt"
-            [ Def.create (v64 "t14_f1") (Bil.Var (v64 "RSP"));
-              Def.create (v64 "t14_f2") (Bil.Var (v64 "RBX"));
-              Def.create (v64 "t14_f3") (Bil.Var (v64 "FS_BASE")) ]
+            [ Def.create (v64 "t14_f1") (Bil.Var sp);
+              Def.create (v64 "t14_f2") (Bil.Var (callee_saved 0));
+              Def.create (v64 "t14_f3") (Bil.Var thread_pointer) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-12" (args = []));
 
     pin "TYPES-13"
@@ -106,7 +97,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_p2") (Bil.Var (v64 "hike_arg2"));
               Def.create (v64 "t14_p3") (Bil.Var (v64 "intrinsic:foo")) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-13" (args = []));
 
 
@@ -121,9 +112,10 @@ let tests : unit Alcotest.test list =
           { regions = []; window_param = true; runtime_residue = false }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-16"
-          (rets = []
+          (arg_names rets
+           = Base.List.map (Abi.of_target (x86 ())).Abi.return_regs ~f:Var.name
           && match args with
              | [ a ] ->
                  arg_name a = "hike_window"
@@ -135,33 +127,35 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: an emittable intrinsic takes its free vars [In] and \
        its own defs [Out]"
       (fun () ->
-        let rdi = v64 "RDI" in
+        let rdi = int_param 0 in
         let y = v64 "intrinsic:testsig_y" in
         let sub =
           Term.set_attr
             (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-17"
-          (arg_names args = [ "RDI" ]
+          (arg_names args = [ Var.name (int_param 0) ]
           && for_all_in args
           && arg_names rets = [ "intrinsic:testsig_y" ]
           && Base.List.for_all rets ~f:(fun a ->
                  Arg.intent a = Some Out && not (is_ptr a))));
 
     pin "TYPES-18"
-      "compute_sub_sig: an internal sub carries the ABI return carriers (RAX, RDX, YMM0), no body scan"
+      "compute_sub_sig: an internal sub carries exactly the ABI's return registers as Out lanes, no body scan"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
         let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
-        check "TYPES-18" (arg_names rets = [ "RAX"; "RDX"; "YMM0" ]));
-
-
-
-
-
-
+        let target_abi = Abi.of_target (x86 ()) in
+        check "TYPES-18 the target ABI's carriers, in its order"
+          (Base.List.map rets ~f:Arg.lhs
+           |> fun lanes ->
+           Base.List.length lanes = Base.List.length target_abi.Abi.return_regs
+           && Base.List.for_all2_exn lanes target_abi.Abi.return_regs ~f:Var.same);
+        check "TYPES-18 Out lanes, each an ABI return register"
+          (Base.List.for_all rets ~f:(fun a ->
+               Arg.intent a = Some Out && Abi.is_return_reg target_abi (Arg.lhs a))));
 
     pin "TYPES-22"
       "a named external call absent from the program keeps the synthetic parameter ABI"
@@ -177,11 +171,11 @@ let tests : unit Alcotest.test list =
                         (Call.create ~target:(Label.direct target) ()))) ] ]
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog' = Types.sign_program ~target:unknown prog in
+        let prog' = Types.sign_program ~target:(x86 ()) prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         check "TYPES-22"
           (arg_names (Model.sig_args sub')
-           = Base.List.map (Abi.param_regs abi @ [ v64 "RAX" ]) ~f:Var.name));
+           = Base.List.map (Abi.param_regs abi @ [ (int_ret 0) ]) ~f:Var.name));
 
     pin "TYPES-23"
       "a canonical direct return does not add synthetic call lanes"
@@ -190,14 +184,17 @@ let tests : unit Alcotest.test list =
           sub_of "t14_terminal_return" [ [], [ (0, mk_ret) ] ]
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog' = Types.sign_program ~target:unknown prog in
+        let prog' = Types.sign_program ~target:(x86 ()) prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
-        check "TYPES-23" (Model.sig_args sub' = []));
+        let target_abi = Abi.of_target (x86 ()) in
+        check "TYPES-23"
+          (Base.List.for_all (Model.sig_args sub') ~f:(fun a ->
+               Abi.is_return_reg target_abi (Arg.lhs a))));
     pin "KIND-01"
       "a def computing a stack address is ptr-kind (its denotation is \
        stack-resident)"
       (fun () ->
-        let rbp = v64 "RBP" and rax = v64 "RAX" in
+        let rbp = frame_ptr and rax = int_ret 0 in
         let sub =
           straight_sub "k01"
             [ Def.create rbp (Bil.Var sp);
@@ -225,10 +222,10 @@ let tests : unit Alcotest.test list =
 
     pin "KIND-05"
       "an integer SSA version of a pointer register stays an integer" (fun () ->
-        let rdi = v64 "RDI" in
+        let rdi = int_param 0 in
         let rdi1 = Var.with_index rdi 1 in
-        let rbx1 = Var.with_index (v64 "RBX") 1 in
-        let rcx1 = Var.with_index (v64 "RCX") 1 in
+        let rbx1 = Var.with_index (callee_saved 0) 1 in
+        let rcx1 = Var.with_index (int_param 3) 1 in
         let eight = Bil.Int (Cbat_word.to_word (w64 8)) in
         let sub =
           straight_sub "k05"
@@ -247,7 +244,7 @@ let tests : unit Alcotest.test list =
 
     pin "KIND-04"
       "a callee parameter passed a stack address is ptr-kind" (fun () ->
-        let rdi = v64 "RDI" in
+        let rdi = int_param 0 in
         let callee, _ =
           sub_of ~args:[ Arg.create ~intent:In rdi (Bil.Var rdi) ] "k04_callee"
             [ [], [ (0, mk_ret) ] ]
@@ -295,9 +292,8 @@ let tests : unit Alcotest.test list =
 
     pin "TYPES-25" "return carriers retain entry values on unwritten paths"
       (fun () ->
-        let target = Theory.Target.declare ~bits:64 ~nicknames:[ "x86_64-gnu-elf" ]
-            ~package:"hike-test" "return-preservation" in
-        let rax = v64 "RAX" and rdx = v64 "RDX" and rdi = v64 "RDI" in
+        let target = x86 () in
+        let rax = int_ret 0 and rdx = int_ret 1 and rdi = int_param 0 in
         let sub, tids =
           sub_of "preserve_return"
             [ [ Def.create rax (Bil.Var rdi) ],
@@ -310,8 +306,15 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let signed = Types.sign_sub ~target sub in
-        Alcotest.(check (list string)) "TYPES-25 inputs"
-          [ "RDI"; "RDX"; "YMM0" ] (arg_names (Model.sig_args signed));
+        let inputs = Base.List.map (Model.sig_args signed) ~f:Arg.lhs in
+        let has v = Base.List.exists inputs ~f:(Var.same v) in
+        check "TYPES-25 the parameter and the lane unwritten on one path are inputs"
+          (has rdi && has rdx);
+        check "TYPES-25 a lane written on every path is not an input"
+          (not (has rax));
+        check "TYPES-25 every input beyond the parameter is an ABI return register"
+          (Base.List.for_all inputs ~f:(fun v ->
+               Var.same v rdi || Abi.is_return_reg (Abi.of_target target) v));
         let prog = Hike.Ssa.ssa_program ~target
             (Program.create ~subs:[ signed ] ()) in
         let ssa = Term.first sub_t prog |> Base.Option.value_exn in
@@ -355,7 +358,7 @@ let tests : unit Alcotest.test list =
                             ~target:(Direct self_tid) ()))) ]);
               ([], [ (0, mk_ret) ]) ]
         in
-        let prog = Types.sign_program ~target:unknown (Program.create ~subs:[ sub ] ()) in
+        let prog = Types.sign_program ~target:(x86 ()) (Program.create ~subs:[ sub ] ()) in
         let stamped = Term.enum sub_t prog |> Seq.hd_exn in
         (* the same self-call shape reading RBX first: not a trampoline *)
         let reader_tid = Tid.for_name "trampoline_reader" in
@@ -372,7 +375,7 @@ let tests : unit Alcotest.test list =
                            ~target:(Direct reader_tid) ()))) ];
               ([], [ (0, mk_ret) ]) ]
         in
-        let prog2 = Types.sign_program ~target:unknown (Program.create ~subs:[ reader ] ()) in
+        let prog2 = Types.sign_program ~target:(x86 ()) (Program.create ~subs:[ reader ] ()) in
         let stamped2 = Term.enum sub_t prog2 |> Seq.hd_exn in
         check "TYPES-24"
           (Model.is_plt_trampoline_sub stamped

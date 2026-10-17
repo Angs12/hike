@@ -309,7 +309,7 @@ let tests : unit Alcotest.test list =
     pin "VSA-60"
       "P3-1: gate-free — the entry RSP anchor is denoted (entry input state carries RSP = the symbolic segment base at offset 0 — StackOff{0})"
       (fun () ->
-        let rsp_var = v64 "RSP" in
+        let rsp_var = sp in
         let sub = mk_p3_anchor_sub () in
         let sol = run_anchored sub in
         let st = in_state sol (entry_tid_of sub) in
@@ -390,7 +390,7 @@ let tests : unit Alcotest.test list =
               img_slots = Core.Int64.Set.empty } ]
         in
         let envs, _, _ =
-          produce ~images Theory.Target.unknown
+          produce ~images (x86_target ())
             (Program.create ~subs:[ sub ] ()) sub
         in
         let blk = Term.first blk_t sub |> Base.Option.value_exn in
@@ -403,7 +403,7 @@ let tests : unit Alcotest.test list =
       "a solve paused on a callee past the entry block resumes to the cold \
        solve's result"
       (fun () ->
-        let rsi = v64 "RSI" and rcx = v64 "RCX" and rbx = v64 "RBX" in
+        let rsi = int_param 1 and rcx = int_param 3 and rbx = callee_saved 0 in
         let k n = Bil.int (Word.of_int64 ~width:64 n) in
         let callee_tid = Tid.create () in
         let sub, tids =
@@ -418,11 +418,11 @@ let tests : unit Alcotest.test list =
           Vsa.Call_effects.Summary
             (Some (Cbat_var_id.intern_set (Var.Set.singleton rcx))) in
         let solve ~callee =
-          Hv.start Theory.Target.unknown ~lookup:(fun _ -> None) ~images:[]
+          Hv.start (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
             ~callee ~block_addrs:(Core.Map.empty (module Addr))
             ~foreign_slots:Core.Int64.Set.empty sub in
         let resume p ~callee =
-          Hv.resume Theory.Target.unknown ~lookup:(fun _ -> None) ~images:[]
+          Hv.resume (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
             ~callee ~foreign_slots:Core.Int64.Set.empty p in
         match solve ~callee:(fun _ -> Vsa.Call_effects.Blocked) with
         | Hv.Done _ -> check "VSA-68.paused" false
