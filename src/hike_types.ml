@@ -468,39 +468,67 @@ let ptr_defs ?(extra = Var.Set.empty) ?(used = Var.Set.empty)
     Base.List.fold vs ~init:acc ~f:(fun acc v ->
         if use_ok v then Core.Set.add acc v else acc)
   in
-  (* The vars an address expression is based on: [v], [v ± k], [v + idx]
-     with a shift, multiply, cast or constant index, an [ite]'s arms.  A
-     sum of two bare vars names no base: neither is known to be the
-     pointer, so both stay integers. *)
-  let rec bases (e : exp) : var list =
-    let is_sum = function
-      | Bil.BinOp ((Bil.PLUS | Bil.MINUS), _, _) -> true
-      | _ -> false
-    in
-    let is_var = function Bil.Var _ -> true | _ -> false in
-    match e with
-    | Bil.Var v -> [ v ]
-    | Bil.Ite (_, a, b) -> bases a @ bases b
-    | Bil.BinOp (Bil.MINUS, a, b) ->
-        if is_var a && is_var b then [] else bases a
-    | Bil.BinOp (Bil.PLUS, a, b) -> (
-        match (is_var a, is_sum a, is_var b, is_sum b) with
-        | true, _, true, _ -> []
-        | _, true, _, true -> []
-        | true, _, _, false -> bases a
-        | _, false, true, _ -> bases b
-        | _, true, _, _ -> bases a
-        | _, _, _, true -> bases b
-        | _ -> [])
-    | _ -> []
+  let blk_of_def =
+    Base.List.fold defs ~init:Tid.Map.empty ~f:(fun m (blk, d) ->
+        Core.Map.set m ~key:(Term.tid d) ~data:blk)
   in
-  let used_def used d =
+  let storages = Hike_sections.spans_of_layout ~word layout in
+  (* The vars an address expression is based on, read off the
+     denotation's leaf census ([Hike_synth_addr.address_leaves]).  A lone
+     var is the address itself.  On the additive spine, a leaf that is a
+     stack or storage address, or already proven a pointer, is the base
+     and the visible [Int] leaves are indices.  With no base, the one
+     leaf the denotation cannot see is the base; two unseen leaves name
+     none (neither is known to be the pointer). *)
+  let bases seed d (e : exp) : var list =
+    match (e, Core.Map.find blk_of_def (Term.tid d)) with
+    | Bil.Var v, _ -> [ v ]
+    | _, None -> []
+    | _, Some blk ->
+        let rec spine (e : exp) =
+          match e with
+          | Bil.Var v -> [ v ]
+          | Bil.Ite (_, a, b) | Bil.BinOp (Bil.PLUS, a, b) ->
+              spine a @ spine b
+          | Bil.BinOp (Bil.MINUS, a, _) -> spine a
+          | _ -> []
+        in
+        let vs = spine e in
+        (* The denotation keys on the base register: its value in the
+           before-env of [d] is the version's. *)
+        let leaves =
+          Hike_synth_addr.address_leaves ~denote:facts.Hike_kb.denote
+            ~storages ~blk ~def:d
+            ((object
+                inherit Exp.mapper
+                method! map_sym v = Var.base v
+              end)#map_exp e)
+        in
+        let leaf v = Core.Map.find leaves (Var.base v) in
+        let is_base v =
+          is_ptr seed v
+          || (match leaf v with
+              | Some (`Static _ | `Addr) -> true
+              | Some `Int | None -> false)
+        in
+        match Base.List.filter vs ~f:is_base with
+        | _ :: _ as bs -> bs
+        | [] -> (
+            match
+              Base.List.dedup_and_sort vs ~compare:Var.compare
+              |> Base.List.filter ~f:(fun v -> Base.Option.is_none (leaf v))
+            with
+            | [ v ] -> [ v ]
+            | _ -> [])
+  in
+  let used_def seed used d =
     let used =
       match Hike_stack_model.addr_of_rhs (Def.rhs d) with
-      | Some (a, _) -> add_used used (bases a)
+      | Some (a, _) -> add_used used (bases seed d a)
       | None -> used
     in
-    if Core.Set.mem used (Def.lhs d) then add_used used (bases (Def.rhs d))
+    if Core.Set.mem used (Def.lhs d) then
+      add_used used (bases seed d (Def.rhs d))
     else used
   in
   let used_phi used p =
@@ -522,7 +550,7 @@ let ptr_defs ?(extra = Var.Set.empty) ?(used = Var.Set.empty)
     in
     let flow =
       Hike_bir_flow.run ~graph ~sub ~rev:true ~initial ~default:Var.Set.empty
-        ~equal:Core.Set.equal ~merge:Core.Set.union ~def:used_def
+        ~equal:Core.Set.equal ~merge:Core.Set.union ~def:(used_def seed)
         ~phi:used_phi ~jmp:(fun used _ -> used)
     in
     Core.Map.fold flow.before ~init:seed ~f:(fun ~key:_ ~data acc ->

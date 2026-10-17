@@ -620,6 +620,67 @@ let tests : unit Alcotest.test list =
             check "TYPES-32 the 32-bit version is an integer"
               (Base.List.for_all (defs_of eax) ~f:(fun d -> not (ptr_of d)))
         | _ -> check "TYPES-32 two versions of the register" false);
+
+    (* An address's base is chosen by denotation: the stack-based
+       operand is the base and the loop index stays an integer. *)
+    pin "TYPES-33"
+      "RSP + (i - 72 + 104) leaves the loop index an integer: the address \
+       is a GEP off the stack base"
+      (fun () ->
+        let i = int_param 4 and a = int_ret 0 in
+        let m = memv "types33_m" in
+        let c = Var.create ~is_virtual:false ~fresh:false "types33_c" (Type.Imm 1) in
+        let n k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let sub, _ =
+          sub_of "types33"
+            [ [ Def.create i (n 0) ], [ (1, mk_goto) ];
+              [ Def.create a
+                  (Bil.BinOp (Bil.PLUS, Bil.Var sp,
+                              Bil.BinOp (Bil.PLUS,
+                                         Bil.BinOp (Bil.MINUS, Bil.Var i, n 72),
+                                         n 104)));
+                Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var a, n 1, LittleEndian, `r64));
+                Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, n 8)) ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var c)); (2, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub = rewrite_one sub in
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-33 the address is a pointer" (kinds.is_ptr_def "types33" a);
+        check "TYPES-33 the loop index is an integer"
+          (not (kinds.is_ptr_def "types33" i));
+        let ir = emit_ir ~types:kinds.retype [ sub ] in
+        check "TYPES-33 the store is a GEP off the stack base, no cast"
+          (contains_substring ir "getelementptr i8, ptr %entry1, i64 %"
+           && (not (contains_substring ir "= inttoptr"))
+           && not (contains_substring ir "ptrtoint")));
+
+    pin "TYPES-34"
+      "heap base + index: the visible bounded index stays an integer and the \
+       unseen operand is the base"
+      (fun () ->
+        let b = int_ret 1 and k = callee_saved 0 and a = int_ret 0 in
+        let src = int_param 1 in
+        let m = memv "types34_m" in
+        let c = Var.create ~is_virtual:false ~fresh:false "types34_c" (Type.Imm 1) in
+        let n x = Bil.Int (Cbat_word.to_word (w64 x)) in
+        let sub, _ =
+          sub_of "types34"
+            [ [ Def.create b (Bil.Load (Bil.Var m, Bil.Var src, LittleEndian, `r64)) ],
+              [ (2, fun t -> mk_jmp_to t (Bil.Var c)); (1, mk_goto) ];
+              [ Def.create k (n 0) ], [ (3, mk_goto) ];
+              [ Def.create k (n 8) ], [ (3, mk_goto) ];
+              [ Def.create a (Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Var k));
+                Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var a, n 1, LittleEndian, `r64)) ],
+              [ (4, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-34 the base is a pointer" (kinds.is_ptr_def "types34" b);
+        check "TYPES-34 the index is an integer"
+          (not (kinds.is_ptr_def "types34" k)));
   ]
 
 let () = run "hike_types" tests
