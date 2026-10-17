@@ -80,9 +80,6 @@ let ws_finish ~(pass : string) ~(fail : string) (crashes : int) (loadfails : int
   flush stdout;
   exit (if crashes = 0 && loadfails = 0 then 0 else 1)
 
-(* DCE seam, aliased once here (no flat-name reach-throughs in probes). *)
-module Dce = Hike.Dce
-
 (* Print a usage line and exit 2. *)
 let usage (prog : string) (msg : string) : 'a =
   Printf.eprintf "usage: %s %s\n" prog msg;

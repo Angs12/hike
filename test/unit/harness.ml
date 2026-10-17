@@ -33,7 +33,7 @@ let with_timeout (secs : int) (f : unit -> unit) : unit =
     f
 
 (* One Alcotest group per pin id: the group name is the stable, filterable id
-   (`test_dce.exe test 'DCE-01'`), the case string is the human description.
+   (`<suite>.exe test '<ID>'`), the case string is the human description.
    Alcotest records a raised exception as a failure and runs the next group, so
    one broken fixture never hides the rest of the module. *)
 let pin ?(timeout = 300) (id : string) (desc : string) (f : unit -> unit) :

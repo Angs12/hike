@@ -35,9 +35,6 @@ module Rip = Hike_rip
 module Tls = Hike_tls
 module Synth = Hike_synth
 
-(** Dead-code elimination. *)
-module Dce = Hike_dce
-
 (** The jump compiler: jcc flag idioms become value comparisons. *)
 module Jump = Hike_jump
 

@@ -197,22 +197,6 @@ val storage_of_range : range_storage Tree.t -> range -> range_storage option
 (** The section space predicates: data sections vs the sub-local
     stack/arg spaces. *)
 (** The def's memory access: (address, width in bytes, stores?). *)
-(** The mem vars of storages whose bytes escape this sub: a storage
-    carrying an escape extent (a stored stack-symbolic value, an
-    incoming stack-address parameter), one a typed call argument
-    names — a promoted [hike_argN] binding the callee's slot convention
-    reaches, or an argument register holding a rewritten storage-base
-    address — or the residue shadow a model-window callee reads (a
-    variadic callee's overflow cells, an unpromotable Args claim).  The
-    DCE sweep keeps the rooted storages' defs. *)
-val escape_roots_of_sub :
-  addr_bits:int ->
-  abi:Hike_abi.t ->
-  arities:int Tid.Map.t ->
-  window_readers:Tid.Set.t ->
-  tree:sub_tree ->
-  sub term ->
-  Var.Set.t
 
 (** Stamps the ctx's slim tags onto the sub's defs (a term mapper). *)
 val stamp_tags : ctx -> sub term -> sub term

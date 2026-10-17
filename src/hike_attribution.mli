@@ -6,7 +6,7 @@ type result = {
 }
 
 (** Stamps section tags, promotes eligible storage,
-    and returns the emitter spec and DCE roots with the rewritten program. *)
+    and returns the rewritten program with the facts carrying the emitter spec. *)
 val run :
   facts:Hike_kb.facts ->
   word:int ->

@@ -17,7 +17,6 @@ module Resolve = Hike_resolve
 module Rip = Hike_rip
 module Tls = Hike_tls
 module Synth = Hike_synth
-module Dce = Hike_dce
 module Jump = Hike_jump
 module Split_mem = Hike_split_mem
 module Split_blocks = Hike_split_blocks

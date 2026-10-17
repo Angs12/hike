@@ -43,43 +43,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       @ Base.List.map spec.spec_whole ~f:(fun (id, lo, hi) ->
             { Hike_synth_addr.id; lo; hi })
     in
-    let arities =
-      Core.Map.map sections.sub_trees
-        ~f:(Hike_sections.slot_arity ~word ~entry)
-    in
-    let window_readers =
-      Term.enum sub_t program
-      |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc sub ->
-             let reads_window =
-               Hike_variadic.is_variadic sub
-               || Base.Option.value_map
-                    (Core.Map.find sections.sub_trees (Term.tid sub))
-                    ~default:false ~f:(fun tree ->
-                      Hike_sections.Tree.to_sequence tree
-                      |> Seq.exists ~f:(fun (_, range) ->
-                             Base.List.exists range.Hike_sections.members
-                               ~f:(fun member_ ->
-                                 member_.Hike_sections.m_identity
-                                 && Hike_sections.equal_sec
-                                      member_.Hike_sections.m_sec
-                                      Hike_stack_model.Args)))
-             in
-             if reads_window then Core.Set.add acc (Term.tid sub) else acc)
-    in
-    let escape_roots =
-      Term.enum sub_t program
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun map sub ->
-             let tree =
-               Core.Map.find sections.sub_trees (Term.tid sub)
-               |> Option.value ~default:Hike_sections.Tree.empty
-             in
-             Core.Map.set map ~key:(Term.tid sub)
-               ~data:
-                 (Hike_sections.escape_roots_of_sub
-                    ~addr_bits:(Hike_stack_model.word_bits facts.abi.word)
-                    ~abi:facts.abi ~arities ~window_readers ~tree sub))
-    in
-    (program, regions, Hike_kb.with_attribution facts ~spec ~escape_roots)
+    (program, regions, Hike_kb.with_attribution facts ~spec)
   in
   let program, facts =
     Hike_rip.resolve_with_layout ~addr_bits ~slots ~layout program

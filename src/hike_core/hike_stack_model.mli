@@ -154,10 +154,6 @@ val is_region_ptr : var -> bool
 val sec_comp_ptr : addr_bits:int -> int -> var
 val is_sec_comp_ptr : var -> bool
 
-(* The un-carved global memory state: BAP's own [mem] var; its stores
-   cross sub boundaries. *)
-val is_global_mem : var -> bool
-
 val is_storage_base : var -> bool
 val region_ptr_id_of : var -> int option
 

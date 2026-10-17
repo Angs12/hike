@@ -313,7 +313,7 @@ let call_arg ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Argument i)
 
 let kind (v : var) = Hike_synth.classify Hike_synth.empty v
 
-(* The call-argument temps survive DCE: they are the call's arguments. *)
+(* The call-argument temps are the call's arguments. *)
 let is_call_arg v =
   match kind v with
   | Some (Hike_synth.Storage (Hike_synth.Argument _)) -> true
@@ -403,15 +403,6 @@ let is_sec_comp_ptr v =
 (* A storage's base value: never renamed, never a lane. *)
 let is_storage_base (v : var) : bool =
   is_region_ptr v || is_sec_comp_ptr v
-
-(* The un-carved global memory state: BAP's own [mem] var, outside the
-   fissioned families.  A store into it is observable outside the sub
-   (the caller reads the sret buffer through its own pointer) — the
-   sweep never kills one. *)
-let is_global_mem (v : var) : bool =
-  match kind v with
-  | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
-  | _ -> Core.String.equal (Var.name (Var.base v)) "mem"
 
 let region_ptr_id_of v =
   match kind v with

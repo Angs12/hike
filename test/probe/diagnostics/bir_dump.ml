@@ -1,5 +1,5 @@
 (* Pipeline BIR dump: prints a sub's blocks after chosen pass stages.
-   Usage: bir_dump.exe <binary> <subname> <stage>  (stage: fp|split|ssa|dce) *)
+   Usage: bir_dump.exe <binary> <subname> <stage>  (stage: fp|split|ssa) *)
 
 open Bap.Std
 open Probe_common
@@ -63,7 +63,7 @@ let () =
       | "fp" -> prog
       | _ ->
         (* the vsa/attribution stages run inside the plugin; the caller
-           wants post-split/ssa/dce shapes, which need the full solve *)
+           wants post-split/ssa shapes, which need the full solve *)
         failwith "stage needs the full pipeline; use fp"
     in
     (match find_sub prog name with

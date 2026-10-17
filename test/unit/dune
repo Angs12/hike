@@ -23,7 +23,6 @@
 
 (tests
  (names
-  test_dce
   test_clp
   test_exact
   test_map_lattice
