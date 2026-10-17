@@ -398,6 +398,63 @@ let tests : unit Alcotest.test list =
           (Base.List.equal Var.same
              (Base.List.map (Model.sig_rets signed) ~f:Arg.lhs)
              (Base.List.map (Types.return_lanes ~target signed) ~f:Arg.lhs)));
+
+    (* A return lane follows the version it returns at an exit; a
+       trampoline has none, so a pointer argument stays out of it. *)
+    pin "TYPES-27"
+      "a pointer argument does not type the same register's return lane"
+      (fun () ->
+        let target = x86 () in
+        let rdx = int_ret 1 in
+        let ext = Tid.create () in
+        let callee, _ =
+          sub_of "types27_tramp"
+            [ [], [ (1, mk_goto) ];
+              [],
+              [ (0,
+                 fun _ ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~target:(Label.direct ext) ()))) ] ]
+        in
+        let caller, _ =
+          sub_of "types27_caller"
+            [ [ Def.create rdx (Bil.Var sp) ],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Label.direct t)
+                           ~target:(Label.direct (Term.tid callee))
+                           ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let facts, stamped, _ = fixture_facts [ caller; callee ] in
+        let prog = Program.create ~subs:stamped () in
+        let prog = Types.sign_program ~target prog in
+        let pks, inferred =
+          Types.ptr_kinds ~facts ~sub_of:(Types.sub_of_program prog) prog
+        in
+        let callee =
+          Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
+          |> Base.Option.value_exn
+        in
+        let ptr_vars = Types.ptr_vars_of ~pks ~inferred callee in
+        let ptr_rets = Types.ptr_returns ~facts callee ptr_vars in
+        let mem_typ = Types.mem_type_of_target target in
+        let callee = Types.retype_sub ~mem_typ ~ptr_vars ~ptr_rets callee in
+        let lane_typ ~ret =
+          Term.enum arg_t callee
+          |> Seq.find ~f:(fun a ->
+                 Var.same (Arg.lhs a) rdx && Model.is_ret a = ret)
+          |> Base.Option.map ~f:(fun a -> Var.typ (Arg.lhs a))
+        in
+        check "TYPES-27 the argument lane is a pointer"
+          (lane_typ ~ret:false = Some mem_typ);
+        check "TYPES-27 the return lane stays an integer"
+          (match lane_typ ~ret:true with
+           | Some t -> t <> mem_typ
+           | None -> false));
   ]
 
 let () = run "hike_types" tests

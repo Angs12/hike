@@ -236,8 +236,9 @@ let is_exit_blk (blk : blk term) : bool =
          | Goto _ | Int _ -> false)
 
 (* The return registers the sub returns a pointer in: a version of the
-   register reaching an exit is a pointer.  A fixed signature keeps the
-   ABI's integer returns. *)
+   register reaching an exit is a pointer.  An exit no version reaches
+   is no evidence (the base register is an argument lane, not a return
+   one).  A fixed signature keeps the ABI's integer returns. *)
 let ptr_returns ~(facts : Hike_kb.facts) (sub : sub term) (ptrs : Var.Set.t)
     : Var.Set.t =
   if Model.fixed_signature sub then Var.Set.empty
@@ -246,10 +247,10 @@ let ptr_returns ~(facts : Hike_kb.facts) (sub : sub term) (ptrs : Var.Set.t)
         Term.enum blk_t sub
         |> Seq.exists ~f:(fun blk ->
                is_exit_blk blk
-               && Core.Set.mem ptrs
-                    (Base.Option.value ~default:r
-                       (Base.Option.first_some (minted_at blk r)
-                          (passed_at blk r)))))
+               && Base.Option.value_map ~default:false
+                    (Base.Option.first_some (minted_at blk r)
+                       (passed_at blk r))
+                    ~f:(Core.Set.mem ptrs)))
     |> Var.Set.of_list
 
 (* Every SSA version of SP and the window the sub names. *)
@@ -630,18 +631,23 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
      method! map_jmp j =
        super#map_jmp j |> Model.map_effects ~read:repl ~write:repl
      method! map_arg a =
-       let a = super#map_arg a in
+       let ret = Model.is_ret a in
        let lhs = Arg.lhs a in
        let ptr =
-         if Model.is_ret a then Core.Set.mem ptr_rets lhs
+         if ret then Core.Set.mem ptr_rets lhs
          else Core.Set.mem ptr_vars lhs || Model.is_ptr_arg a
        in
-       if not ptr then a
+       (* An output lane is typed by [ptr_rets] alone: an input fact on
+          the same register does not reach it. *)
+       if ret && not ptr then a
        else
-         Term.with_attrs
-           (Arg.create ~tid:(Term.tid a) ?intent:(Arg.intent a) (to_mem lhs)
-              (Arg.rhs a))
-           (Term.attrs a)
+         let a' = super#map_arg a in
+         if not ptr then a'
+         else
+           Term.with_attrs
+             (Arg.create ~tid:(Term.tid a') ?intent:(Arg.intent a')
+                (to_mem lhs) (Arg.rhs a'))
+             (Term.attrs a')
    end)#map_sub sub
 
 (* The signature pass: write every sub's lane list onto its own [arg]
