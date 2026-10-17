@@ -1096,7 +1096,7 @@ let tests : unit Alcotest.test list =
 
     pin "BK-74"
       "the SIGNED ext row — the pre-image [0, 0xFF] on a top env; the meet with \
-       {0x100} is empty, so the env keeps its value (identity, observed)"
+       {0x100} is empty, so the env is the dead-path bottom (observed)"
       (fun () ->
         let env15b = mk_env [ (s_t, Ws.singleton (s_r32 0x100)) ] in
         let env15b' =
@@ -1121,7 +1121,7 @@ let tests : unit Alcotest.test list =
         check "BK-74"
           (Ws.elem (s_r32 0xFF) row15b
           && not (Ws.elem (s_r32 0x100) row15b)
-          && Ws.equal c15b (Ws.singleton (s_r32 0x100))));
+          && AI.equal env15b' AI.bottom && Ws.is_bottom c15b));
 
     pin "BK-75"
       "the completion is the negation — NOT over each of the six comparisons \

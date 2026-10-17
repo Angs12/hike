@@ -76,7 +76,7 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-59 | S6: a ranged read that only partly overlaps a stored cell is not met into it — the cell keeps its stored value | as BK-58 (meet every key) | the cell at 0 narrows (15 ∉) |
 | BK-60 | S6: the dynamic-index read meets no cell — the cells at 0, 40 and 80 all keep their stored values | as BK-58 (meet every key) | the cells at 0/40/80 narrow (15 ∉) |
 | BK-71 | S11 the NEG row (`neg` of the produced window). | Drop the `Bil.NEG` arm. | BK-71. |
-| BK-74 | S15b the SIGNED-ext pre-image `[0,0xFF]`; the empty meet keeps the env value (identity). | Make the empty meet narrow/pick the constraint. | BK-74 (`Ws.equal` false). |
+| BK-74 | S15b the SIGNED-ext pre-image `[0,0xFF]`; the empty meet is the dead-path bottom. | Keep the env value on an empty meet. | BK-74 (`AI.equal` false). |
 | BK-75 | S16a `complete_cond` negates each of the six comparisons structurally (both orders). | As BK-70. | BK-75. |
 | BK-76 | S16b the completed fallthrough of `(x <u y)` seeds `y ⊆ [0,3]`. | As BK-70. | BK-76. |
 | BK-77 | S16c the 3-comparison AND chain narrows `a` to `[0,6]` and leaves `y`,`c`. | Make the `Bil.BinOp (AND, …)` `{1}` arm identity. | BK-77. |
