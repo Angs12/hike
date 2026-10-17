@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# The robustness matrix (T18): the corpus under every optimization
-# level, compiler, stack-protector mode, and consumer recompile level —
-# harness-free (llc pic, gcc -pie, stdout+rc byte-diffed against the
-# native binary), stripped and unstripped.
-#
-# Usage: matrix.sh <stage>
-#   stages: opts compilers protector protector-strip strip recomp
-#           performance --reference DIR [performance options]
-# Each stage prints one line per cell: PASS/FAIL counts + the red list.
+# The complete robustness matrix: every native configuration, all four
+# TLS models, and every LLVM optimization level, compared with native runs.
 
 set -u
 
@@ -21,8 +14,13 @@ LLC="${HIKE_LLC:-llc-21}"
 
 provenance_ok "$TREE" || exit $?
 
-# One matrix cell: compile every corpus source with $1, lift each
-# binary, llc+link harness-free, run both, byte-diff stdout and rc.
+if [ "$#" -ne 0 ]; then
+  echo "matrix.sh takes no arguments; it always runs the complete matrix" >&2
+  exit 2
+fi
+
+# One matrix cell: compile and lift every source, then rebuild through
+# each LLVM optimization level and compare execution with native.
 # Prints "CELL <tag>: <n>/<total> pass[; reds: ...]" and appends the
 # per-binary details to $WORK/<tag>.log.
 cell () {
@@ -43,10 +41,10 @@ cell () {
   done
 
   local n=0 total=0 reds=""
+  local -A level_pass=([0]=0 [1]=0 [2]=0 [3]=0 [s]=0 [z]=0)
   for i in "${!srcs[@]}"; do
     f="${srcs[$i]}"; name="${names[$i]}"
     if [ -n "$model" ] && [ "$name" != "tls_models" ]; then continue; fi
-    if [ -n "${HIKE_MATRIX_FILTER:-}" ] && ! [[ "$name" =~ $HIKE_MATRIX_FILTER ]]; then continue; fi
     total=$((total + 1))
     local bin="$dir/$name" ll="$dir/$name.ll" o="$dir/$name.o" exe="$dir/$name.lifted"
     local extra=()
@@ -66,41 +64,57 @@ cell () {
       echo "  $name: EXTERNAL-ATOMIC-CALL" >> "$log"; reds="$reds $name(atomic-call)"
       continue
     fi
-    if ! $LLC -O0 -relocation-model=pic -filetype=obj "$ll" -o "$o" 2>>"$log"; then
-      echo "  $name: LLC-FAIL" >> "$log"; reds="$reds $name(llc)"
-      continue
-    fi
-    if ! gcc -pie "$o" -o "$exe" -lpthread 2>>"$log"; then
-      echo "  $name: LINK-FAIL" >> "$log"; reds="$reds $name(link)"
-      continue
-    fi
-    local lout="$dir/$name.l.out" nout="$dir/$name.n.out" lrc nrc
-    local repeats=1 run passed=1
+    local nout="$dir/$name.n.out" lrc nrc
+    local repeats=1 run passed=1 lvl level_ok
     case "$name" in tls_pthreads|tls_initialized|tls_models) repeats=20 ;; esac
-    for ((run=1; run<=repeats; run++)); do
-      timeout "$HIKE_RUN_TIMEOUT" "$exe" > "$lout" 2>/dev/null; lrc=$?
-      timeout "$HIKE_RUN_TIMEOUT" "$bin" > "$nout" 2>/dev/null; nrc=$?
-      if [ "$lrc" -eq 124 ] || [ "$nrc" -eq 124 ]; then
-        echo "  $name: TIMEOUT run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
-        reds="$reds $name(timeout)"; passed=0; break
+    for lvl in 0 1 2 3 s z; do
+      local optll="$dir/$name.O$lvl.ll" lout="$dir/$name.O$lvl.l.out"
+      if ! opt-21 -O"$lvl" -S "$ll" -o "$optll" 2>>"$log"; then
+        echo "  $name: OPT-FAIL O$lvl" >> "$log"
+        reds="$reds $name(O$lvl-opt)"; passed=0; continue
       fi
-      if [ "$lrc" != "$nrc" ] || ! cmp -s "$lout" "$nout"; then
-        echo "  $name: DIFF run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
-        reds="$reds $name(diff-run-$run)"; passed=0; break
+      if ! $LLC -O0 -relocation-model=pic -filetype=obj "$optll" -o "$o" 2>>"$log"; then
+        echo "  $name: LLC-FAIL O$lvl" >> "$log"
+        reds="$reds $name(O$lvl-llc)"; passed=0; continue
       fi
-      if [ "$lrc" -ge 128 ]; then
-        echo "  $name: SIGNAL run=$run/$repeats (rc=$lrc)" >> "$log"
-        reds="$reds $name(signal)"; passed=0; break
+      if ! gcc -pie "$o" -o "$exe" -lpthread 2>>"$log"; then
+        echo "  $name: LINK-FAIL O$lvl" >> "$log"
+        reds="$reds $name(O$lvl-link)"; passed=0; continue
+      fi
+      level_ok=1
+      for ((run=1; run<=repeats; run++)); do
+        timeout "$HIKE_RUN_TIMEOUT" bash -c 'exec -a prog "$1"' _ "$exe" > "$lout" 2>&1; lrc=$?
+        timeout "$HIKE_RUN_TIMEOUT" bash -c 'exec -a prog "$1"' _ "$bin" > "$nout" 2>&1; nrc=$?
+        if [ "$lrc" -eq 124 ] || [ "$nrc" -eq 124 ]; then
+          echo "  $name: TIMEOUT O$lvl run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
+          reds="$reds $name(O$lvl-timeout)"; level_ok=0; break
+        fi
+        if [ "$lrc" != "$nrc" ] || ! cmp -s "$lout" "$nout"; then
+          echo "  $name: DIFF O$lvl run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
+          reds="$reds $name(O$lvl-diff-run-$run)"; level_ok=0; break
+        fi
+        if [ "$lrc" -ge 128 ]; then
+          echo "  $name: SIGNAL O$lvl run=$run/$repeats (rc=$lrc)" >> "$log"
+          reds="$reds $name(O$lvl-signal)"; level_ok=0; break
+        fi
+      done
+      if [ "$level_ok" = 1 ]; then
+        level_pass[$lvl]=$(( ${level_pass[$lvl]} + 1 ))
+        echo "  $name: PASS O$lvl runs=$repeats" >> "$log"
+      else
+        passed=0
       fi
     done
     if [ "$passed" = 1 ]; then
-      n=$((n + 1)); echo "  $name: PASS runs=$repeats" >> "$log"
+      n=$((n + 1))
     fi
   done
+  local levels="" lvl
+  for lvl in 0 1 2 3 s z; do levels="$levels O$lvl=${level_pass[$lvl]}/$total"; done
   if [ -n "$reds" ]; then
-    echo "CELL $tag: $n/$total pass;reds:$reds"
+    echo "CELL $tag: $n/$total pass; LLVM:$levels; reds:$reds"
   else
-    echo "CELL $tag: $n/$total pass"
+    echo "CELL $tag: $n/$total pass; LLVM:$levels"
   fi
   [ "$total" -gt 0 ] && [ "$n" -eq "$total" ]
 }
@@ -112,35 +126,8 @@ stage_cells () {
     done; exit "$failed"; }
 }
 
-# The recompile sweep runs the semantic gate's own machinery over the
-# recorded -O2 stripped corpus emissions, one consumer level at a time.
-stage_recomp () {
-  local corpus="${HIKE_CORPUS:-/tmp/corpus-o2}"
-  local failed=0
-  for lvl in 0 1 2 3 s z; do
-    local out="$WORK/recomp-$lvl"
-    mkdir -p "$out"
-    HIKE_OPT_LEVEL="$lvl" "$HERE/semantic/run_semantic.sh" "$corpus" \
-      "${HIKE_EMIT:-/tmp/hike-emit}" "$out" > "$out/summary.log" 2>&1 || failed=1
-    local line
-    line="$(grep 'semantic-opt:' "$out/summary.log" | tail -1)"
-    echo "CELL recomp-$lvl: ${line:-NO-RESULT}"
-  done
-  return "$failed"
-}
-
-case "${1:-}" in
-  performance)
-    shift
-    python3 "$HERE/matrix_performance.py" --output "$WORK/performance" "$@"
-    ;;
-  tls)              HIKE_MATRIX_FILTER='^(tls_|atomic_)' stage_cells tls ;;
-  tls-models)       stage_cells tls-models ;;
-  opts)             stage_cells opts ;;
-  compilers)        stage_cells compilers ;;
-  protector)        stage_cells protector ;;
-  protector-strip)  stage_cells protector-strip ;;
-  strip)            stage_cells strip ;;
-  recomp)           stage_recomp ;;
-  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|tls|tls-models|recomp|performance> [options]" >&2; exit 2 ;;
-esac
+failed=0
+for stage in opts compilers protector protector-strip strip tls-models; do
+  stage_cells "$stage" || failed=1
+done
+exit "$failed"
