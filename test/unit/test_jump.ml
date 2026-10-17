@@ -504,6 +504,45 @@ let tests : unit Alcotest.test list =
         let blk1 = Term.enum blk_t s' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tids.(1)) in
         let j = Term.enum jmp_t blk1 |> Seq.hd_exn in
         check "JMP-51" (Exp.equal (Jmp.cond j) (Bil.Var zf)));
+
+    pin "JMP-52" "low casts compose with signed and unsigned casts by width"
+      (fun () ->
+        let src = Bil.Var (Var.create ~is_virtual:true ~fresh:true
+            "cast_source" (Type.Imm 8)) in
+        Base.List.iter [ Bil.UNSIGNED; Bil.SIGNED ] ~f:(fun kind ->
+            Base.List.iter [ (16, 4); (16, 8); (16, 12); (4, 2) ]
+              ~f:(fun (middle, width) ->
+                let rhs = Bil.Var (Var.create ~is_virtual:true ~fresh:true
+                    "cast_other" (Type.Imm width)) in
+                let cast = Bil.Cast (Bil.LOW, width, Bil.Cast (kind, middle, src)) in
+                let expected =
+                  if width = 8 then src
+                  else Bil.Cast ((if width < 8 then Bil.LOW else kind), width, src) in
+                let s = sub_of_defs_and_jmp "cast_widths"
+                    [ Def.create zf (Bil.BinOp (Bil.EQ, cast, rhs)) ] (Bil.Var zf) in
+                check "JMP-52"
+                  (Exp.equal (jmp_cond_of (compile_sub s))
+                     (Bil.BinOp (Bil.EQ, expected, rhs))))));
+
+    pin "JMP-53" "a casted reused switch index retains its inclusive bound"
+      (fun () ->
+        let saved = Var.create ~is_virtual:true ~fresh:true
+            "saved_index" (Type.Imm 32) in
+        let low = Bil.Cast (Bil.LOW, 32, xv) in
+        let limit = Bil.Int (Word.of_int ~width:32 23) in
+        let defs =
+          [ Def.create saved low;
+            Def.create x (Bil.Cast (Bil.UNSIGNED, 64,
+                Bil.BinOp (Bil.MINUS, low, limit)));
+            Def.create cf (Bil.BinOp (Bil.LT, Bil.Var saved, limit));
+            Def.create zf (Bil.BinOp (Bil.EQ, Bil.Cast (Bil.LOW, 32, xv), w0_32)) ] in
+        let s = compile_sub (sub_of_defs_and_jmp "casted_switch" defs cf_or_zf) in
+        check "JMP-53"
+          (match jmp_cond_of s, defs_of s with
+           | Bil.Var guard, comparison :: _ ->
+             Var.equal (Def.lhs comparison) guard
+             && Exp.equal (Def.rhs comparison) (Bil.BinOp (Bil.LE, low, limit))
+           | _ -> false));
   ]
 
 let () = run "jump" tests

@@ -165,6 +165,12 @@ let rewrite (e : exp) : exp option =
   | Bil.Extract (hi, lo, Bil.Int a) -> Some (Bil.Int (Word.extract_exn ~hi ~lo a))
   | Bil.Concat (Bil.Int a, Bil.Int b) -> Some (Bil.Int (Word.concat a b))
   | Bil.Ite (Bil.Int c, a, b) -> Some (if Word.is_one c then a else b)
+  (* Low bits survive signed and unsigned casts unchanged. *)
+  | Bil.Cast (Bil.LOW, n, Bil.Cast (((Bil.UNSIGNED | Bil.SIGNED) as kind), m, x))
+    when n <= m ->
+    Option.map (width_of_exp x) ~f:(fun w ->
+        if n = w then x
+        else Bil.Cast ((if n < w then Bil.LOW else kind), n, x))
   (* the sign bit is the signed test against zero *)
   | Bil.Cast (Bil.HIGH, 1, a) when Option.exists (width_of_exp a) ~f:(fun n -> n > 1) ->
     Option.map (zero_of a) ~f:(fun z -> Bil.BinOp (Bil.SLT, a, z))
