@@ -696,8 +696,14 @@ let call_lanes ~abi ~callee target =
   | None ->
     match callee target with
     | Some sub ->
-      (Base.List.map (sig_args sub) ~f:Arg.lhs,
-       Base.List.map (sig_rets sub) ~f:Arg.lhs)
+      (* A bodyless declaration carries no lanes of its own; a call
+         passes the machine's parameter registers. *)
+      let args =
+        if Base.Option.is_none (Term.first blk_t sub) then
+          Abi.param_regs abi
+        else Base.List.map (sig_args sub) ~f:Arg.lhs
+      in
+      (args, Base.List.map (sig_rets sub) ~f:Arg.lhs)
     | None ->
       (Core.Set.to_list (Var.Set.of_list (Abi.param_regs abi @ abi.Abi.return_regs)),
        abi.Abi.return_regs)

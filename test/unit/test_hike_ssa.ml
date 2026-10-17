@@ -261,6 +261,89 @@ let tests : unit Alcotest.test list =
           (Var.index (Phi.lhs phi) > 0
           && Option.equal Exp.equal call_incoming (Some (Bil.Var call_version))
           && bypass_has_version));
+
+    pin "SSA-05"
+      "a self-loop phi is placed only for vars live into the header"
+      (fun () ->
+        let ctr = v64 "ssa5_ctr" in
+        let tmp = v64 "ssa5_tmp" in
+        let one = Bil.Int (Cbat_word.to_word (w64 1)) in
+        let loop_blk =
+          blk_of_defs
+            [ Def.create tmp (Bil.BinOp (Bil.PLUS, Bil.Var ctr, one));
+              Def.create ctr (Bil.Var tmp) ]
+        in
+        let exit_blk = with_jmps (blk_of_defs []) [ Hike_return.create () ] in
+        let loop_blk =
+          with_jmps loop_blk
+            [ mk_jmp_to (Term.tid loop_blk) (Bil.Var (v1 "ssa5_cond"));
+              mk_goto (Term.tid exit_blk) ]
+        in
+        let entry =
+          with_jmps
+            (blk_of_defs
+               [ Def.create ctr (Bil.Int (Cbat_word.to_word (w64 0))) ])
+            [ mk_goto (Term.tid loop_blk) ]
+        in
+        let sub =
+          let sb = Sub.Builder.create ~name:"ssa5" () in
+          Sub.Builder.add_blk sb entry;
+          Sub.Builder.add_blk sb loop_blk;
+          Sub.Builder.add_blk sb exit_blk;
+          Sub.Builder.result sb
+        in
+        let prog = Program.create ~subs:[ sub ] () in
+        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let sub = Term.enum sub_t prog |> Seq.hd_exn in
+        let header =
+          Term.find blk_t sub (Term.tid loop_blk) |> Base.Option.value_exn
+        in
+        let phi_of v =
+          Term.enum phi_t header
+          |> Seq.exists ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) v)
+        in
+        check "SSA-05" (phi_of ctr && not (phi_of tmp)));
+
+    pin "SSA-06" "a call to a bodyless declaration reads the parameter registers"
+      (fun () ->
+        let reg = int_param 1 in
+        let ext = Sub.create ~name:"ssa6_ext" () in
+        let join =
+          with_jmps (blk_of_defs [])
+            [ Jmp.create
+                (Call
+                   (Call.create ~return:(Direct (Tid.create ()))
+                      ~target:(Direct (Term.tid ext)) ())) ]
+        in
+        let arm k =
+          with_jmps
+            (blk_of_defs
+               [ Def.create reg (Bil.Int (Cbat_word.to_word (w64 k))) ])
+            [ mk_goto (Term.tid join) ]
+        in
+        let a1 = arm 1 and a2 = arm 2 in
+        let entry =
+          with_jmps (blk_of_defs [])
+            [ mk_jmp_to (Term.tid a1) (Bil.Var (v1 "ssa6_cond"));
+              mk_goto (Term.tid a2) ]
+        in
+        let sub =
+          let sb = Sub.Builder.create ~name:"ssa6" () in
+          List.iter (Sub.Builder.add_blk sb) [ entry; a1; a2; join ];
+          Sub.Builder.result sb
+        in
+        let prog = Program.create ~subs:[ ext; sub ] () in
+        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let sub =
+          Term.enum sub_t prog
+          |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ssa6")
+          |> Base.Option.value_exn
+        in
+        let join' = Term.find blk_t sub (Term.tid join) |> Base.Option.value_exn in
+        check "SSA-06"
+          (Term.enum phi_t join'
+          |> Seq.exists ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) reg)));
   ]
 
 let () = run "hike_ssa" tests

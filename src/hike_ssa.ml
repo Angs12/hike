@@ -99,9 +99,10 @@ let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
     |> Seq.map ~f:(fun (s, e) -> if Tid.equal s src then (s, exp) else (s, e))
     |> Seq.to_list)
 
-(* Phi placement follows the iterated dominance frontier of term writes;
-   SP also has an edge definition at a machine call with a continuation. *)
-let place_phis ~sp ~vars ~def_sites_of ~call_blocks
+(* Pruned SSA: a phi sits at the iterated dominance frontier of a var's
+   writes, and only where the var is live-in.  SP also has an edge
+   definition at a machine call with a continuation. *)
+let place_phis ~sp ~vars ~def_sites_of ~live_in ~call_blocks
     ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of
     (sub : sub term) : sub term =
   let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
@@ -134,6 +135,7 @@ let place_phis ~sp ~vars ~def_sites_of ~call_blocks
 
         iterated_frontier bs
         |> Core.Set.to_list
+        |> Base.List.filter ~f:(fun tid -> Core.Set.mem (live_in tid) v)
         |> Base.List.fold ~init:sub ~f:(fun sub tid ->
                match Term.find blk_t sub tid with
                | None -> sub
@@ -415,8 +417,21 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub t
     let def_sites_of v =
       Base.Option.value (Core.Map.find def_sites v) ~default:[]
     in
+    (* Block live-in over the terms' own reads and writes. *)
+    let live_in =
+      let live =
+        Hike_bir_flow.liveness ~graph:g ~sub
+          ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
+          ~def:(fun d -> (Model.writes (`Def d), Model.reads (`Def d)))
+          ~phi:(fun p -> (Model.writes (`Phi p), Model.reads (`Phi p)))
+          ~jmp:(fun j -> (Model.writes (`Jmp j), Model.reads (`Jmp j)))
+      in
+      fun tid ->
+        Base.Option.value (Core.Map.find live.Hike_bir_flow.before tid)
+          ~default:Var.Set.empty
+    in
     let sub =
-      place_phis ~sp ~vars ~def_sites_of ~call_blocks
+      place_phis ~sp ~vars ~def_sites_of ~live_in ~call_blocks
         ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of sub
     in
     let sub =
