@@ -122,8 +122,35 @@ let shift (k : t) ~(bytes : int) : t option =
   let lo = add k.lo n and hi = add k.hi n in
   if le lo hi then Some { k with lo; hi } else None
 
-(* Sub-range of one owner key: the owner's stride carries. *)
-let piece (k : t) ~lo ~hi : t = {origin = k.origin; lo; hi; step = k.step}
+(* [k] from the first point of its grid at or above [p]; None when no
+   grid point remains. *)
+let grid_from (k : t) (p : point) : t option =
+  if le p k.lo then Some k
+  else
+    let lo =
+      if k.step = 1 then Some p
+      else
+        let step = Stdlib.Int64.of_int k.step in
+        let r = Stdlib.Int64.unsigned_rem (Stdlib.Int64.sub p.pvalue k.lo.pvalue) step in
+        if Stdlib.Int64.equal r 0L then Some p
+        else
+          let up = add p (Stdlib.Int64.sub step r) in
+          Option.some_if (ge up p) up in
+    Option.bind lo ~f:(fun lo -> Option.some_if (le lo k.hi) {k with lo})
+
+(* Sub-range of one owner key: the owner's stride carries and both ends
+   sit on its grid, so a split key claims only points the owner claimed.
+   None when no grid point lies in [lo, hi]. *)
+let piece (k : t) ~lo ~hi : t option =
+  Option.bind (grid_from k lo) ~f:(fun g ->
+      if gt g.lo hi then None
+      else if g.step = 1 || le g.hi hi then
+        Some {g with hi = min g.hi hi}
+      else
+        let span = Stdlib.Int64.sub hi.pvalue g.lo.pvalue in
+        let down = Stdlib.Int64.sub span
+            (Stdlib.Int64.unsigned_rem span (Stdlib.Int64.of_int g.step)) in
+        Some {g with hi = add g.lo down})
 
 (* A TOTAL order (origin, then lower, upper, stride): the interval tree's
    [add] treats [compare = 0] as identity and replaces the node, so a
@@ -199,17 +226,18 @@ let intersection (k1 : t) (k2 : t) : t =
 
 (* Results may be unordered.  A key of another origin is disjoint. *)
 let interval_diff (k1 : t) (k2 : t) : t list =
+  let pieces ps = List.filter_opt ps in
   if not (Hike_origin.equal k1.origin k2.origin) then [ k1 ]
   else if lt (lower k1) (lower k2) then
     if lt (upper k1) (lower k2) then [ k1 ]
     else if contains k2 (upper k1) then
-      [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo) ]
+      pieces [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo) ]
     else
-      [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo);
-        piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
+      pieces [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo);
+               piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
   else if contains k2 (lower k1) then
     if gt (upper k1) (upper k2) then
-      [ piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
+      pieces [ piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
     else []
   else [ k1 ] (* disjoint *)
 
@@ -232,14 +260,16 @@ let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
         if is_zero (lower k') then Seq.Step.Skip {state = after}
         else
         let hi = min k.hi (pred (lower k')) in
-        if le pt hi then Seq.Step.Yield
-            {value = (piece k ~lo:pt ~hi:hi, v); state = after}
-        else Seq.Step.Skip {state = after}
+        match if le pt hi then piece k ~lo:pt ~hi else None with
+        | Some gap -> Seq.Step.Yield {value = (gap, v); state = after}
+        | None -> Seq.Step.Skip {state = after}
     in
     (* Final gap. *)
     let finishing_step' pt =
-      if le pt k.hi then Seq.Step.Yield
-          {value = (piece k ~lo:pt ~hi:(k.hi), v); state = next_pt k.hi}
+      if le pt k.hi then
+        match piece k ~lo:pt ~hi:k.hi with
+        | Some gap -> Seq.Step.Yield {value = (gap, v); state = next_pt k.hi}
+        | None -> Seq.Step.Done
       else Seq.Step.Done in
     Seq.unfold_with_and_finish s ~init:(Some k.lo)
       ~running_step:(Option.value_map
@@ -251,62 +281,43 @@ let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
                          ~f:finishing_step')
 
 type side = Left | Right | Both_sides
-module Seq_ME = Seq.Merge_with_duplicates_element
 
-type section =
-    | Left_Mid of t * t
-    | Left_Right of t * t
-    | Mid_Right of t * t
-    | Left_Mid_Right of t * t * t
-
-
-(* [sections]: exclusive stretches keep their owner's stride; the
-   shared stretch carries the combined stride (the demoted hull when
-   the grids differ).  Ordered relations: disjoint either way, one
-   hull containing the other's head, or shared bounds. *)
-let sections (k1 : t) (k2 : t) : side * t * ((t, t) Seq_ME.t) option =
-  let mix lo hi = {origin = k1.origin; lo; hi; step = combined_step k1 k2} in
-  if not (Hike_origin.equal k1.origin k2.origin) then
-    (* Disjoint namespaces. *)
-    (if compare k1 k2 < 0 then Left, k1, Some (Seq_ME.Right k2)
-     else Right, k2, Some (Seq_ME.Left k1))
-  else if lt k1.hi k2.lo then Left, k1, Some (Seq_ME.Right k2)
-  else if lt k2.hi k1.lo then Right, k2, Some (Seq_ME.Left k1)
-  else if lt k1.lo k2.lo then
-    (* k1's head is exclusive; the shared stretch merges. *)
-    let res = piece k1 ~lo:k1.lo ~hi:(pred k2.lo) in
-    let mid1 = mix k2.lo k1.hi in
-    Left, res, Some (Seq_ME.Both (mid1, k2))
-  else if lt k2.lo k1.lo then
-    (* k2's head is exclusive; the shared stretch merges. *)
-    let res = piece k2 ~lo:k2.lo ~hi:(pred k1.lo) in
-    let mid2 = mix k1.lo k2.hi in
-    Right, res, Some (Seq_ME.Both (k1, mid2))
-  else if lt k1.hi k2.hi then
-    (* Equal lows: k2's tail is exclusive. *)
-    let mid2 = piece k2 ~lo:(succ k1.hi) ~hi:k2.hi in
-    Both_sides, mix k1.lo k1.hi, Some (Seq_ME.Right mid2)
-  else if lt k2.hi k1.hi then
-    (* Equal lows: k1's tail is exclusive. *)
-    let mid1 = piece k1 ~lo:(succ k2.hi) ~hi:k1.hi in
-    Both_sides, mix k2.lo k2.hi, Some (Seq_ME.Left mid1)
-  else (* equal highs: one shared stretch, nothing exclusive *)
-    Both_sides, mix k1.lo k1.hi, None
-
-(* Merge two key sequences with sides. *)
+(* Sweep sorted region streams into exclusive prefixes and shared
+   overlaps. Unconsumed tails keep their owner's grid and meet the next
+   region of the other stream; only the shared stretch takes the
+   combined stride. *)
 let seq_product (s1 : t seq) (s2 : t seq) : (side * t) seq =
-    let combined = Seq.merge_with_duplicates s1 s2 ~compare:compare in
-    Seq.unfold_step ~init:combined ~f:begin fun s ->
-      Option.value_map ~default:Seq.Step.Done (Seq.next s) ~f: begin
-        fun (hd, tl) -> match hd with
-          | Seq_ME.Left k1 -> Seq.Step.Yield {value = (Left, k1); state = tl}
-          | Seq_ME.Right k2 -> Seq.Step.Yield {value = (Right, k2); state = tl}
-          | Seq_ME.Both (k1, k2) ->
-            let s, k, mrest = sections k1 k2 in
-            let tl' = Option.fold mrest ~init:tl ~f:Seq.shift_right in
-            Seq.Step.Yield {value = (s, k); state = tl'}
-      end
-    end
+  let cons_tail tail rest = Option.fold tail ~init:rest ~f:(fun r t -> Seq.cons t r) in
+  Seq.unfold_step ~init:(s1, s2) ~f:(fun (s1, s2) ->
+      let emit side key s1 s2 =
+        Seq.Step.Yield {value = (side, key); state = (s1, s2)} in
+      match Seq.next s1, Seq.next s2 with
+      | None, None -> Seq.Step.Done
+      | Some (a, rest), None -> emit Left a rest s2
+      | None, Some (b, rest) -> emit Right b s1 rest
+      | Some (a, rest1), Some (b, rest2) ->
+        if not (Hike_origin.equal a.origin b.origin) then
+          if compare a b < 0 then emit Left a rest1 s2
+          else emit Right b s1 rest2
+        else if lt a.hi b.lo then emit Left a rest1 s2
+        else if lt b.hi a.lo then emit Right b s1 rest2
+        else if lt a.lo b.lo then
+          let rest1 = cons_tail (grid_from a b.lo) rest1 in
+          (match piece a ~lo:a.lo ~hi:(pred b.lo) with
+           | Some prefix -> emit Left prefix rest1 s2
+           | None -> Seq.Step.Skip {state = (rest1, s2)})
+        else if lt b.lo a.lo then
+          let rest2 = cons_tail (grid_from b a.lo) rest2 in
+          (match piece b ~lo:b.lo ~hi:(pred a.lo) with
+           | Some prefix -> emit Right prefix s1 rest2
+           | None -> Seq.Step.Skip {state = (s1, rest2)})
+        else
+          let hi = min a.hi b.hi in
+          let shared = {a with hi; step = combined_step a b} in
+          let remaining k rest =
+            if equal k.hi hi then rest
+            else cons_tail (grid_from k (succ hi)) rest in
+          emit Both_sides shared (remaining a rest1) (remaining b rest2))
 
 let pp_point ppf (p : point) =
     Format.fprintf ppf "0x%Lx" p.pvalue

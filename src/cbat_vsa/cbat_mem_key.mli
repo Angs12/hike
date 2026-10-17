@@ -47,7 +47,7 @@ val step : t -> int
 val cell_key : t -> Cbat_landmarks.cell_desc
 val combined_step : t -> t -> int
 val covers : t -> t -> bool
-val piece : t -> lo:point -> hi:point -> t
+val piece : t -> lo:point -> hi:point -> t option
 val interval_diff : t -> t -> t list
 val gaps : 'a -> t -> (t * 'a) seq -> (t * 'a) seq
 val overlap : t -> t -> bool

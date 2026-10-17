@@ -321,6 +321,78 @@ let tests : unit Alcotest.test list =
         check "MAP-34.ai-same-write" (AI.add_word e ~key:(v64 "RBX") ~data:d == e);
         check "MAP-34.ai-join-self" (AI.join e e == e));
 
+    pin "MAP-35"
+      "memory joins split unequal overlapping ranges and revisit their remaining tails"
+      (fun () ->
+        let byte n = Mem.Val.create (Ws.singleton (Cbat_word.of_int ~width:8 n)) LittleEndian in
+        let facts rows =
+          List.fold_left (fun m (lo, hi, n) ->
+              Mem.meet_add m ~key:(range lo hi) ~data:(byte n)) empty rows in
+        let read m i = Mem.Val.data (Mem.find (8, LittleEndian) m (point i)) in
+        let check_join label left right =
+          let joined = Mem.join left right in
+          let rec disjoint = function
+            | [] -> true
+            | (k, _) :: rest ->
+              List.for_all (fun (q, _) -> not (Mem.Key.overlap k q)) rest
+              && disjoint rest in
+          check (label ^ ".disjoint") (disjoint (Mem.cells joined));
+          for i = 0 to 12 do
+            check (Printf.sprintf "%s.read.%d" label i)
+              (Ws.equal (read joined i) (Ws.join (read left i) (read right i)))
+          done in
+        let coarse = facts [ 0, 8, 1 ] in
+        let split = facts [ 0, 7, 1; 8, 8, 2 ] in
+        check_join "MAP-35.coarse-left" coarse split;
+        check_join "MAP-35.coarse-right" split coarse;
+        let whole = facts [ 0, 12, 1 ] in
+        let pieces = facts [ 0, 2, 2; 5, 7, 3; 10, 12, 4 ] in
+        check_join "MAP-35.tails-left" whole pieces;
+        check_join "MAP-35.tails-right" pieces whole;
+        for a = 0 to 4 do
+          for b = a to 4 do
+            for c = 0 to 4 do
+              for d = c to 4 do
+                check_join "MAP-35.bounds" (facts [ a, b, 1 ]) (facts [ c, d, 2 ])
+              done
+            done
+          done
+        done);
+
+
+    pin "MAP-36"
+      "a strided key split by a meet, a diff or a gap keeps its own grid: pieces start and end on \
+       grid points and keep the stride; a gap holding no grid point vanishes"
+      (fun () ->
+        let grid lo step n =
+          opadd_key_of
+            (Ws.of_clp
+               (Clp.create ~width:32 ~step:(w32 step) ~cardn:(w32 n) (w32 lo))) in
+        let facts keys =
+          List.fold_left (fun m k -> Mem.meet_add m ~key:k ~data:(cell 1)) empty keys in
+        let shape m =
+          List.map (fun (k, _) ->
+              let d = Mem.Key.cell_key k in
+              Int64.to_int d.Cbat_landmarks.lo_value,
+              Int64.to_int d.Cbat_landmarks.hi_value,
+              d.Cbat_landmarks.stride) (Mem.cells m) in
+        check "MAP-36.same-grid-tail"
+          (shape (Mem.meet (facts [ grid 0 4 11 ]) (facts [ grid 0 4 3 ]))
+           = [ 0, 8, 4; 12, 40, 4 ]);
+        check "MAP-36.off-grid-split"
+          (shape (Mem.meet (facts [ grid 0 4 11 ]) (facts [ range 5 6 ]))
+           = [ 0, 4, 4; 5, 6, 1; 8, 40, 4 ]);
+        let add m k = Mem.meet_add m ~key:k ~data:(cell 1) in
+        check "MAP-36.diff-remainders"
+          (shape (add (facts [ grid 0 4 11 ]) (range 12 13))
+           = [ 0, 8, 4; 12, 13, 1; 16, 40, 4 ]);
+        check "MAP-36.gap-after-cell"
+          (shape (add (facts [ range 5 6 ]) (grid 0 4 11))
+           = [ 0, 4, 4; 5, 6, 1; 8, 40, 4 ]);
+        check "MAP-36.gap-between-grid-points"
+          (shape (add (facts [ range 1 3; range 5 7 ]) (grid 0 8 3))
+           = [ 0, 0, 8; 1, 3, 1; 5, 7, 1; 8, 16, 8 ]));
+
   ]
 
 let () = run "map_lattice" tests
