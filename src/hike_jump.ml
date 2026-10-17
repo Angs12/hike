@@ -38,8 +38,7 @@ let compile_jmp ~(flags : var list) (g : B.graph) (b0 : blk term) (j : jmp term)
   |> List.min_elt ~compare:(fun x y -> Poly.compare (order x) (order y))
   |> Option.filter ~f:(fun (f : B.form) -> not (Exp.equal f.exp orig))
 
-let uses_of ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
-  Hike_stack_model.sub_reads ~abi s
+let uses_of (s : sub term) : Var.Set.t = Hike_stack_model.sub_reads s
 
 (* Compiles every jump's cond, then drops every def of a consumed flag var
    no read survives.  A compiled cond that reads memory, or whose vars are
@@ -47,7 +46,6 @@ let uses_of ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
    position — the VSA tags the def, and the tag licenses the emitter's
    frame addressing. *)
 let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
-  let abi = Hike_abi.of_target target in
   let flags = flag_vars target in
   let g = B.graph_of_sub sub in
   let plans =
@@ -76,7 +74,7 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
               match Core.Map.find conds (Term.tid j) with
               | Some c -> Jmp.with_cond j c
               | None -> j)) in
-    let dead = Core.Set.diff consumed (uses_of ~abi sub1) in
+    let dead = Core.Set.diff consumed (uses_of sub1) in
     if Core.Set.is_empty dead then sub1
     else
       Term.map blk_t sub1 ~f:(fun blk ->

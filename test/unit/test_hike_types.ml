@@ -181,7 +181,7 @@ let tests : unit Alcotest.test list =
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         check "TYPES-22"
           (arg_names (Model.sig_args sub')
-           = Base.List.map (Abi.param_regs abi) ~f:Var.name));
+           = Base.List.map (Abi.param_regs abi @ [ v64 "RAX" ]) ~f:Var.name));
 
     pin "TYPES-23"
       "a canonical direct return does not add synthetic call lanes"
@@ -292,6 +292,52 @@ let tests : unit Alcotest.test list =
              Core.Set.mem s rdi
              && Var.typ (Arg.lhs arg) = mem_typ
            | None -> false));
+
+    pin "TYPES-25" "return carriers retain entry values on unwritten paths"
+      (fun () ->
+        let target = Theory.Target.declare ~bits:64 ~nicknames:[ "x86_64-gnu-elf" ]
+            ~package:"hike-test" "return-preservation" in
+        let rax = v64 "RAX" and rdx = v64 "RDX" and rdi = v64 "RDI" in
+        let sub, tids =
+          sub_of "preserve_return"
+            [ [ Def.create rax (Bil.Var rdi) ],
+              [ (1, fun t -> mk_jmp_to t
+                    (Bil.BinOp (Bil.EQ, Bil.Var rdi,
+                       Bil.Int (Cbat_word.to_word (w64 0)))));
+                (2, mk_goto) ];
+              [ Def.create rdx (Bil.Int (Cbat_word.to_word (w64 7))) ],
+              [ (2, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let signed = Types.sign_sub ~target sub in
+        Alcotest.(check (list string)) "TYPES-25 inputs"
+          [ "RDI"; "RDX"; "YMM0" ] (arg_names (Model.sig_args signed));
+        let prog = Hike.Ssa.ssa_program ~target
+            (Program.create ~subs:[ signed ] ()) in
+        let ssa = Term.first sub_t prog |> Base.Option.value_exn in
+        let join = Term.find blk_t ssa tids.(2) |> Base.Option.value_exn in
+        let phi = Term.enum phi_t join
+            |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) rdx)
+            |> Base.Option.value_exn in
+        check "TYPES-25 preserved incoming"
+          (Phi.values phi |> Seq.exists ~f:(fun (src, e) ->
+               Tid.equal src tids.(0) && Exp.equal e (Bil.Var rdx)));
+        let overwritten = plain_sub "overwrite_return"
+            [ Def.create rdx (Bil.Int (Cbat_word.to_word (w64 7))) ]
+            |> Types.sign_sub ~target in
+        check "TYPES-25 overwritten lane"
+          (not (Model.sig_args overwritten |> Base.List.exists ~f:(fun a ->
+               Var.same (Arg.lhs a) rdx)));
+        let untouched, _ = sub_of "untouched_return" [ [], [ (0, mk_ret) ] ] in
+        let caller, _ = sub_of "forward_return"
+            [ [], [ (1, fun t -> Jmp.create (Call
+                  (Call.create ~return:(Direct t)
+                     ~target:(Direct (Term.tid untouched)) ()))) ];
+              [], [ (0, mk_ret) ] ] in
+        let caller = Types.sign_sub ~target caller in
+        check "TYPES-25 call chains retain incoming carriers"
+          (Model.sig_args caller |> Base.List.exists ~f:(fun a ->
+               Var.same (Arg.lhs a) rax)));
 
     (* The PLT-trampoline stamp: hike-sign computes it from the same
        liveness run as the signature; the emitter reads the stamp. *)

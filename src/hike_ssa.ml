@@ -48,28 +48,6 @@ let machine_call (j : jmp term) : bool =
       | Indirect _ -> true)
   | _ -> false
 
-(* The call's ret lanes: a mapped intrinsic versions its own ret temps;
-   an in-program sub its own Out intents; an unmapped intrinsic target
-   (the atomic family's marker stubs) no lanes at all — it is not code;
-   every other target (externs, the synthetic conventions) the ABI
-   return registers. *)
-let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
-    var list =
-  match Hike_native_fp.native_fp_op (Tid.name target) with
-  | Some op ->
-    let w =
-      Hike_native_fp.lane_width_of_name
-        ~word_bits:(Model.word_bits abi.Abi.word)
-        (Tid.name target)
-    in
-    Hike_native_fp.(fp_sig_of op ~w).fp_rets
-  | None -> (
-    if Hike_abi.is_intrinsic_name (Tid.name target) then []
-    else
-      match Core.Map.find subs target with
-      | Some sub -> Base.List.map (Model.sig_rets sub) ~f:Arg.lhs
-      | None -> abi.Abi.return_regs)
-
 let restore_word ~(abi : Abi.t) : exp =
   Bil.Int
     (Cbat_word.to_word
@@ -121,10 +99,9 @@ let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
     |> Seq.map ~f:(fun (s, e) -> if Tid.equal s src then (s, exp) else (s, e))
     |> Seq.to_list)
 
-(* Phi placement: for each renamable var, a phi at the iterated
-   dominance frontier of its def sites (the entry, its writes, the ret
-   mints, and for the SP the machine call blocks with a continuation). *)
-let place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
+(* Phi placement follows the iterated dominance frontier of term writes;
+   SP also has an edge definition at a machine call with a continuation. *)
+let place_phis ~sp ~vars ~def_sites_of ~call_blocks
     ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of
     (sub : sub term) : sub term =
   let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
@@ -142,10 +119,6 @@ let place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
         debug_var_sites ~iterated_frontier v (def_sites_of v);
 #endif
         let sites = def_sites_of v in
-        let sites =
-          sites
-          @ Base.Option.value (Core.Map.find ret_mint_sites v) ~default:[]
-        in
         let sites =
           if Var.same v sp then
             sites
@@ -171,9 +144,8 @@ let place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
 (* The rename walk, dominator-tree ordered from [start]: every def and
    phi takes a fresh version, every read the live one, and each block's
    argument and ret versions are stamped. *)
-let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of ~call_info
-    ~call_blk_tids ~machine_blk_tids (sub : sub term) : sub term =
-  (* The rename walk, dominator-tree ordered from [start]. *)
+let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~machine_blk_tids
+    (sub : sub term) : sub term =
   let vars_tbl : var list Var.Table.t = Core.Hashtbl.create (module Var) in
   let nums : int Var.Table.t = Core.Hashtbl.create (module Var) in
   (* Each var's live version: the top entry, when it is versioned. *)
@@ -240,14 +212,18 @@ let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of ~call_info
                   Def.with_lhs d (new_name (Def.lhs d))
                 else d)
           in
-          let blk = Term.map jmp_t blk ~f:(Jmp.map_exp ~f:substitute) in
+          let blk = Term.map jmp_t blk ~f:(fun j ->
+              Jmp.map_exp ~f:substitute j
+              |> Model.map_effects ~read:top ~write:Fun.id) in
           (* The argument map reads BEFORE the call's ret mints: an
              argument lane passes the machine's current value, not
              the callee's future result. *)
           let arg_vers = live_vers () in
-          if Core.Set.mem call_blk_tids tid then
-            Base.List.iter (mint_of (call_info blk)) ~f:(fun v ->
-                minted := (v, new_name v) :: !minted);
+          let blk = Term.map jmp_t blk ~f:(fun j ->
+              Model.map_effects ~read:Fun.id ~write:(fun v ->
+                  let version = new_name v in
+                  minted := (v, version) :: !minted;
+                  version) j) in
           stamps :=
             Core.Map.set !stamps ~key:tid
               ~data:
@@ -298,8 +274,7 @@ let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of ~call_info
            | Some blk ->
                Term.update blk_t sub (Term.set_attr blk versions_tag data))
 
-let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
-    ~(subs : sub term Tid.Map.t) (sub : sub term) : sub term =
+let ssa_sub ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub term =
   if is_ssa sub then sub
   else if Seq.is_empty (Term.enum blk_t sub) then sub
   else
@@ -356,10 +331,6 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
              if Base.List.is_empty cs then None else Some (blk, cs))
       |> Seq.to_list
     in
-    let call_blk_tids =
-      Base.List.map call_blocks ~f:(fun (blk, _) -> Term.tid blk)
-      |> Core.Set.of_list (module Tid)
-    in
     let machine_blk_tids =
       Term.enum blk_t sub
       |> Seq.filter ~f:(fun blk ->
@@ -400,24 +371,6 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
             | None -> b)
     in
     let blks = Term.enum blk_t sub |> Seq.to_list in
-    (* The mint plan per call block: the ret lanes it versions. *)
-    let mint_of (cs : (jmp term * Call.t) list) =
-      Base.List.concat_map cs ~f:(fun (_, c) ->
-          match Call.target c with
-          | Direct t -> ret_lanes_of ~subs ~abi t
-          | Indirect _ -> abi.Abi.return_regs)
-      |> Var.Set.of_list |> Core.Set.to_list
-    in
-    let ret_mint_sites =
-      Base.List.fold call_blocks ~init:Var.Map.empty
-        ~f:(fun sites (blk, cs) ->
-          let tid = Term.tid blk in
-          Base.List.fold (mint_of cs) ~init:sites ~f:(fun sites v ->
-              let tids =
-                Base.Option.value (Core.Map.find sites v) ~default:[]
-              in
-              Core.Map.set sites ~key:v ~data:(tid :: tids)))
-    in
     (* The dom/phi machinery walks the BIR's own CFG ([g] above). *)
 #ifdef VSA_DEBUG
     debug_graph g;
@@ -441,53 +394,19 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       in
       fixpoint Tid.Set.empty
     in
-    (* The emitter reads call lanes at their sites (arguments) and at
-       returns (results) with no BIR use — they join [vars] so the
-       joins where their defs meet still materialize a phi. *)
-    let call_lanes =
-      Base.List.concat_map call_blocks ~f:(fun (_, cs) ->
-          Base.List.concat_map cs ~f:(fun (_, c) ->
-              match Call.target c with
-              | Direct t when Hike_abi.is_intrinsic_name (Tid.name t) -> []
-              | Direct t ->
-                  ret_lanes_of ~subs ~abi t
-                  @ (match Core.Map.find subs t with
-                    | Some sub ->
-                        Base.List.filter_map (Model.sig_args sub) ~f:(fun a ->
-                            match Arg.intent a with
-                            | Some Out -> None
-                            | _ -> Some (Arg.lhs a))
-                    | None -> abi.Abi.int_param_regs)
-              | Indirect _ ->
-                  abi.Abi.return_regs @ abi.Abi.int_param_regs))
-      |> Core.Set.of_list (module Var)
-    in
-    let boundary =
-      Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
-          Core.Set.union
-            (Core.Set.union acc
-               (Term.enum jmp_t blk
-                |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
-                       Core.Set.union reads (Model.jmp_boundary_reads ~abi j))))
-            (Model.blk_boundary_reads blk))
-    in
     let vars =
-      Base.List.fold blks ~init:(Core.Set.union call_lanes boundary)
-        ~f:(fun acc blk -> Core.Set.union acc (Blk.free_vars blk))
+      Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
+          Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->
+              Core.Set.union acc (Core.Set.union (Model.reads term) (Model.writes term))))
       |> Core.Set.filter ~f:renamable
     in
-    (* The definition census: for each var, the block tids whose defs or
-       phis write it — one term scan, queried per var. *)
+    (* One term scan indexes the blocks that write each variable. *)
     let def_sites : Tid.t list Var.Map.t =
       Base.List.fold blks ~init:Var.Map.empty ~f:(fun m blk ->
           let written =
             Blk.elts blk
             |> Seq.fold ~init:Var.Set.empty ~f:(fun ws elt ->
-                   Core.Set.union ws
-                     (match elt with
-                      | `Def d -> Model.def_writes d
-                      | `Phi p -> Model.phi_writes p
-                      | _ -> Var.Set.empty))
+                   Core.Set.union ws (Model.writes elt))
           in
           Core.Set.fold written ~init:m ~f:(fun m v ->
               let tids = Base.Option.value (Core.Map.find m v) ~default:[] in
@@ -497,12 +416,11 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       Base.Option.value (Core.Map.find def_sites v) ~default:[]
     in
     let sub =
-      place_phis ~sp ~vars ~def_sites_of ~ret_mint_sites ~call_blocks
+      place_phis ~sp ~vars ~def_sites_of ~call_blocks
         ~machine_blk_tids ~has_continuation ~iterated_frontier ~preds_of sub
     in
     let sub =
-      rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~mint_of
-        ~call_info ~call_blk_tids ~machine_blk_tids sub
+      rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~machine_blk_tids sub
     in
     Term.set_attr sub ssa_tag ()
 
@@ -512,23 +430,9 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
 let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
-        let phi_reads =
-          Term.enum phi_t blk
-          |> Seq.fold ~init:Var.Set.empty ~f:(fun reads p ->
-                 Core.Set.union reads (Model.phi_reads p))
-          |> Core.Set.filter ~f:(fun v -> Var.index v = 0)
-        in
-        let boundary_reads =
-          Term.enum jmp_t blk
-          |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
-                 Core.Set.union reads (Model.jmp_boundary_inputs ~abi j))
-          |> Core.Set.filter ~f:(fun v -> Var.index v = 0)
-        in
-        Core.Set.union acc
-          (Core.Set.union phi_reads
-             (Core.Set.union boundary_reads
-                (Blk.free_vars blk
-                |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))))
+      Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->
+          Core.Set.union acc (Model.reads term
+              |> Core.Set.filter ~f:(fun v -> Var.index v = 0))))
   |> Core.Set.filter ~f:(fun v ->
          not
            (Model.is_model_storage v
@@ -538,9 +442,14 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
 
 let ssa_program ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
+  let abi = Abi.of_target target in
   let subs =
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
           Core.Map.set m ~key:(Term.tid s) ~data:s)
   in
-  Term.map sub_t prog ~f:(ssa_sub ~target ~subs)
+  Term.map sub_t prog ~f:(fun sub ->
+      if is_ssa sub then sub
+      else
+        Model.prepare_effects ~abi ~callee:(Core.Map.find subs) sub
+        |> ssa_sub ~target)

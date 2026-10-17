@@ -8,6 +8,15 @@ open Bap.Std
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
+let return_lanes ~target sub =
+  let carriers =
+    if Abi.is_primary_target target then (Abi.of_target target).Abi.return_regs
+    else []
+  in
+  Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Bil.Var reg))
+  @ Base.List.filter (Model.sig_rets sub) ~f:(fun arg ->
+      not (Base.List.exists carriers ~f:(Var.same (Arg.lhs arg))))
+
 (* A lane is a pointer when it is an address lane: a by-reference
    argument, a memory var (its storage), or the caller window. *)
 let tag_lane (a : Arg.t) : Arg.t =
@@ -37,11 +46,7 @@ let compute_sub_sig ~(free_vars : var list)
        facts, not a body scan); the boundary itself (the C entry and
        the emitted intrinsics) keeps its ABI shape, and a foreign
        target answers no returns. *)
-    let carriers =
-      if not (Abi.is_primary_target target) then []
-      else abi.Abi.return_regs
-    in
-    Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+    return_lanes ~target sub
   in
   let rets, args =
     (* A sub reading its incoming window carries the caller-window
@@ -88,7 +93,7 @@ let compute_sub_sig ~(free_vars : var list)
     else
       (* The signature transcribes the sub term's own BIR args
          (promoted slots included). *)
-      let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
+      let arg_terms = Model.sig_args sub in
       let args =
         let nonparam_rank = 100 in
         let param_regs = Abi.param_regs abi in
@@ -176,6 +181,10 @@ let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
     if Model.is_self_call_shape ~target sub then
       Model.set_plt_trampoline sub
     else sub
+  in
+  let sub =
+    if Model.is_emittable_intrinsic sub then sub
+    else Model.set_sig sub (return_lanes ~target sub @ Model.sig_args sub)
   in
   let free_vars = free_regs_of_sub ~target sub in
   let rets, args = compute_sub_sig ~free_vars target sub in
@@ -615,6 +624,8 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
      method! map_sym v = repl v
      method! map_def d = Def.with_lhs (super#map_def d) (repl (Def.lhs d))
      method! map_phi p = Phi.with_lhs (super#map_phi p) (repl (Phi.lhs p))
+     method! map_jmp j =
+       super#map_jmp j |> Model.map_effects ~read:repl ~write:repl
      method! map_arg a =
        let a = super#map_arg a in
        let lhs = Arg.lhs a in

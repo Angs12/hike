@@ -54,6 +54,11 @@ let tests : unit Alcotest.test list =
           Base.List.Assoc.find stamp.Hike.Stack_model.Versions.rets ret_reg
             ~equal:Var.same
         in
+        let call = Term.first jmp_t call_blk |> Base.Option.value_exn in
+        check "SSA-01 term writes are the stamped results"
+          (Core.Set.equal (Hike.Stack_model.writes (`Jmp call))
+             (stamp.Hike.Stack_model.Versions.rets
+              |> Base.List.map ~f:snd |> Var.Set.of_list));
         check "SSA-01"
           (Hike.Stack_model.is_ssa caller'
           && Base.Option.is_some stamped

@@ -99,7 +99,7 @@ let live_in_of_sub ~def_reads ~def_writes ~phi_reads
     (kill, base_vars (def_reads d))
   in
   let phi p = (Var.Set.empty, base_vars (phi_reads p)) in
-  let jmp j = base_vars (jmp_reads j) in
+  let jmp j = (Var.Set.empty, base_vars (jmp_reads j)) in
   Hike_bir_flow.liveness ~graph:(Sub.to_graph s) ~sub:s
     ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
     ~def ~phi ~jmp

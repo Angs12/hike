@@ -298,9 +298,11 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
                Core.Set.union acc (Exp.free_vars (Arg.rhs arg))
            | _ -> acc)
   in
-  let def d = (Model.def_writes d, Model.def_reads d) in
-  let phi p = (Model.phi_writes p, Model.phi_reads p) in
-  let jmp j = Model.jmp_input_reads ~abi j in
+  let sub = Model.prepare_effects ~abi ~callee:(fun _ -> None) sub in
+  let effects term = (Model.writes term, Model.reads term) in
+  let def d = effects (`Def d) in
+  let phi p = effects (`Phi p) in
+  let jmp j = effects (`Jmp j) in
   let graph = Sub.to_graph sub in
   let block_ids =
     Base.List.map blks ~f:Term.tid |> Core.Set.of_list (module Tid)

@@ -117,7 +117,7 @@ let tests : unit Alcotest.test list =
           Hike_bir_flow.liveness ~graph ~sub ~initial
             ~def:(fun d -> (dwrites d, dreads d))
             ~phi:(fun p -> (Var.Set.empty, preads p))
-            ~jmp:jreads
+            ~jmp:(fun j -> (Var.Set.empty, jreads j))
         in
         let same a b = Core.Map.equal Core.Set.equal a b in
         check "before" (same reference.before compiled.before);

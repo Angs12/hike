@@ -98,25 +98,11 @@ val reads_mem : exp -> bool
 val addr_of_rhs : exp -> (exp * Size.t) option
 val store_data_of_rhs : exp -> exp option
 
-(* BAP term reads plus ABI transfer boundary reads, split by direction:
-   the inputs the transfer consumes from the containing sub (a call's
-   parameter registers) vs the outputs the convention produces (the
-   return registers; a sub's entry lanes read inputs only). *)
-val def_reads : def term -> Var.Set.t
-val phi_reads : phi term -> Var.Set.t
 val phi_reads_from : phi term -> Tid.t -> Var.Set.t
-val jmp_operand_reads : jmp term -> Var.Set.t
-val jmp_boundary_reads : abi:Abi.t -> jmp term -> Var.Set.t
-val jmp_boundary_inputs : abi:Abi.t -> jmp term -> Var.Set.t
-val jmp_input_reads : abi:Abi.t -> jmp term -> Var.Set.t
 (* The mem-typed defs a call-bearing block hands its callee: the
    storages the site's stores built and the call-argument address
    temps. *)
 val blk_boundary_reads : blk term -> Var.Set.t
-(* The FP call site's argument temp ([intrinsic:xN[:width]]). *)
-val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
-val def_writes : def term -> Var.Set.t
-val phi_writes : phi term -> Var.Set.t
 val word_bits : int -> int
 val is_true_cond : exp -> bool
 
@@ -209,7 +195,7 @@ val is_model_storage : var -> bool
 (* The tid-name sanitization. *)
 val sanitize_tid_name : string -> string
 
-val sub_reads : abi:Abi.t -> sub term -> Var.Set.t
+val sub_reads : sub term -> Var.Set.t
 val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 
 (* The call facts. *)
@@ -279,6 +265,15 @@ val set_sig : sub term -> Arg.t list -> sub term
 val is_ret : Arg.t -> bool
 val sig_args : sub term -> Arg.t list
 val sig_rets : sub term -> Arg.t list
+
+(** Explicit operands and the implicit lanes carried by a BIR term. *)
+val reads :
+  [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
+val writes :
+  [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
+val prepare_effects :
+  abi:Abi.t -> callee:(Tid.t -> sub term option) -> sub term -> sub term
+val map_effects : read:(var -> var) -> write:(var -> var) -> jmp term -> jmp term
 
 (* The lane type/kind flags on the arg terms. *)
 module Flag : sig

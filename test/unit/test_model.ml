@@ -499,17 +499,21 @@ let tests : unit Alcotest.test list =
           Blk.Builder.result b
         in
         check "MOD-41 def/phi terms use BAP accessors"
-          (Core.Set.equal (Model.def_reads d) (Var.Set.singleton rax)
-          && Core.Set.equal (Model.def_writes d) (Var.Set.singleton rdi)
-          && Core.Set.equal (Model.phi_reads phi)
+          (Core.Set.equal (Model.reads (`Def d)) (Var.Set.singleton rax)
+          && Core.Set.equal (Model.writes (`Def d)) (Var.Set.singleton rdi)
+          && Core.Set.equal (Model.reads (`Phi phi))
                (Core.Set.of_list (module Var) [ rax; rbx ])
           && Core.Set.equal (Model.phi_reads_from phi p1)
                (Var.Set.singleton rax)
-          && Core.Set.equal (Model.phi_writes phi) (Var.Set.singleton dst));
+          && Core.Set.equal (Model.writes (`Phi phi)) (Var.Set.singleton dst));
         check "MOD-41 calls include implicit ABI reads"
-          (Core.Set.equal (Model.jmp_reads ~abi call) call_reads);
+          (Core.Set.equal (Model.reads (`Jmp call)) call_reads);
+        check "MOD-41 calls write return registers; returns write none"
+          (Core.Set.equal (Model.writes (`Jmp call))
+                (Var.Set.of_list abi.Abi.return_regs)
+           && Core.Set.is_empty (Model.writes (`Jmp ret)));
         check "MOD-41 returns include implicit ABI reads"
-          (Core.Set.equal (Model.jmp_reads ~abi ret)
+          (Core.Set.equal (Model.reads (`Jmp ret))
              (Core.Set.of_list (module Var)
                 (abi.Abi.return_regs @ [ abi.Abi.sp ])));
         check "MOD-41 block uses respect local definitions"

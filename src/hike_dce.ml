@@ -3,13 +3,11 @@
    ordinary def/phi fixpoint; unused scalar definitions remain removable. *)
 open Bap.Std
 open Bap.Std.Bil.Types
-module Abi = Hike_abi
 module Model = Hike_stack_model
 
-let dce ~(target : Bap_core_theory.Theory.Target.t)
+let dce ~target:(_ : Bap_core_theory.Theory.Target.t)
     ~(escape_roots : Var.Set.t) (sub : sub term) :
     sub term =
-  let abi = Abi.of_target target in
   (* A mapped-intrinsic sub's body is the emitter's interface. *)
   if Model.is_intrinsic sub then sub
   else
@@ -19,10 +17,10 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
              Seq.append
                (Term.enum def_t b
                |> Seq.map ~f:(fun d ->
-                      (Term.tid d, Def.lhs d, Model.def_reads d, Model.reads_mem (Def.rhs d))))
+                      (Term.tid d, Def.lhs d, Model.reads (`Def d), Model.reads_mem (Def.rhs d))))
                (Term.enum phi_t b
                |> Seq.map ~f:(fun p ->
-                      (Term.tid p, Phi.lhs p, Model.phi_reads p,
+                      (Term.tid p, Phi.lhs p, Model.reads (`Phi p),
                        Seq.exists (Phi.values p) ~f:(fun (_, e) -> Model.reads_mem e)))))
       |> Seq.to_list
     in
@@ -47,12 +45,13 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
            Term.enum jmp_t b
            |> Seq.iter ~f:(fun j ->
                exact_roots :=
-                 Core.Set.union !exact_roots (Model.jmp_operand_reads j));
+                 Core.Set.union !exact_roots (Model.reads (`Jmp j)));
            let boundary =
              Core.Set.union
                (Term.enum jmp_t b
                 |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
-                       Core.Set.union reads (Model.jmp_boundary_reads ~abi j)))
+                       Core.Set.union reads
+                         (Core.Set.union (Model.reads (`Jmp j)) (Model.writes (`Jmp j)))))
                (Model.blk_boundary_reads b)
            in
            base_roots :=

@@ -433,34 +433,6 @@ let phi_reads_from (p : phi term) (pred : Tid.t) : Var.Set.t =
 
 let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
 
-(* The boundary reads a jmp's kind consumes with no operand naming
-   them, split by direction.  The inputs are what the transfer consumes
-   from the containing sub: a call's parameter registers.  The outputs
-   are what the convention produces at the boundary: the return
-   registers (the sub's own at a return edge, the callee's at a call)
-   and SP.  Liveness reads the union (an output's producer stays live);
-   a sub's input lanes read the inputs only — an output lane with no
-   producer is the ABI's undef, not an entry value. *)
-let jmp_boundary_inputs ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
-  match Jmp.kind j with
-  | Call _ when not (Hike_return.is_jmp j) ->
-    Core.Set.of_list (module Var) (Abi.param_regs abi)
-  | _ -> Var.Set.empty
-
-let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
-  Core.Set.union (jmp_boundary_inputs ~abi j)
-    (match Jmp.kind j with
-     | Ret _ | Call _ ->
-       Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
-     | _ -> Var.Set.empty)
-
-let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
-  Core.Set.union (jmp_operand_reads j) (jmp_boundary_reads ~abi j)
-
-(* The reads that name the containing sub's entry values. *)
-let jmp_input_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
-  Core.Set.union (jmp_operand_reads j) (jmp_boundary_inputs ~abi j)
-
 (* A call consumes the containing block's memory: the mem-typed vars the
    block defines — the outgoing stores' storages and the call-argument
    address temps.  The callee reads the state the site built, through the
@@ -482,13 +454,6 @@ let blk_boundary_reads (blk : blk term) : Var.Set.t =
 let def_writes (d : def term) : Var.Set.t = Var.Set.singleton (Def.lhs d)
 let phi_writes (p : phi term) : Var.Set.t = Var.Set.singleton (Phi.lhs p)
 
-
-let blk_reads ~(abi : Abi.t) (blk : blk term) : Var.Set.t =
-  Blk.elts blk
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun reads -> function
-         | `Def d -> Core.Set.union reads (def_reads d)
-         | `Phi p -> Core.Set.union reads (phi_reads p)
-         | `Jmp j -> Core.Set.union reads (jmp_reads ~abi j))
 
 let is_region_mem v =
   match kind v with
@@ -526,12 +491,6 @@ let is_model_storage v =
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
       match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)
-
-(* The vars a sub reads, including the ABI boundary of each transfer. *)
-let sub_reads ~(abi : Abi.t) (s : sub term) : Var.Set.t =
-  Term.enum blk_t s
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
-      Core.Set.union acc (blk_reads ~abi blk))
 
 let sub_operand_reads (s : sub term) : Var.Set.t =
   Term.enum blk_t s
@@ -724,6 +683,104 @@ let sig_args (s : sub term) : Arg.t list =
 
 let sig_rets (s : sub term) : Arg.t list =
   Term.enum arg_t s |> Base.Sequence.to_list |> Base.List.filter ~f:is_ret
+
+let call_lanes ~abi ~callee target =
+  match Hike_native_fp.native_fp_op (Tid.name target) with
+  | Some op ->
+    let w = Hike_native_fp.lane_width_of_name
+        ~word_bits:(word_bits abi.Abi.word) (Tid.name target) in
+    let signature = Hike_native_fp.fp_sig_of op ~w in
+    (signature.fp_args, signature.fp_rets)
+  | None when Abi.is_intrinsic_name (Tid.name target)
+           || Abi.is_interrupt_name (Tid.name target) -> ([], [])
+  | None ->
+    match callee target with
+    | Some sub ->
+      (Base.List.map (sig_args sub) ~f:Arg.lhs,
+       Base.List.map (sig_rets sub) ~f:Arg.lhs)
+    | None ->
+      (Core.Set.to_list (Var.Set.of_list (Abi.param_regs abi @ abi.Abi.return_regs)),
+       abi.Abi.return_regs)
+
+(* Implicit boundary lanes travel with the jump through SSA and retyping. *)
+module Term_effects = struct
+  open! Core
+  type t = { reads : var list; writes : var list }
+  [@@deriving bin_io, compare, sexp]
+  let pp ppf t = Sexp.pp ppf (sexp_of_t t)
+end
+
+let effects_tag : Term_effects.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"term-effects"
+    ~uuid:"89ddf051-153f-40ac-8940-4260ab3145db" (module Term_effects)
+
+let call_effects ~abi ~callee j =
+  match Jmp.kind j with
+  | Call c when not (Hike_return.is_jmp j) ->
+    let reads, writes = match Call.target c with
+      | Direct target -> call_lanes ~abi ~callee target
+      | Indirect _ ->
+        (Core.Set.to_list (Var.Set.of_list (Abi.param_regs abi @ abi.Abi.return_regs)),
+         abi.Abi.return_regs) in
+    let machine = match Call.target c with
+      | Direct target ->
+        not (Abi.is_intrinsic_name (Tid.name target)
+             || Abi.is_interrupt_name (Tid.name target))
+      | Indirect _ -> true in
+    let reads = if machine then abi.Abi.sp :: reads else reads in
+    { Term_effects.reads; writes }
+  | _ -> { Term_effects.reads = []; writes = [] }
+
+let effects j =
+  match Term.get_attr j effects_tag with
+  | Some effects -> effects
+  | None ->
+    let abi = Abi.x86_64_sysv in
+    if Hike_return.is_jmp j then
+      { Term_effects.reads = abi.return_regs @ [ abi.sp ]; writes = [] }
+    else match Jmp.kind j with
+      | Ret _ -> { Term_effects.reads = abi.return_regs @ [ abi.sp ]; writes = [] }
+      | _ -> call_effects ~abi ~callee:(fun _ -> None) j
+
+let reads = function
+  | `Def d -> def_reads d
+  | `Phi p -> phi_reads p
+  | `Jmp j ->
+    Core.Set.union (jmp_operand_reads j) (Var.Set.of_list (effects j).reads)
+
+let writes = function
+  | `Def d -> def_writes d
+  | `Phi p -> phi_writes p
+  | `Jmp j -> Var.Set.of_list (effects j).writes
+
+let map_effects ~read ~write j =
+  let effects = effects j in
+  Term.set_attr j effects_tag
+    { Term_effects.reads = Base.List.map effects.reads ~f:read;
+      writes = Base.List.map effects.writes ~f:write }
+
+let prepare_effects ~abi ~callee sub =
+  let outgoing = abi.Abi.sp :: (sig_rets sub
+      |> Base.List.concat_map ~f:(fun arg ->
+          Exp.free_vars (Arg.rhs arg) |> Core.Set.to_list)) in
+  Term.map blk_t sub ~f:(fun blk ->
+      let boundary = Core.Set.to_list (blk_boundary_reads blk) in
+      Term.map jmp_t blk ~f:(fun j ->
+          let effects =
+            if Hike_return.is_jmp j then
+              { Term_effects.reads = outgoing; writes = [] }
+            else match Jmp.kind j with
+              | Ret _ -> { Term_effects.reads = outgoing; writes = [] }
+              | _ -> call_effects ~abi ~callee j in
+          let reads = match Jmp.kind j with
+            | Call _ -> effects.reads @ boundary
+            | _ -> effects.reads in
+          Term.set_attr j effects_tag { effects with reads }))
+
+let sub_reads sub =
+  Term.enum blk_t sub |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+      Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->
+          Core.Set.union acc (reads term)))
 
 (* The pass is the home of each lane's TYPE: a lane is a pointer (an
    address lane, a by-reference argument, the caller window) or it keeps

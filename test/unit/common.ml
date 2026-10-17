@@ -143,16 +143,16 @@ module Ds = Hike.Def_slots
 
 let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
-    ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
-    ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
-    ~jmp_reads:(Sm.jmp_reads ~abi)
+    ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
+    ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
+    ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
     ?callee ?resolved ?sub_lookup sub init
 
 let mk_rctx ~abi ?sub_lookup sub =
   Vsa.Test_seam.mk_rctx ~abi
-    ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
-    ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
-    ~jmp_reads:(Sm.jmp_reads ~abi)
+    ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
+    ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
+    ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
     ?sub_lookup sub
 (* The record vocabulary: test_fixtures resolves [Cu] through this open. *)
 module Cu = Hike.Stack_model

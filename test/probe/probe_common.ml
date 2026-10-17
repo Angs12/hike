@@ -10,9 +10,11 @@ module Model = Hike.Stack_model
 
 let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
-    ~def_reads:Model.def_reads ~def_writes:Model.def_writes
-    ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
-    ~jmp_reads:(Model.jmp_reads ~abi)
+    ~def_reads:(fun d -> Model.reads (`Def d))
+    ~def_writes:(fun d -> Model.writes (`Def d))
+    ~phi_reads:(fun p -> Model.reads (`Phi p))
+    ~phi_writes:(fun p -> Model.writes (`Phi p))
+    ~jmp_reads:(fun j -> Core.Set.union (Model.reads (`Jmp j)) (Model.writes (`Jmp j)))
     ?callee ?resolved ?sub_lookup sub init
 
 (* A probe's callees: a sub of [prog] writes the registers its own defs

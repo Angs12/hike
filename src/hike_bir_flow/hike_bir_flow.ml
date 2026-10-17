@@ -76,6 +76,6 @@ let liveness ~graph ~sub ~initial ~def ~phi ~jmp =
           |> List.fold ~init:(empty, empty) ~f:(fun acc -> function
               | `Def d -> step acc (def d)
               | `Phi p -> step acc (phi p)
-              | `Jmp j -> step acc (empty, jmp j))
+              | `Jmp j -> step acc (jmp j))
         in
         fun live -> Core.Set.union (Core.Set.diff live kill) gen)
