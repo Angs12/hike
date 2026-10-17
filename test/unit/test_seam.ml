@@ -153,7 +153,7 @@ let tests : unit Alcotest.test list =
              (AI.find_word 32 out x)));
     (* The edge step reads a guard no state satisfies as a dead edge. *)
     pin "SEAM-05"
-      "refine_edge_inline: an empty guard meet is a dead edge; a satisfiable or merely narrowing guard, an unreached read and a discarded walk are not"
+      "refine_edge_inline: an empty guard meet is a dead edge; a satisfiable or merely narrowing guard and a discarded walk are not"
       (fun () ->
         let x = Var.create ~is_virtual:false ~fresh:false "dead_x" (Type.Imm 32) in
         let zf = v1 "dead_zf" in
@@ -192,7 +192,7 @@ let tests : unit Alcotest.test list =
         let o, _ = edge ~discarded:true two both in
         check "SEAM-05.discarded" (not (dead o));
         let o, _ = edge (Ws.bottom 32) (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) in
-        check "SEAM-05.unreached-read" (not (dead o));
+        check "SEAM-05.unreached-read" (dead o);
         let o, _ =
           edge ~defs:[ Def.create zf (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) ]
             two (Bil.Var zf) in

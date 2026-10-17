@@ -217,15 +217,14 @@ let leaf_meet ?(on_empty : 'st -> 'st = Fun.id) ~(landmarks : Cbat_landmarks.t)
   end
 
 (* The leaf var's inverse: the meet, through the one leaf rule.  An empty
-   meet against a value the state holds is proof no state satisfies the
-   constraint: the dead-path bottom.  A bottom value is an unreached
-   read, which proves nothing. *)
+   meet is proof no state satisfies the constraint: the dead-path
+   bottom. *)
 let meet_var ~(landmarks : Cbat_landmarks.t)
     (env : AI.t) (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
   | Type.Imm w ->
     let cur = AI.find_word w env v in
-    let on_empty env = if WordSet.is_bottom cur then env else AI.bottom in
+    let on_empty _ = AI.bottom in
     leaf_meet ~on_empty ~landmarks ~key:(Cbat_landmarks.Word v) ~cur
       ~meet:WordSet.meet
       ~write:(fun m env ->
@@ -1210,8 +1209,6 @@ let walk ~(locus : locus)
                | Type.Imm w -> word_set acc v (AI.find_word w env v)
                | _ -> acc)) in
   let cells = ref no_cells in
-  (* Set when the walk proves no state reaches the edge. *)
-  let dead = ref false in
   let st = { words; cells; outputs = ref Tid.Map.empty;
              reads = ref Tid.Map.empty; landmarks } in
   (* The def's own pre-state with the owed word constraints met in. *)
@@ -1223,10 +1220,10 @@ let walk ~(locus : locus)
         ~nonneg:(fun e -> witness ~env:ce e)
         (Def.rhs d) cstr'
     in
-    if AI.equal env' AI.bottom && not (AI.equal ce AI.bottom) then dead := true;
     (* The cells this def's loads read hold the read constraint here. *)
     locus.record_reads st d ~before ~after:!cells;
-    locus.harvest st ~base:ce ~env:env' ~rhs:(Def.rhs d)
+    locus.harvest st ~base:ce ~env:env' ~rhs:(Def.rhs d);
+    not (AI.equal env' AI.bottom)
   in
   let walk_word_def (d, pre, post) =
     let v = Def.lhs d in
@@ -1238,22 +1235,22 @@ let walk ~(locus : locus)
          words := Core.Map.remove !words (Var.base v);
          (match locus.at_def ~post:(fun () -> AI.find_word w post v) ~cstr with
           | None ->
-            (* The produced value cannot satisfy the constraint: it
-               does not hold before this def.  A value the replay
-               produced there makes the edge dead. *)
-            if not (WordSet.is_bottom (AI.find_word w post v)) then dead := true
+            (* The produced value cannot satisfy the constraint: no
+               state reaches the edge. *)
+            false
           | Some cstr' ->
             locus.record_output st d cstr';
             invert_def d pre cstr')
-       | None -> ())
+       | None -> true)
     | Type.Mem _ ->
       (* Driven by the cells the loads pushed. *)
-      if locus.invert_mem !cells then invert_def d pre undefined_width
-    | Type.Unk -> ()
+      not (locus.invert_mem !cells) || invert_def d pre undefined_width
+    | Type.Unk -> true
   in
-  List.iter prefixed ~f:walk_word_def;
-  if !dead then AI.bottom
-  else locus.replay st ~entry:blk_state ~prefix:prefixed env
+  (* A def with no state behind it ends the walk: the edge is bottom. *)
+  if List.for_all prefixed ~f:walk_word_def
+  then locus.replay st ~entry:blk_state ~prefix:prefixed env
+  else AI.bottom
 
 (* The walk's seeds: the cond's own constrained vars — every free var
    the guard bounds.  A seed's constraint is the state's own value for
