@@ -53,6 +53,52 @@ let epilogue_sub (ret : var) : sub term =
                       ()))) ];
          [], [] ])
 
+(* The production seams on fixtures: sign, SSA, then the kind
+   inference.  [retype] is the types pass for [emit_ir ~types]. *)
+type use_kinds = {
+  is_ptr_def : string -> var -> bool;
+  is_ptr_lane : string -> var -> bool;
+  is_ptr_version : string -> var -> bool;
+  defs : string -> def term list;
+  retype : program term -> program term;
+}
+
+let use_kinds (subs : sub term list) : use_kinds =
+  let target = x86 () in
+  let facts, stamped, _ = fixture_facts subs in
+  let prog =
+    Types.sign_program ~target (Program.create ~subs:stamped ())
+    |> Hike.Ssa.ssa_program ~target
+  in
+  let pks, inferred =
+    Types.ptr_kinds ~facts ~sub_of:(Types.sub_of_program prog) prog
+  in
+  let sub_named name =
+    Term.enum sub_t prog
+    |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
+    |> Base.Option.value_exn
+  in
+  let ptr_vars name = Types.ptr_vars_of ~pks ~inferred (sub_named name) in
+  let defs name =
+    Term.enum blk_t (sub_named name)
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.to_list
+  in
+  let is_ptr_version name v = Core.Set.mem (ptr_vars name) v in
+  { is_ptr_version;
+    defs;
+    is_ptr_def =
+      (fun name reg ->
+        defs name
+        |> Base.List.exists ~f:(fun d ->
+               Var.same (Var.base (Def.lhs d)) reg
+               && is_ptr_version name (Def.lhs d)));
+    is_ptr_lane = (fun name reg -> is_ptr_version name reg);
+    retype =
+      (fun prog ->
+        Types.type_program ~facts ~mem_typ:(Types.mem_type_of_target target)
+          prog) }
+
 (* A real [@main]: [Tid.for_name] prefixes ["@"], so ["main"] names the tid
    [@main] — the name the fixed signature reads. *)
 let tests : unit Alcotest.test list =
@@ -455,6 +501,125 @@ let tests : unit Alcotest.test list =
           (match lane_typ ~ret:true with
            | Some t -> t <> mem_typ
            | None -> false));
+
+    (* Use-based kinds: a version used as a load/store address is a
+       pointer, per SSA version. *)
+    pin "TYPES-28"
+      "a version used as a store or load address is a pointer; the loaded \
+       value is not"
+      (fun () ->
+        let rax = int_ret 0 and rcx = int_param 3 and rdx = int_ret 1 in
+        let m = memv "types28_m" in
+        let sub =
+          straight_sub "types28"
+            [ Def.create rax (Bil.Int (Cbat_word.to_word (w64 4096)));
+              Def.create rcx (Bil.Int (Cbat_word.to_word (w64 8192)));
+              Def.create m
+                (Bil.Store (Bil.Var m, Bil.Var rax,
+                            Bil.Int (Cbat_word.to_word (w64 1)),
+                            LittleEndian, `r64));
+              Def.create rdx (Bil.Load (Bil.Var m, Bil.Var rcx, LittleEndian, `r64)) ]
+        in
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-28 the store address is a pointer" (kinds.is_ptr_def "types28" rax);
+        check "TYPES-28 the load address is a pointer" (kinds.is_ptr_def "types28" rcx);
+        check "TYPES-28 the loaded value is an integer"
+          (not (kinds.is_ptr_def "types28" rdx)));
+
+    pin "TYPES-29"
+      "a base operand of a pointer-preserving address def is a pointer, and \
+       the access is a GEP"
+      (fun () ->
+        let rdi = int_param 0 and rax = int_ret 0 in
+        let m = memv "types29_m" in
+        let eight = Bil.Int (Cbat_word.to_word (w64 8)) in
+        let sub =
+          straight_sub "types29"
+            [ Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rdi, eight));
+              Def.create m
+                (Bil.Store (Bil.Var m, Bil.Var rax,
+                            Bil.Int (Cbat_word.to_word (w64 1)),
+                            LittleEndian, `r64)) ]
+        in
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-29 the sum is a pointer" (kinds.is_ptr_def "types29" rax);
+        check "TYPES-29 its base, the entry lane, is a pointer"
+          (kinds.is_ptr_lane "types29" rdi);
+        let ir = emit_ir ~types:kinds.retype [ sub ] in
+        check "TYPES-29 the store is addressed by a GEP, not inttoptr"
+          (contains_substring ir "getelementptr"
+           && not (contains_substring ir "inttoptr")));
+
+    pin "TYPES-30"
+      "a callee reached only indirectly takes a pointer lane for a parameter \
+       it uses as a store address"
+      (fun () ->
+        let rdi = int_param 0 in
+        let m = memv "types30_m" in
+        let callee, _ =
+          sub_of ~args:[ Arg.create ~intent:In rdi (Bil.Var rdi) ] "types30_redirect"
+            [ [ Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var rdi,
+                              Bil.Int (Cbat_word.to_word (w64 2)),
+                              LittleEndian, `r64)) ],
+              [ (1, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let kinds = use_kinds [ callee ] in
+        check "TYPES-30 the parameter lane is a pointer"
+          (kinds.is_ptr_lane "types30_redirect" rdi));
+
+    pin "TYPES-31"
+      "a sum of two bare vars names no base: both stay integers"
+      (fun () ->
+        let rdi = int_param 0 and rsi = int_param 1 in
+        let rax = int_ret 0 in
+        let m = memv "types31_m" in
+        let sub =
+          straight_sub "types31"
+            [ Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Var rsi));
+              Def.create m
+                (Bil.Store (Bil.Var m, Bil.Var rax,
+                            Bil.Int (Cbat_word.to_word (w64 1)),
+                            LittleEndian, `r64)) ]
+        in
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-31 the sum is a pointer (it is the address)"
+          (kinds.is_ptr_def "types31" rax);
+        check "TYPES-31 neither addend is"
+          (not (kinds.is_ptr_lane "types31" rdi)
+           && not (kinds.is_ptr_lane "types31" rsi)));
+
+    pin "TYPES-32"
+      "use makes a version a pointer, not its register: a narrower version \
+       of the same register stays an integer"
+      (fun () ->
+        let rax = int_ret 0 in
+        let eax = Var.create ~is_virtual:false ~fresh:false "types32_eax" (Type.Imm 32) in
+        let m = memv "types32_m" in
+        let sub =
+          straight_sub "types32"
+            [ Def.create rax (Bil.Int (Cbat_word.to_word (w64 4096)));
+              Def.create m
+                (Bil.Store (Bil.Var m, Bil.Var rax,
+                            Bil.Int (Cbat_word.to_word (w64 1)),
+                            LittleEndian, `r64));
+              Def.create rax (Bil.Int (Cbat_word.to_word (w64 7)));
+              Def.create eax (Bil.Cast (Bil.LOW, 32, Bil.Var rax)) ]
+        in
+        let kinds = use_kinds [ sub ] in
+        let defs_of reg =
+          kinds.defs "types32" |> Base.List.filter ~f:(fun d -> Var.same (Var.base (Def.lhs d)) reg)
+        in
+        let ptr_of d = kinds.is_ptr_version "types32" (Def.lhs d) in
+        match defs_of rax with
+        | [ first; second ] ->
+            check "TYPES-32 the version used as an address is a pointer" (ptr_of first);
+            check "TYPES-32 the later version of the register is an integer"
+              (not (ptr_of second));
+            check "TYPES-32 the 32-bit version is an integer"
+              (Base.List.for_all (defs_of eax) ~f:(fun d -> not (ptr_of d)))
+        | _ -> check "TYPES-32 two versions of the register" false);
   ]
 
 let () = run "hike_types" tests
