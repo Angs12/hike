@@ -476,8 +476,8 @@ let ptr_defs ?(extra = Var.Set.empty) ?(used = Var.Set.empty)
   (* The vars an address expression is based on, read off the
      denotation's leaf census ([Hike_synth_addr.address_leaves]).  A lone
      var is the address itself.  On the additive spine, a leaf that is a
-     stack or storage address, or already proven a pointer, is the base
-     and the visible [Int] leaves are indices.  With no base, the one
+     stack, storage or module address, or already proven a pointer, is
+     the base and the visible [Int] leaves are indices.  With no base, the one
      leaf the denotation cannot see is the base; two unseen leaves name
      none (neither is known to be the pointer). *)
   let bases seed d (e : exp) : var list =
@@ -505,11 +505,25 @@ let ptr_defs ?(extra = Var.Set.empty) ?(used = Var.Set.empty)
               end)#map_exp e)
         in
         let leaf v = Core.Map.find leaves (Var.base v) in
+        (* A module address is an [Int] piece to attribution's folding but
+           a base here: by its synthetic identity or a module origin. *)
+        let module_base v =
+          (match Hike_synth.classify Hike_synth.empty (Var.base v) with
+           | Some (Hike_synth.Module_addr _) -> true
+           | _ -> false)
+          || (match facts.Hike_kb.denote ~blk ~def:d (Bil.Var (Var.base v)) with
+              | Ok ws -> (
+                  match Vsa.WordSet.origin ws with
+                  | Some (Hike_origin.Rip _) -> true
+                  | _ -> false)
+              | Error _ -> false)
+        in
         let is_base v =
           is_ptr seed v
           || (match leaf v with
               | Some (`Static _ | `Addr) -> true
               | Some `Int | None -> false)
+          || module_base v
         in
         match Base.List.filter vs ~f:is_base with
         | _ :: _ as bs -> bs

@@ -681,6 +681,46 @@ let tests : unit Alcotest.test list =
         check "TYPES-34 the base is a pointer" (kinds.is_ptr_def "types34" b);
         check "TYPES-34 the index is an integer"
           (not (kinds.is_ptr_def "types34" k)));
+
+    pin "TYPES-35"
+      "rodata + index: the module address is the base (a GEP off its \
+       global) and the index stays an integer"
+      (fun () ->
+        let g = Hike_synth.module_addr ~addr_bits:64 0x4010L in
+        let b = int_param 2 and k = callee_saved 0 and a = int_ret 0 in
+        let m = memv "types35_m" in
+        let c = Var.create ~is_virtual:false ~fresh:false "types35_c" (Type.Imm 1) in
+        let n x = Bil.Int (Cbat_word.to_word (w64 x)) in
+        let sub, _ =
+          sub_of "types35"
+            [ [ Def.create b (Bil.Var g) ],
+              [ (2, fun t -> mk_jmp_to t (Bil.Var c)); (1, mk_goto) ];
+              [ Def.create k (n 0) ], [ (3, mk_goto) ];
+              [ Def.create k (n 8) ], [ (3, mk_goto) ];
+              [ Def.create a
+                  (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Var k),
+                             LittleEndian, `r64)) ],
+              [ (4, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
+                     sm_lo = 0x4000L; sm_hi = 0x401fL; sm_words = 4;
+                     sm_image = Some (Bytes.make 32 '\000'); sm_copy_relocs = [] } in
+        let comp = { Hike.Stack_model.comp_id = 7; sec_lo = 0x4000L;
+                     sec_hi = 0x401fL; lo_w = 1; hi_w = 3; typed_w = 8 } in
+        let spec = { empty_spec with spec_sections = [ Some meta ];
+                                     spec_comps = [ comp ] } in
+        Hike_origin.Regions.install [ (Hike_section.Rodata, 0x4000L, 0x401fL) ];
+        Fun.protect ~finally:(fun () -> Hike_origin.Regions.install [])
+          (fun () ->
+        let kinds = use_kinds [ sub ] in
+        check "TYPES-35 the index is an integer"
+          (not (kinds.is_ptr_def "types35" k));
+        let _, stamped, _ = fixture_facts [ sub ] in
+        let ir = emit_ir_spec ~types:kinds.retype spec stamped in
+        check "TYPES-35 the address is a GEP off the module base, no inttoptr"
+          (contains_substring ir "getelementptr i8, ptr getelementptr inbounds (i8, ptr @sec_comp_7"
+           && not (contains_substring ir "= inttoptr"))));
   ]
 
 let () = run "hike_types" tests
