@@ -17,6 +17,12 @@ val provide_dest : file:string -> site:int64 -> int64 -> unit
     fact. *)
 val scan : Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state
 
+(** The decode resumed from [starts]: only the code they reach is
+    decoded again, merged into the state. *)
+val resume :
+  Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state ->
+  starts:int64 list -> Disasm.Driver.state
+
 (** One function's candidate graph from the decoded state: the blocks
     [entry] reaches without entering another entry, every edge kept. *)
 val function_cfg :

@@ -158,12 +158,13 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
      Kb.provide Theory.Semantics.slot label
        (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))))
 
-(* A fresh decode of every code region in which every root in [roots]
-   answers [is_subroutine] through the entry promise, plus every provided
-   destination fact.  The driver classifies each code address through a
-   scoped label, so the address-keyed promise — not a stored fact — marks
-   a root; [roots] must carry every entry on each scan. *)
-let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.state =
+(* The decode context: every root in [roots] answers [is_subroutine]
+   through the entry promise, and every provided destination fact is
+   read.  The driver classifies each code address through a scoped
+   label, so the address-keyed promise — not a stored fact — marks a
+   root; [roots] must carry every entry on each decode. *)
+let decoding (proj : Project.t) ~(file : string) ~(roots : int64 list)
+    (body : Driver.state Kb.t) : Driver.state =
 #ifdef VSA_DEBUG
   Printf.eprintf "hike-dbg-roots: [%s]\n%!"
     (Base.List.map roots ~f:(Printf.sprintf "%Lx") |> String.concat ",");
@@ -192,8 +193,26 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
      Kb.Symbol.in_package file @@ fun () ->
      Kb.promising Theory.Label.unit ~promise:(fun _ -> !!(Some unit)) @@ fun () ->
      Kb.promising Theory.Label.is_subroutine ~promise:entry_promise @@ fun () ->
-     let mems = code_mems proj |> List.rev in
-     kb_fold (fun s mem -> Driver.scan mem s) Driver.init mems)
+     body)
+
+(* A fresh decode of every code region. *)
+let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.state =
+  decoding proj ~file ~roots
+    (kb_fold (fun s mem -> Driver.scan mem s) Driver.init
+       (code_mems proj |> List.rev))
+
+(* The decode resumed from [starts] over the regions holding them: the
+   driver's own pending-work step, so only the code reachable from the
+   starts is decoded again and no start becomes a subroutine. *)
+let resume (proj : Project.t) ~(file : string) ~(roots : int64 list)
+    (state : Driver.state) ~(starts : int64 list) : Driver.state =
+  let starts = Base.List.map starts ~f:Addr.of_int64 in
+  decoding proj ~file ~roots
+    (kb_fold (fun s mem ->
+         match Base.List.filter starts ~f:(Memory.contains mem) with
+         | [] -> Kb.return s
+         | here -> Driver.resume (Core.Set.of_list (module Addr) here) mem s)
+        state (code_mems proj))
 
 (* Each decoded block's start address and its terminator instruction's
    address.  The solver's jmp rewrites rebuild jmps with [Jmp.create

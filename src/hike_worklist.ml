@@ -181,6 +181,48 @@ let is_entry t (a : int64) : bool =
 let rescan t =
   t.state <- D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
 
+(* A function's learned destinations change only the code its dispatch
+   instructions reach: resume the decode from those instructions.  The resumed state
+   stands only if every learned jump records its destination and each
+   destination is a decoded block; else the whole binary is scanned
+   again. *)
+let rescan_function t (learned : (int64 * int64) list) =
+  let starts =
+    Base.List.dedup_and_sort ~compare:Core.Int64.compare
+      (Base.List.map learned ~f:fst)
+  in
+  let resumed =
+    D.resume t.proj ~file:t.file ~roots:(frontier_roots t.frontier) t.state
+      ~starts
+  in
+  let decoded (site, w) =
+    let w = Addr.of_int64 w in
+    (match Disasm.Driver.jump resumed (Addr.of_int64 site) with
+     | Some j -> Core.Set.mem (Disasm.Driver.destinations j) w
+     | None -> false)
+    && (Disasm.Driver.is_block resumed w || Disasm.Driver.is_data resumed w)
+  in
+  let kept = Base.List.for_all learned ~f:decoded in
+#ifdef VSA_DEBUG
+  let full = D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier) in
+  Printf.eprintf "hike-dbg-rescan: starts=%d resume=%s equal=%b\n%!"
+    (List.length starts) (if kept then "kept" else "fallback")
+    (Disasm.Driver.equal resumed full);
+  let hex set =
+    Core.Set.to_list set |> Base.List.take_while ~f:(fun _ -> true)
+    |> (fun l -> Base.List.take l 6)
+    |> Base.List.map ~f:(fun a -> Printf.sprintf "%Lx" (Word.to_int64_exn a))
+    |> String.concat ","
+  in
+  let br = Disasm.Driver.blocks resumed and bf = Disasm.Driver.blocks full in
+  Printf.eprintf "hike-dbg-diff: only-resumed=%d [%s] only-full=%d [%s]\n%!"
+    (Core.Set.length (Core.Set.diff br bf)) (hex (Core.Set.diff br bf))
+    (Core.Set.length (Core.Set.diff bf br)) (hex (Core.Set.diff bf br));
+  t.state <- (if kept then resumed else full)
+#else
+  if kept then t.state <- resumed else rescan t
+#endif
+
 (* ---- targets ---- *)
 
 let entry_of t (a : int64) : entry =
@@ -618,7 +660,7 @@ and learn_dests t cfg (f : func) : bool =
       D.provide_dest ~file:t.file ~site w);
   if Base.List.is_empty learned then false
   else begin
-    rescan t;
+    rescan_function t learned;
     true
   end
 
