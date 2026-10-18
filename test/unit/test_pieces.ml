@@ -746,7 +746,10 @@ let tests : unit Alcotest.test list =
             "sdiv", P.sdiv, A.sdiv; "modulo", P.modulo, A.modulo;
             "smodulo", P.smodulo, A.smodulo;
             "logand", P.logand, A.logand; "logor", P.logor, A.logor;
-            "concat", P.concat, A.concat ] in
+            "concat", P.concat, A.concat; "logxor", P.logxor, A.logxor;
+            "arshift", P.arshift, (fun a b -> List.concat (A.arshift_parts a b));
+            "rshift", P.rshift, (fun a b -> List.concat (A.rshift_parts a b));
+            "lshift", P.lshift, (fun a b -> List.concat (A.lshift_parts a b)) ] in
         for i = 1 to 1200 do
           let width = [| 8; 32; 64; 128 |].(i mod 4) in
           let a = operand width in

@@ -729,9 +729,10 @@ module Pieces_base = struct
      Merge those producers directly; no operand shape needs a special
      case, and no complete row of results is built before consumption. *)
   let merge_streams inputs ~f =
-    List.fold inputs ~init:Sequence.empty ~f:(fun acc input ->
-        Sequence.merge_sorted acc (Sequence.of_lazy (lazy (f input)))
-          ~compare:compare_piece)
+    List.map inputs ~f:(fun input -> Sequence.of_lazy (lazy (f input)))
+    |> List.reduce_balanced ~f:(fun a b ->
+        Sequence.merge_sorted a b ~compare:compare_piece)
+    |> Option.value ~default:Sequence.empty
 
   let arc_stream arcs =
     let arcs = List.filter arcs ~f:(fun p -> not (C.is_bottom p)) in
@@ -765,12 +766,14 @@ module Pieces_base = struct
     produce (fun emit ->
         List.iter ps.pieces ~f:(fun q -> List.iter (f q) ~f:emit))
 
-  (* Each pair likewise. *)
-  let lift2_parts (f : progression -> progression -> progression list)
+  (* Shift parts are separate ordered arc producers; their relative
+     order is arbitrary, so merge the groups instead of flattening them. *)
+  let lift2_parts (f : progression -> progression -> progression list list)
       (a : t) (b : t) : t =
-    produce (fun emit ->
-        List.iter a.pieces ~f:(fun qa ->
-            List.iter b.pieces ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
+    stream
+      (merge_streams a.pieces ~f:(fun pa ->
+           merge_streams b.pieces ~f:(fun pb ->
+               merge_streams (f pa pb) ~f:arc_stream)))
 
   let add = lift2 A.add
   let sub = lift2 A.sub
@@ -779,9 +782,9 @@ module Pieces_base = struct
   let sdiv = lift2 A.sdiv
   let modulo = lift2 A.modulo
   let smodulo = lift2 A.smodulo
-  let arshift = lift2_parts (fun a b -> List.concat (A.arshift_parts a b))
-  let rshift = lift2_parts (fun a b -> List.concat (A.rshift_parts a b))
-  let lshift = lift2_parts (fun a b -> List.concat (A.lshift_parts a b))
+  let arshift = lift2_parts A.arshift_parts
+  let rshift = lift2_parts A.rshift_parts
+  let lshift = lift2_parts A.lshift_parts
   let logand = lift2 A.logand
   let logor = lift2 A.logor
   let concat = lift2 A.concat
@@ -793,11 +796,10 @@ module Pieces_base = struct
     | [], _ | _, [] -> empty
     | ap, bp ->
       let ob = List.map bp ~f:(fun pb -> A.xor_operand pb) in
-      produce (fun emit ->
-          List.iter ap ~f:(fun pa ->
-              let oa = A.xor_operand pa in
-              List.iter ob ~f:(fun ob ->
-                  List.iter (A.logxor_ops oa ob) ~f:emit)))
+      stream
+        (merge_streams ap ~f:(fun pa ->
+             let oa = A.xor_operand pa in
+             merge_streams ob ~f:(fun ob -> arc_stream (A.logxor_ops oa ob))))
 
   let lnot = map (fun p -> [ C.lnot p ])
   let neg = map A.neg
