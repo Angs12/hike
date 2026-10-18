@@ -781,6 +781,27 @@ let tests : unit Alcotest.test list =
         check "PCS-30.elements"
           (List.for_all (fun h -> P.elem (Cbat_word.concat h low) result) (Clp.iter high)));
 
+    pin "PCS-31"
+      "scaling and shifts read descending operands in forward element order"
+      (fun () ->
+        let w = Cbat_word.of_int ~width:8 in
+        let values = Clp.create_descending ~width:8 ~base:(w 200) ~step:(w 3) in
+        let ps = P.of_progression values in
+        List.iter
+          (fun (name, actual, concrete) ->
+             check ("PCS-31." ^ name)
+               (List.for_all (fun x -> P.elem (concrete x) actual) (Clp.iter values)))
+          [ "mul", P.mul ps (P.singleton (w 1)), (fun x -> x);
+            "lshift", P.lshift ps (P.singleton (w 0)), (fun x -> x) ];
+        let amount =
+          P.of_progression
+            (Clp.create_descending ~width:16
+               ~base:(Cbat_word.of_int ~width:16 32)
+               ~step:(Cbat_word.one 16)) in
+        let n = P.singleton (w 64) in
+        check "PCS-31.rshift" (P.elem (w 64) (P.rshift n amount));
+        check "PCS-31.arshift" (P.elem (w 64) (P.arshift n amount)));
+
   ]
 
 let () = run "pieces" tests

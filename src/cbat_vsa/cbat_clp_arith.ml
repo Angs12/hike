@@ -117,6 +117,7 @@ let mul_core (p1 : t) (p2 : t) : t list =
     | Some e2 ->
       (* Singleton case is exact. *)
       let scale a b = (* [a] a singleton: scale [b] by its base *)
+        let b = forward b in
         let base = W.mul (base_of b) (base_of a) in
         let step = W.mul (step_of b) (base_of a) in
         arcs base ~step ~cardn:(cardn_of b) in
@@ -367,6 +368,7 @@ let split_shift_parts ~(sz1 : int) ~(overshift : t list)
           (Option.value (finite_end p2') ~default:(base_of p2'))))
 
 let lshift_parts (p1 : t) (p2 : t) : t list list =
+  let p1 = forward p1 in
   let sz1 = bitwidth p1 in
     let open Monads.Std.Monad.Option.Syntax in
   (match begin
@@ -401,6 +403,7 @@ let rewidth_l ~(width : int) (xs : t list) : t list =
   | None -> []
 
 let rewidth ~(width : int) (p : t) : t =
+  let p = forward p in
   create ~width (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
 
 (* [p] re-spanned on its extrema. *)
@@ -470,6 +473,7 @@ let signed_span (p : t) : t =
   | _ -> top (bitwidth p)
 
 let rec arshift_parts (p1 : t) (p2 : t) : t list list =
+  let p1 = forward p1 in
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
   if sz1 <> sz2 then
