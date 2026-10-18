@@ -724,8 +724,72 @@ module Pieces_base = struct
         List.iter a.pieces ~f:(fun qa ->
             List.iter b.pieces ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
 
-  let add = lift2 A.add
-  let sub = lift2 A.sub
+  let point_pieces (ps : progression list) : bool =
+    List.for_all ps ~f:(fun p -> Cbat_word.is_one (C.cardn_of p))
+
+  let finite_pieces (ps : progression list) : bool =
+    List.for_all ps ~f:(fun p -> not (C.is_infinite p))
+
+  (* [ps] shifted by [c], ascending.  Pieces and high arcs that stay below
+     2^w keep their order; whatever wraps lands below [c], ahead of all of
+     them.  Whole-wrapped pieces stay ordered; a low arc of a crossing piece
+     (or a two-element piece the wrap reorders) is out of place and is the
+     only thing sorted. *)
+  let shifted (ps : progression list) (c : Cbat_word.t) : progression list =
+    let above, whole, partial =
+      List.fold_right ps ~init:([], [], []) ~f:(fun p (u, w, x) ->
+          let base = C.base_of p in
+          let wraps = Cbat_word.(<) (Cbat_word.add base c) base in
+          List.fold_right (C.translate p c) ~init:(u, w, x)
+            ~f:(fun q (u, w, x) ->
+                if not (Cbat_word.(<) (C.base_of q) c) then (q :: u, w, x)
+                else if wraps then (u, q :: w, x)
+                else (u, w, q :: x)))
+    in
+    List.append
+      (merge_progressions (List.sort partial ~compare:compare_piece) whole)
+      above
+
+  (* Each piece of [ps] shifted by each delta; the rows merge into the one
+     ascending stream the image index would hold. *)
+  let shift_all (ps : progression list) (deltas : Cbat_word.t list) : t =
+    let rec dedup = function
+      | a :: (b :: _ as rest) ->
+        if compare_piece a b = 0 then dedup rest else a :: dedup rest
+      | l -> l
+    in
+    of_progressions
+      (dedup
+         (List.fold deltas ~init:[] ~f:(fun acc c ->
+              merge_progressions acc (shifted ps c))))
+
+  (* A shift by constants: one operand all single points, the other all
+     finite pieces of the same width.  [None]: general pairs. *)
+  let shift_operands (a : t) (b : t) : (progression list * progression list) option =
+    match a.pieces, b.pieces with
+    | [], _ | _, [] -> None
+    | _ when not (Stdlib.Int.equal (width_of a) (width_of b)) -> None
+    | ap, bp ->
+      if point_pieces bp && finite_pieces ap then Some (ap, bp)
+      else if point_pieces ap && finite_pieces bp then Some (bp, ap)
+      else None
+
+  let add (a : t) (b : t) : t =
+    match a.pieces, b.pieces with
+    | [ _ ], [ _ ] -> lift2 A.add a b
+    | _ ->
+      (match shift_operands a b with
+       | Some (ps, pts) -> shift_all ps (List.map pts ~f:C.base_of)
+       | None -> lift2 A.add a b)
+
+  let sub (a : t) (b : t) : t =
+    match a.pieces, b.pieces with
+    | [ _ ], [ _ ] -> lift2 A.sub a b
+    | (_ :: _ as ap), (_ :: _ as bp)
+      when point_pieces bp && finite_pieces ap
+           && Stdlib.Int.equal (width_of a) (width_of b) ->
+      shift_all ap (List.map bp ~f:(fun p -> Cbat_word.neg (C.base_of p)))
+    | _ -> lift2 A.sub a b
   let mul = lift2 A.mul
   let div = lift2 A.div
   let sdiv = lift2 A.sdiv
@@ -752,7 +816,31 @@ module Pieces_base = struct
                   List.iter (A.logxor_ops oa ob) ~f:emit)))
 
   let lnot = map (fun p -> [ C.lnot p ])
-  let neg = map A.neg
+  (* Negation reverses disjoint finite ranges.  Only a piece holding 0
+     wraps: 0 comes first, the rest of its image last. *)
+  let neg (ps : t) : t =
+    let rec disjoint = function
+      | p :: (q :: _ as rest) ->
+        (match C.max_elem p, C.min_elem q with
+         | Some hi, Some lo -> Cbat_word.(<) hi lo && disjoint rest
+         | _ -> false)
+      | _ -> true
+    in
+    match ps.pieces with
+    | [] | [ _ ] -> map A.neg ps
+    | pieces when finite_pieces pieces && disjoint pieces ->
+      let head, tail =
+        match pieces with
+        | p :: rest when Cbat_word.is_zero (C.base_of p) -> Some p, rest
+        | _ -> None, pieces
+      in
+      let rest = List.concat (List.rev_map tail ~f:A.neg) in
+      of_progressions
+        (match Option.map head ~f:A.neg with
+         | None -> rest
+         | Some [ low; high ] -> (low :: rest) @ [ high ]
+         | Some arcs -> arcs @ rest)
+    | _ -> map A.neg ps
 
   let extract ?hi ?lo (ps : t) : t =
     let w = bitwidth ps in

@@ -615,6 +615,65 @@ let tests : unit Alcotest.test list =
             P.union (prog32 ~lo:0 ~hi:9) (prog32 ~lo:100 ~hi:200); wrapped;
             P.union wrapped (p32 [ 0x7FFFFFF0; 0x80000010 ]); capped ]);
 
+    pin "PCS-28"
+      "add, sub and neg build their ascending result directly: it equals the \
+       sorted, deduplicated image of the same per-pair results, over \
+       multi-piece, wrapping, near-0/near-max, constant and over-budget \
+       operands at widths 8, 32 and 64"
+      (fun () ->
+        let rs = Random.State.make [| 28; 2026 |] in
+        let rnd n = Random.State.int rs n in
+        let word width =
+          let w k = Cbat_word.of_int ~width k in
+          match rnd 4 with
+          | 0 -> w (rnd 40)
+          | 1 -> Cbat_word.neg (w (rnd 40))
+          | 2 -> w (rnd (1 lsl (min width 29)))
+          | _ ->
+            Cbat_word.add
+              (w (rnd (1 lsl (min width 29))))
+              (Cbat_word.lshift (w (rnd 1000)) (w (max 0 (width - 12)))) in
+        let piece width =
+          if rnd 3 = 0 then Clp.singleton (word width)
+          else
+            let step = Cbat_word.of_int ~width (1 + rnd 6) in
+            let cardn = Cbat_word.of_int ~width:(width + 1) (2 + rnd 12) in
+            match Clp.arcs ~width ~step ~cardn (word width) with
+            | [] -> Clp.singleton (word width)
+            | l -> List.nth l (rnd (List.length l)) in
+        let operand width =
+          match rnd 6 with
+          | 0 -> P.singleton (word width)
+          | 1 ->
+            P.of_list ~width
+              (List.sort_uniq Cbat_word.compare
+                 (List.init (1 + rnd 90) (fun _ -> word width)))
+          | _ ->
+            List.fold_left
+              (fun acc _ -> P.union acc (P.of_arcs [ piece width ]))
+              (P.of_arcs [ piece width ])
+              (List.init (rnd 6) Fun.id) in
+        let image gen =
+          P.of_progressions
+            (List.sort_uniq P.compare_piece
+               (List.filter (fun p -> not (Clp.is_bottom p)) (gen ()))) in
+        let pairs a b f =
+          List.concat_map
+            (fun pa -> List.concat_map (fun pb -> f pa pb) (P.to_list b))
+            (P.to_list a) in
+        for i = 1 to 3000 do
+          let width = [| 8; 32; 64 |].(i mod 3) in
+          let a = operand width and b = operand width in
+          check (Printf.sprintf "PCS-28.add.%d" i)
+            (P.equal (P.add a b) (image (fun () -> pairs a b Cbat_clp_arith.add)));
+          check (Printf.sprintf "PCS-28.sub.%d" i)
+            (P.equal (P.sub a b) (image (fun () -> pairs a b Cbat_clp_arith.sub)));
+          check (Printf.sprintf "PCS-28.neg.%d" i)
+            (P.equal (P.neg a)
+               (image (fun () ->
+                    List.concat_map Cbat_clp_arith.neg (P.to_list a))))
+        done);
+
   ]
 
 let () = run "pieces" tests

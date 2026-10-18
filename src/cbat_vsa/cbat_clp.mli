@@ -101,6 +101,8 @@ module Pieces : sig
   (* A result's pieces: one progression or the two arcs of one across the
      modulus, ascending. *)
   val of_arcs : progression list -> t
+  (* The unsigned piece order. *)
+  val compare_piece : progression -> progression -> int
   (* Merge ascending progression streams, without combining or capping. *)
   val merge_progressions : progression list -> progression list -> progression list
   (* Build from disjoint, ascending, non-bottom progressions. *)
