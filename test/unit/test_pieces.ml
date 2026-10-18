@@ -598,6 +598,8 @@ let tests : unit Alcotest.test list =
              check (name ^ ".hull")
                (List.equal Clp.equal (P.to_list (P.circular_hull ps))
                   (recomputed_hull ps));
+             check (name ^ ".idempotent")
+               (P.circular_hull (P.circular_hull ps) == P.circular_hull ps);
              check (name ^ ".extrema")
                (same_opt (P.min_elem ps)
                   (extreme Clp.min_elem (Cbat_word.min_by ~signed:false) ps)

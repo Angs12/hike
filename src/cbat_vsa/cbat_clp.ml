@@ -49,9 +49,9 @@ let () =
    The list is the set union; [] is bottom.  Smart constructors are the
    only way in; no raw list escapes except through [to_list].  The other
    fields are facts of the list, computed once when it is built: the
-   circular hull (None when the union is its own hull) and the four
-   extrema.  Order, equality, sexp and
-   bin_io are the list's alone. *)
+   circular hull (None when the union is its own hull; a hull is its own
+   hull) and the four extrema.  Order, equality, sexp and bin_io are the
+   list's alone. *)
 module Pieces_base = struct
   type t =
     { pieces : progression list;
@@ -80,21 +80,26 @@ module Pieces_base = struct
     | p :: rest ->
       List.fold rest ~init:[ p ] ~f:(fun acc q -> C.union_arcs acc [ q ])
 
+  (* A value with the given hull field and the extrema of its list. *)
+  let with_hull (pieces : progression list) (hull : t option) : t =
+    { pieces; hull;
+      min_u = extremum C.min_elem ~better:(Cbat_word.min_by ~signed:false) pieces;
+      max_u = extremum C.max_elem ~better:(Cbat_word.max_by ~signed:false) pieces;
+      min_s =
+        extremum C.min_elem_signed ~better:(Cbat_word.min_by ~signed:true) pieces;
+      max_s =
+        extremum C.max_elem_signed ~better:(Cbat_word.max_by ~signed:true) pieces }
+
   (* The one way to a value: derive the cached facts from the list.  A
-     union that is its own hull has none stored. *)
-  let rec mk (pieces : progression list) : t =
-    let min_u = extremum C.min_elem ~better:(Cbat_word.min_by ~signed:false) pieces in
-    let max_u = extremum C.max_elem ~better:(Cbat_word.max_by ~signed:false) pieces in
-    let min_s =
-      extremum C.min_elem_signed ~better:(Cbat_word.min_by ~signed:true) pieces in
-    let max_s =
-      extremum C.max_elem_signed ~better:(Cbat_word.max_by ~signed:true) pieces in
+     hull is its own hull, so a union that equals its hull, and the stored
+     hull itself, keep none. *)
+  let mk (pieces : progression list) : t =
     let arcs = hull_arcs pieces in
     if phys_equal arcs pieces
        || (List.length arcs = List.length pieces
            && List.for_all2_exn arcs pieces ~f:C.equal)
-    then { pieces; hull = None; min_u; max_u; min_s; max_s }
-    else { pieces; hull = Some (mk arcs); min_u; max_u; min_s; max_s }
+    then with_hull pieces None
+    else with_hull pieces (Some (with_hull arcs None))
 
   let empty : t = mk []
 
