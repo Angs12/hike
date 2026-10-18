@@ -1,11 +1,11 @@
 (* The runtime origin of a relative value: the concrete pointer the
    offsets are measured from.  One origin per value; the algebra's
-   cross-origin rule materialises a mixed computation to [Abs]. *)
+   cross-origin rule materialises a mixed computation to a plain value.
+   A value with no origin is no [Rel] at all. *)
 
 open Bap.Std
 
 type t =
-  | Abs  (* no origin: the absolute piece union *)
   | Stack  (* the sub's entry SP — the caller's frame is Stack at/above the entry word *)
   | Fs  (* the ABI thread pointer; offsets are signed TLS/TCB byte offsets *)
   | Rip of Hike_section.t
@@ -45,7 +45,6 @@ let stack_span = Stdlib.Int64.shift_left 1L 23
 
 let facts (t : t) : facts =
   match t with
-  | Abs -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
   | Stack ->
     { base = segment_base;
       certified = 4;
@@ -57,7 +56,6 @@ let facts (t : t) : facts =
 
 let name (t : t) : string =
   match t with
-  | Abs -> "abs"
   | Stack -> "stack"
   | Fs -> "fs"
   | Rip _ -> "rip"
@@ -67,7 +65,7 @@ let name (t : t) : string =
 let names_stack_line (t : t) : bool =
   match t with
   | Stack -> true
-  | Abs | Rip _ | Fs -> false
+  | Rip _ | Fs -> false
 
 (* The program's section map: the section each module address lies in.
    Installed once per program from the loaded image. *)

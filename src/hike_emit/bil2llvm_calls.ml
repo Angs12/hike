@@ -18,7 +18,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
   let extern = is_extern ctx call_tid in
   let slot_args =
-    Base.List.filter args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
+    Base.List.filter args ~f:(fun a ->
+        Hike_stack_model.is_arg_slot ctx.synth (Arg.lhs a))
   in
   (* The caller-window base is the caller's SP at the call: its position
      in the caller's residue (the shadow that covers the above-entry
@@ -72,7 +73,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         (match window_ptr () with
          | Some w -> w
          | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
-      else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
+      else if Hike_stack_model.is_arg_slot ctx.synth (Arg.lhs arg) then
         let i =
           Base.Option.value ~default:0
             (Base.List.findi slot_args
@@ -90,7 +91,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         in
         Llvm.build_bitcast v (Llvm.double_type ctx.llvm_ctx) ""
           llvm_builder
-      else if lane_is_ptr arg then
+      else if lane_is_ptr ctx arg then
         (* A stack address is passed as a pointer into the caller's
            own storage.  The kind is a callee-side may — a site whose
            value is not itself a stack address passes the register's
@@ -137,7 +138,7 @@ let set_arg_attrs_of ctx fn args =
 
 let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
   Base.List.iteri (get_args ctx sub_tid) ~f:(fun i arg ->
-      let value = lane_value_of arg (Llvm.param fn i) in
+      let value = lane_value_of ctx arg (Llvm.param fn i) in
       insert_local scope blk_tid (Arg.lhs arg) value;
       (* A parameter dominates every reader: bind it sub-wide too. *)
       bind_ssaval scope (Arg.lhs arg) value)
@@ -209,7 +210,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
         Bil2llvm_value.Int
           (Llvm.build_bitcast v (typ_lltype ctx (Var.typ (Arg.lhs ret))) ""
              llvm_builder)
-      | None -> lane_value_of ret v
+      | None -> lane_value_of ctx ret v
     in
     bind_call_ret ctx scope blk_tid ret v
   in
@@ -224,7 +225,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
       (* A sub-register lane needs the extension promise; a full-width
          lane carries it vacuously. *)
       (match Var.typ (Arg.lhs ret) with
-       | Type.Imm w when w < ctx.addr_bits && not (lane_is_ptr ret) ->
+       | Type.Imm w when w < ctx.addr_bits && not (lane_is_ptr ctx ret) ->
          Llvm.add_call_site_attr ret_var
            (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
            Llvm.AttrIndex.Return
@@ -322,7 +323,7 @@ let thunk_tid_of (sub_tid : tid) : tid =
    pointer parameter) stays untwinned. *)
 let thunk_eligible ctx (sub_tid : tid) : bool =
   let conv_lane v =
-    Hike_stack_model.is_arg_slot (Var.base v)
+    Hike_stack_model.is_arg_slot ctx.synth (Var.base v)
     || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
     || Base.List.exists
          (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
@@ -341,7 +342,7 @@ let create_thunk ctx (sub_tid : tid) =
   else
   let llvm_ctx = ctx.llvm_ctx in
   let llvm_module = ctx.llvm_module in
-  let arity = count_slot_args (get_args ctx sub_tid) in
+  let arity = count_slot_args ctx.synth (get_args ctx sub_tid) in
   let args = get_args ctx sub_tid in
   let rets = get_rets ctx sub_tid in
   (* The twin is the machine-convention face: its return is the
@@ -411,12 +412,12 @@ let create_thunk ctx (sub_tid : tid) =
   let forward (a : Arg.t) (v : Bil2llvm_value.t) : Llvm.llvalue =
     Bil2llvm_value.ll
       (Bil2llvm_value.coerce ~addr_bits:ctx.addr_bits builder
-         ~ptr:(lane_is_ptr a) v)
+         ~ptr:(lane_is_ptr ctx a) v)
   in
   let call_args =
     Base.List.map args ~f:(fun a ->
         let v = Arg.lhs a in
-        if Hike_stack_model.is_arg_slot v then
+        if Hike_stack_model.is_arg_slot ctx.synth v then
           let i =
             match Hike_synth.index_of ctx.synth v with
             | Some i -> i
@@ -444,9 +445,9 @@ let create_thunk ctx (sub_tid : tid) =
   let n_callee = Base.List.length rets in
   let lane_value (i : int) (a : Arg.t) : Llvm.llvalue =
     let v =
-      if i >= n_callee then lane_value_of a (Llvm.undef (lane_type ctx a))
+      if i >= n_callee then lane_value_of ctx a (Llvm.undef (lane_type ctx a))
       else
-        lane_value_of (Base.List.nth_exn rets i)
+        lane_value_of ctx (Base.List.nth_exn rets i)
           (match rets with
            | [ _ ] -> r
            | _ -> Llvm.build_extractvalue r i "" builder)
@@ -483,7 +484,7 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
         (* The ret lane's type drives: pointer lanes return the pointer,
            the vector carrier the integer bits as its vector, integer
            lanes the integer form. *)
-        if lane_is_ptr ret then as_ptr llvm_builder v
+        if lane_is_ptr ctx ret then as_ptr llvm_builder v
         else
           match lane_vector ctx ret with
           | Some ty ->

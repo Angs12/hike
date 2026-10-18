@@ -276,7 +276,8 @@ let rename_versions ~abi ~sp ~g ~dom ~renamable ~succs_of ~machine_blk_tids
            | Some blk ->
                Term.update blk_t sub (Term.set_attr blk versions_tag data))
 
-let ssa_sub ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub term =
+let ssa_sub ~(synth : Hike_synth.table)
+    ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub term =
   if is_ssa sub then sub
   else if Seq.is_empty (Term.enum blk_t sub) then sub
   else
@@ -298,12 +299,12 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub t
        a model memory state otherwise; only the model's own memory vars
        (the mem operands) are un-renamable. *)
     let renamable (v : var) =
-      not (Model.is_model_storage v)
-      && not (Hike_synth.is_address_var Hike_synth.empty v)
+      not (Model.is_model_storage synth v)
+      && not (Hike_synth.is_address_var synth v)
       && not (Var.same v pc)
       && not (Var.same v window)
-      && not (Model.is_arg_slot (Var.base v))
-      && not (Model.is_call_arg (Var.base v))
+      && not (Model.is_arg_slot synth (Var.base v))
+      && not (Model.is_call_arg synth (Var.base v))
     in
     (* The sub's CFG, straight from the BIR (every edge is an explicit
        jmp: the completion writes the guards' fallthroughs).  The
@@ -442,7 +443,8 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub t
 (* Under SSA the sub's input lanes are its index-0 reads: every
    versioned read is dominated by its def.  The model's memory vars and
    storage bases are not lanes; a Mem-typed pointer value is. *)
-let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
+let free_regs_ssa ~(synth : Hike_synth.table) ~(abi : Abi.t) (sub : sub term) :
+    var list =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
       Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->
@@ -450,12 +452,13 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
               |> Core.Set.filter ~f:(fun v -> Var.index v = 0))))
   |> Core.Set.filter ~f:(fun v ->
          not
-           (Model.is_model_storage v
-          || Model.is_window_var v || Abi.is_sp abi (Var.base v)
-          || Hike_synth.is_address_var Hike_synth.empty v))
+           (Model.is_model_storage synth v
+          || Model.is_window_var synth v || Abi.is_sp abi (Var.base v)
+          || Hike_synth.is_address_var synth v))
   |> Core.Set.to_list
 
-let ssa_program ~(target : Bap_core_theory.Theory.Target.t)
+let ssa_program ~(synth : Hike_synth.table)
+    ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
   let abi = Abi.of_target target in
   let subs =
@@ -466,5 +469,5 @@ let ssa_program ~(target : Bap_core_theory.Theory.Target.t)
   Term.map sub_t prog ~f:(fun sub ->
       if is_ssa sub then sub
       else
-        Model.prepare_effects ~abi ~callee:(Core.Map.find subs) sub
-        |> ssa_sub ~target)
+        Model.prepare_effects ~synth ~abi ~callee:(Core.Map.find subs) sub
+        |> ssa_sub ~synth ~target)

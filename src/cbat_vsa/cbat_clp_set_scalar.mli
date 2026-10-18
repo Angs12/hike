@@ -76,7 +76,7 @@ val stack_leaves : t -> t list
 (* The value's address pieces per memory-key line: a relative value keeps
    its origin's line, plain values the absolute line, and a mixed value
    names every leaf's. *)
-val address_groups : t -> (Origin.t * Cbat_clp.Pieces.t) list
+val address_groups : t -> (Origin.t option * Cbat_clp.Pieces.t) list
 
 (* The verdict of one address-filter decision.  [`Keep`]/[`Drop`] apply
    to the whole progression; [`Split`] hands it back to the bisection;
@@ -93,10 +93,10 @@ type address_verdict =
    with their own verdicts.  The origin is kept; an unbounded piece and a
    mixed-origin value are kept whole. *)
 val filter_addresses :
-  t -> decide:(Origin.t -> Cbat_clp.t -> address_verdict) -> t
+  t -> decide:(Origin.t option -> Cbat_clp.t -> address_verdict) -> t
 
-(* Memory namespaces: Rip keys on the Abs line. *)
-val key_line : Origin.t -> Origin.t
+(* Memory namespaces: Rip keys on the absolute line ([None]). *)
+val key_line : Origin.t -> Origin.t option
 
 (* The set's own address stride: > 1 only for a bounded strided Clp or
    stack-offset progression; 1 otherwise. *)

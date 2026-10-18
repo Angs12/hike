@@ -153,14 +153,14 @@ let tests : unit Alcotest.test list =
        different origins are disjoint. *)
     pin "MAP-26"
       "the key namespace: an origin-aware key round-trips (a stack word keys in \
-       the Stack namespace, a plain out-of-band word in Abs) and two keys of the \
+       the Stack namespace, a plain out-of-band word on the absolute line) and two keys of the \
        same byte range but different origins do not overlap"
       (fun () ->
         let k_stack = key_of (Ws.stack_word_i64 (-8L)) in
         let k_abs = key_of (Ws.singleton (w64 (-8))) in
         check "MAP-26"
-          (Hike_origin.equal (key_origin k_stack) Hike_origin.Stack
-          && Hike_origin.equal (key_origin k_abs) Hike_origin.Abs
+          (Option.equal Hike_origin.equal (key_origin k_stack) (Some Hike_origin.Stack)
+          && Option.is_none (key_origin k_abs)
           && not (Mem.Key.overlap k_stack k_abs)));
 
     pin "MAP-27"

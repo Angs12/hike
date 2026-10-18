@@ -344,7 +344,7 @@ let in_one_image ~(find : lo:int64 -> last:int64 -> section_image option)
       if
         (not cell_free)
         && Mem.has_cell_in mv
-             ~origin:(WordSet.key_line (Option.value origin ~default:WordSet.Origin.Abs))
+             ~origin:(Option.bind origin ~f:WordSet.key_line)
              ~lo:(Lazy.force mn_w) ~hi:last_w
       then None
       else read img
@@ -430,7 +430,7 @@ let load_value ~(addr : wordset) ~(endian : endian) ~(bits : int) (mv : Mem.t) :
      && Option.value_map (WordSet.relative_offsets addr) ~default:false
           ~f:(fun offs -> Cbat_clp.Pieces.equal offs
               (Cbat_clp.Pieces.singleton (Cbat_word.zero bits)))
-     && not (Mem.has_cell_in mv ~origin:Hike_origin.Fs
+     && not (Mem.has_cell_in mv ~origin:(Some Hike_origin.Fs)
                ~lo:(Cbat_word.zero bits)
                ~hi:(Cbat_word.of_int ~width:bits (bits / 8 - 1)))
   then addr else
@@ -487,9 +487,10 @@ let in_own_frame (addr : wordset) : bool =
    callee may reach it: the data has a stack leaf and the address is not
    in the sub's own frame below entry.  [denote_exp] discards it;
    [denote_def] folds it into the state. *)
-let rec denote_exp_escaping ~(escaped : bool ref) (e : exp) (env : AI.t) :
+let rec denote_exp_escaping ~(synth : Hike_synth.table)
+    ~(escaped : bool ref) (e : exp) (env : AI.t) :
     val_t or_type_error =
-  let denote_exp = denote_exp_escaping ~escaped in
+  let denote_exp = denote_exp_escaping ~synth ~escaped in
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
     if b then !!() else fail err in
@@ -498,13 +499,13 @@ let rec denote_exp_escaping ~(escaped : bool ref) (e : exp) (env : AI.t) :
   match e with
   | Bil.Var v -> begin match Var.typ v with
     | Type.Imm bitwidth ->
-      (match Hike_synth.module_addr_of Hike_synth.empty v with
+      (match Hike_synth.module_addr_of synth v with
        | Some a when bitwidth = 64 -> return_imm (WordSet.module_address a)
        | Some a ->
          return_imm (WordSet.singleton
                        (Cbat_word.of_int64 ~width:bitwidth a))
        | None ->
-         match Hike_synth.thread_addr_of Hike_synth.empty v with
+         match Hike_synth.thread_addr_of synth v with
          | Some off -> return_imm (WordSet.set_origin Hike_origin.Fs
                                     (WordSet.stack_word_i64 off))
          | None -> return_imm @@ AI.find_word bitwidth env v)
@@ -588,24 +589,27 @@ let rec denote_exp_escaping ~(escaped : bool ref) (e : exp) (env : AI.t) :
     denote_exp body env'
   | Bil.Unknown (_,typ) -> val_top typ
 
-let denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
-  denote_exp_escaping ~escaped:(ref false) e env
+let denote_exp ~(synth : Hike_synth.table) (e : exp) (env : AI.t) :
+    val_t or_type_error =
+  denote_exp_escaping ~synth ~escaped:(ref false) e env
 
-let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
+let denote_imm_exp ~(synth : Hike_synth.table) (e : exp) (env : AI.t) :
+    WordSet.t or_type_error =
   let open Monad_type_error in
-  denote_exp e env >>= val_as_imm
+  denote_exp ~synth e env >>= val_as_imm
 
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
    words and memory ops key cells by their segment offsets.  A def the
    denotation cannot type adds nothing: its readers take the top
    identity. *)
-let denote_def_escaping ~(escaped : bool ref) (df : def term) (env : AI.t) :
+let denote_def_escaping ~(synth : Hike_synth.table) ~(escaped : bool ref)
+    (df : def term) (env : AI.t) :
     AI.t =
   let v = Def.lhs df in
   let e = Def.rhs df in
   match
     (let open Monad_type_error in
-     denote_exp_escaping ~escaped e env >>| fun ev ->
+     denote_exp_escaping ~synth ~escaped e env >>| fun ev ->
      (match ev with
       | `Word p ->
         (* A partial-register write (EAX into RAX) zero-fills the base
@@ -629,28 +633,29 @@ let denote_def_escaping ~(escaped : bool ref) (df : def term) (env : AI.t) :
       (Format.asprintf "denote_def %s: %s" (Var.name v)
          (Type.Error.to_string err))
 
-let denote_def (df : def term) (env : AI.t) : AI.t =
+let denote_def ~(synth : Hike_synth.table) (df : def term) (env : AI.t) : AI.t =
   let escaped = ref false in
-  let env' = denote_def_escaping ~escaped df env in
+  let env' = denote_def_escaping ~synth ~escaped df env in
   if !escaped then AI.escape_frame env' else env'
 
-let denote_defs (b : blk term) : AI.t -> AI.t =
+let denote_defs ~(synth : Hike_synth.table) (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)
   fun env0 ->
     Term.enum def_t b
-    |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def df env)
+    |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def ~synth df env)
 
 (* One per-block state replay: the block's defs fold [denote_def]
    from its entry state; [f] folds over each def's (before, after)
    states. *)
-let fold_block_states ~(sol : (tid, AI.t) Solution.t) (blk : blk term)
+let fold_block_states ~(synth : Hike_synth.table)
+    ~(sol : (tid, AI.t) Solution.t) (blk : blk term)
     ~(init : 'acc) ~(f : AI.t -> AI.t -> def term -> 'acc -> 'acc) :
     'acc * AI.t =
   let st_end, acc =
     Term.enum def_t blk
     |> Seq.fold ~init:(Solution.get sol (Term.tid blk), init)
          ~f:(fun (st_before, acc) d ->
-             let st_after = denote_def d st_before in
+             let st_after = denote_def ~synth d st_before in
              (st_after, f st_before st_after d acc))
   in
   (acc, st_end)
@@ -671,14 +676,15 @@ let last_defs (blk : blk term) : def term Var.Map.t =
    no edge may run.  A live state that produces one is an analysis bug,
    and the decision seam says so loudly rather than widening the
    guard.  Jumps after one that always runs are not denoted. *)
-let reachable_jumps_by (type a) ~(jmp : a -> jmp term) (env : AI.t)
+let reachable_jumps_by (type a) ~(synth : Hike_synth.table)
+    ~(jmp : a -> jmp term) (env : AI.t)
     (items : a seq) : a seq =
   Seq.unfold_with items ~init:true ~f:begin fun reachable item ->
     let jmp_term = jmp item in
     if not reachable then Seq.Step.Done
     else
     let cond =
-      match denote_imm_exp (Jmp.cond jmp_term) env with
+      match denote_imm_exp ~synth (Jmp.cond jmp_term) env with
       | Ok c ->
           if WordSet.is_bottom c && not (AI.equal env AI.bottom) then
             failwith
@@ -693,5 +699,6 @@ let reachable_jumps_by (type a) ~(jmp : a -> jmp term) (env : AI.t)
     else Seq.Step.Skip {state = can_fall_through}
   end
 
-let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
-  reachable_jumps_by ~jmp:Fn.id env jmps
+let reachable_jumps ~(synth : Hike_synth.table) (env : AI.t)
+    (jmps : jmp term seq) : jmp term seq =
+  reachable_jumps_by ~synth ~jmp:Fn.id env jmps

@@ -1,7 +1,7 @@
 (* The per-def runtime origin: the origin ADT value the solve computed
    for the def, stamped at the solve boundary and read through the
    seam.  Absence means the def is outside the analysis boundary —
-   minted after it, or its sub did not converge — and reads Abs. *)
+   minted after it, or its sub did not converge — and reads no origin. *)
 
 include Core
 open Bap.Std
@@ -37,39 +37,38 @@ let () =
         "hike: def-origin conflict: two different origins were stamped for one def"
     | _ -> None)
 
-(* Two different origins for one def coarsen to Abs: the absolute
+(* Two different origins for one def coarsen to no origin: the plain
    world is the sound join. *)
-let def_origin_d : Origin.t option Hike_def_slot.t =
+let def_origin_d : Origin.t option option Hike_def_slot.t =
   Hike_def_slot.optional ~name:"hike-def-origin"
     ~inspect:(fun _ -> Sexp.Atom "hike:def-origin")
-    ~join:(fun a b -> if Origin.equal a b then Ok a else Ok Origin.Abs)
-    ~equal:Origin.equal
+    ~join:(fun a b ->
+        if Option.equal Origin.equal a b then Ok a else Ok None)
+    ~equal:(Option.equal Origin.equal)
     ~get_bump:"" ~put_bump:"" ~bump:(fun _ -> ())
 
 let def_origin (d : def term) : Origin.t option =
-  Hike_def_slot.get def_origin_d d
+  Option.join (Hike_def_slot.get def_origin_d d)
 
 (* Writes the origin onto the def (the fixture seam's writer). *)
 let with_origin (o : Origin.t) (d : def term) : def term =
-  Hike_def_slot.put def_origin_d (Some o) d
+  Hike_def_slot.put def_origin_d (Some (Some o)) d
 
 (* The def's stamped origin: its value's own origin; a mixed or plain
-   value reads Abs, the sound fallback. *)
-let origin_of_def_value (v : WordSet.t) : Origin.t =
-  match WordSet.origin v with
-  | Some o -> o
-  | None -> Origin.Abs
+   value reads no origin, the sound fallback. *)
+let origin_of_def_value (v : WordSet.t) : Origin.t option = WordSet.origin v
 
 (* The stamp sweep's per-def step: the routed origin is the memory
    node's ADDRESS (where the traffic lands, for a load and a store
    alike); a non-memory def's is its value's. *)
-let stamp_origin ~(before : AI.t) (d : def term) (after : AI.t) : def term =
+let stamp_origin ~(synth : Hike_synth.table) ~(before : AI.t)
+    (d : def term) (after : AI.t) : def term =
   let o =
     match mem_addr_of (Def.rhs d) with
     | Some addr -> (
-        match denote_imm_exp addr before with
+        match denote_imm_exp ~synth addr before with
         | Ok ws -> origin_of_def_value ws
-        | Error _ -> Origin.Abs)
+        | Error _ -> None)
     | None ->
       let width =
         match Var.typ (Def.lhs d) with

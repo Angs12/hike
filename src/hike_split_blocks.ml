@@ -12,7 +12,11 @@ module Model = Hike_stack_model
 (* Materialize before attribution rewrites addresses. Keep the call arms
    beside their stores until promotion binds the outgoing slot pointers;
    [normalize] then gives every call its own block before signature/SSA. *)
-let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
+let materialize ~(facts : Hike_kb.facts) (prog : program term) :
+    Hike_synth.table * program term =
+  let synth = ref facts.synth in
+  let module_addr ~bits a =
+    Hike_synth.record synth (Hike_synth.mint_module_addr ~addr_bits:bits a) in
   let sub_at a =
     match Core.Map.find facts.sub_addrs a with
     | Some t -> Some t
@@ -54,7 +58,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
       | _ -> None
     in
     Base.Option.filter target ~f:(fun e ->
-        not (Base.Option.value_map (Hike_transfer.slot_of_target ~index e)
+        not (Base.Option.value_map (Hike_transfer.slot_of_target ~index ~synth:!synth e)
                ~default:false ~f:(Core.Set.mem facts.foreign_slots)))
   in
   (* The case test for one word: the target equals the word's module
@@ -75,11 +79,11 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
          Base.List.map bs ~f:(fun b ->
              Bil.BinOp (Bil.AND,
                         Bil.BinOp (Bil.EQ, b_exp,
-                                   Bil.Var (Hike_synth.module_addr ~addr_bits:bits b)),
+                                   Bil.Var (module_addr ~bits b)),
                         delta b))
          |> Base.List.reduce_exn ~f:(fun x y -> Bil.BinOp (Bil.OR, x, y)))
     | None ->
-      Bil.BinOp (Bil.EQ, e, Bil.Var (Hike_synth.module_addr ~addr_bits:bits a))
+      Bil.BinOp (Bil.EQ, e, Bil.Var (module_addr ~bits a))
   in
   (* The words no arm tests, grouped by transfer kind; the last group is
      the default.  A word naming an in-sub block is a real destination:
@@ -159,7 +163,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
   (* Every dispatch is read on the unbound sub; a base whose var is
      rewritten before the transfer is bound at its site, and the guards
      read the binding. *)
-  Cbat_vsa.with_images facts.images (fun () ->
+  let prog = Cbat_vsa.with_images facts.images (fun () ->
       Term.map sub_t prog ~f:(fun sub ->
           let index = Hike_transfer.index_of_sub sub in
           (* The arms are the BIR's case edges: the base walk reads
@@ -184,7 +188,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
                                 | _ -> failwith "hike: dispatch: base summand is not a word"
                               in
                               Some ({ f with Hike_backsubst.exp = summand },
-                                    Hike_synth.fresh ~bits Hike_synth.Binding)
+                                    Hike_synth.record synth (Hike_synth.mint_fresh ~bits Hike_synth.Binding))
                             | _ -> None
                           in
                           (Term.tid j, (e, d, bound))))))
@@ -204,6 +208,8 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
           in
           Hike_backsubst.bind sub binds
           |> Term.map blk_t ~f:(dispatch_blk ~sub ~plans)))
+  in
+  (!synth, prog)
 
 (* Calls execute in their own arm blocks; the selector blocks contain
    only guarded gotos and explicit false edges. A call's return remains
@@ -216,7 +222,7 @@ let compilable_series (jmps : jmp term list) : bool =
       | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
       | _ -> false)
 
-let pieces (blk : blk term) : blk term list =
+let pieces ~synth (blk : blk term) : blk term list =
   match Term.enum jmp_t blk |> Seq.to_list with
   | [] | [ _ ] -> [ blk ]
   | jmps ->
@@ -227,7 +233,7 @@ let pieces (blk : blk term) : blk term list =
               let action =
                 let bindings =
                   Term.enum def_t blk
-                  |> Seq.filter ~f:(fun d -> Model.is_call_arg (Def.lhs d))
+                  |> Seq.filter ~f:(fun d -> Model.is_call_arg synth (Def.lhs d))
                   |> Seq.map ~f:(fun d -> Def.create (Def.lhs d) (Def.rhs d))
                   |> Seq.to_list
                 in
@@ -251,7 +257,7 @@ let pieces (blk : blk term) : blk term list =
               if Int.equal i 0 then
                 Term.filter jmp_t blk ~f:(fun _ -> false)
                 |> Term.filter def_t ~f:(fun d ->
-                     Base.List.is_empty actions || not (Model.is_call_arg (Def.lhs d)))
+                     Base.List.is_empty actions || not (Model.is_call_arg synth (Def.lhs d)))
                 |> fun b -> Term.append jmp_t b j
               else Blk.create ~tid ~jmps:[ j ] ()
             in
@@ -262,7 +268,7 @@ let pieces (blk : blk term) : blk term list =
       in
       pieces @ actions
 
-let split_sub (sub : sub term) : sub term =
+let split_sub ~synth (sub : sub term) : sub term =
   Term.concat_map blk_t sub ~f:(fun blk ->
       let jmps = Term.enum jmp_t blk |> Seq.to_list in
       let needs_split =
@@ -272,21 +278,21 @@ let split_sub (sub : sub term) : sub term =
                    match Jmp.kind j with Call _ -> true | _ -> false))
       in
       if not needs_split then [ blk ]
-      else if compilable_series jmps then pieces blk
+      else if compilable_series jmps then pieces ~synth blk
       else begin
         Hike_diag.warn "split-blocks: sub %s: block %s: unsupported multi-jmp series; left unsplit"
           (Sub.name sub) (Tid.name (Term.tid blk));
         [ blk ]
       end)
 
-let normalize (prog : program term) : program term =
-  Term.map sub_t prog ~f:split_sub
+let normalize ~synth (prog : program term) : program term =
+  Term.map sub_t prog ~f:(split_sub ~synth)
 
 (* The sub's free registers, read at its own entries over the BIR's
    explicit edges.  A split piece carries no defs; its entering edge is
    the previous piece's explicit Goto, so liveness does not transport a
    target's live set to the sub entry. *)
-let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
+let free_regs ~synth ~(abi : Hike_abi.t) (sub : sub term) : var list =
   let blks = Term.enum blk_t sub |> Seq.to_list in
   (* The exit seed mirrors BAP's liveness: outgoing lanes read their
      value at the return. *)
@@ -298,7 +304,7 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
                Core.Set.union acc (Exp.free_vars (Arg.rhs arg))
            | _ -> acc)
   in
-  let sub = Model.prepare_effects ~abi ~callee:(fun _ -> None) sub in
+  let sub = Model.prepare_effects ~synth ~abi ~callee:(fun _ -> None) sub in
   let effects term = (Model.writes term, Model.reads term) in
   let def d = effects (`Def d) in
   let phi p = effects (`Phi p) in
@@ -325,6 +331,6 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
              ~default:Var.Set.empty))
   |> Core.Set.filter ~f:(fun v ->
          not (Hike_abi.is_sp abi (Var.base v))
-         && not (Hike_synth.is_address_var Hike_synth.empty v)
+         && not (Hike_synth.is_address_var synth v)
          && match Var.typ v with Type.Mem _ -> false | _ -> true)
   |> Core.Set.to_list

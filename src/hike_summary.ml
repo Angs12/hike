@@ -49,7 +49,8 @@ let through ~tail (s : t option) : contribution =
    summary; [slot] the summary of the external a linker slot names;
    [lookup] an entry address's sub.  [envs] and [block_addrs] are the
    sub's own solve results. *)
-let of_solved ~(abi : Hike_abi.t) ~(callee : Tid.t -> t option)
+let of_solved ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
+    ~(callee : Tid.t -> t option)
     ~(slot : int64 -> t option) ~(lookup : int64 -> Tid.t option)
     ~(foreign_slots : Core.Int64.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t) (sub : sub term) : t =
@@ -66,10 +67,10 @@ let of_solved ~(abi : Hike_abi.t) ~(callee : Tid.t -> t option)
   (* Only reachable blocks denote, so their states exist. *)
   let denote ~blk ?def e =
     let pre, post = Core.Map.find_exn envs (Term.tid blk) in
-    Vsa.denote_exp_at ~post ~pre ~blk ?def e
+    Vsa.denote_exp_at ~synth ~post ~pre ~blk ?def e
   in
   let foreign e =
-    match Hike_transfer.slot_of_target ~index e with
+    match Hike_transfer.slot_of_target ~synth ~index e with
     | Some a when Core.Set.mem foreign_slots a -> Some a
     | _ -> None
   in
@@ -145,7 +146,7 @@ let of_solved ~(abi : Hike_abi.t) ~(callee : Tid.t -> t option)
   Term.enum blk_t sub
   |> Seq.filter ~f:reachable
   |> Seq.fold
-       ~init:{ adds = Some (Cbat_var_id.intern_set (Hike_vsa.written_regs_of_sub sub));
+       ~init:{ adds = Some (Cbat_var_id.intern_set (Hike_vsa.written_regs_of_sub ~synth sub));
                back = false }
        ~f:(fun acc blk ->
            Term.enum jmp_t blk |> Seq.fold ~init:acc ~f:(fun acc j -> join_contribution acc (effect_of blk j)))

@@ -7,24 +7,29 @@
 open Bap.Std
 open Bap.Std.Bil.Types
 
-(* The FP model's operand and result temps: [intrinsic:xN] /
-   [intrinsic:yN], any number of them. *)
-let temp_lane v =
-  match Hike_synth.classify Hike_synth.empty v with
-  | Some (Hike_synth.Fp_lane (lane, i)) -> Some (lane, i)
-  | _ -> None
+(* The operand and result temps: the lifter's own [intrinsic:xN] /
+   [intrinsic:yN], or a lane this pass already qualified and recorded. *)
+let temp_lane ~synth v =
+  match Hike_native_fp.lifter_lane v with
+  | Some _ as lane -> lane
+  | None ->
+    (match Hike_synth.classify !synth v with
+     | Some (Hike_synth.Fp_lane (lane, i)) -> Some (lane, i)
+     | _ -> None)
 
-(* A temp's identity carries its width. *)
-let qualify v =
-  match Var.typ v, temp_lane v with
+(* A temp's identity carries its width; the qualified lane is recorded. *)
+let qualify ~synth v =
+  match Var.typ v, temp_lane ~synth v with
   | Type.Imm w, Some (lane, i) ->
-    Var.with_index (Hike_synth.fp_lane ~addr_bits:w lane i) (Var.index v)
+    Var.with_index
+      (Hike_synth.record synth (Hike_synth.mint_fp_lane ~addr_bits:w lane i))
+      (Var.index v)
   | _ -> v
 
 (* A mapped FP call's target names its operand width: the nearest
    preceding temp def in term order.  The sized spelling is the table's
    own, so no consumer resolves a width. *)
-let tag_targets (sub : sub term) : sub term =
+let tag_targets ~synth (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       let widths = ref Tid.Map.empty in
       let cur = ref 64 in
@@ -34,7 +39,7 @@ let tag_targets (sub : sub term) : sub term =
              | `Def d -> (
                  let l = Def.lhs d in
                  match Var.typ l with
-                 | Type.Imm w when Option.is_some (temp_lane l) -> cur := w
+                 | Type.Imm w when Option.is_some (temp_lane ~synth l) -> cur := w
                  | _ -> ())
              | `Jmp j ->
                  widths := Core.Map.set !widths ~key:(Term.tid j) ~data:!cur
@@ -73,7 +78,8 @@ let tag_targets (sub : sub term) : sub term =
           | _ -> j))
 
 (* Every occurrence of a temp, defs and reads alike. *)
-let qualify_sub (sub : sub term) : sub term =
+let qualify_sub ~synth (sub : sub term) : sub term =
+  let qualify = qualify ~synth in
   let m =
     object
       inherit Exp.mapper
@@ -91,5 +97,11 @@ let qualify_sub (sub : sub term) : sub term =
             Phi.with_lhs (Phi.map_exp p ~f:m#map_exp) (qualify (Phi.lhs p)))
         blk)
 
-let run_program (prog : program term) : program term =
-  Term.map sub_t prog ~f:(fun sub -> qualify_sub (tag_targets sub))
+let run_program ~(synth : Hike_synth.table) (prog : program term) :
+    Hike_synth.table * program term =
+  let cell = ref synth in
+  let prog =
+    Term.map sub_t prog ~f:(fun sub ->
+        qualify_sub ~synth:cell (tag_targets ~synth:cell sub))
+  in
+  (!cell, prog)

@@ -135,12 +135,13 @@ type def_fact = {
 (** The sub's storage spans: the layout's regions in the synth fact
     shape. *)
 val spans_of_layout :
-  word:int -> Hike_stack_model.sub_layout -> Hike_synth.storage_span list
+  synth:Hike_synth.table ref -> word:int -> Hike_stack_model.sub_layout ->
+  Hike_synth.storage_span list
 
 (** Every def's rewrite facts, selected from the finalized trees, the
     access conversions, the storage spans and the value's leaves. *)
 val def_facts :
-  word:int -> entry:int64 -> abi:Hike_abi.t ->
+  synth:Hike_synth.table ref -> word:int -> entry:int64 -> abi:Hike_abi.t ->
   tree:sub_tree -> data:data_tree ->
   projections:projection option Tid.Map.t ->
   conversions:conv Tid.Map.t ->

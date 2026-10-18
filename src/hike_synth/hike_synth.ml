@@ -88,93 +88,69 @@ let fp_lane ~addr_bits lane i =
   | Input -> var ~addr_bits (K_fp_input i)
   | Output -> var ~addr_bits (K_fp_output i)
 
-(* The environment register keeps its own name and type. *)
-let environment v =
-  Var.create ~is_virtual:false ~fresh:false (Var.name v) (Var.typ v)
-
-let accumulator ~addr_bits = var ~addr_bits K_accumulator
-let let_var ~addr_bits i typ = var ~addr_bits (K_let (i, typ))
-
 let next_temporary = ref 0
-
-let fresh ~bits temporary =
-  incr next_temporary;
-  var ~addr_bits:bits (K_temporary (temporary, !next_temporary))
-
-(* — The private classification. — *)
-
-let family name ~prefix ~suffix f =
-  Base.Option.bind (Base.String.chop_prefix name ~prefix) ~f:(fun rest ->
-      Base.Option.bind (Base.String.chop_suffix rest ~suffix) ~f:(fun id ->
-          Base.Option.map (Stdlib.int_of_string_opt id) ~f))
-
-let fp_kind name ~prefix make =
-  Base.Option.bind (Base.String.chop_prefix name ~prefix) ~f:(fun rest ->
-      match String.split_on_char ':' rest with
-      | [lane] | [lane; _] -> Base.Option.map (Stdlib.int_of_string_opt lane) ~f:make
-      | _ -> None)
-
-let kind_of_var v =
-  let v = Var.base v in
-  let n = Var.name v in
-  if Base.String.is_prefix n ~prefix:"hike_synth_" then
-    Base.Option.bind (Base.String.chop_prefix n ~prefix:"hike_synth_")
-      ~f:(fun h -> Option.map (fun a -> K_addr a) (Int64.of_string_opt ("0x" ^ h)))
-  else if Base.String.is_prefix n ~prefix:"hike_thread_" then
-    Base.Option.bind (Base.String.chop_prefix n ~prefix:"hike_thread_")
-      ~f:(fun h -> Option.map (fun a -> K_thread_addr a) (Int64.of_string_opt ("0x" ^ h)))
-  else if Base.String.is_prefix n ~prefix:"hike_slot" then
-    family n ~prefix:"hike_slot" ~suffix:"" (fun i -> K_slot i)
-  else if Base.String.is_prefix n ~prefix:"hike_arg" then
-    family n ~prefix:"hike_arg" ~suffix:"" (fun i -> K_argument i)
-  else if String.equal n "hike_window" then Some K_window
-  else if String.equal n "hike_window_mem" then Some K_window_memory
-  else if Base.String.is_prefix n ~prefix:"stack_r" then
-    Base.Option.first_some
-      (family n ~prefix:"stack_r" ~suffix:"_mem" (fun i -> K_region_memory i))
-      (family n ~prefix:"stack_r" ~suffix:"_ptr" (fun i -> K_region i))
-  else if Base.String.is_prefix n ~prefix:"sec_comp_" then
-    Base.Option.first_some
-      (family n ~prefix:"sec_comp_" ~suffix:"_mem" (fun i -> K_global_memory i))
-      (family n ~prefix:"sec_comp_" ~suffix:"_ptr" (fun i -> K_global i))
-  else if Base.String.is_prefix n ~prefix:"intrinsic:x" then
-    fp_kind n ~prefix:"intrinsic:x" (fun i -> K_fp_input i)
-  else if Base.String.is_prefix n ~prefix:"intrinsic:y" then
-    fp_kind n ~prefix:"intrinsic:y" (fun i -> K_fp_output i)
-  else if String.equal n "hike_acc" then Some K_accumulator
-  else if Base.String.is_prefix n ~prefix:"hike_let" then
-    family n ~prefix:"hike_let" ~suffix:"" (fun i -> K_let (i, Var.typ v))
-  else if Base.String.is_prefix n ~prefix:"hike_cmp" then
-    family n ~prefix:"hike_cmp" ~suffix:"" (fun i -> K_temporary (Comparison, i))
-  else if Base.String.is_prefix n ~prefix:"hike_ld" then
-    family n ~prefix:"hike_ld" ~suffix:"" (fun i -> K_temporary (Load, i))
-  else if Base.String.is_prefix n ~prefix:"hike_rd" then
-    family n ~prefix:"hike_rd" ~suffix:"" (fun i -> K_temporary (Refinement, i))
-  else if Base.String.is_prefix n ~prefix:"hike_bd" then
-    family n ~prefix:"hike_bd" ~suffix:"" (fun i -> K_temporary (Binding, i))
-  else if Hike_abi.is_env_reg Hike_abi.x86_64_sysv v then Some (K_environment v)
-  else None
 
 type table = kind Var.Map.t
 
 let empty : table = Var.Map.empty
 
+(* The creating pass records each synthetic var with its kind, keyed by
+   the base var (an SSA version resolves to its base). *)
+let add (tbl : table) (v : Var.t) (k : kind) : table =
+  Core.Map.set tbl ~key:(Var.base v) ~data:k
+
 let resolve (tbl : table) (v : Var.t) : kind option =
-  match Core.Map.find tbl v with Some k -> Some k | None -> kind_of_var v
+  Core.Map.find tbl (Var.base v)
 
-let mem tbl v = Core.Map.mem tbl v
+(* Mints a var of [kind] and records it. *)
+let mint ~addr_bits kind tbl =
+  let v = var ~addr_bits kind in
+  (add tbl v kind, v)
 
-let table_of_program (prog : program term) : table =
+let mint_base ~addr_bits storage = mint ~addr_bits (base_kind_of_storage storage)
+let mint_bytes ~addr_bits storage = mint ~addr_bits (bytes_kind_of_storage storage)
+let mint_module_addr ~addr_bits a = mint ~addr_bits (K_addr a)
+let mint_thread_addr ~addr_bits a = mint ~addr_bits (K_thread_addr a)
+
+let mint_fp_lane ~addr_bits lane i =
+  mint ~addr_bits (match lane with Input -> K_fp_input i | Output -> K_fp_output i)
+
+let mint_fresh ~bits temporary tbl =
+  incr next_temporary;
+  mint ~addr_bits:bits (K_temporary (temporary, !next_temporary)) tbl
+
+(* The accumulating form for a traversal that keeps its table in a cell. *)
+let record (cell : table ref) f =
+  let tbl, v = f !cell in
+  cell := tbl;
+  v
+
+(* The caller-window base is one var per target, known with the facts. *)
+let add_window tbl ~addr_bits = fst (mint ~addr_bits K_window tbl)
+
+(* An environment register is the target's own var: recorded as given. *)
+let add_environment tbl v = add tbl v (K_environment v)
+
+let mem tbl v = Core.Map.mem tbl (Var.base v)
+
+let union (a : table) (b : table) : table =
+  Core.Map.merge_skewed a b ~combine:(fun ~key:_ x _ -> x)
+
+(* The vars the program still names, plus the target's registers and
+   caller window (finite facts, kept whole). *)
+let restrict_to_program (tbl : table) (prog : program term) : table =
   (object
      inherit [table] Term.visitor
      method! visit_var v acc =
-       match kind_of_var v with
-       | Some k -> Core.Map.set acc ~key:v ~data:k
+       let key = Var.base v in
+       match Core.Map.find tbl key with
+       | Some k -> Core.Map.set acc ~key ~data:k
        | None -> acc
-   end)#run prog empty
+   end)#run prog
+    (Core.Map.filter tbl ~f:(function K_environment _ | K_window -> true | _ -> false))
 
-let is_temporary v =
-  Var.is_virtual v || match resolve empty v with
+let is_temporary ~table v =
+  Var.is_virtual v || match resolve table v with
   | Some (K_temporary _ | K_accumulator | K_let _) -> true
   | _ -> false
 
@@ -286,17 +262,17 @@ let equal_storage (a : storage) (b : storage) : bool =
   | Window, Window -> true
   | _ -> false
 
-let storage_span ~addr_bits storage ~lo ~hi =
-  { ss_storage = storage; ss_base = base ~addr_bits storage; ss_lo = lo;
-    ss_hi = hi }
+let storage_span ~addr_bits storage ~lo ~hi tbl =
+  let tbl, ss_base = mint_base ~addr_bits storage tbl in
+  (tbl, { ss_storage = storage; ss_base; ss_lo = lo; ss_hi = hi })
 
 let span_of_storage (spans : storage_span list) storage =
   Base.List.find spans ~f:(fun s -> equal_storage s.ss_storage storage)
 
-let base_var ~addr_bits v =
+let base_var tbl ~addr_bits v =
   Base.Option.map ~f:(var ~addr_bits)
-    (Base.Option.bind (resolve empty v) ~f:base_kind)
+    (Base.Option.bind (resolve tbl v) ~f:base_kind)
 
-let memory_var ~addr_bits v =
+let memory_var tbl ~addr_bits v =
   Base.Option.map ~f:(var ~addr_bits)
-    (Base.Option.bind (resolve empty v) ~f:memory_kind)
+    (Base.Option.bind (resolve tbl v) ~f:memory_kind)

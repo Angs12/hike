@@ -602,18 +602,18 @@ let tests : unit Alcotest.test list =
           "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit \
            shape)"
           (AI.equal
-             (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
+             (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
              entry);
         check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
           (Ws.equal
              (AI.find_word 32
-                (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:entry
+                (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:entry
                    (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
                    (Ws.singleton W.b1))
                 x)
              (range 0 9));
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let st tid = Graphlib.Std.Solution.get sol tid in
@@ -739,11 +739,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let entry = AI.add_word entry ~key:t ~data:(Ws.singleton (w32 5)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -802,11 +802,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -815,7 +815,7 @@ let tests : unit Alcotest.test list =
         in
         let cell_of_key k =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var mem, k, LittleEndian, `r32)) refined)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var mem, k, LittleEndian, `r32)) refined)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         check "T5-2 (Store row): the constrained cell (the store's key) meets {6}"
@@ -873,13 +873,13 @@ let tests : unit Alcotest.test list =
               ~key:hmem ~data:wide_mem_h
           in
           let sol_h =
-            static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
               sub_h
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_h sub_h)
           in
-          let rctx_h = mk_rctx ~abi:Hike_abi.x86_64_sysv sub_h in
+          let rctx_h = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub_h in
           let blk_h = List.nth (Term.enum blk_t sub_h |> Seq.to_list) 0 in
-          let forward = Vsa.Test_seam.denote_defs blk_h entry_h in
+          let forward = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk_h entry_h in
           let entry_h = AI.add_word entry_h ~key:ht ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol:sol_h ~rctx:rctx_h
@@ -894,7 +894,7 @@ let tests : unit Alcotest.test list =
         let refined_p, forward_p, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
         let cell_p addr =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_p, addr, LittleEndian, `r32)) refined_p)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var hmem_p, addr, LittleEndian, `r32)) refined_p)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         check
@@ -910,7 +910,7 @@ let tests : unit Alcotest.test list =
           hull_case ~store_off:16 in
         let cell_n addr =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_n, addr, LittleEndian, `r32)) refined_n)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var hmem_n, addr, LittleEndian, `r32)) refined_n)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         check
@@ -971,18 +971,18 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let cell_of env =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var mem, kb, LittleEndian, `r32)) env)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var mem, kb, LittleEndian, `r32)) env)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         (* Walk-level: the guard block's walk returns the block's entry
            state with the constrained cell. *)
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let blk1 =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Term.tid b = guard_tid)
@@ -1041,13 +1041,13 @@ let tests : unit Alcotest.test list =
           in
           let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:base in
           let sol =
-            static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
               sub
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
           in
-          let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+          let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
           let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
-          let forward = Vsa.Test_seam.denote_defs blk entry in
+          let forward = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk entry in
           let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -1107,7 +1107,7 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:m ~data:cell5 in
         let refined =
-          Vsa.Test_seam.constrain_operands
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
             ~landmarks:(Cbat_landmarks.create ()) ~env:entry
             (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32))
             (Ws.singleton (w32 6))
@@ -1251,11 +1251,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let walk () =
           let entry = AI.add_word entry ~key:i ~data:(Ws.singleton k) in
           Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -1264,7 +1264,7 @@ let tests : unit Alcotest.test list =
         in
         let cell_of env =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty
                (Bil.Load
                   ( Bil.Var mem,
                     Bil.BinOp
@@ -1435,7 +1435,7 @@ let tests : unit Alcotest.test list =
         let lm = Cbat_landmarks.create () in
         let cell i =
           Cbat_landmarks.Cell
-            { Cbat_landmarks.origin = Hike_origin.Stack;
+            { Cbat_landmarks.origin = Some Hike_origin.Stack;
               lo_width = 64; lo_value = Int64.of_int i;
               hi_width = 64; hi_value = Int64.of_int i; stride = 1 }
         in

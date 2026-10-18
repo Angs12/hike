@@ -60,7 +60,7 @@ let fp_assert (name : string) (op : Bil2llvm_fp.native_fp) : unit =
   let x0_def = Def.create (ivar64 "intrinsic:x0") (Bil.Var (v64 "fp_arg0")) in
   let x1_def = Def.create (ivar64 "intrinsic:x1") (Bil.Var (v64 "fp_arg1")) in
   let arg_defs = if fp_unary op then [ x0_def ] else [ x0_def; x1_def ] in
-  let ir = emit_ir (mk_fp_program name arg_defs) in
+  let ir = emit_ir ~synth:Hike.Synth.empty (mk_fp_program name arg_defs) in
   check
     ("FP-TABLE " ^ name ^ ": the native op is emitted")
     (contains_substring ir (op_ir_string op))
@@ -107,7 +107,7 @@ let tests : unit Alcotest.test list =
         let db = Def.create x0b (Bil.Int (Cbat_word.to_word (w64 7))) in
         let loud =
           try
-            ignore (emit_ir (mk_fp_program "intrinsic:not_a_real_intrinsic" [ db ]));
+            ignore (emit_ir ~synth:Hike.Synth.empty (mk_fp_program "intrinsic:not_a_real_intrinsic" [ db ]));
             false
           with Failure msg ->
             contains_substring msg "unmapped intrinsic call"
@@ -138,7 +138,7 @@ let tests : unit Alcotest.test list =
               (Bil.Load (Bil.Var m, addr, LittleEndian, `r64))
           in
           let intr = "intrinsic:cast_sfloat_rne_ieee754_binary_64" in
-          emit_ir (mk_fp_program intr [ d_base; d_st; d_x0 ])
+          emit_ir ~synth:Hike.Synth.empty (mk_fp_program intr [ d_base; d_st; d_x0 ])
         in
         let ir_rbp = cast_ir (Var.name frame_ptr) in
         let ir_rbx = cast_ir (Var.name (callee_saved 0)) in
@@ -191,7 +191,7 @@ let tests : unit Alcotest.test list =
         in
         let stamp sub = Sm.set_layout layout sub in
         let ir =
-          emit_ir
+          emit_ir ~synth:Hike.Synth.empty
             (Base.List.map ~f:stamp
                (mk_fp_program "intrinsic:fadd_rne_ieee754_binary_64" [ x0d; x1d ]))
         in

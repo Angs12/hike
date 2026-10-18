@@ -18,18 +18,21 @@ let find_def (sub : sub term) (dtid : Tid.t) : def term =
 
 (* Promote rewrite over the fixture facts: map the stamped sub and mint
    the hike_argN defs. *)
-let promote_rewrite (facts : Hike.Kb.facts) (sub : sub term) : sub term =
+let promote_rewrite_synth (facts : Hike.Kb.facts) (sub : sub term) :
+    Hike.Synth.table * sub term =
   let prog = Program.create ~subs:[ sub ] () in
   let ctx =
     Hike.Sections.attribute ~facts ~word:8
       ~entry:Hike.Stack_model.segment_base ~spans:[] prog
   in
-  let prog =
+  let synth, prog =
     Hike.Promote.rewrite_program ~word:8
       ~entry:Hike.Stack_model.segment_base ~facts ~spans:[] ~ctx
       prog
   in
-  Term.first sub_t prog |> Base.Option.value_exn
+  (synth, Term.first sub_t prog |> Base.Option.value_exn)
+
+let promote_rewrite facts sub = snd (promote_rewrite_synth facts sub)
 
 let tests : unit Alcotest.test list =
   [
@@ -56,7 +59,7 @@ let tests : unit Alcotest.test list =
         in
         let sub = straight_sub "et_chain" [ dx; dy ] in
         let envs, sub', _ =
-          produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
         in
         let blk = Term.first blk_t sub' |> Base.Option.value_exn in
         let pre, _ = Core.Map.find_exn envs (Term.tid blk) in
@@ -75,7 +78,7 @@ let tests : unit Alcotest.test list =
         in
         let sub = straight_sub "et_chain" [ dx; dy ] in
         let _, sub', _ =
-          produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
         in
         let dx' = find_def sub' (Term.tid dx) in
         let dy' = find_def sub' (Term.tid dy) in
@@ -83,7 +86,7 @@ let tests : unit Alcotest.test list =
         let tag_dy = Vsa.env_tag dy' in
         check "ENV-07"
           (match (tag_dx, tag_dy) with
-          | Some e1, Some e2 -> AI.equal e2 (Vsa.Test_seam.denote_def dx e1)
+          | Some e1, Some e2 -> AI.equal e2 (Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty dx e1)
           | _ -> false));
 
 
@@ -206,7 +209,7 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let facts, sub' = fixture_facts_sub sub in
+        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let sub'' = promote_rewrite facts sub' in
         let store'' = find_def sub'' (Term.tid store) in
         check "ENV-13"
@@ -241,7 +244,7 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let facts, sub' = fixture_facts_sub sub in
+        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let sub'' = promote_rewrite facts sub' in
         let store'' = find_def sub'' (Term.tid store) in
         check "ENV-14" (Base.Option.is_some (Vsa.env_tag store'')));
@@ -277,11 +280,12 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let facts, sub' = fixture_facts_sub sub in
-        let sub'' = promote_rewrite facts sub' in
+        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
+        let synth, sub'' = promote_rewrite_synth facts sub' in
         let arg =
           Term.enum def_t (Term.first blk_t sub'' |> Base.Option.value_exn)
-          |> Seq.find ~f:(fun d -> Hike.Stack_model.is_call_arg (Def.lhs d))
+          |> Seq.find ~f:(fun d ->
+              Hike.Stack_model.is_call_arg synth (Def.lhs d))
         in
         check_bound "ENV-16" arg (fun d ->
             Base.Option.is_none (Vsa.env_tag d)));

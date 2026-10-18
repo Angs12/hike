@@ -15,5 +15,5 @@ val index_of_sub : sub term -> index
    its absolute slot.  [index] shares one per-sub def scan; without it
    (and with [sub]) each call builds its own. *)
 val slot_of_target :
-  ?index:index -> ?synth:Hike_synth.table -> ?origin:(var -> int64 option) ->
+  ?index:index -> synth:Hike_synth.table -> ?origin:(var -> int64 option) ->
   ?sub:sub term -> exp -> int64 option

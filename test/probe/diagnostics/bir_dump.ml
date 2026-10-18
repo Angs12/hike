@@ -10,7 +10,7 @@ let () =
   match args with
   | [ path; "subs"; _ ] ->
     let proj = load_project path in
-    Term.enum sub_t (production_input proj)
+    Term.enum sub_t (snd (production_input proj))
     |> Seq.iter ~f:(fun s ->
            let entry_addr =
              match Option.map fst (Term.enum blk_t s |> Seq.next) with
@@ -51,13 +51,13 @@ let () =
     Printf.printf "bias=%Ld\n" (Hike.Image.get_bias proj);
     List.iter (fun (s, a) -> Printf.printf "rel %Lx -> %Lx\n" s a)
       (Hike.Image.relative_values proj ~bias:(Hike.Image.get_bias proj));
-    ignore (find_sub (production_input proj) "main");
+    ignore (find_sub (snd (production_input proj)) "main");
     exit 0
   | [ path; name; stage ] ->
     let proj = load_project path in
-    let prog = production_input proj in
+    let synth, prog = production_input proj in
     let target = Project.target proj in
-    let prog = Hike.Fp.run_program prog in
+    let _, prog = Hike.Fp.run_program ~synth prog in
     let prog =
       match stage with
       | "fp" -> prog

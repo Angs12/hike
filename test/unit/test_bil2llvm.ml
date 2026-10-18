@@ -26,7 +26,8 @@ let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
             | Some t -> stamp_tag d (Some t)
             | None -> d))
   in
-  Hike.Promote.promote_sub ~addr_bits:64 (mk_facts ()) sub
+  Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64
+    (mk_facts ()) sub
 
 (* Phi lines with exactly two incomings. *)
 (* The types pass's retype for a fixture: every SSA version of [ptrs]
@@ -111,7 +112,7 @@ let tests : unit Alcotest.test list =
                            ~target:(Label.direct callee_tid) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ir = emit_ir [ sub; callee ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ sub; callee ] in
         check "EMIT-04"
           (contains_substring ir "freeze i256 undef"
           && not (contains_substring ir "[ %hike_undef,")
@@ -149,7 +150,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let callee = fst (sub_of "sp_callee" [ [], [ (0, mk_ret) ] ]) in
-        let ir = emit_ir [ caller; callee ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ caller; callee ] in
         (* The un-anchored frame folds the restore to a constant; the
            pinned fact is the absence of any SP phi or sp_restored
            lane — the continuation needs no merge. *)
@@ -202,7 +203,7 @@ let tests : unit Alcotest.test list =
                 [ Def.create (v64 "edge_mult_use") (Bil.Var x) ], [];
                 [], [] ]
           in
-          emit_ir [ s ]
+          emit_ir ~synth:Hike.Synth.empty [ s ]
         in
         let duplicated = count_two_incoming_phis (build ~both_to_t:true ()) in
         let distinct = count_two_incoming_phis (build ~both_to_t:false ()) in
@@ -231,7 +232,7 @@ let tests : unit Alcotest.test list =
             sub_of "wfam_mismatch"
               [ [ binding (); Def.create out32 (Bil.Var wfam32) ], [ (0, mk_ret) ] ]
           in
-          emit_ir [ s ]
+          emit_ir ~synth:Hike.Synth.empty [ s ]
         in
         let build_control () : string =
           let out64 = v64 "wfam_out" in
@@ -239,7 +240,7 @@ let tests : unit Alcotest.test list =
             sub_of "wfam_control"
               [ [ binding (); Def.create out64 (Bil.Var wfam) ], [ (0, mk_ret) ] ]
           in
-          emit_ir [ s ]
+          emit_ir ~synth:Hike.Synth.empty [ s ]
         in
         let mismatched = build_mismatched () in
         let control = build_control () in
@@ -300,7 +301,7 @@ let tests : unit Alcotest.test list =
             spec_tls = Some { tls_lo = 0x3dd0L; tls_memsz = 0x18L; tls_align = 8;
                               tls_base = -0x18L; tls_prefix = 0; tls_image = Bytes.empty } }
         in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-14"
           (contains_substring ir "@hike_tls_block = thread_local global"
            (* the own-range cells: memsz 0x18, offsets -8/-10 land at
@@ -330,15 +331,16 @@ let tests : unit Alcotest.test list =
               Def.create m (Bil.Store (Bil.Var m, slot, Bil.Var p, LittleEndian, `r64));
               Def.create q (Bil.Load (Bil.Var m, slot, LittleEndian, `r64));
               Def.create out (Bil.Load (Bil.Var m, Bil.Var q, LittleEndian, `r64)) ] in
-        let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
-        let envs, sub = Vsa.stamp_envs_of_sol ~sol sub in
+        let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
+        let envs, sub = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
         let facts = Hike.Kb.build ~block_envs:envs ~lookup:(fun _ -> None)
             ~block_addrs:Addr.Map.empty ~target:(x86_target ()) in
         let tls = Some { Hike_spec.tls_lo = 0x5000L; tls_memsz = 8L;
                          tls_align = 8; tls_base = -8L; tls_prefix = 0;
                          tls_image = Bytes.make 8 '\000' } in
-        let prog = Hike.Tls.rewrite_program ~addr_bits:64 ~tls
-            ~denote:facts.denote (Program.create ~subs:[sub] ()) in
+        let synth, prog = Hike.Tls.rewrite_program ~synth:Hike.Synth.empty
+            ~addr_bits:64 ~tls ~denote:facts.denote
+            (Program.create ~subs:[sub] ()) in
         let sub = Option.get (Term.first sub_t prog) in
         let last = Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
             |> Seq.to_list |> List.rev |> List.hd in
@@ -347,7 +349,7 @@ let tests : unit Alcotest.test list =
            | Bil.Load (_, Bil.Var v, _, _) ->
              Var.equal v (Hike.Synth.thread_addr ~addr_bits:64 (-8L))
            | _ -> false);
-        let ir = emit_ir_spec { empty_spec with spec_tls = tls } [sub] in
+        let ir = emit_ir_spec ~synth { empty_spec with spec_tls = tls } [sub] in
         check "TLS pointers materialize through the emitted block"
           (contains_substring ir "@llvm.threadlocal.address(ptr @hike_tls_block)");
         check "thread address constants never become signature inputs"
@@ -384,7 +386,7 @@ let tests : unit Alcotest.test list =
             [ [ Def.create (v64 "ext_slot_t")
                   (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
         in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-41"
           (contains_substring ir "@foobar"
           && not (contains_substring ir "@foo.bar")));
@@ -423,7 +425,7 @@ let tests : unit Alcotest.test list =
             [ [ Def.create (v64 "rel_slot_t")
                   (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
         in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-43"
           (contains_substring ir
              "ptrtoint (ptr getelementptr inbounds (i8, ptr @text, i64 4) \
@@ -459,7 +461,7 @@ let tests : unit Alcotest.test list =
             [ [ Def.create (v64 "classb_slot_t")
                   (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
         in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-44"
           (contains_substring ir "i64 1288"
           && not (contains_substring ir "ptrtoint")
@@ -495,7 +497,7 @@ let tests : unit Alcotest.test list =
             [ [ Def.create (v64 "string_slot_t")
                   (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
         in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-45"
           (contains_substring ir "i64 2189640"
           && not (contains_substring ir "ptrtoint")
@@ -541,7 +543,7 @@ let tests : unit Alcotest.test list =
               [ (1, mk_goto) ];
               [], [ (0, fun _ -> mk_goto interrupt) ] ]
         in
-        let ir = emit_ir [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ sub ] in
         check "EMIT-25" (contains_substring ir "llvm.trap"));
 
     (* A terminal direct call has a machine-level return path. *)
@@ -567,7 +569,7 @@ let tests : unit Alcotest.test list =
         in
         let loud =
           try
-            ignore (emit_ir [ sub ]);
+            ignore (emit_ir ~synth:Hike.Synth.empty [ sub ]);
             false
           with Failure m ->
             Base.String.is_substring m
@@ -588,7 +590,7 @@ let tests : unit Alcotest.test list =
         in
         let loud =
           try
-            ignore (emit_ir [ sub ]);
+            ignore (emit_ir ~synth:Hike.Synth.empty [ sub ]);
             false
           with Failure m ->
             Base.String.is_substring m ~substring:"no enumerated destinations"
@@ -631,7 +633,7 @@ let tests : unit Alcotest.test list =
         in
         let loud =
           try
-            ignore (emit_ir [ sub ]);
+            ignore (emit_ir ~synth:Hike.Synth.empty [ sub ]);
             false
           with Failure m ->
             Base.String.is_substring m ~substring:"unsplit multi-jmp"
@@ -653,7 +655,7 @@ let tests : unit Alcotest.test list =
               [ Def.create (int_ret 0) (Bil.Var x) ], [ (4, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ir = emit_ir [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ sub ] in
         check "EMIT-62"
           (contains_substring ir " = phi i64 "
           && not (contains_substring ir "undef")));
@@ -677,7 +679,7 @@ let tests : unit Alcotest.test list =
                  window_param = false;
                  runtime_residue = true }
         in
-        let ir = emit_ir ~types:(retype_versions [ rsp ]) [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:(retype_versions [ rsp ]) [ sub ] in
         let sets =
           String.split_on_char '\n' ir
           |> List.filter (fun l -> contains_substring l "call void @hike_rstack_set")
@@ -707,8 +709,8 @@ let tests : unit Alcotest.test list =
                  runtime_residue = false }
         in
         let types = retype_versions [ rsp ] in
-        let big = emit_ir ~types [ sub 8192L "emit_probe_big" ] in
-        let small = emit_ir ~types [ sub 64L "emit_probe_small" ] in
+        let big = emit_ir ~synth:Hike.Synth.empty ~types [ sub 8192L "emit_probe_big" ] in
+        let small = emit_ir ~synth:Hike.Synth.empty ~types [ sub 64L "emit_probe_small" ] in
         check "EMIT-61"
           (contains_substring big "\"probe-stack\"=\"inline-asm\""
           && not (contains_substring small "probe-stack")
@@ -742,7 +744,7 @@ let tests : unit Alcotest.test list =
                  runtime_residue = false }
         in
         ignore d_dec;
-        let ir = emit_ir ~types:(retype_versions [ rsp; rbp ]) [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:(retype_versions [ rsp; rbp ]) [ sub ] in
         check "EMIT-58"
           (contains_substring ir "call ptr @llvm.ptrmask.p0.i64(ptr %"
            && contains_substring ir "store i64"
@@ -758,7 +760,7 @@ let tests : unit Alcotest.test list =
                 [ [addr;value], [(1,mk_marker (Tid.for_name
                     (Printf.sprintf "intrinsic:x86:atomic_%s_%d" op bits)))];
                   [], [(0,mk_ret)] ] in
-            let ir = emit_ir [sub] in
+            let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
             check (Printf.sprintf "EMIT-47.%s.%d" op bits)
               (contains_substring ir ("atomicrmw " ^ op ^ " ptr")
                && contains_substring ir (Printf.sprintf "i%d 3 seq_cst" bits)
@@ -778,7 +780,7 @@ let tests : unit Alcotest.test list =
               [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_add_64"))];
               [Def.create m (Bil.Store (Bil.Var m,Bil.Int (atomic_w 0x2010),
                   Bil.Var old,LittleEndian,`r64))], [(0,mk_ret)] ] in
-        let ir = emit_ir [sub] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
         check "EMIT-48"
           (contains_substring ir "i64 7 seq_cst"
            && contains_substring ir "store i64 %xold"
@@ -802,7 +804,7 @@ let tests : unit Alcotest.test list =
                       LittleEndian, `r64)) ],
               [ (0, mk_ret) ] ]
         in
-        let ir = emit_ir [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ sub ] in
         check "EMIT-50"
           (not (contains_substring ir "atomicrmw")
            && contains_substring ir "store i64 9"));
@@ -814,7 +816,7 @@ let tests : unit Alcotest.test list =
             let sub, _ = sub_of "fence_sub"
                 [ ([], [ (1, mk_marker (Tid.for_name ("intrinsic:" ^ name))) ]);
                   ([], [ (0, mk_ret) ]) ] in
-            let ir = emit_ir [ sub ] in
+            let ir = emit_ir ~synth:Hike.Synth.empty [ sub ] in
             check ("EMIT-51." ^ name)
               (contains_substring ir ("fence " ^ order)
                && not (contains_substring ir ("call void @" ^ name))))
@@ -828,7 +830,7 @@ let tests : unit Alcotest.test list =
                Def.create (Hike.Atomic.lane "input1" 64) (Bil.Int (atomic_w 9))],
               [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_cmpxchg_64"))];
               [], [(0,mk_ret)] ] in
-        let ir = emit_ir [sub] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
         check "EMIT-52"
           (contains_substring ir "cmpxchg ptr"
            && contains_substring ir "i64 5, i64 9 seq_cst seq_cst"
@@ -844,7 +846,7 @@ let tests : unit Alcotest.test list =
                       spec_externals = [ 0x5000L, "tls_external" ];
                       spec_relative = [ 0x5008L, 0xdeadL ] } in
         let sub, _ = sub_of "tls_init_sub" [ [], [ (0, mk_ret) ] ] in
-        let ir = emit_ir_spec spec [ sub ] in
+        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
         check "EMIT-54"
           (contains_substring ir "ptrtoint (ptr @tls_external to i64)"
            && contains_substring ir "[8 x i8] zeroinitializer"
@@ -854,7 +856,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub,_ = sub_of "legacy_atomic"
             [ [], [(1,mk_marker lock_tid)]; [], [(0,mk_ret)] ] in
-        let refused = try ignore (emit_ir [sub]); false with
+        let refused = try ignore (emit_ir ~synth:Hike.Synth.empty [sub]); false with
           | Failure message -> contains_substring message "legacy atomic markers" in
         check "EMIT-55" refused);
 
@@ -869,7 +871,7 @@ let tests : unit Alcotest.test list =
               [(3,mk_marker (Tid.for_name "intrinsic:x86:atomic_neg_64"))];
               [Def.create old (Bil.Int (atomic_w 9))], [(3,mk_goto)];
               [Def.create (int_ret 0) (Bil.Var old)], [(0,mk_ret)] ] in
-        let ir = emit_ir [sub] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
         check "EMIT-56"
           (contains_substring ir "call i64 @hike.atomic.neg.64"
            && contains_substring ir "define internal i64 @hike.atomic.neg.64"
@@ -882,7 +884,7 @@ let tests : unit Alcotest.test list =
         let sub,_ = sub_of "unknown_atomic"
             [ [], [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_add_128"))];
               [], [(0,mk_ret)] ] in
-        let refused = try ignore (emit_ir [sub]); false with
+        let refused = try ignore (emit_ir ~synth:Hike.Synth.empty [sub]); false with
           | Failure message -> contains_substring message "unsupported atomic intrinsic" in
         check "EMIT-57" refused);
 
@@ -897,7 +899,7 @@ let tests : unit Alcotest.test list =
             [ [], [ (0, mk_ret) ] ]
         in
         let entry = Term.set_attr entry Sub.entry_point () in
-        let ir = emit_ir [ entry ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty [ entry ] in
         check "EMIT-46"
           (contains_substring ir "@_start("
            && not (contains_substring ir "@sub_10b0")));

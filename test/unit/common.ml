@@ -159,15 +159,17 @@ module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Ds = Hike.Def_slots
 
-let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
+let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
+    ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
     ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
     ?callee ?resolved ?sub_lookup sub init
 
-let mk_rctx ~abi ?sub_lookup sub =
+let mk_rctx ~abi ~synth ?sub_lookup sub =
   Vsa.Test_seam.mk_rctx ~abi
+    ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
     ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
@@ -204,42 +206,53 @@ let top_facts () : Hike.Kb.facts =
 
 (* The fixtures' callees: a sub of [prog] writes the registers its
    own defs write; any other target writes anything. *)
-let callee_of (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
+let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
   match Term.find sub_t prog tid with
-  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hv.written_regs_of_sub s)))
+  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hv.written_regs_of_sub ~synth s)))
   | None -> Summary None
 
 (* The production solve with every callee summarized, so it never
    pauses: the block environments, the rewritten sub and the grown
    block-address map. *)
-let solve ?(images = []) ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) :
-    (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
+let solve_with_synth ~synth ?(images = [])
+    ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) =
   match
     Hv.start target ~lookup:(fun _ -> None) ~images ~callee ~block_addrs
+      ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hv.Done (envs, sub', block_addrs') -> (envs, sub', block_addrs')
+  | Hv.Done (envs, sub', block_addrs', synth) -> (envs, sub', block_addrs', synth)
   | Hv.Paused _ -> Alcotest.fail "solve: a fixture callee is blocked"
+
+let solve ~synth ?images ?block_addrs ~callee target sub =
+  let envs, sub, addrs, _ =
+    solve_with_synth ~synth ?images ?block_addrs ~callee target sub
+  in
+  (envs, sub, addrs)
 
 (* The producer, composed: the solve's products for [sub] with [prog]'s
    subs as its callees — the tests' one-line driver. *)
-let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
+let produce ~synth ?(block_addrs = []) ?(images = []) target (prog : program term)
     (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  solve ~images ~callee:(callee_of prog) target
+  solve ~synth ~images ~callee:(callee_of ~synth prog) target
     ~block_addrs:
       (Core.Map.of_alist_exn (module Addr)
          (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
     sub
 
 (* Runs the production attribution protocol over fixture analysis facts. *)
-let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
+let run_chain_attrib_result ~synth ?(spans = []) (subs : sub term list) :
+    Hike.Attribution.result =
   let target = (x86_target ()) in
   let prog = Program.create ~subs () in
-  let acc =
-    Seq.fold (Term.enum sub_t prog) ~init:Tid.Map.empty ~f:(fun acc sub ->
-        let envs, sub', _ = produce target prog sub in
-        Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))
+  let acc, synth =
+    Seq.fold (Term.enum sub_t prog) ~init:(Tid.Map.empty, synth)
+      ~f:(fun (acc, synth) sub ->
+        let envs, sub', _, synth =
+          solve_with_synth ~synth ~callee:(callee_of ~synth prog) target sub
+        in
+        (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'), synth))
   in
   let all_envs =
     Core.Map.fold acc ~init:Tid.Map.empty ~f:(fun ~key:_ ~data:(e, _) m ->
@@ -254,26 +267,27 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
         Core.Map.find acc (Term.tid sub)
         |> Base.Option.value_map ~default:sub ~f:snd)
   in
+  let facts = Hike.Kb.with_synth facts (Hike.Synth.union facts.synth synth) in
   let prog =
     Hike.Variadic.stamp ~abi:facts.abi ~entry:Hike.Stack_model.segment_base
       ~denote:facts.denote prog
   in
-  let result =
-    Hike.Attribution.run ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
-      ~spans ~meta:[] ~tls:None ~relative:[] ~externals:[] prog
-  in
-  result.program
+  Hike.Attribution.run ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
+    ~spans ~meta:[] ~tls:None ~relative:[] ~externals:[] prog
+
+let run_chain_attrib ~synth ?spans (subs : sub term list) : program term =
+  (run_chain_attrib_result ~synth ?spans subs).program
 
 (* The fixtures' analysis facts: the subs' converged environments, plus
    the stamped subs the seam reads (the fixpoint's sweep tags every def
    with its before-env).  The bool reports a nonempty env set. *)
-let fixture_facts (subs : sub term list) :
+let fixture_facts ~synth (subs : sub term list) :
     Hike.Kb.facts * sub term list * bool =
-  let all_envs, stamped, ok =
-    Base.List.fold subs ~init:(Tid.Map.empty, [], true)
-      ~f:(fun (m, stamped, ok) sub ->
-        let envs, sub', _ =
-          solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
+  let all_envs, stamped, ok, synth =
+    Base.List.fold subs ~init:(Tid.Map.empty, [], true, synth)
+      ~f:(fun (m, stamped, ok, synth) sub ->
+        let envs, sub', _, synth =
+          solve_with_synth ~synth ~callee:(callee_of ~synth (Program.create ~subs:[ sub ] ()))
             (x86_target ()) sub
         in
         (Core.Map.merge m envs
@@ -281,34 +295,41 @@ let fixture_facts (subs : sub term list) :
              match el with
                | `Left v | `Right v | `Both (_, v) -> Some v),
          sub' :: stamped,
-         ok && not (Core.Map.is_empty envs)))
+         ok && not (Core.Map.is_empty envs), synth))
   in
-  (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
-     ~block_addrs:(Core.Map.empty (module Addr)) ~target:(x86_target ()),
+  let facts = Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
+      ~block_addrs:(Core.Map.empty (module Addr)) ~target:(x86_target ()) in
+  (Hike.Kb.with_synth facts (Hike.Synth.union facts.synth synth),
    Base.List.rev stamped,
    ok && not (Core.Map.is_empty all_envs))
 
-let install_fixture_envs (subs : sub term list) : Hike.Kb.facts =
-  let facts, _, _ = fixture_facts subs in
+let install_fixture_envs ~synth (subs : sub term list) : Hike.Kb.facts =
+  let facts, _, _ = fixture_facts ~synth subs in
   facts
 
 (* The facts plus the one stamped sub (the unstamped term when the
    solve did not converge). *)
-let fixture_facts_sub (sub : sub term) : Hike.Kb.facts * sub term =
-  let facts, stamped, _ = fixture_facts [ sub ] in
+let fixture_facts_sub ~synth (sub : sub term) : Hike.Kb.facts * sub term =
+  let facts, stamped, _ = fixture_facts ~synth [ sub ] in
   (facts, match stamped with [ s ] -> s | _ -> sub)
 
 (* The attribution ctx over fixtures with freshly solved, stamped
    envs. *)
-let fixture_ctx ?(spans = []) (subs : sub term list) : Hike.Sections.ctx =
-  let facts, subs, _ = fixture_facts subs in
+let fixture_ctx ~synth ?(spans = []) (subs : sub term list) : Hike.Sections.ctx =
+  let facts, subs, _ = fixture_facts ~synth subs in
   Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
     ~spans (Program.create ~subs ())
 
 (* The single-sub rewrite: the chain replica's rewritten sub. *)
-let rewrite_one (sub : sub term) : sub term =
-  let prog = run_chain_attrib [ sub ] in
+let rewrite_one ~synth (sub : sub term) : sub term =
+  let prog = run_chain_attrib ~synth [ sub ] in
   Term.first sub_t prog |> Base.Option.value_exn
+
+(* The rewritten sub with the synthetic vars its attribution recorded. *)
+let rewrite_one_synth ~synth (sub : sub term) : Hike.Synth.table * sub term =
+  let result = run_chain_attrib_result ~synth [ sub ] in
+  (result.facts.Hike.Kb.synth,
+   Term.first sub_t result.program |> Base.Option.value_exn)
 
 
 

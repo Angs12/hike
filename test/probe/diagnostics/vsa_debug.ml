@@ -51,7 +51,8 @@ let i_of (sub : sub term) : var =
 let run_one_fixture (name : string) (sub : sub term) : unit =
   Printf.printf "=== fixture %s ===\n" name;
   let sp = Hike.Abi.x86_64_sysv.sp in
-  let sol = run_sub_fixpoint sub in
+  let synth = Hike.Synth.empty in
+  let sol = run_sub_fixpoint ~synth sub in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun b ->
       let st0 = Graphlib.Std.Solution.get sol (Term.tid b) in
@@ -60,7 +61,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
       Term.enum def_t b
       |> Seq.iter ~f:(fun d ->
           let pre = !st1 in
-          let post = Vsa.Test_seam.denote_def d pre in
+          let post = Vsa.Test_seam.denote_def ~synth d pre in
           Printf.printf "    %s\n      pre : %s\n      post: %s\n"
             (def_to_string d)
             (state_summary [ sp; i_of sub ] pre)
@@ -69,7 +70,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
 
 let run_binary (path : string) (name : string) : unit =
   let proj = load_project path in
-  let prog = production_input proj in
+  let synth, prog = production_input proj in
   let sp = sp_of proj in
   let sub =
     match find_sub prog name with
@@ -80,9 +81,9 @@ let run_binary (path : string) (name : string) : unit =
   (* The fused solve returns the rewritten (normalized) sub and the
      per-block (pre, post) envs: the walks read the forms production
      analyses. *)
-  let envs, sub', _grown =
-    Probe_common.solve
-      ~callee:(Probe_common.callee_of (Program.create ~subs:[ sub ] ()))
+  let envs, sub', _grown, synth =
+    Probe_common.solve ~synth
+      ~callee:(Probe_common.callee_of ~synth (Program.create ~subs:[ sub ] ()))
       (Project.target proj) sub
   in
   let pre_of tid = match Core.Map.find envs tid with
@@ -141,7 +142,7 @@ let run_binary (path : string) (name : string) : unit =
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
             let lv = Def.lhs d in
-            let post = Vsa.Test_seam.denote_def d !st in
+            let post = Vsa.Test_seam.denote_def ~synth d !st in
             (match Var.typ lv with
              | Type.Imm n when n <= 64 ->
                Printf.printf "  [%s] %s\n%!" (Tid.name (Term.tid b))
@@ -162,7 +163,7 @@ let run_binary (path : string) (name : string) : unit =
                  | None -> "?"
                  | Some a ->
                    (match
-                      Vsa.denote_exp_at ~pre:!st ~blk:b ~def:d a
+                      Vsa.denote_exp_at ~synth ~pre:!st ~blk:b ~def:d a
                     with
                     | Ok ws -> Format.asprintf "%a" Vsa.WordSet.pp ws
                     | Error _e -> "err")
@@ -191,7 +192,7 @@ let run_binary (path : string) (name : string) : unit =
                Printf.printf "  def %-8s | pre %s | post %s\n%!"
                  (Var.name lv)
                  (cellstat !st lv)
-                 (let post = Vsa.Test_seam.denote_def d !st in
+                 (let post = Vsa.Test_seam.denote_def ~synth d !st in
                   let r = cellstat post lv in
                   st := post;
                   r)))

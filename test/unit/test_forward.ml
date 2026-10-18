@@ -83,11 +83,11 @@ let st_m = memv "st_m"
 let st_lit n = Bil.Int (Cbat_word.to_word (w64 n))
 let st_slot k = Bil.BinOp (Bil.MINUS, Bil.Var sp, st_lit k)
 let st_store ?(size = `r64) env addr v =
-  Vsa.Test_seam.denote_def
+  Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty
     (Def.create st_m (Bil.Store (Bil.Var st_m, addr, v, LittleEndian, size))) env
 let st_load ?(size = `r64) env addr =
   match
-    Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var st_m, addr, LittleEndian, size)) env
+    Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var st_m, addr, LittleEndian, size)) env
   with
   | Ok v -> v
   | Error _ -> failwith "st_load"
@@ -104,7 +104,7 @@ let tests : unit Alcotest.test list =
           Bil.Ite
             (Bil.Var f32, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Int (Cbat_word.to_word (w32 20)))
         in
-        match Vsa.Test_seam.denote_imm_exp e env with
+        match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty e env with
         | Ok ws ->
             check "FWD-01" (Ws.elem (w32 10) ws && Ws.elem (w32 20) ws && not (Ws.is_bottom ws))
         | Error _ -> check "FWD-01" false);
@@ -130,7 +130,7 @@ let tests : unit Alcotest.test list =
                ( Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)),
                  Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64 ))
         in
-        let env1 = Vsa.Test_seam.denote_def d1 AI.top in
+        let env1 = Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty d1 AI.top in
         let d2 =
           Def.create m
             (Bil.Store
@@ -139,7 +139,7 @@ let tests : unit Alcotest.test list =
         in
         let idx = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
         let mem1 = AI.find_memory idx env1 m in
-        let env2 = Vsa.Test_seam.denote_def d2 env1 in
+        let env2 = Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty d2 env1 in
         let mem2 = AI.find_memory idx env2 m in
         check "FWD-05"
           (not (Mem.equal mem1 (Mem.top (Mem.get_idx mem1)))
@@ -156,7 +156,7 @@ let tests : unit Alcotest.test list =
         let zf = v1 "l2b_zf2" in
         let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ]) in
         let e = Bil.BinOp (Bil.EQ, Bil.Var zf, Bil.Int W.b0) in
-        match Vsa.Test_seam.denote_imm_exp e env with
+        match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty e env with
         | Ok ws ->
             check "FWD-07"
               (not (Ws.is_bottom ws)
@@ -168,7 +168,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let pf = v1 "l2b_pf3" in
         let env_after =
-          Vsa.Test_seam.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top
+          Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top
         in
         let ws = AI.find_word 1 env_after pf in
         check "FWD-08"
@@ -189,12 +189,12 @@ let tests : unit Alcotest.test list =
         in
         let ok_lt =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top)
             ~ok:bool_top ~error:(fun _ -> false)
         in
         let ok_eq =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty
                (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z))
                AI.top)
             ~ok:bool_top ~error:(fun _ -> false)
@@ -209,7 +209,7 @@ let tests : unit Alcotest.test list =
         let zf = v1 "l2b_zf5" in
         let x = v64 "l2b_x5" in
         let flag_env =
-          Vsa.Test_seam.denote_def
+          Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty
             (Def.create zf
                (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x)))
             AI.top
@@ -224,7 +224,7 @@ let tests : unit Alcotest.test list =
           match Term.enum jmp_t blk1' |> Seq.to_list with [ j ] -> j | _ -> assert false
         in
         let kept =
-          Vsa.Test_seam.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list
+          Vsa.Test_seam.reachable_jumps ~synth:Hike.Synth.empty flag_env (Seq.of_list [ jmp ]) |> Seq.to_list
         in
         let cnt = v64 "l2b_cnt5" in
         let sub, tids =
@@ -262,7 +262,7 @@ let tests : unit Alcotest.test list =
           ~restore:(fun () -> Vsa.set_section_images [])
           (fun () ->
             let img1 =
-              match Vsa.Test_seam.denote_imm_exp (load32 (Bil.Var img_var)) env3 with
+              match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (load32 (Bil.Var img_var)) env3 with
               | Ok ws ->
                   let card =
                     Result.fold (Cbat_word.to_int64 (Ws.cardinality ws)) ~ok:Fun.id
@@ -287,7 +287,7 @@ let tests : unit Alcotest.test list =
               Ws.of_clp (Clp.interval ~width:8
                   (Cbat_word.of_int ~width:8 0) (Cbat_word.of_int ~width:8 23)) in
             check "FWD-11.ordered-image-producer"
-              (match Vsa.Test_seam.denote_imm_exp load8 env with
+              (match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty load8 env with
                | Ok ws -> Ws.equal ws expected
                | Error _ -> false)));
 
@@ -301,7 +301,7 @@ let tests : unit Alcotest.test list =
           ~restore:(fun () -> Vsa.set_section_images [])
           (fun () ->
             let img2 =
-              match Vsa.Test_seam.denote_imm_exp (load32 (Bil.Var img_var)) env3 with
+              match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (load32 (Bil.Var img_var)) env3 with
               | Ok ws -> Ws.is_top ws
               | Error _ -> false
             in
@@ -317,7 +317,7 @@ let tests : unit Alcotest.test list =
           ~restore:(fun () -> Vsa.set_section_images [])
           (fun () ->
             let img3 =
-              match Vsa.Test_seam.denote_imm_exp (load32 (Bil.Var img_var)) env_over with
+              match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (load32 (Bil.Var img_var)) env_over with
               | Ok ws -> Ws.is_top ws
               | Error _ -> false
             in
@@ -344,7 +344,7 @@ let tests : unit Alcotest.test list =
           ~restore:(fun () -> Vsa.set_section_images [])
           (fun () ->
             let img4 =
-              match Vsa.Test_seam.denote_imm_exp (load32 (Bil.Var img_var)) env4 with
+              match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (load32 (Bil.Var img_var)) env4 with
               | Ok ws -> Ws.equal ws stored
               | Error _ -> false
             in
@@ -357,7 +357,7 @@ let tests : unit Alcotest.test list =
         let tmp = v64 "rg1_tmp" in
         let env0 = AI.add_word AI.top ~key:sp ~data:(Ws.stack_word_i64 0L) in
         let env1 =
-          Vsa.Test_seam.denote_def
+          Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty
             (Def.create tmp
                (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 0x48)))))
             env0
@@ -368,7 +368,7 @@ let tests : unit Alcotest.test list =
               Bil.BinOp (Bil.AND, Bil.Var tmp, Bil.Int (Cbat_word.to_word (w64 0xF))),
               Bil.Int (Cbat_word.to_word (w64 0)) )
         in
-        match Vsa.Test_seam.denote_imm_exp guard env1 with
+        match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty guard env1 with
         | Ok ws ->
             check "FWD-15"
               (Ws.elem (Cbat_word.of_int ~width:1 1) ws
@@ -392,7 +392,7 @@ let tests : unit Alcotest.test list =
         in
         let top1 =
           match
-            Vsa.Test_seam.denote_imm_exp eq
+            Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty eq
               (AI.add_word AI.top ~key:v ~data:(Ws.singleton (w64 5)))
           with
           | Ok ws -> bool_top ws
@@ -404,7 +404,7 @@ let tests : unit Alcotest.test list =
         in
         let top1' =
           match
-            Vsa.Test_seam.denote_imm_exp eq2
+            Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty eq2
               (AI.add_word AI.top ~key:v2
                  ~data:(Ws.of_list ~width:64 [ w64 0; w64 0x200 ]))
           with
@@ -426,7 +426,7 @@ let tests : unit Alcotest.test list =
             ( Bil.Int (Cbat_word.to_word (w64 0)),
               Bil.Unknown ("t_top64", Type.Imm 64) )
         in
-        match Vsa.Test_seam.denote_imm_exp e AI.top with
+        match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty e AI.top with
         | Error _ -> check "FWD-17" false
         | Ok ws ->
           check "FWD-17"
@@ -444,7 +444,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub, tids, rax = sp_roundtrip () in
         let envs, _, _ =
-          solve ~callee:(callee_of (Program.create ~subs:[ sub ] ()))
+          solve ~synth:Hike.Synth.empty ~callee:(callee_of ~synth:Hike.Synth.empty (Program.create ~subs:[ sub ] ()))
             (x86_target ()) sub
         in
         (* The RELOAD block's post state holds the reloaded value; the
@@ -543,7 +543,7 @@ let tests : unit Alcotest.test list =
             ~key:q ~data:(Ws.stack_word_i64 (-24L)) in
         let btrue = Ws.singleton Cbat_word.b1 and bfalse = Ws.singleton Cbat_word.b0 in
         let denote e =
-          match Vsa.Test_seam.denote_imm_exp e env with
+          match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty e env with
           | Ok ws -> ws
           | Error _ -> Ws.bottom 1 in
         check "FWD-27.eq-self"
@@ -562,7 +562,7 @@ let tests : unit Alcotest.test list =
         let zero = Bil.Int (Cbat_word.to_word (Cbat_word.b0)) in
         let bad = Bil.Var (Var.create "fwd28_unk" Type.Unk) in
         let c = v1 "fwd28_c" in
-        let denote e env = Vsa.Test_seam.denote_imm_exp e env in
+        let denote e env = Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty e env in
         let is_val e n =
           match denote e AI.top with
           | Ok ws -> Ws.equal ws (Ws.singleton (w64 n))
@@ -587,7 +587,7 @@ let tests : unit Alcotest.test list =
         let first = mk_goto t in
         let later = mk_jmp_to t (Bil.Var dead) in
         let kept =
-          Vsa.Test_seam.reachable_jumps env (Seq.of_list [ first; later ])
+          Vsa.Test_seam.reachable_jumps ~synth:Hike.Synth.empty env (Seq.of_list [ first; later ])
           |> Seq.to_list in
         check "FWD-29" (List.length kept = 1));
   ]

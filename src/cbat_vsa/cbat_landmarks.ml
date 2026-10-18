@@ -35,7 +35,7 @@ let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
 (* The cell a landmark is about: the memory key's byte hull (each end as
    width/value) and stride — per-stride cells keep their own rows. *)
 type cell_desc = {
-  origin : Hike_origin.t;
+  origin : Hike_origin.t option;
   lo_width : int;
   lo_value : int64;
   hi_width : int;
@@ -44,7 +44,7 @@ type cell_desc = {
 }
 
 let equal_cell (a : cell_desc) (b : cell_desc) : bool =
-  Hike_origin.equal a.origin b.origin
+  Option.equal Hike_origin.equal a.origin b.origin
   && Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
   && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
   && Int.equal a.stride b.stride
@@ -186,7 +186,7 @@ let same_line (a : Cbat_clp_set_composite.t) (b : Cbat_clp_set_composite.t) :
     bool =
   match Cbat_clp_set_composite.origin a, Cbat_clp_set_composite.origin b with
   | Some oa, Some ob ->
-    Hike_origin.equal (Cbat_clp_set_composite.key_line oa)
+    Option.equal Hike_origin.equal (Cbat_clp_set_composite.key_line oa)
       (Cbat_clp_set_composite.key_line ob)
   | None, None -> true
   | Some _, None | None, Some _ -> false

@@ -46,6 +46,7 @@ let () =
     let proj = load_project path in
     let prog = Project.program proj in
     let target = Project.target proj in
+    let synth = ref Hike.Synth.empty in
     let raw =
       match find_sub prog subname with
       | Some s -> s
@@ -56,16 +57,22 @@ let () =
     let callee =
       match written_mode with
       | "none" -> fun _ -> Vsa.Call_effects.Summary None
-      | _ -> callee_of prog
+      | _ -> callee_of ~synth:!synth prog
     in
     Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
     (* The pass's transforms, in chain order. *)
+    let compile raw =
+      let table, sub = Hike.Jump.compile_sub ~synth:!synth target raw in
+      synth := table;
+      sub in
     let sub =
       match mode with
       | "raw" -> raw
-      | "jump" -> Hike.Jump.compile_sub target raw
-      | "split" -> Hike.Split_mem.split_sub raw
-      | "both" -> Hike.Split_mem.split_sub (Hike.Jump.compile_sub target raw)
+      | "jump" -> compile raw
+      | "split" -> Hike.Split_mem.split_sub ~synth raw
+      | "both" ->
+        Hike.Split_mem.split_sub ~synth
+          (compile raw)
       | _ -> usage Sys.argv.(0) usage_text
     in
     let nblk = Term.enum blk_t sub |> Seq.length in
@@ -79,7 +86,7 @@ let () =
     let abi = Hike.Abi.of_target target in
     let t0 = Unix.gettimeofday () in
     match
-      static_graph_vsa ~abi ~callee ~sub_lookup:(fun _ -> None) sub
+      static_graph_vsa ~synth:!synth ~abi ~callee ~sub_lookup:(fun _ -> None) sub
         (Vsa.init_sol ~abi sub)
     with
     | sol ->

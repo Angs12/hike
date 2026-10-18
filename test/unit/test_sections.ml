@@ -28,20 +28,24 @@ let portion_eq (p : A.portion) (sec : A.sec) (lo : int64) (hi : int64) =
 let stack_off (o : int64) : Ws.t = Ws.stack_word_i64 o
 
 let resolved_addr resolved =
-  if resolved then Bil.Var (Hike_synth.module_addr ~addr_bits:64 0x4000L)
-  else Bil.Int (Word.zero 64)
+  if resolved then
+    let synth, v = Hike_synth.mint_module_addr ~addr_bits:64 0x4000L Hike_synth.empty in
+    synth, Bil.Var v
+  else Hike_synth.empty, Bil.Int (Word.zero 64)
 
 let rd ?(resolved = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~word:8 ~entry ~spans:[] ~synth:Hike_synth.empty
-    ~address:(resolved_addr resolved) ~width ws
+  let synth, address = resolved_addr resolved in
+  A.range_of_denotation ~word:8 ~entry ~spans:[] ~synth
+    ~address ~width ws
 
 let spans_of () =
   [ { A.ds_sec = S.Data; ds_lo = 0x4000L; ds_hi = 0x403FL; ds_slots = [] };
     { A.ds_sec = S.Rodata; ds_lo = 0x5000L; ds_hi = 0x501FL; ds_slots = [] } ]
 
 let rd_spans ?(resolved = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~word:8 ~entry ~spans:(spans_of ()) ~synth:Hike_synth.empty
-    ~address:(resolved_addr resolved) ~width ws
+  let synth, address = resolved_addr resolved in
+  A.range_of_denotation ~word:8 ~entry ~spans:(spans_of ()) ~synth
+    ~address ~width ws
 
 (* Fixture stack frame: the mem, the SP and the frame pointer. *)
 let mem_rbp () = (memv "at_m", sp, frame_ptr)
@@ -49,7 +53,7 @@ let mem_rbp () = (memv "at_m", sp, frame_ptr)
 (* The fixture's one installed context: the solve, the one install, and
    the stamped subs the seam reads. *)
 let tree_ctx (subs : sub term list) : A.ctx =
-  fixture_ctx ~spans:(spans_of ()) subs
+  fixture_ctx ~synth:Hike.Synth.empty ~spans:(spans_of ()) subs
 
 let load_at (m : var) (base : var) (off : int64) (bits : int) : def term =
   Def.create (v64 "at_t")
@@ -103,7 +107,7 @@ let storage_at (ctx : A.ctx) (sub : sub term) (sec : A.sec) (lo : int64)
 (* T3: the data rows of the storage rule — Global conversion through the
    resolved proof, the word hull, the typed-width agreement, and the
    Whole_span identity. *)
-let sec_load ?(resolved = true) ?(width = 8) (addr : int64) : def term =
+let sec_load ?(resolved = true) ?(width = 8) (addr : int64) =
   let d =
     Def.create (v64 "at_g")
       (Bil.Load
@@ -112,13 +116,17 @@ let sec_load ?(resolved = true) ?(width = 8) (addr : int64) : def term =
            LittleEndian,
            Size.of_int_exn (8 * width) ))
   in
-  if resolved then Def.map_exp d ~f:(Exp.substitute
-      (Bil.Int (Word.of_int64 ~width:64 addr))
-      (Bil.Var (Hike_synth.module_addr ~addr_bits:64 addr)))
-  else d
+  if resolved then
+    let synth, v = Hike_synth.mint_module_addr ~addr_bits:64 addr Hike_synth.empty in
+    synth, Def.map_exp d ~f:(Exp.substitute
+      (Bil.Int (Word.of_int64 ~width:64 addr)) (Bil.Var v))
+  else Hike_synth.empty, d
 
-let data_ctx (defs : def term list) : A.ctx =
-  tree_ctx [ straight_sub "at_global" defs ]
+let data_ctx defs : A.ctx =
+  let synth = Base.List.fold defs ~init:Hike_synth.empty
+      ~f:(fun synth (table, _) -> Hike_synth.union synth table) in
+  fixture_ctx ~synth ~spans:(spans_of ())
+    [ straight_sub "at_global" (Base.List.map defs ~f:snd) ]
 
 let data_comps (ctx : A.ctx) : Hike.Stack_model.sec_comp list =
   A.global_comps_of ~word:8 ~spans:(spans_of ()) ctx
@@ -136,9 +144,9 @@ let st_pre (sub : sub term) (blk0 : blk term) (blk1 : blk term) : AI.t =
   let blk_of tid =
     match Term.find blk_t sub tid with Some b -> b | None -> assert false
   in
-  Vsa.Test_seam.denote_defs
+  Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty
     (blk_of (Term.tid blk1))
-    (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (anchored_entry ()))
+    (Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty (blk_of (Term.tid blk0)) (anchored_entry ()))
 
 let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
   match Mem.Key.of_wordset (Ws.stack_word_i64 addr) with
@@ -218,7 +226,7 @@ let residue_layout name (mask : int64) =
            `r64 ))
   in
   let sub = straight_sub name [ def_n; def_st ] in
-  let ctx = fixture_ctx [ sub ] in
+  let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
   let tree =
     Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
   in
@@ -297,9 +305,10 @@ let tests : unit Alcotest.test list =
                  ds_hi = (-1L);
                  ds_slots = [] } ]
            in
+           let synth, address = Hike_synth.mint_module_addr ~addr_bits:64 (-8L) Hike_synth.empty in
            match
              A.range_of_denotation ~word:8 ~entry ~spans:top_span
-               ~synth:Hike_synth.empty ~address:(Bil.Var (Hike_synth.module_addr ~addr_bits:64 (-8L))) ~width:8 ws
+               ~synth ~address:(Bil.Var address) ~width:8 ws
            with
            | None, [ p ] ->
                (* The whole occupied range [2^64-8, 2^64-1]: hi+7 wrapped
@@ -736,9 +745,12 @@ let tests : unit Alcotest.test list =
                  ds_hi = 0x403FL;
                  ds_slots = [ 0x4008L ] } ]
            in
-           let sub = straight_sub "at_slot" [ sec_load 0x4008L ] in
+           let synth, def = sec_load 0x4008L in
+           let sub = straight_sub "at_slot" [ def ] in
+           let facts = top_facts () in
+           let facts = Hike.Kb.with_synth facts (Hike.Synth.union facts.synth synth) in
            let ctx =
-             A.attribute ~facts:(top_facts ()) ~word:8 ~entry ~spans:slot_spans
+             A.attribute ~facts ~word:8 ~entry ~spans:slot_spans
                (Program.create ~subs:[ sub ] ())
            in
            Base.List.is_empty (A.global_comps_of ~word:8 ~spans:slot_spans ctx)
@@ -802,7 +814,7 @@ let tests : unit Alcotest.test list =
         let sub, _ =
           sub_of "c1_mask" [ [ def_wide; def_narrow ], [ (1, mk_goto) ]; [], [] ]
         in
-        let sub' = rewrite_one sub in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         let narrow' =
           Term.enum blk_t sub'
           |> Seq.concat_map ~f:(Term.enum def_t)
@@ -815,7 +827,7 @@ let tests : unit Alcotest.test list =
                match Def.rhs d with
                | Bil.Store (Bil.Var mem, Bil.Var b, _, _, `r16) ->
                    Var.same mem (Sm.region_mem ~addr_bits:64 1)
-                   && Sm.region_ptr_id_of b = Some 1
+                   && Sm.region_ptr_id_of synth b = Some 1
                    && Var.equal (Def.lhs d) mem
                | _ -> false)
            | None -> false));
@@ -849,7 +861,7 @@ let tests : unit Alcotest.test list =
     pin "SEC-60" "C4b: the widened member's component takes Frame storage, never Region"
       (fun () ->
         let sub_mixed, def_idx_store = mk_indexed_loop ~pfx:"c4b" in
-        let ctx_mixed = fixture_ctx [ sub_mixed ] in
+        let ctx_mixed = fixture_ctx ~synth:Hike.Synth.empty [ sub_mixed ] in
         check_bound "SEC-60"
           (storage_of_def ctx_mixed sub_mixed (Term.tid def_idx_store))
           (fun rs -> rs.A.storage = A.Stack_residue));
@@ -858,7 +870,7 @@ let tests : unit Alcotest.test list =
       "C4b: the constant cell joins the widened member's Frame component (together, not Region)"
       (fun () ->
         let sub_mixed, _def_idx_store = mk_indexed_loop ~pfx:"c4b" in
-        let ctx_mixed = fixture_ctx [ sub_mixed ] in
+        let ctx_mixed = fixture_ctx ~synth:Hike.Synth.empty [ sub_mixed ] in
         check "SEC-61"
           (match Core.Map.find ctx_mixed.A.sub_trees (Term.tid sub_mixed) with
            | Some tree -> (
@@ -894,7 +906,7 @@ let tests : unit Alcotest.test list =
                  `r64 ))
         in
         let sub = straight_sub "r12_span8" [ d_rbp; d ] in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let tree =
           Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
         in
@@ -932,7 +944,7 @@ let tests : unit Alcotest.test list =
           sub_of "b2a_caller"
             [ [ def_out ], [ (1, fun t -> mk_call_jmp t callee_tid) ]; [], [] ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let tree =
           Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
         in
@@ -976,7 +988,7 @@ let tests : unit Alcotest.test list =
               [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let tree = Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub)) in
         let identity =
           A.Tree.to_sequence tree |> Seq.to_list
@@ -1011,7 +1023,7 @@ let tests : unit Alcotest.test list =
               [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let tree = Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub)) in
         let layout =
           A.layout_of_tree ~word:8 ~entry ~abi:Hike.Abi.x86_64_sysv ~sub tree
@@ -1047,7 +1059,7 @@ let tests : unit Alcotest.test list =
               [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         check "SEC-78"
           (storage_at ctx sub Sm.Stack (pos (-24L)) (pos (-17L))
            = Some A.Stack_residue
@@ -1058,7 +1070,7 @@ let tests : unit Alcotest.test list =
       "S2 (fp-GPR): an untagged heap-RBP store does NOT degrade the sub (the rsp cell keeps Region storage — stack-ness is the value proof alone)"
       (fun () ->
         let sub = heap_store_sub "s2_heap_rbp" "s2_m" frame_ptr in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         check "SEC-66"
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
           = Some (A.Stack_region 1)));
@@ -1134,7 +1146,7 @@ let tests : unit Alcotest.test list =
             [ def_rbp; def_frame; def_n_cell; def_load; def_sub; def_ptr;
               def_align; def_save; def_band ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let projection d =
           match Core.Map.find ctx.A.projections (Term.tid d) with
           | Some (Some p) -> Some p
@@ -1211,7 +1223,7 @@ let tests : unit Alcotest.test list =
           straight_sub "vla_cut"
             [ def_rbp; def_frame; def_n_cell; def_load; def_sub; def_straddle ]
         in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         check "SEC-70"
           (match
              Core.Map.find ctx.A.projections (Term.tid def_straddle)
@@ -1253,7 +1265,7 @@ let tests : unit Alcotest.test list =
                  `r64 ))
         in
         let sub = straight_sub "sel_top" [ def_st ] in
-        let ctx = fixture_ctx [ sub ] in
+        let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
         let tree =
           Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
         in

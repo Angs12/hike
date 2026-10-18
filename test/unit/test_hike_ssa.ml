@@ -38,8 +38,8 @@ let tests : unit Alcotest.test list =
               [ (0, mk_ret) ] ]
         in
         let prog = Program.create ~subs:[ callee; caller ] () in
-        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let caller' =
           Term.enum sub_t prog
           |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ret_caller")
@@ -122,8 +122,8 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let sub =
           Term.enum sub_t prog |> Seq.hd_exn
         in
@@ -167,11 +167,11 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         let abi = Hike.Abi.of_target (x86_target ()) in
-        let free = Hike.Ssa.free_regs_ssa ~abi sub in
+        let free = Hike.Ssa.free_regs_ssa ~synth:Hike.Synth.empty ~abi sub in
         check "SSA-03"
           (Hike.Stack_model.is_ssa sub
           && Base.List.exists free ~f:(Var.same (int_param 0))
@@ -217,7 +217,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ callee; sub ] () in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let caller =
           Term.enum sub_t prog
           |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ssa4_caller")
@@ -293,8 +293,8 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         let header =
           Term.find blk_t sub (Term.tid loop_blk) |> Base.Option.value_exn
@@ -334,8 +334,8 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ ext; sub ] () in
-        let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-        let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+        let prog = Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
         let sub =
           Term.enum sub_t prog
           |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ssa6")

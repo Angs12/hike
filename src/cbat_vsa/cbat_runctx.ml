@@ -44,6 +44,7 @@ type refine_ctx = {
      the walk anchors on, the call-read lanes, and the
      word size behind every word lookup. *)
   rc_abi : Hike_abi.t;
+  rc_synth : Hike_synth.table ref;
   rc_blocks : block_facts Tid.Map.t;
   (* The producer non-negativity oracle (the walk's signed rows): an
      expression whose every possible value has its sign bit clear.  The
@@ -117,6 +118,7 @@ let live_in_of_sub ~def_reads ~def_writes ~phi_reads
    the per-block fact records; the live-in fixpoint feeds them. *)
 let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
     ~jmp_reads
+    ~(synth : Hike_synth.table ref)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (s : sub term) : refine_ctx = {
   rc_nonneg = (fun ~env:_ _ -> false);
@@ -124,6 +126,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
   rc_post = ref Tid.Map.empty;
   rc_prefix = ref Tid.Map.empty;
   rc_abi = abi;
+  rc_synth = synth;
   rc_sub_lookup = sub_lookup;
   rc_blocks =
     let live =

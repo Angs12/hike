@@ -41,14 +41,23 @@ let thread_pointer ctx llvm_builder =
   let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
   Llvm.build_call fty f [||] "hike_tp" llvm_builder
 
-let marker_of_size size =
-  Hike_synth.accumulator ~addr_bits:(Size.in_bits size)
+let marker_of_size ctx size =
+  let synth, v =
+    Hike_synth.mint ~addr_bits:(Size.in_bits size) Hike_synth.K_accumulator ctx.synth
+  in
+  ctx.synth <- synth;
+  v
 
 (* The Let-binder's evaluation temp: a fresh identity with a name the
    lifted vocabulary never uses, so the substitution cannot capture. *)
 let fresh_let_var ctx scope (v : Var.t) : Var.t =
   incr scope.let_counter;
-  Hike_synth.let_var ~addr_bits:ctx.addr_bits !(scope.let_counter) (Var.typ v)
+  let synth, v =
+    Hike_synth.mint ~addr_bits:ctx.addr_bits
+      (Hike_synth.K_let (!(scope.let_counter), Var.typ v)) ctx.synth
+  in
+  ctx.synth <- synth;
+  v
 
 (* Maps only the mem node matching (addr, size) to a var, preserving
    the enclosing structure. *)
@@ -123,7 +132,7 @@ let rec create_offset ctx scope llvm_builder blk_tid exp :
       match get_ptr_offset scope v with
       | Some off -> Some off
       | None ->
-          if is_ptr_var v then None
+          if is_ptr_var ctx v then None
           else
             match create_exp ctx scope llvm_builder blk_tid exp with
             | Bil2llvm_value.Int x -> Some x
@@ -280,7 +289,7 @@ and storage_access ?(ptr_cell = false) ?(is_window = false)
   match node with
   | `Load (addr, size) ->
       let p = addr_ptr addr in
-      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size)
+      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size ctx size)
         ~emit:(fun () -> load_cell ctx llvm_builder ~ptr:ptr_cell size p)
         ~rewrite:(rewrite addr size)
   | `Store (addr, data, size) ->
@@ -290,7 +299,7 @@ and storage_access ?(ptr_cell = false) ?(is_window = false)
         ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p);
         d
       in
-      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size)
+      emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size ctx size)
         ~emit ~rewrite:(rewrite addr size)
 
 (* Named-component routing: the mem var names storage and the address
@@ -326,7 +335,7 @@ and sec_comp_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid exp
       end
       else raw_load ~ptr_cell ctx llvm_builder size a
   in
-  emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size size) ~emit
+  emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size ctx size) ~emit
     ~rewrite:(rewrite_mem_node exp addr size)
 
 and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =

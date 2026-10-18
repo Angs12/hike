@@ -28,9 +28,8 @@ type kind = S.kind =
 
 let lanes_of (t : t) : S.t list = match t with Scalar s -> [ s ] | Lanes ls -> ls
 
-(* A word worth a lane of its own: it carries an origin other than Abs. *)
-let carries (s : S.t) : bool =
-  match S.origin s with Some o -> not (Origin.equal o Origin.Abs) | None -> false
+(* A word worth a lane of its own: it carries an origin. *)
+let carries (s : S.t) : bool = Option.is_some (S.origin s)
 
 let has_lanes (t : t) : bool =
   match t with Lanes _ -> true | Scalar s -> carries s

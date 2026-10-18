@@ -311,24 +311,22 @@ let arg_slot ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Slot i)
    the slots. *)
 let call_arg ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Argument i)
 
-let kind (v : var) = Hike_synth.classify Hike_synth.empty v
-
 (* The call-argument temps are the call's arguments. *)
-let is_call_arg v =
-  match kind v with
+let is_call_arg synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage (Hike_synth.Argument _)) -> true
   | _ -> false
 
 (* The FP model's operand temp: [intrinsic:x<N>], width-qualified by the
    fp pass ([intrinsic:x<N>:<width>]); an FP call site's argument.  The
    base name carries no SSA version. *)
-let is_fp_operand_temp v =
-  match kind v with
+let is_fp_operand_temp synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Fp_lane (Hike_synth.Input, _)) -> true
   | _ -> false
 
-let is_arg_slot v =
-  match kind v with
+let is_arg_slot synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage (Hike_synth.Slot _)) -> true
   | _ -> false
 
@@ -336,8 +334,8 @@ let is_arg_slot v =
    address width. *)
 let window_mem ~addr_bits = Hike_synth.bytes ~addr_bits Hike_synth.Window
 
-let is_window_mem v =
-  match kind v with
+let is_window_mem synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Bytes Hike_synth.Window) -> true
   | _ -> false
 
@@ -345,8 +343,8 @@ let is_window_mem v =
 let hike_window_var ~word =
   Hike_synth.base ~addr_bits:(word_bits word) Hike_synth.Window
 
-let is_window_var v =
-  match kind v with
+let is_window_var synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage Hike_synth.Window) -> true
   | _ -> false
 
@@ -396,8 +394,8 @@ let region_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Stack id)
    rewritten address def's value is [base + displacement]. *)
 let region_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Stack id)
 
-let is_region_ptr v =
-  match kind v with
+let is_region_ptr synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage (Hike_synth.Stack _)) -> true
   | _ -> false
 
@@ -405,17 +403,17 @@ let is_region_ptr v =
    emitter binds it to the component's global. *)
 let sec_comp_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Global id)
 
-let is_sec_comp_ptr v =
-  match kind v with
+let is_sec_comp_ptr synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage (Hike_synth.Global _)) -> true
   | _ -> false
 
 (* A storage's base value: never renamed, never a lane. *)
-let is_storage_base (v : var) : bool =
-  is_region_ptr v || is_sec_comp_ptr v
+let is_storage_base synth (v : var) : bool =
+  is_region_ptr synth v || is_sec_comp_ptr synth v
 
-let region_ptr_id_of v =
-  match kind v with
+let region_ptr_id_of synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> Some id
   | _ -> None
 
@@ -438,7 +436,7 @@ let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
    block defines — the outgoing stores' storages and the call-argument
    address temps.  The callee reads the state the site built, through the
    slot addresses the site minted. *)
-let blk_boundary_reads (blk : blk term) : Var.Set.t =
+let blk_boundary_reads synth (blk : blk term) : Var.Set.t =
   let is_call j =
     match Jmp.kind j with
     | Call _ when not (Hike_return.is_jmp j) -> true
@@ -449,15 +447,15 @@ let blk_boundary_reads (blk : blk term) : Var.Set.t =
     Term.enum def_t blk
     |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
            let lhs = Def.lhs d in
-           if is_mem lhs || is_fp_operand_temp lhs then Core.Set.add acc lhs
+           if is_mem lhs || is_fp_operand_temp synth lhs then Core.Set.add acc lhs
            else acc)
 
 let def_writes (d : def term) : Var.Set.t = Var.Set.singleton (Def.lhs d)
 let phi_writes (p : phi term) : Var.Set.t = Var.Set.singleton (Phi.lhs p)
 
 
-let is_region_mem v =
-  match kind v with
+let is_region_mem synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
   | _ -> false
 
@@ -478,16 +476,16 @@ let sec_comp_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Global 
    BIL var. *)
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
-let is_sec_comp_mem v =
-  match kind v with
+let is_sec_comp_mem synth v =
+  match Hike_synth.classify synth v with
   | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
   | _ -> false
 
 (* A model-owned storage var: a fissioned memory family or a storage
    base. *)
-let is_model_storage v =
-  is_region_mem v || is_window_mem v || is_sec_comp_mem v
-  || is_storage_base v
+let is_model_storage synth v =
+  is_region_mem synth v || is_window_mem synth v || is_sec_comp_mem synth v
+  || is_storage_base synth v
 
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
@@ -806,12 +804,12 @@ let map_effects ~read ~write j =
     { Term_effects.reads = Base.List.map effects.reads ~f:read;
       writes = Base.List.map effects.writes ~f:write }
 
-let prepare_effects ~abi ~callee sub =
+let prepare_effects ~synth ~abi ~callee sub =
   let outgoing = abi.Abi.sp :: (sig_rets sub
       |> Base.List.concat_map ~f:(fun arg ->
           Exp.free_vars (Arg.rhs arg) |> Core.Set.to_list)) in
   Term.map blk_t sub ~f:(fun blk ->
-      let boundary = Core.Set.to_list (blk_boundary_reads blk) in
+      let boundary = Core.Set.to_list (blk_boundary_reads synth blk) in
       Term.map jmp_t blk ~f:(fun j ->
           let effects =
             if Hike_return.is_jmp j then

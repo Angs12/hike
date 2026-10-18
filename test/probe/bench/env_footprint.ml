@@ -41,9 +41,9 @@ type row = {
 }
 
 let measure_sub (target : Bap_core_theory.Theory.Target.t) (sub : sub term) : row =
-  let envs, _, _ =
-    Probe_common.solve
-      ~callee:(Probe_common.callee_of (Program.create ~subs:[ sub ] ())) target sub
+  let envs, _, _, _ =
+    Probe_common.solve ~synth:Hike.Synth.empty
+      ~callee:(Probe_common.callee_of ~synth:Hike.Synth.empty (Program.create ~subs:[ sub ] ())) target sub
   in
   let pairs = Core.Map.data envs in
   let pre = Core.List.map pairs ~f:fst in

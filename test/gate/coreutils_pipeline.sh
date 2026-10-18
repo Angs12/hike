@@ -206,7 +206,19 @@ do_suite() {
     local suite_log="$WORK/suite"
     mkdir -p "$suite_log"
 
+    clean_test_state() {
+        # A killed run leaves Automake logs behind and make can reuse them.
+        # Limit cleanup to the two generated test trees.
+        local dir
+        for dir in "$CORE/tests" "$CORE/gnulib-tests"; do
+            [ -d "$dir" ] || continue
+            find "$dir" -type f \( -name '*.log' -o -name 'test-suite.log' \) \
+                -delete 2>/dev/null || true
+        done
+    }
+
     run_check() { # $1 = tag for log names
+        clean_test_state
         # Stub doc tools: regenerating man/info would execute the swapped-in
         # binaries before the real tests run.  The Makefile reaches help2man
         # through the `run_help2man' variable, not HELP2MAN, so the variable
@@ -256,12 +268,6 @@ do_suite() {
         fi
     done
     note "suite: swapped $swapped lifted binaries into $CORE/src"
-
-    # ---- clean the test state ----
-    # A killed run leaves tests/*.log behind, and make then reuses them: the
-    # re-run "finishes" in seconds reporting FAIL 0 from stale results.
-    find "$CORE/tests" -name '*.log' -delete 2>/dev/null || true
-    find "$CORE" -name 'test-suite.log' -delete 2>/dev/null || true
 
     # ---- lifted run ----
     touch "$suite_log/.stamp.$$"

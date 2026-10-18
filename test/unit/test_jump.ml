@@ -7,7 +7,8 @@ open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
 
-let compile_sub (s : sub term) : sub term = Hike.Jump.compile_sub jump_target s
+let compile_sub (s : sub term) : sub term =
+  snd (Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target s)
 
 let w0_32 = Bil.Int (Word.zero 32)
 let w0_64 = Bil.Int (Word.zero 64)

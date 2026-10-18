@@ -106,10 +106,11 @@ let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
 
 (* Drop dead virtual temps; machine regs are the ABI surface and stay.
    Missing keys read top, so dropping only weakens. *)
-let gc (e : t) ~(keep : Int.Set.t) : t =
+let gc ~(synth : Hike_synth.table) (e : t) ~(keep : Int.Set.t) : t =
   let words =
     WordEnv.filter_keys e.words ~f:(fun k ->
-        (not (Cbat_var_id.is_virtual k))
+        let v = Cbat_var_id.var_of k in
+        (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v))
         || Core.Set.mem keep (Cbat_var_id.base_of k)) in
   if phys_equal words e.words then e else { e with words }
 

@@ -8,7 +8,6 @@ open Bap.Std
 let ids : (Var.t, int) Core.Hashtbl.t = Core.Hashtbl.create (module Var)
 let vars : var option array ref = ref (Base.Array.create ~len:256 None)
 let bases : int array ref = ref (Base.Array.create ~len:256 (-1))
-let virtuals : bool array ref = ref (Base.Array.create ~len:256 false)
 let next = ref 0
 
 let grow (i : int) : unit =
@@ -21,8 +20,7 @@ let grow (i : int) : unit =
       dst
     in
     vars := resize !vars None;
-    bases := resize !bases (-1);
-    virtuals := resize !virtuals false
+    bases := resize !bases (-1)
   end
 
 (* Every env op interns: the hit path allocates nothing. *)
@@ -35,21 +33,17 @@ and add_new (v : var) : int =
   grow i;
   Core.Hashtbl.set ids ~key:v ~data:i;
   (!vars).(i) <- Some v;
-  (!virtuals).(i) <- Hike_synth.is_temporary v;
   (* The base's id serves the keep/need tests; a base var is itself. *)
   (!bases).(i) <- intern (Var.base v);
   i
 
 let var_of (i : int) : var = Core.Option.value_exn (!vars).(i)
 let base_of (i : int) : int = (!bases).(i)
-let is_virtual (i : int) : bool = (!virtuals).(i)
-
 let reset () : unit =
   Core.Hashtbl.clear ids;
   next := 0;
   vars := Base.Array.create ~len:256 None;
-  bases := Base.Array.create ~len:256 (-1);
-  virtuals := Base.Array.create ~len:256 false
+  bases := Base.Array.create ~len:256 (-1)
 
 let intern_set (vs : Var.Set.t) : Core.Int.Set.t =
   Core.Set.fold vs ~init:(Core.Set.empty (module Core.Int))

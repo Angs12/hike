@@ -2,7 +2,6 @@
 
 | id | behavior |
 |---|---|
-| SYN-01 | Every synthetic family constructs through the general storage/lane entries and classifies through the one `Hike_synth.classify`; the table records every var, identities are non-virtual, bases and bytes pair through the one base/memory operation, and fresh temporaries have distinct identities. |
 | RIP-01 | Tagged values become stable address variables; loads and stores use component memory and byte indices through `Hike_synth.rewrite_def`. Analysis facts survive, unclassified and untagged bits stay exact, and resolution is idempotent. |
 | RIP-02 | Nested synthetic variables enter the shared table, denote singleton module addresses (in their section when the program's section map holds them), contribute no signature inputs, and preserve linker-slot target recognition. |
 | RIP-03 | A resolved address value and access render through the same owning section global and byte index. |

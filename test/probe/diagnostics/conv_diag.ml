@@ -28,7 +28,7 @@ let () =
       (Sub.name sub);
     let sub' = sub in
     let sol, converged =
-      try (Probe_common.run_sub_fixpoint sub', true)
+      try (Probe_common.run_sub_fixpoint ~synth:Hike.Synth.empty sub', true)
       with Vsa.Fixpoint_not_converged (n, sol) ->
         Printf.printf "FIXPOINT NOT CONVERGED after %d rounds\n" n;
         (sol, false)

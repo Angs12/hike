@@ -8,8 +8,9 @@ module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 module Model = Hike.Stack_model
 
-let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
+let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
+    ~synth:(ref synth)
     ~def_reads:(fun d -> Model.reads (`Def d))
     ~def_writes:(fun d -> Model.writes (`Def d))
     ~phi_reads:(fun p -> Model.reads (`Phi p))
@@ -19,18 +20,20 @@ let static_graph_vsa ~abi ?callee ?resolved ?sub_lookup sub init =
 
 (* A probe's callees: a sub of [prog] writes the registers its own defs
    write; any other target writes anything. *)
-let callee_of (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
+let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.callee =
   match Term.find sub_t prog tid with
-  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hike.Vsa.written_regs_of_sub s)))
+  | Some s -> Summary (Some (Cbat_var_id.intern_set (Hike.Vsa.written_regs_of_sub ~synth s)))
   | None -> Summary None
 
 (* The production solve of one sub with every callee summarized. *)
-let solve ~callee target (sub : sub term) =
+let solve ~synth ~callee target (sub : sub term) =
   match
     Hike.Vsa.start target ~lookup:(fun _ -> None) ~images:[] ~callee
-      ~block_addrs:Addr.Map.empty ~foreign_slots:Core.Int64.Set.empty sub
+      ~block_addrs:Addr.Map.empty
+      ~synth
+      ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hike.Vsa.Done (envs, sub', block_addrs) -> (envs, sub', block_addrs)
+  | Hike.Vsa.Done (envs, sub', block_addrs, synth) -> (envs, sub', block_addrs, synth)
   | Hike.Vsa.Paused _ -> failwith "probe: a callee is blocked"
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
@@ -101,13 +104,16 @@ type ws_binary_error =
 (* The production input: the passes hike runs before the VSA, in the
    chain's order (src/hike.ml).  The probes measure the analysis as
    production runs it, never the raw lift. *)
-let production_input (proj : Project.t) : program term =
+let production_input (proj : Project.t) : Hike.Synth.table * program term =
   let target = Project.target proj in
-  Project.program proj
-  |> Term.map sub_t ~f:(Hike.Jump.compile_sub target)
-  |> Hike.Split_mem.normalize
-  |> Hike.Coerce.coerce_program
-  |> Hike.Fp.run_program
+  let synth = ref Hike.Synth.empty in
+  let compile sub =
+    let table, sub = Hike.Jump.compile_sub ~synth:!synth target sub in
+    synth := table;
+    sub in
+  let program = Term.map sub_t (Project.program proj) ~f:compile in
+  let synth, program = Hike.Split_mem.normalize ~synth:!synth program in
+  Hike.Fp.run_program ~synth (Hike.Coerce.coerce_program program)
 
 (* The analysis image set: never-written memory, relocated words resolved. *)
 let section_images (proj : Project.t) : Vsa.section_image list =
@@ -127,14 +133,15 @@ let section_images (proj : Project.t) : Vsa.section_image list =
                    Int64.compare a img_lo >= 0 && Int64.compare a img_hi <= 0) })
 
 (* Load a binary and apply [run_sub] to each sub in program order. *)
-let ws_run_binary (path : string) (run_sub : Vsa.section_image list -> sub term -> 'a) :
+let ws_run_binary (path : string) (run_sub : Hike.Synth.table -> Vsa.section_image list -> sub term -> 'a) :
     ('a list, ws_binary_error) result =
   try
     match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
     | Error e -> Error (Load_error e)
     | Ok proj ->
-      let subs = Term.enum sub_t (production_input proj) |> Seq.to_list in
-      Ok (List.map (run_sub (section_images proj)) subs)
+      let synth, program = production_input proj in
+      let subs = Term.enum sub_t program |> Seq.to_list in
+      Ok (List.map (run_sub synth (section_images proj)) subs)
   with e -> Error (Run_error e)
 
 (* Load a binary through the production driver and apply [run_sub] to each
@@ -175,13 +182,13 @@ let all_subs (prog : program term) : sub term list =
 (* The ONE per-sub solve (spec §2.1): the sub over its own program,
    seeded from init_sol, with the image-backed sections armed exactly
    as production arms them.  Every probe's fixpoint flow is this. *)
-let run_sub_fixpoint ?(images = []) (sub : sub term) : Vsa.vsa_sol =
+let run_sub_fixpoint ~synth ?(images = []) (sub : sub term) : Vsa.vsa_sol =
   Vsa.with_images images (fun () ->
-      static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+      static_graph_vsa ~synth ~abi:Hike_abi.x86_64_sysv sub
         (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub))
 
-let analyze_and_fixpoint (sub : sub term) : sub term * Vsa.vsa_sol =
-  (sub, run_sub_fixpoint sub)
+let analyze_and_fixpoint ~synth (sub : sub term) : sub term * Vsa.vsa_sol =
+  (sub, run_sub_fixpoint ~synth sub)
 
 (* Word-set printers. *)
 
@@ -249,17 +256,17 @@ let blk_bil_to_string (b : blk term) : string =
 
 (* Each stack kind comes from its def's before-state address denotation;
    definitions are classified independently. *)
-let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
+let seam_kinds_of ~synth (sol : Vsa.vsa_sol) (sub : sub term) :
     Ws.kind Tid.Map.t =
   (* The seam reads the defs' Env Tags: walk the sweep's stamped sub. *)
-  let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
+  let _, sub = Vsa.stamp_envs_of_sol ~synth ~sol sub in
   let kind_of blk d =
     let open Base.Option in
     Base.Option.bind
       (Vsa.Test_seam.mem_addr_of (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
-          (Vsa.denote_exp_at
+          (Vsa.denote_exp_at ~synth
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))
     >>= fun ws ->

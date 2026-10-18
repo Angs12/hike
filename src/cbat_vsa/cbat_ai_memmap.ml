@@ -258,7 +258,7 @@ module IT = Interval_tree.Make_binable(Key)
    another coordinate line would match a query at the same point.  Every
    query filters by line; every removal removes only same-line cells. *)
 let same_line (a : Key.t) (b : Key.t) : bool =
-  Hike_origin.equal (Key.origin a) (Key.origin b)
+  Option.equal Hike_origin.equal (Key.origin a) (Key.origin b)
 
 let it_intersections (m : 'a IT.t) (k : Key.t) : (Key.t * 'a) Sequence.t =
   IT.intersections m k |> Sequence.filter ~f:(fun (k', _) -> same_line k k')
@@ -302,11 +302,11 @@ let coalesce (it : itree) : itree =
       else match pending with
         | None -> (acc, Some (k, v))
         | Some (pk, pv)
-          when Hike_origin.equal (Key.origin k) (Key.origin pk)
+          when Option.equal Hike_origin.equal (Key.origin k) (Key.origin pk)
                && Key.equal (Key.lower k) (Key.lower pk) ->
             (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
         | Some (pk, pv)
-          when Hike_origin.equal (Key.origin k) (Key.origin pk)
+          when Option.equal Hike_origin.equal (Key.origin k) (Key.origin pk)
                && Val.equal pv v
                (* Only a dense or congruently-strided union claims exactly
                   the two cells' bytes; a mixed-step union would demote to
@@ -415,7 +415,7 @@ let call_keep (m : t) ~(keep_lo : Cbat_word.t)
     let stack_arg_pts = Option.all (List.map stack_args ~f:(fun (lo, hi) ->
         Option.map2 (Key.of_word lo) (Key.of_word hi)
           ~f:(fun lo hi ->
-            { Key.origin = Hike_origin.Stack; lo; hi; step = 1 }))) in
+            { Key.origin = Some Hike_origin.Stack; lo; hi; step = 1 }))) in
     let keep_lo_pt = Key.of_word keep_lo in
     match keep_lo_pt, stack_arg_pts with
     | Some keep_lo_pt, Some stack_arg_pts ->
@@ -423,7 +423,7 @@ let call_keep (m : t) ~(keep_lo : Cbat_word.t)
         List.exists stack_arg_pts ~f:(Key.overlap k) in
       let keeps (k : Key.t) : bool =
         let o = Key.origin k in
-        (not clear_frame) && Hike_origin.names_stack_line o
+        (not clear_frame) && Option.exists o ~f:Hike_origin.names_stack_line
         && (not (is_stack_arg k)) && not (Key.lt (Key.lower k) keep_lo_pt)
       in
       let kept =
@@ -443,7 +443,7 @@ let is_bottom (m : t) : bool =
 (* Whether a stored cell's key intersects the byte range [lo, hi]
    (inclusive addresses).  Unkeyable bounds answer "yes" — the caller
    keeps its abstract read. *)
-let has_cell_in (m : t) ~(origin : Hike_origin.t) ~(lo : Cbat_word.t)
+let has_cell_in (m : t) ~(origin : Hike_origin.t option) ~(lo : Cbat_word.t)
     ~(hi : Cbat_word.t) : bool =
   match m.itree with
   | None -> false

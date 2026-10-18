@@ -37,7 +37,7 @@ val frame_escaped : t -> bool
 val escape_frame : t -> t
 
 (* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
-val gc : t -> keep:Core.Int.Set.t -> t
+val gc : synth:Hike_synth.table -> t -> keep:Core.Int.Set.t -> t
 
 val selective_widen_extrapolate : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> steps:int -> t -> t -> t
 

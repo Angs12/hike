@@ -29,6 +29,7 @@ val equal : t -> t -> bool
     assumed. *)
 val of_solved :
   abi:Hike_abi.t ->
+  synth:Hike_synth.table ->
   callee:(Tid.t -> t option) ->
   slot:(int64 -> t option) ->
   lookup:(int64 -> Tid.t option) ->

@@ -63,12 +63,87 @@ type use_kinds = {
   retype : program term -> program term;
 }
 
-let use_kinds (subs : sub term list) : use_kinds =
+(* The fixpoint on a fixture program: sign, SSA, then [ptr_fixpoint]. *)
+let analyse ~synth ?pks ?uks (subs : sub term list) =
   let target = x86 () in
-  let facts, stamped, _ = fixture_facts subs in
+  let facts, stamped, _ = fixture_facts ~synth subs in
   let prog =
-    Types.sign_program ~target (Program.create ~subs:stamped ())
-    |> Hike.Ssa.ssa_program ~target
+    Types.sign_program ~synth:facts.Hike.Kb.synth ~target
+      (Program.create ~subs:stamped ())
+    |> Hike.Ssa.ssa_program ~synth:facts.Hike.Kb.synth ~target
+  in
+  let sub_of = Types.sub_of_program prog in
+  (facts, prog, Types.ptr_fixpoint ?pks ?uks ~facts ~sub_of prog)
+
+let facts_equal (a : Types.ptr_facts) (b : Types.ptr_facts) =
+  Core.Set.equal a.def_tids b.def_tids
+  && Core.Map.equal Stdlib.( = ) a.def_storages b.def_storages
+  && Core.Set.equal a.vars b.vars
+
+let var_names (s : Var.Set.t) : Core.String.Set.t =
+  Core.String.Set.of_list (Base.List.map (Core.Set.to_list s) ~f:Var.to_string)
+
+(* A sub's pointer versions by name, inferred or proved by callers. *)
+let ptr_names (prog : program term) (pks, inferred) (name : string) =
+  let sub =
+    Term.enum sub_t prog
+    |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
+    |> Base.Option.value_exn
+  in
+  var_names (Types.ptr_vars_of ~pks ~inferred sub)
+
+(* Deterministic multi-sub programs: each sub computes and stores through
+   sums of its two parameter lanes, and calls other subs (back edges
+   included) with a stack pointer or its own lanes. *)
+let gen_program (seed : int) (n : int) : sub term list =
+  let rng = Random.State.make [| seed |] in
+  let rdi = int_param 0 and rsi = int_param 1 and rax = int_ret 0 in
+  let m = memv "gen_m" in
+  let k x = Bil.Int (Cbat_word.to_word (w64 x)) in
+  let pick l = List.nth l (Random.State.int rng (List.length l)) in
+  let name i = "gen" ^ string_of_int i in
+  let defs () =
+    let value =
+      pick
+        [ Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Var rsi);
+          Bil.BinOp (Bil.PLUS, Bil.Var rdi, k 8);
+          Bil.BinOp (Bil.PLUS, Bil.Var sp, k 16);
+          Bil.Var sp; Bil.Var rsi; Bil.Var rdi; k 4096 ]
+    in
+    let dst = pick [ rax; rsi; rdi ] in
+    let store =
+      if Random.State.bool rng then
+        [ Def.create m
+            (Bil.Store (Bil.Var m, Bil.Var (pick [ rax; rdi; rsi ]), k 1,
+                        LittleEndian, `r64)) ]
+      else []
+    in
+    Def.create dst value :: store
+  in
+  List.init n (fun i ->
+      let calls = Random.State.int rng 3 in
+      let call callee t =
+        Jmp.create
+          (Call
+             (Call.create ~return:(Label.direct t)
+                ~target:(Label.direct (Tid.for_name (name callee))) ()))
+      in
+      let nodes =
+        List.init (calls + 1) (fun b ->
+            if b < calls then
+              (defs (), [ (b + 1, call (Random.State.int rng n)) ])
+            else (defs (), [ (b + 1, mk_goto) ]))
+        @ [ ([], [ (0, mk_ret) ]) ]
+      in
+      fst (sub_of ~tid:(Tid.for_name (name i)) (name i) nodes))
+
+let use_kinds ~synth (subs : sub term list) : use_kinds =
+  let target = x86 () in
+  let facts, stamped, _ = fixture_facts ~synth subs in
+  let prog =
+    Types.sign_program ~synth:facts.Hike.Kb.synth ~target
+      (Program.create ~subs:stamped ())
+    |> Hike.Ssa.ssa_program ~synth:facts.Hike.Kb.synth ~target
   in
   let pks, inferred =
     Types.ptr_kinds ~facts ~sub_of:(Types.sub_of_program prog) prog
@@ -140,7 +215,7 @@ let tests : unit Alcotest.test list =
     pin "TYPES-05" "tag_lane: a plain [In] register lane is not a pointer"
       (fun () ->
         let rdi = int_param 0 in
-        let a' = Types.tag_lane (Arg.create ~intent:In rdi (Bil.Var rdi)) in
+        let a' = Types.tag_lane ~synth:Hike.Synth.empty (Arg.create ~intent:In rdi (Bil.Var rdi)) in
         check "TYPES-05"
           (arg_name a' = Var.name rdi && Arg.intent a' = Some In && not (is_ptr a')));
 
@@ -162,20 +237,23 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_f2") (Bil.Var (callee_saved 0));
               Def.create (v64 "t14_f3") (Bil.Var thread_pointer) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
+        let _, args = Types.compute_sub_sig ~synth:Hike.Synth.empty ~free_vars:(Types.free_regs_of_sub ~synth:Hike.Synth.empty ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-12" (args = []));
 
     pin "TYPES-13"
-      "compute_sub_sig: intrinsic-target and promoted names are not argument \
+      "compute_sub_sig: intrinsic-target and registered promoted variables are not argument \
        lanes"
       (fun () ->
+        let slot = v64 "registered_slot" and arg = v64 "registered_arg" in
+        let synth = Hike.Synth.add
+            (Hike.Synth.add Hike.Synth.empty slot (K_slot 0)) arg (K_argument 2) in
         let sub =
           plain_sub "t14_prom"
-            [ Def.create (v64 "t14_p1") (Bil.Var (v64 "hike_slot0"));
-              Def.create (v64 "t14_p2") (Bil.Var (v64 "hike_arg2"));
+            [ Def.create (v64 "t14_p1") (Bil.Var slot);
+              Def.create (v64 "t14_p2") (Bil.Var arg);
               Def.create (v64 "t14_p3") (Bil.Var (v64 "intrinsic:foo")) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
+        let _, args = Types.compute_sub_sig ~synth ~free_vars:(Types.free_regs_of_sub ~synth ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-13" (args = []));
 
 
@@ -190,7 +268,8 @@ let tests : unit Alcotest.test list =
           { regions = []; window_param = true; runtime_residue = false }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
+        let synth = Hike.Synth.add_window Hike.Synth.empty ~addr_bits:64 in
+        let rets, args = Types.compute_sub_sig ~synth ~free_vars:(Types.free_regs_of_sub ~synth ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-16"
           (arg_names rets
            = Base.List.map (Abi.of_target (x86 ())).Abi.return_regs ~f:Var.name
@@ -212,7 +291,7 @@ let tests : unit Alcotest.test list =
             (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) sub) (x86 ()) sub in
+        let rets, args = Types.compute_sub_sig ~synth:Hike.Synth.empty ~free_vars:(Types.free_regs_of_sub ~synth:Hike.Synth.empty ~target:(x86 ()) sub) (x86 ()) sub in
         check "TYPES-17"
           (arg_names args = [ Var.name (int_param 0) ]
           && for_all_in args
@@ -224,7 +303,7 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: an internal sub carries exactly the ABI's return registers as Out lanes, no body scan"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
+        let rets, _ = Types.compute_sub_sig ~synth:Hike.Synth.empty ~free_vars:(Types.free_regs_of_sub ~synth:Hike.Synth.empty ~target:(x86 ()) (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
         let target_abi = Abi.of_target (x86 ()) in
         check "TYPES-18 the target ABI's carriers, in its order"
           (Base.List.map rets ~f:Arg.lhs
@@ -249,7 +328,7 @@ let tests : unit Alcotest.test list =
                         (Call.create ~target:(Label.direct target) ()))) ] ]
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog' = Types.sign_program ~target:(x86 ()) prog in
+        let prog' = Types.sign_program ~synth:Hike.Synth.empty ~target:(x86 ()) prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         check "TYPES-22"
           (arg_names (Model.sig_args sub')
@@ -262,7 +341,7 @@ let tests : unit Alcotest.test list =
           sub_of "t14_terminal_return" [ [], [ (0, mk_ret) ] ]
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog' = Types.sign_program ~target:(x86 ()) prog in
+        let prog' = Types.sign_program ~synth:Hike.Synth.empty ~target:(x86 ()) prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         let target_abi = Abi.of_target (x86 ()) in
         check "TYPES-23"
@@ -282,7 +361,7 @@ let tests : unit Alcotest.test list =
                      Bil.Var rbp,
                      Bil.Int (Cbat_word.to_word (w64 8)) )) ]
         in
-        let facts, stamped = fixture_facts_sub sub in
+        let facts, stamped = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let pf = Types.ptr_defs ~facts stamped in
         let rax_def =
           Term.enum blk_t stamped
@@ -311,7 +390,7 @@ let tests : unit Alcotest.test list =
               Def.create rdi1 (Bil.Int (Cbat_word.to_word (w64 48)));
               Def.create rbx1 (Bil.BinOp (Bil.PLUS, Bil.Var rdi1, eight)) ]
         in
-        let facts, stamped = fixture_facts_sub sub in
+        let facts, stamped = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let pf =
           Types.ptr_defs ~extra:(Var.Set.singleton rdi) ~facts stamped
         in
@@ -339,7 +418,7 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let facts, stamped, _ = fixture_facts [ caller; callee ] in
+        let facts, stamped, _ = fixture_facts ~synth:Hike.Synth.empty [ caller; callee ] in
         let prog = Program.create ~subs:stamped () in
         let sub_of_m = Types.sub_of_program prog in
         let pks, _ = Types.ptr_kinds ~facts ~sub_of:sub_of_m prog in
@@ -383,7 +462,7 @@ let tests : unit Alcotest.test list =
               [ (2, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let signed = Types.sign_sub ~target sub in
+        let signed = Types.sign_sub ~synth:Hike.Synth.empty ~target sub in
         let inputs = Base.List.map (Model.sig_args signed) ~f:Arg.lhs in
         let has v = Base.List.exists inputs ~f:(Var.same v) in
         check "TYPES-25 the parameter and the lane unwritten on one path are inputs"
@@ -393,7 +472,7 @@ let tests : unit Alcotest.test list =
         check "TYPES-25 every input beyond the parameter is an ABI return register"
           (Base.List.for_all inputs ~f:(fun v ->
                Var.same v rdi || Abi.is_return_reg (Abi.of_target target) v));
-        let prog = Hike.Ssa.ssa_program ~target
+        let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target
             (Program.create ~subs:[ signed ] ()) in
         let ssa = Term.first sub_t prog |> Base.Option.value_exn in
         let join = Term.find blk_t ssa tids.(2) |> Base.Option.value_exn in
@@ -405,7 +484,7 @@ let tests : unit Alcotest.test list =
                Tid.equal src tids.(0) && Exp.equal e (Bil.Var rdx)));
         let overwritten = plain_sub "overwrite_return"
             [ Def.create rdx (Bil.Int (Cbat_word.to_word (w64 7))) ]
-            |> Types.sign_sub ~target in
+            |> Types.sign_sub ~synth:Hike.Synth.empty ~target in
         check "TYPES-25 overwritten lane"
           (not (Model.sig_args overwritten |> Base.List.exists ~f:(fun a ->
                Var.same (Arg.lhs a) rdx)));
@@ -415,7 +494,7 @@ let tests : unit Alcotest.test list =
                   (Call.create ~return:(Direct t)
                      ~target:(Direct (Term.tid untouched)) ()))) ];
               [], [ (0, mk_ret) ] ] in
-        let caller = Types.sign_sub ~target caller in
+        let caller = Types.sign_sub ~synth:Hike.Synth.empty ~target caller in
         check "TYPES-25 call chains retain incoming carriers"
           (Model.sig_args caller |> Base.List.exists ~f:(fun a ->
                Var.same (Arg.lhs a) rax)));
@@ -436,7 +515,7 @@ let tests : unit Alcotest.test list =
                             ~target:(Direct self_tid) ()))) ]);
               ([], [ (0, mk_ret) ]) ]
         in
-        let prog = Types.sign_program ~target:(x86 ()) (Program.create ~subs:[ sub ] ()) in
+        let prog = Types.sign_program ~synth:Hike.Synth.empty ~target:(x86 ()) (Program.create ~subs:[ sub ] ()) in
         let stamped = Term.enum sub_t prog |> Seq.hd_exn in
         (* the same self-call shape reading RBX first: not a trampoline *)
         let reader_tid = Tid.for_name "trampoline_reader" in
@@ -453,7 +532,7 @@ let tests : unit Alcotest.test list =
                            ~target:(Direct reader_tid) ()))) ];
               ([], [ (0, mk_ret) ]) ]
         in
-        let prog2 = Types.sign_program ~target:(x86 ()) (Program.create ~subs:[ reader ] ()) in
+        let prog2 = Types.sign_program ~synth:Hike.Synth.empty ~target:(x86 ()) (Program.create ~subs:[ reader ] ()) in
         let stamped2 = Term.enum sub_t prog2 |> Seq.hd_exn in
         check "TYPES-24"
           (Model.is_plt_trampoline_sub stamped
@@ -465,7 +544,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let target = x86 () in
         let a = Abi.of_target target in
-        let signed = Types.sign_sub ~target (Sub.create ~name:"types26_ext" ()) in
+        let signed = Types.sign_sub ~synth:Hike.Synth.empty ~target (Sub.create ~name:"types26_ext" ()) in
         check "TYPES-26 args are exactly the ABI's parameter registers, In"
           (Base.List.equal Var.same
              (Base.List.map (Model.sig_args signed) ~f:Arg.lhs)
@@ -507,13 +586,13 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let facts, stamped, _ = fixture_facts [ caller; callee ] in
+        let facts, stamped, _ = fixture_facts ~synth:Hike.Synth.empty [ caller; callee ] in
         let prog = Program.create ~subs:stamped () in
-        let prog = Types.sign_program ~target prog in
+        let prog = Types.sign_program ~synth:Hike.Synth.empty ~target prog in
         let pks, inferred =
           Types.ptr_kinds ~facts ~sub_of:(Types.sub_of_program prog) prog
         in
-        let callee =
+              let callee =
           Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
           |> Base.Option.value_exn
         in
@@ -552,15 +631,15 @@ let tests : unit Alcotest.test list =
                             LittleEndian, `r64));
               Def.create rdx (Bil.Load (Bil.Var m, Bil.Var rcx, LittleEndian, `r64)) ]
         in
-        let kinds = use_kinds [ sub ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         check "TYPES-28 the store address is a pointer" (kinds.is_ptr_def "types28" rax);
         check "TYPES-28 the load address is a pointer" (kinds.is_ptr_def "types28" rcx);
         check "TYPES-28 the loaded value is an integer"
           (not (kinds.is_ptr_def "types28" rdx)));
 
     pin "TYPES-29"
-      "a base operand of a pointer-preserving address def is a pointer, and \
-       the access is a GEP"
+      "an unproven operand of an address def is no base: it stays an \
+       integer and the access goes through inttoptr"
       (fun () ->
         let rdi = int_param 0 and rax = int_ret 0 in
         let m = memv "types29_m" in
@@ -573,14 +652,13 @@ let tests : unit Alcotest.test list =
                             Bil.Int (Cbat_word.to_word (w64 1)),
                             LittleEndian, `r64)) ]
         in
-        let kinds = use_kinds [ sub ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         check "TYPES-29 the sum is a pointer" (kinds.is_ptr_def "types29" rax);
-        check "TYPES-29 its base, the entry lane, is a pointer"
-          (kinds.is_ptr_lane "types29" rdi);
-        let ir = emit_ir ~types:kinds.retype [ sub ] in
-        check "TYPES-29 the store is addressed by a GEP, not inttoptr"
-          (contains_substring ir "getelementptr"
-           && not (contains_substring ir "inttoptr")));
+        check "TYPES-29 the unproven entry lane stays an integer"
+          (not (kinds.is_ptr_lane "types29" rdi));
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:kinds.retype [ sub ] in
+        check "TYPES-29 the store is addressed through inttoptr"
+          (contains_substring ir "inttoptr"));
 
     pin "TYPES-30"
       "a callee reached only indirectly takes a pointer lane for a parameter \
@@ -597,7 +675,7 @@ let tests : unit Alcotest.test list =
               [ (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let kinds = use_kinds [ callee ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ callee ] in
         check "TYPES-30 the parameter lane is a pointer"
           (kinds.is_ptr_lane "types30_redirect" rdi));
 
@@ -615,7 +693,7 @@ let tests : unit Alcotest.test list =
                             Bil.Int (Cbat_word.to_word (w64 1)),
                             LittleEndian, `r64)) ]
         in
-        let kinds = use_kinds [ sub ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         check "TYPES-31 the sum is a pointer (it is the address)"
           (kinds.is_ptr_def "types31" rax);
         check "TYPES-31 neither addend is"
@@ -639,7 +717,7 @@ let tests : unit Alcotest.test list =
               Def.create rax (Bil.Int (Cbat_word.to_word (w64 7)));
               Def.create eax (Bil.Cast (Bil.LOW, 32, Bil.Var rax)) ]
         in
-        let kinds = use_kinds [ sub ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         let defs_of reg =
           kinds.defs "types32" |> Base.List.filter ~f:(fun d -> Var.same (Var.base (Def.lhs d)) reg)
         in
@@ -677,20 +755,20 @@ let tests : unit Alcotest.test list =
               [ (1, fun t -> mk_jmp_to t (Bil.Var c)); (2, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let sub = rewrite_one sub in
-        let kinds = use_kinds [ sub ] in
+        let sub = rewrite_one ~synth:Hike.Synth.empty sub in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         check "TYPES-33 the address is a pointer" (kinds.is_ptr_def "types33" a);
         check "TYPES-33 the loop index is an integer"
           (not (kinds.is_ptr_def "types33" i));
-        let ir = emit_ir ~types:kinds.retype [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:kinds.retype [ sub ] in
         check "TYPES-33 the store is a GEP off the stack base, no cast"
           (contains_substring ir "getelementptr i8, ptr %entry1, i64 %"
            && (not (contains_substring ir "= inttoptr"))
            && not (contains_substring ir "ptrtoint")));
 
     pin "TYPES-34"
-      "heap base + index: the visible bounded index stays an integer and the \
-       unseen operand is the base"
+      "loaded value + index: no operand has base evidence, so both stay \
+       integers and the access goes through inttoptr"
       (fun () ->
         let b = int_ret 1 and k = callee_saved 0 and a = int_ret 0 in
         let src = int_param 1 in
@@ -709,16 +787,20 @@ let tests : unit Alcotest.test list =
               [ (4, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let kinds = use_kinds [ sub ] in
-        check "TYPES-34 the base is a pointer" (kinds.is_ptr_def "types34" b);
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
+        check "TYPES-34 the loaded value is an integer"
+          (not (kinds.is_ptr_def "types34" b));
         check "TYPES-34 the index is an integer"
-          (not (kinds.is_ptr_def "types34" k)));
+          (not (kinds.is_ptr_def "types34" k));
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:kinds.retype [ sub ] in
+        check "TYPES-34 the store is addressed through inttoptr"
+          (contains_substring ir "inttoptr"));
 
     pin "TYPES-35"
       "rodata + index: the module address is the base (a GEP off its \
        global) and the index stays an integer"
       (fun () ->
-        let g = Hike_synth.module_addr ~addr_bits:64 0x4010L in
+        let synth, g = Hike_synth.mint_module_addr ~addr_bits:64 0x4010L Hike_synth.empty in
         let b = int_param 2 and k = callee_saved 0 and a = int_ret 0 in
         let m = memv "types35_m" in
         let c = Var.create ~is_virtual:false ~fresh:false "types35_c" (Type.Imm 1) in
@@ -745,14 +827,252 @@ let tests : unit Alcotest.test list =
         Hike_origin.Regions.install [ (Hike_section.Rodata, 0x4000L, 0x401fL) ];
         Fun.protect ~finally:(fun () -> Hike_origin.Regions.install [])
           (fun () ->
-        let kinds = use_kinds [ sub ] in
+        let kinds = use_kinds ~synth [ sub ] in
         check "TYPES-35 the index is an integer"
           (not (kinds.is_ptr_def "types35" k));
-        let _, stamped, _ = fixture_facts [ sub ] in
-        let ir = emit_ir_spec ~types:kinds.retype spec stamped in
+        let _, stamped, _ = fixture_facts ~synth [ sub ] in
+        let ir = emit_ir_spec ~synth ~types:kinds.retype spec stamped in
         check "TYPES-35 the address is a GEP off the module base, no inttoptr"
           (contains_substring ir "getelementptr i8, ptr getelementptr inbounds (i8, ptr @sec_comp_7"
            && not (contains_substring ir "= inttoptr"))));
+
+    (* The call-graph worklist reads only the edges of subs whose pointer
+       versions changed; a chain exercises seeds flowing both ways. *)
+    pin "TYPES-37"
+      "a pointer passed down a call chain types every callee's parameter \
+       lane, as the restart-until-stable inference did"
+      (fun () ->
+        let rdi = int_param 0 in
+        let m = memv "types37_m" in
+        let n x = Bil.Int (Cbat_word.to_word (w64 x)) in
+        let call_to callee t =
+          Jmp.create
+            (Call
+               (Call.create ~return:(Label.direct t)
+                  ~target:(Label.direct (Term.tid callee)) ()))
+        in
+        let leaf, _ =
+          sub_of "types37_leaf"
+            [ [ Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var rdi, n 1, LittleEndian, `r64)) ],
+              [ (1, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let mid, _ =
+          sub_of "types37_mid"
+            [ [ Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rdi, n 8)) ],
+              [ (1, fun t -> call_to leaf t) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let top, _ =
+          sub_of "types37_top"
+            [ [ Def.create rdi (Bil.Var sp) ],
+              [ (1, fun t -> call_to mid t) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ top; mid; leaf ] in
+        check "TYPES-37 the leaf parameter is a pointer"
+          (kinds.is_ptr_lane "types37_leaf" rdi);
+        check "TYPES-37 the middle parameter is a pointer"
+          (kinds.is_ptr_lane "types37_mid" rdi));
+
+    (* An operand with no base evidence is never the base, so a later
+       proof for its sibling cannot be pre-empted by round order. *)
+    pin "TYPES-38"
+      "x + y with y proven a pointer in a later round: y is the base, x \
+       stays an integer, whatever the round and sub order"
+      (fun () ->
+        let rdi = int_param 0 and rsi = int_param 1 and rax = int_ret 0 in
+        let m = memv "types38_m" in
+        let n x = Bil.Int (Cbat_word.to_word (w64 x)) in
+        let call_to callee t =
+          Jmp.create
+            (Call
+               (Call.create ~return:(Label.direct t)
+                  ~target:(Label.direct (Term.tid callee)) ()))
+        in
+        let f, _ =
+          sub_of "types38_f"
+            [ [ Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Var rsi));
+                Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var rax, n 1, LittleEndian, `r64)) ],
+              [ (1, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let mid, _ =
+          sub_of "types38_mid"
+            [ [], [ (1, fun t -> call_to f t) ]; [], [ (0, mk_ret) ] ]
+        in
+        let top_via callee name =
+          fst
+            (sub_of name
+               [ [ Def.create rsi (Bil.Var sp) ],
+                 [ (1, fun t -> call_to callee t) ];
+                 [], [ (0, mk_ret) ] ])
+        in
+        let direct = top_via f "types38_top_f" in
+        let chain = top_via mid "types38_top_mid" in
+        let observe subs =
+          let k = use_kinds ~synth:Hike.Synth.empty subs in
+          (k.is_ptr_lane "types38_f" rsi, k.is_ptr_lane "types38_f" rdi)
+        in
+        let expect = (true, false) in
+        check "TYPES-38 proof in the first round"
+          (observe [ direct; f ] = expect);
+        check "TYPES-38 proof arriving a round later"
+          (observe [ chain; mid; f ] = expect);
+        check "TYPES-38 the same with the callee solved first"
+          (observe [ f; mid; chain ] = expect));
+
+    (* The inference is one monotone fixpoint: whatever order the subs
+       and the proofs arrive in, the answer is the fresh solve of the
+       same rules at the final seeds. *)
+    pin "TYPES-39"
+      "resumed solves equal a fresh solve at the final seeds, in any sub \
+       order"
+      (fun () ->
+        for seed = 0 to 29 do
+          let n = 2 + (seed mod 4) in
+          let subs = gen_program seed n in
+          let facts, prog, (pks, uks, inferred, _) = analyse ~synth:Hike.Synth.empty subs in
+          let fresh_ok =
+            Term.enum sub_t prog
+            |> Seq.for_all ~f:(fun sub ->
+                   let get m =
+                     Core.Map.find m (Term.tid sub)
+                     |> Base.Option.value ~default:Var.Set.empty
+                   in
+                   facts_equal
+                     (Types.ptr_defs ~extra:(get pks) ~used:(get uks) ~facts
+                        sub)
+                     (Core.Map.find_exn inferred (Term.tid sub)))
+          in
+          check (Printf.sprintf "TYPES-39 fresh solve agrees (%d)" seed)
+            fresh_ok;
+          let names p pks inferred =
+            Base.List.map (Term.enum sub_t p |> Seq.to_list) ~f:(fun s ->
+                (Sub.name s, ptr_names p (pks, inferred) (Sub.name s)))
+            |> Base.List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+          in
+          let base = names prog pks inferred in
+          let same_in_order label order =
+            let _, p, (pks, _, inferred, _) = analyse ~synth:Hike.Synth.empty (order subs) in
+            check (Printf.sprintf "TYPES-39 %s order agrees (%d)" label seed)
+              (Base.List.equal
+                 (fun (a, x) (b, y) ->
+                   String.equal a b && Core.Set.equal x y)
+                 base (names p pks inferred))
+          in
+          same_in_order "reversed" List.rev;
+          same_in_order "rotated" (fun l ->
+              match l with [] -> [] | h :: t -> t @ [ h ])
+        done);
+
+    (* Per-sub solver: growing seeds on one solver agree with fresh ones,
+       and a repeated solve is a no-op. *)
+    pin "TYPES-40"
+      "a solver resumed over growing seeds equals fresh solvers; re-solving \
+       and re-running the fixpoint from its result change nothing"
+      (fun () ->
+        let rdi = int_param 0 and rsi = int_param 1 in
+        for seed = 0 to 29 do
+          let subs = gen_program (100 + seed) (2 + (seed mod 4)) in
+          let facts, prog, (pks, uks, inferred, _) = analyse ~synth:Hike.Synth.empty subs in
+          Term.enum sub_t prog
+          |> Seq.iter ~f:(fun sub ->
+                 let seeds =
+                   [ Var.Set.empty; Var.Set.singleton rdi;
+                     Var.Set.of_list [ rdi; rsi ] ]
+                 in
+                 let resumed = Types.ptr_solver ~facts sub in
+                 let used = Var.Set.empty in
+                 Base.List.iter seeds ~f:(fun extra ->
+                     let r = resumed ~extra ~used in
+                     check "TYPES-40 resumed equals fresh"
+                       (facts_equal r
+                          (Types.ptr_defs ~extra ~used ~facts sub));
+                     check "TYPES-40 re-solving is a no-op"
+                       (facts_equal r (resumed ~extra ~used))));
+          let pks', uks', inferred', solves' =
+            Types.ptr_fixpoint ~pks ~uks ~facts
+              ~sub_of:(Types.sub_of_program prog) prog
+          in
+          check "TYPES-40 the fixpoint is stable under its own seeds"
+            (Core.Map.equal Var.Set.equal pks pks'
+             && Core.Map.equal Var.Set.equal uks uks'
+             && Core.Map.equal facts_equal inferred inferred');
+          check "TYPES-40 and takes a single round"
+            (solves' = Seq.length (Term.enum sub_t prog))
+        done);
+
+    (* Evidence only grows the pointer set. *)
+    pin "TYPES-41"
+      "more evidence (seeds, a proving caller, a module base) never shrinks \
+       the pointer set"
+      (fun () ->
+        let rdi = int_param 0 and rsi = int_param 1 in
+        for seed = 0 to 29 do
+          let subs = gen_program (200 + seed) (2 + (seed mod 4)) in
+          let facts, prog, _ = analyse ~synth:Hike.Synth.empty subs in
+          Term.enum sub_t prog
+          |> Seq.iter ~f:(fun sub ->
+                 let solve extra = Types.ptr_defs ~extra ~facts sub in
+                 let a = solve Var.Set.empty
+                 and b = solve (Var.Set.singleton rdi)
+                 and c = solve (Var.Set.of_list [ rdi; rsi ]) in
+                 check "TYPES-41 seeds grow the vars"
+                   (Core.Set.is_subset a.vars ~of_:b.vars
+                    && Core.Set.is_subset b.vars ~of_:c.vars);
+                 check "TYPES-41 seeds grow the pointer defs"
+                   (Core.Set.is_subset a.def_tids ~of_:b.def_tids
+                    && Core.Set.is_subset b.def_tids ~of_:c.def_tids));
+          (* a caller proving gen0's lanes *)
+          let caller =
+            fst
+              (sub_of "gen_caller"
+                 [ [ Def.create rdi (Bil.Var sp); Def.create rsi (Bil.Var sp) ],
+                   [ (1,
+                      fun t ->
+                        Jmp.create
+                          (Call
+                             (Call.create ~return:(Label.direct t)
+                                ~target:(Label.direct (Tid.for_name "gen0"))
+                                ()))) ];
+                   [], [ (0, mk_ret) ] ])
+          in
+          let _, p1, (pks1, _, inf1, _) = analyse ~synth:Hike.Synth.empty subs in
+          let _, p2, (pks2, _, inf2, _) = analyse ~synth:Hike.Synth.empty (caller :: subs) in
+          Term.enum sub_t p1
+          |> Seq.iter ~f:(fun s ->
+                 let nm = Sub.name s in
+                 check "TYPES-41 a proving caller grows every sub"
+                   (Core.Set.is_subset
+                      (ptr_names p1 (pks1, inf1) nm)
+                      ~of_:(ptr_names p2 (pks2, inf2) nm)))
+        done;
+        (* a module base against an unproven operand: [x + idx] only gains
+           pointers when [x] is a module address *)
+        let synth, g = Hike_synth.mint_module_addr ~addr_bits:64 0x4010L Hike_synth.empty in
+        let a = int_ret 0 and idx = int_param 3 and p = int_param 4 in
+        let m = memv "types41_m" in
+        let names x =
+          let sub =
+            straight_sub "types41"
+              [ Def.create a (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Var idx));
+                Def.create m
+                  (Bil.Store (Bil.Var m, Bil.Var a,
+                              Bil.Int (Cbat_word.to_word (w64 1)),
+                              LittleEndian, `r64)) ]
+          in
+          let _, pr, (pks, _, inf, _) = analyse ~synth [ sub ] in
+          ptr_names pr (pks, inf) "types41"
+        in
+        let without = names p and with_base = names g in
+        check "TYPES-41 an unproven operand is not a base"
+          (not (Core.Set.mem without (Var.to_string p)));
+        check "TYPES-41 a module base is a base, and the sum stays a pointer"
+          (Core.Set.mem with_base (Var.to_string g)
+           && Core.Set.length with_base >= Core.Set.length without));
   ]
 
 let () = run "hike_types" tests

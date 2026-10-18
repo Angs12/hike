@@ -31,7 +31,7 @@ type fset = Exact.t
    exact offset piece union [offs], one origin per value.  A value is
    ONE of those (the common case — no list cell), or [Many] of the
    canonical multi-piece list ([Many] never nests: [canonical]
-   flattens; a mixed-origin pool materialises to [Abs]).
+   flattens; a mixed-origin pool materialises to a plain value).
    Extrema answer from the offsets; shape-losing ops degrade to that
    plain hull; ops keeping unknown base bits answer top — the base is
    a tag except its certified low bits. *)
@@ -130,7 +130,7 @@ let checked_add (a : int64) (b : int64) : int64 option = checked_add3 a 0L b
    addresses, whose anchor records provenance, not an unknown base. *)
 let absolute_line (o : Origin.t) : bool =
   match o with
-  | Origin.Abs | Origin.Rip _ -> true
+  | Origin.Rip _ -> true
   | Origin.Stack | Origin.Fs -> false
 
 (* The exact hull [base + offs_lo, base + offs_hi]; a missing
@@ -234,7 +234,6 @@ and canonical_pool (ps : t list) : t =
      pool). *)
   let abs_rev, rel_pool =
     List.fold ps ~init:([], Origin_map.empty) ~f:(fun (abs, rels) -> function
-        | Rel (Origin.Abs, x) -> x :: abs, rels
         | Rel (o, x) ->
           abs,
           Map.update rels o ~f:(function
@@ -494,7 +493,7 @@ let rec cardinality (t : t) : word =
   | Exact s -> Exact.cardinality s
   (* An absolute-origin value's offsets ARE its absolute words: the
      base is the fixed 0, no segment multiplies. *)
-  | Rel ((Origin.Abs | Origin.Rip _), offs) -> P.cardinality offs
+  | Rel (Origin.Rip _, offs) -> P.cardinality offs
   | Rel (Origin.Stack, offs) -> stack_cardinality offs
   | Rel (Origin.Fs, offs) ->
     if P.is_bottom offs then Cbat_word.zero 65
@@ -905,21 +904,22 @@ let stack_leaves (t : t) : t list =
   List.filter (leaves t) ~f:(function Rel (o, _) -> Origin.names_stack_line o | _ -> false)
 
 (* The memory-key coordinate line.  A module address names the same
-   bytes as its absolute word, so [Rip] keys on the [Abs] line.  The
-   origin still rides the value; only the key line is coarsened. *)
-let key_line (o : Origin.t) : Origin.t =
+   bytes as its absolute word, so [Rip] keys on the absolute line
+   ([None]).  The origin still rides the value; only the key line is
+   coarsened. *)
+let key_line (o : Origin.t) : Origin.t option =
   match o with
-  | Origin.Stack | Origin.Fs -> o
-  | Origin.Rip _ | Origin.Abs -> Origin.Abs
+  | Origin.Stack | Origin.Fs -> Some o
+  | Origin.Rip _ -> None
 
 (* Memory keys retain the carried origin's line; plain values stay
    absolute.  A mixed value names each leaf's line: its addresses are
    the union of its leaves'. *)
-let rec address_groups (t : t) : (Origin.t * P.t) list =
+let rec address_groups (t : t) : (Origin.t option * P.t) list =
   match t with
   | Rel (o, offs) -> [ (key_line o, offs) ]
-  | Clp ps -> [ (Origin.Abs, ps) ]
-  | Exact s -> [ (Origin.Abs, pieces_of_finset s) ]
+  | Clp ps -> [ (None, ps) ]
+  | Exact s -> [ (None, pieces_of_finset s) ]
   | Many ps -> List.concat_map ps ~f:address_groups
 
 (* A finite progression split at its value midpoint; a singleton has no
@@ -942,7 +942,7 @@ type address_verdict =
   [ `Keep | `Drop | `Split | `Parts of (clp * [ `Keep | `Drop ]) list ]
 
 let filter_addresses (t : t)
-    ~(decide : Origin.t -> clp -> address_verdict) : t =
+    ~(decide : Origin.t option -> clp -> address_verdict) : t =
   (* Visit the upper half first so consing preserves ascending order. *)
   let rec bisect line acc (p : clp) =
     match decide line p with
@@ -969,11 +969,11 @@ let filter_addresses (t : t)
   | Rel (o, ps) ->
     Option.value_map (filter (key_line o) ps) ~default:t ~f:(fun ps -> Rel (o, ps))
   | Clp ps ->
-    Option.value_map (filter Origin.Abs ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
+    Option.value_map (filter None ps) ~default:t ~f:(fun ps -> canonical [ Clp ps ])
   | Exact s ->
     let kept =
       Exact.filter s ~f:(fun w ->
-          match decide Origin.Abs (Clp.singleton w) with
+          match decide None (Clp.singleton w) with
           | `Drop -> false
           | `Keep | `Split -> true
           | `Parts parts ->
@@ -1033,41 +1033,39 @@ let stride (t : t) : int =
 let origin_is_relative x = not (absolute_line x)
 
 (* THE per-op type table: what [op] yields when its operands meet at
-   origins [o1] and [o2] (an absolute operand is [Origin.Abs]).
+   origins [o1] and [o2] ([None] = a plain operand).
    [Wrap o] = the offsets stay relative at [o]; [Materialise] = the
    bases do not survive — both hulls, the plain op; [Top] = the op
    keeps unknown base bits: top.  THE table is the one home of "what
    type dominates"; a new origin lands by extending [Origin.t], a new
    op by one row here. *)
-let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
+let rel_table (op : binop) (o1 : Origin.t option) (o2 : Origin.t option) :
     Hike_origin.rel_row =
-  let rel x = origin_is_relative x in
-  match op with
+  let rel = function
+    | Some o when origin_is_relative o -> Some o
+    | _ -> None in
+  match op, rel o1, rel o2 with
   (* [lift2] answers a union before the table (the join keeps one leaf
      per origin); its row is the same-origin one. *)
-  | Union ->
-    if rel o1 && rel o2 && Origin.equal o1 o2 then Wrap o1 else Materialise
-  | Meet ->
-    if rel o1 && rel o2 then
-      if Origin.equal o1 o2 then Wrap o1 else Materialise
-    else if rel o1 then Wrap o1
-    else if rel o2 then Wrap o2
-    else Materialise
-  | Add | Sub ->
-    if rel o1 && rel o2 then Materialise
-    (* the base appears twice [Add] / cancels [Sub]; a relative operand
-       shifts its offsets by the absolute one *)
-    else if rel o1 then Wrap o1
-    else if rel o2 then (match op with Sub -> Top | _ -> Wrap o2)
-    else Materialise
-  | Logand | Logor | Logxor ->
-    if rel o1 && rel o2 then Top
-    else if rel o1 then Wrap o1
-    else if rel o2 then Wrap o2
-    else Materialise
-  | Mul | Div | Sdiv | Modulo | Smodulo
-  | Lshift | Rshift | Arshift | Concat ->
-    if rel o1 || rel o2 then Top else Materialise
+  | Union, Some a, Some b -> if Origin.equal a b then Wrap a else Materialise
+  | Union, _, _ -> Materialise
+  | Meet, Some a, Some b -> if Origin.equal a b then Wrap a else Materialise
+  | (Meet | Logand | Logor | Logxor), Some a, None -> Wrap a
+  | (Meet | Logand | Logor | Logxor), None, Some b -> Wrap b
+  | (Meet | Logand | Logor | Logxor | Add | Sub), None, None -> Materialise
+  | (Add | Sub), Some _, Some _ -> Materialise
+  (* the base appears twice [Add] / cancels [Sub]; a relative operand
+     shifts its offsets by the absolute one *)
+  | (Add | Sub), Some a, None -> Wrap a
+  | Add, None, Some b -> Wrap b
+  | Sub, None, Some _ -> Top
+  | (Logand | Logor | Logxor), Some _, Some _ -> Top
+  | (Mul | Div | Sdiv | Modulo | Smodulo
+    | Lshift | Rshift | Arshift | Concat), Some _, _ -> Top
+  | (Mul | Div | Sdiv | Modulo | Smodulo
+    | Lshift | Rshift | Arshift | Concat), None, Some _ -> Top
+  | (Mul | Div | Sdiv | Modulo | Smodulo
+    | Lshift | Rshift | Arshift | Concat), None, None -> Materialise
 
 (* The Top rows' width: concat's result is the concatenated width. *)
 let top_width (op : binop) (w1 : int) (w2 : int) : int =
@@ -1434,7 +1432,6 @@ let rec lift1 (op : unop) (t : t) : t =
   | Cast (_, sz), _ when sz <= 0 -> top (Stdlib.max 1 (bitwidth t))
   | _, _ ->
   match t with
-  | Rel (Origin.Abs, offs) -> plain_unop op (Clp offs)
   | Rel (Origin.Rip _, _) as v when (match op with
       | Extract (Some 63, 0) | Cast (_, 64) -> true
       | _ -> false) -> v
@@ -1511,8 +1508,6 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
            List.concat_map (leaves t2) ~f:(fun q2 -> leaves (lift2 op q1 q2))))
   | _ ->
   match t1, t2 with
-  | Rel (Origin.Abs, offs), _ -> lift2 op (Clp offs) t2
-  | _, Rel (Origin.Abs, offs) -> lift2 op t1 (Clp offs)
   | Rel (Origin.Rip p, a), Rel (Origin.Rip p', b)
     when Hike_section.equal p p' && (match op with Meet -> true | _ -> false) ->
     rip_wrap p (lift2 op (rip_plain a) (rip_plain b))
@@ -1532,17 +1527,17 @@ let rec lift2 (op : binop) (t1 : t) (t2 : t) : t =
   else
     match t1, t2 with
     | Rel (o1, a1), Rel (o2, a2) -> (
-        match rel_table op o1 o2 with
+        match rel_table op (Some o1) (Some o2) with
         | Wrap o -> canonical [ Rel (o, rel_rel op a1 a2) ]
         | Materialise -> materialise2 op t1 t2
         | Top -> top_w ())
     | Rel (o1, _), _ -> (
-        match rel_table op o1 Origin.Abs with
+        match rel_table op (Some o1) None with
         | Wrap _ -> rel_abs op t1 t2
         | Materialise -> materialise2 op t1 t2
         | Top -> top_w ())
     | _, Rel (o2, _) -> (
-        match rel_table op Origin.Abs o2 with
+        match rel_table op None (Some o2) with
         | Wrap _ -> rel_abs op t1 t2
         | Materialise -> materialise2 op t1 t2
         | Top -> top_w ())
@@ -1561,8 +1556,6 @@ let rec diff (t1 : t) (t2 : t) : t =
      subtrahend, and a mixed subtrahend is removed leaf by leaf. *)
   | Many ps, _ -> canonical (List.concat_map ps ~f:(fun q -> leaves (diff q t2)))
   | _, Many qs -> List.fold qs ~init:t1 ~f:diff
-  | Rel (Origin.Abs, offs), _ -> diff (Clp offs) t2
-  | _, Rel (Origin.Abs, offs) -> diff t1 (Clp offs)
   | Rel (o1, a), Rel (o2, b)
     when Origin.equal o1 o2
          || (absolute_line o1 && absolute_line o2

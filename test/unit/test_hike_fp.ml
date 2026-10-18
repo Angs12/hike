@@ -60,8 +60,10 @@ let fp_fixture (intr : string) (w : int) : sub term =
          ([ Def.create rd (Bil.Var temp) ], [ (2, mk_goto) ]);
          ([], [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ]) ])
 
-let fp_prog (subs : sub term list) : program term =
-  Hike.Fp.run_program (Program.create ~subs ())
+let fp_run (subs : sub term list) : Hike.Synth.table * program term =
+  Hike.Fp.run_program ~synth:Hike.Synth.empty (Program.create ~subs ())
+
+let fp_prog (subs : sub term list) : program term = snd (fp_run subs)
 
 let tests : unit Alcotest.test list =
   [
@@ -115,11 +117,10 @@ let tests : unit Alcotest.test list =
     pin "HFP-05" "an unsizable width leaves the target unqualified and warns"
       (fun () ->
         let out = ref "" in
-        let sub =
-          the_sub (fp_prog [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ])
-        in
+        let synth, prog = fp_run [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ] in
+        let sub = the_sub prog in
         out := capture_stderr (fun () ->
-            ignore (Hike.Fp.run_program (Program.create ~subs:[ sub ] ())));
+            ignore (Hike.Fp.run_program ~synth (Program.create ~subs:[ sub ] ())));
         let targets =
           Base.List.concat_map (subs_of (fp_prog
               [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ]))

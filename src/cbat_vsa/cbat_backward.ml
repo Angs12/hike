@@ -304,7 +304,7 @@ let covering_cell (mv : Mem.t) (key : Mem.Key.t) ~(bytes : int)
   let origin = Mem.Key.origin key in
   let r_lo, r_hi = Mem.Key.hull (Mem.Key.expand key ~bytes) in
   let covers (c, v) =
-    Hike_origin.equal (Mem.Key.origin c) origin
+    Option.equal Hike_origin.equal (Mem.Key.origin c) origin
     && (let c_lo, c_hi = cell_span (c, v) in
         Cbat_word.(<=) c_lo r_lo && Cbat_word.(<=) r_hi c_hi)
   in
@@ -354,7 +354,7 @@ let piece_dense (p : Cbat_clp.t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool 
    per-cell element test.  The cell's stride is not read: the forward
    load consults cells by hull overlap, and narrowing by the grid could
    clear a consulted read. *)
-let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t)
+let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t option)
     ~(bytes : int) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t)
     (p : Cbat_clp.t) : bool =
   let w = Cbat_word.bitwidth hi in
@@ -367,7 +367,7 @@ let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t)
           let cells =
             match cells with Some c -> Lazy.force c | None -> Mem.cells mv in
           List.exists cells ~f:(fun (k, _) ->
-              Hike_origin.equal (Mem.Key.origin k) line
+              Option.equal Hike_origin.equal (Mem.Key.origin k) line
               && (let cl, ch = Mem.Key.hull k in
                   Cbat_word.bitwidth cl <> w
                   || Cbat_word.bitwidth ch <> w
@@ -375,7 +375,7 @@ let piece_touches_cell_bounds ?cells (mv : Mem.t) ~(line : Hike_origin.t)
                        (Cbat_clp.interval ~width:w
                           (Cbat_word.sub cl back) ch)))))
 
-let piece_touches_cell (mv : Mem.t) ~(line : Hike_origin.t) ~(bytes : int)
+let piece_touches_cell (mv : Mem.t) ~(line : Hike_origin.t option) ~(bytes : int)
     (p : Cbat_clp.t) : bool =
   match Cbat_clp.min_elem p, Cbat_clp.max_elem p with
   | Some lo, Some hi -> piece_touches_cell_bounds mv ~line ~bytes ~lo ~hi p
@@ -432,11 +432,12 @@ let piece_touches_image ~(bytes : int) (p : Cbat_clp.t) : bool =
    elements, each read by the forward load and dropped iff its value, on
    the constraint's own origin, misses [produced].  [None] when nothing is
    excluded, or everything is (the leaf rule's identity). *)
-let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
+let load_address_constraint ?denoted ~(synth : Hike_synth.table)
+    ~(env : AI.t) ~(mem : exp) ~(addr : exp)
     ~(endian : endian) ~(size : Size.t) (produced : wordset) : wordset option =
   let bits = Size.in_bits size in
   let denoted =
-    match denoted with Some d -> d | None -> denote_imm_exp addr env in
+    match denoted with Some d -> d | None -> denote_imm_exp ~synth addr env in
   match mem, denoted with
   | Bil.Var m, Ok aws
     when bits mod 8 = 0 && WordSet.bitwidth produced = bits
@@ -471,14 +472,14 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         let general_keep line (p : Cbat_clp.t) : bool =
           let one =
             match line with
-            | Hike_origin.Stack | Hike_origin.Fs ->
-              WordSet.set_origin line (WordSet.stack_word (Cbat_clp.Pieces.of_progression p))
+            | Some ((Hike_origin.Stack | Hike_origin.Fs) as o) ->
+              WordSet.set_origin o (WordSet.stack_word (Cbat_clp.Pieces.of_progression p))
             | _ -> WordSet.of_clp (Cbat_clp.Pieces.of_progression p) in
           not (drops (load_value ~addr:one ~endian ~bits mv)) in
         let singleton_keep line (p : Cbat_clp.t) : bool =
           let point =
             match line, Cbat_clp.min_elem p with
-            | (Hike_origin.Stack | Hike_origin.Fs), _ | _, None -> None
+            | Some (Hike_origin.Stack | Hike_origin.Fs), _ | _, None -> None
             | _, Some x when Cbat_word.bitwidth x <> 64 -> None
             | _, Some x ->
               Base.Option.bind (Cbat_word.to_int64_opt x)
@@ -489,7 +490,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
         (* The read-start ranges a covered element's read can touch, as
            the element-level tests build them: the same-line cell hulls
            each shifted back by the read width (the span prefilter is
-           [has_cell_in]), and — on the Abs line — the images' read
+           [has_cell_in]), and — on the absolute line — the images' read
            starts.  A cell hull whose width does not match the piece's
            cannot be intersected and keeps its addresses on the identity
            path.
@@ -500,14 +501,14 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
            the whole hull; walking that hull would enumerate the grid
            for no more knowledge than keeping it. *)
         let cell_enum_bound = 65536 in
-        let covered_ranges (line : Hike_origin.t) ~(lo : Cbat_word.t)
+        let covered_ranges (line : Hike_origin.t option) ~(lo : Cbat_word.t)
             ~(hi : Cbat_word.t) ~(last : Cbat_word.t) :
             (Cbat_clp.Pieces.t * bool) list =
           let w = Cbat_word.bitwidth hi in
           let back = Cbat_word.of_int ~width:w (nb - 1) in
           let image_ranges =
             match line with
-            | Hike_origin.Abs ->
+            | None ->
               List.map image_fits ~f:(fun (fit_lo, fit_hi) ->
                   (Cbat_clp.interval ~width:w
                      (Cbat_word.of_int64 ~width:w fit_lo)
@@ -517,7 +518,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
           let cell_ranges =
             if Mem.has_cell_in mv ~origin:line ~lo ~hi:last then
               List.filter_map (Lazy.force cells) ~f:(fun (k, _) ->
-                  if Hike_origin.equal (Mem.Key.origin k) line then
+                  if Option.equal Hike_origin.equal (Mem.Key.origin k) line then
                     let cl, ch = Mem.Key.hull k in
                     if Cbat_word.bitwidth cl = w && Cbat_word.bitwidth ch = w
                     then
@@ -589,13 +590,13 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
                  if step > 0 && lo + (card - 1) * step = hi then
                    let last = Cbat_word.of_int ~width (hi + nb - 1) in
                    Some (lo, step, card, hi,
-                         not (Mem.has_cell_in mv ~origin:Hike_origin.Abs
+                         not (Mem.has_cell_in mv ~origin:None
                                 ~lo:lo_w ~hi:last))
                  else None
                | _ -> None)
             | _ -> None in
           match line with
-          | Hike_origin.Stack | Hike_origin.Fs -> None
+          | Some (Hike_origin.Stack | Hike_origin.Fs) -> None
           | _ when width <> 64 || bits > 64 -> None
           | _ ->
             let runs =
@@ -638,7 +639,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
             end
           done;
           List.rev !kept in
-        let partition (line : Hike_origin.t) (p : Cbat_clp.t)
+        let partition (line : Hike_origin.t option) (p : Cbat_clp.t)
             ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) ~(last : Cbat_word.t) =
           let hits =
             List.filter_map (covered_ranges line ~lo ~hi ~last)
@@ -692,7 +693,7 @@ let load_address_constraint ?denoted ~(env : AI.t) ~(mem : exp) ~(addr : exp)
             else if
               not
                 ((match line with
-                  | Hike_origin.Abs ->
+                  | None ->
                     piece_touches_image_bounds ~fits:image_fits
                       ~dense:(piece_dense p ~lo ~hi) ~lo ~hi p
                   | _ -> false)
@@ -719,14 +720,14 @@ let rec reads_memory (e : exp) : bool =
   | Bil.Ite (c, t, f) -> reads_memory c || reads_memory t || reads_memory f
   | Bil.Let (_, a, b) -> reads_memory a || reads_memory b
 
-let rec constrain_operands ~(env : AI.t) ?(seed = false)
+let rec constrain_operands ~(synth : Hike_synth.table) ~(env : AI.t) ?(seed = false)
     ?(cells : cell_env ref = ref no_cells)
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
   (* The recursive call on a sub-expression, in [env] unless given. *)
   let recur ?(env = env) e produced =
-    constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e produced in
+    constrain_operands ~synth ~seed ~env ~cells ~nonneg ~landmarks e produced in
   match e with
   | Bil.Var v ->
     if seed then (match Var.typ v with
@@ -754,7 +755,7 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
       | Bil.Cast (c,n,_) -> Cbat_preimage.Cast (c,n)
       | Bil.Extract (hi,lo,_) -> Cbat_preimage.Extract (Some hi,lo)
       | _ -> assert false in
-    (match denote_imm_exp a env with
+    (match denote_imm_exp ~synth a env with
      | Ok arg ->
        let c = WordSet.backward1 op ~arg ~result:produced in
        (* A rejected value still supplies its excluding boundary to the
@@ -765,12 +766,12 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
        recur a c
      | Error _ -> env)
   | Bil.Concat (a,b) ->
-    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
+    constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
   | Bil.Ite (c, t, f) ->
     (* The branches are alternatives: a condition whose denotation names
        one branch constrains that branch; any other condition leaves the
        state unconstrained. *)
-    (match denote_imm_exp c env with
+    (match denote_imm_exp ~synth c env with
      | Ok c_ws when Cbat_word.is_one (WordSet.cardinality c_ws) ->
        if WordSet.elem Cbat_word.b0 c_ws
        then recur f produced
@@ -781,10 +782,10 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
     (* An address that reads no memory denotes the same before and after
        the cell step (which only writes the memory), so one denotation
        serves the whole arm. *)
-    let denoted = denote_imm_exp a env in
+    let denoted = denote_imm_exp ~synth a env in
     let stable = not (reads_memory a) in
     let addr_cstr =
-      load_address_constraint ~denoted ~env ~mem:m ~addr:a ~endian:en ~size:s
+      load_address_constraint ~denoted ~synth ~env ~mem:m ~addr:a ~endian:en ~size:s
         produced in
     (* The cell fact meets the env's memory and threads to the store
        that wrote it; the entry carries the touched byte range (the
@@ -792,11 +793,11 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
        endianness, so the store match compares the read's whole
        shape. *)
     let env =
-      constrain_cell_on_trace ~denoted ~landmarks ~env ~mem:m ~addr:a ~size:s
+      constrain_cell_on_trace ~denoted ~synth ~landmarks ~env ~mem:m ~addr:a ~size:s
         ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       (match Var.typ mv, if stable then denoted else denote_imm_exp a env with
+       (match Var.typ mv, if stable then denoted else denote_imm_exp ~synth a env with
         | Type.Mem (ai, asz), Ok aws ->
           let mv_mem = AI.find_memory (mem_idx ai asz) env mv in
           List.iter (backward_cell_keys mv_mem aws ~bytes:(Size.in_bytes s))
@@ -825,7 +826,7 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
     (match m with
      | Bil.Var mv when not (Core.Map.is_empty !cells) ->
        let ks =
-         Base.Result.ok (denote_imm_exp a env)
+         Base.Result.ok (denote_imm_exp ~synth a env)
          |> Base.Option.value_map ~default:[] ~f:bounded_cell_key in
        if List.is_empty ks then begin
          (* An unbounded address may write any cell: nothing crosses. *)
@@ -853,7 +854,7 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
                 && Bitvector.compare_endian p.pendian en = 0
              then begin
                let data_cstr =
-                 Option.value_map (Base.Result.ok (denote_imm_exp u env))
+                 Option.value_map (Base.Result.ok (denote_imm_exp ~synth u env))
                    ~default:p.pc ~f:(WordSet.meet p.pc) in
                if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
                else recur u data_cstr
@@ -866,13 +867,13 @@ let rec constrain_operands ~(env : AI.t) ?(seed = false)
        cells := no_cells;
        env)
   | Bil.BinOp (op,a,b) ->
-    constrain_binary ~seed ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
+    constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
   | Bil.Unknown _ -> env
 
 (* Numeric inverses join their alternatives before the effectful walk
    delivers either projection. *)
-and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
-  match (denote_imm_exp a env, denote_imm_exp b env) with
+and constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
+  match (denote_imm_exp ~synth a env, denote_imm_exp ~synth b env) with
   | Ok left, Ok right ->
       let signed =
         match op with
@@ -941,7 +942,7 @@ and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
         | Bil.Let _ -> env
         | _ ->
           guarded side produced (fun () ->
-              constrain_operands ~seed ~env ~cells ~nonneg ~landmarks e c)
+              constrain_operands ~synth ~seed ~env ~cells ~nonneg ~landmarks e c)
       in
       let env = deliver 'L' env a x in
       deliver 'R' env b y
@@ -952,7 +953,8 @@ and constrain_binary ~seed ~env ~cells ~nonneg ~landmarks op a b produced =
    concrete hulls; identity on doubt.  Each fan-out key runs the one
    leaf rule; the write-back is the piecewise meet whose empty piece
    keeps its cell. *)
-and constrain_cell_on_trace ?denoted ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
+and constrain_cell_on_trace ?denoted ~(synth : Hike_synth.table)
+    ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
     ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
   match mem with
   | Bil.Var m ->
@@ -960,7 +962,7 @@ and constrain_cell_on_trace ?denoted ~(landmarks : Cbat_landmarks.t) ~(env : AI.
      | Type.Mem (addr_i, addressable_size) ->
        let k = mem_idx addr_i addressable_size in
        (match
-          (match denoted with Some d -> d | None -> denote_imm_exp addr env)
+          (match denoted with Some d -> d | None -> denote_imm_exp ~synth addr env)
         with
         | Error _ -> env
         | Ok addr_ws ->
@@ -1001,9 +1003,9 @@ and constrain_cell_on_trace ?denoted ~(landmarks : Cbat_landmarks.t) ~(env : AI.
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}
    lives here only. *)
-let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
+let constrain_edge ~(synth : Hike_synth.table) ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
     (cond : exp) : AI.t =
-  constrain_operands ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
+  constrain_operands ~synth ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
 
 (* A produced-width dummy for mem defs: their constraint derivation reads
    the cells, never the width. *)
@@ -1094,7 +1096,8 @@ let meet_cell ~(landmarks : Cbat_landmarks.t option) (st : AI.t) (c : cell) :
    its refined inputs, each def's facts met where they hold.  [on_write]
    names each actual write — an output fact at its def, an input fact at
    the entry; a fact equal to the replayed value writes nothing. *)
-let writer_locus ~(on_write : write_site -> unit) : locus =
+let writer_locus ~(synth : Hike_synth.table)
+    ~(on_write : write_site -> unit) : locus =
   let at_def ~post ~cstr =
     let m = WordSet.meet cstr (post ()) in
     if Cbat_word.is_zero (WordSet.cardinality m) then None else Some m
@@ -1139,7 +1142,7 @@ let writer_locus ~(on_write : write_site -> unit) : locus =
         let acc =
           List.fold (Core.Map.find_multi !(st.reads) (Term.tid d)) ~init:acc
             ~f:(meet_cell ~landmarks:None) in
-        let acc = if phys_equal acc pre then post else denote_def d acc in
+        let acc = if phys_equal acc pre then post else denote_def ~synth d acc in
         match Core.Map.find !(st.outputs) (Term.tid d) with
         | Some c ->
           meet_word ~on_write:(fun () -> on_write Output_write) acc (Def.lhs d) c
@@ -1160,13 +1163,14 @@ let observer_locus : locus =
    reverse def order.  It depends only on (block, entry state): the
    solve ctx caches the last denotation physically. *)
 let cached_prefix
+    ~(synth : Hike_synth.table)
     (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
     (blk : blk term) (entry : AI.t) : (def term * AI.t * AI.t) list =
   let compute () =
     Term.enum def_t blk
     |> Seq.fold ~init:(entry, [])
       ~f:(fun (st, acc) d ->
-          let post = denote_def d st in
+          let post = denote_def ~synth d st in
           (post, (d, st, post) :: acc))
     |> snd
   in
@@ -1183,13 +1187,14 @@ let cached_prefix
 (* The block's postcondition from the same fold that fills the prefix
    cache, so the guard walk does not denote the chain again. *)
 let denote_defs_cached
+    ~(synth : Hike_synth.table)
     (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
     (blk : blk term) (entry : AI.t) : AI.t =
-  match cached_prefix (Some cache) blk entry with
+  match cached_prefix ~synth (Some cache) blk entry with
   | [] -> entry
   | (_, _, post) :: _ -> post
 
-let walk ~(locus : locus)
+let walk ~(synth : Hike_synth.table) ~(locus : locus)
     ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
@@ -1199,7 +1204,7 @@ let walk ~(locus : locus)
   (* The walked block's IN state, handed in by the caller — no
      solution lookup, no snapshot copy. *)
   let blk_state = entry in
-  let prefixed = cached_prefix cache blk blk_state in
+  let prefixed = cached_prefix ~synth cache blk blk_state in
   (* The seeds are the word env's entries (each seed's constraint is
      the edge state's own value for the var); the loads push the cells. *)
   let words =
@@ -1216,7 +1221,7 @@ let walk ~(locus : locus)
     let ce = meet_owed ~on_write:ignore pre !words in
     let before = !cells in
     let env' =
-      constrain_operands ~env:ce ~cells ~landmarks
+      constrain_operands ~synth ~env:ce ~cells ~landmarks
         ~nonneg:(fun e -> witness ~env:ce e)
         (Def.rhs d) cstr'
     in
@@ -1280,7 +1285,8 @@ let rooted ~(landmarks : Cbat_landmarks.t) (cond : exp) (f : unit -> 'a) : 'a =
 let walk_block ?(on_write : write_site -> unit = ignore)
     ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
     ~seeds env blk =
-  walk ~locus:(writer_locus ~on_write)
+  walk ~synth:!(rctx.Cbat_runctx.rc_synth)
+    ~locus:(writer_locus ~synth:!(rctx.Cbat_runctx.rc_synth) ~on_write)
     ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
     ~witness ~seeds env blk
 
@@ -1299,7 +1305,8 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
    result DISCARDED: every empty meet records the excluded boundary +
    distance as the enclosing WTO cycle's widening landmark (words and
    memory cells alike). *)
-let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
+let acquire_unsat ~(synth : Hike_synth.table)
+    ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     ~(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
@@ -1307,7 +1314,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
   if Cbat_landmarks.in_cycle landmarks then rooted ~landmarks disabled (fun () -> begin
     (* The observer seeds the requested facts even when the live state
        excludes them. This temporary environment never enters the solve. *)
-    let constrained = constrain_operands ~seed:true ~env ~landmarks disabled
+    let constrained = constrain_operands ~synth ~seed:true ~env ~landmarks disabled
         (WordSet.singleton Cbat_word.b1) in
     if not (AI.equal constrained AI.bottom) then begin
       let seeds = cond_seeds ~env:constrained disabled in
@@ -1315,7 +1322,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
          reaches no leaf meet: skip the walk and its prefix replay. *)
       if not (Core.Set.is_empty seeds) then
         ignore
-          (walk ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
+          (walk ~synth ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
              constrained blk)
     end
   end)
@@ -1329,7 +1336,7 @@ let refine_edge_inline
   let env_in = env in
   let landmarks = rctx.rc_landmarks in
   let env = rooted ~landmarks acc_cond (fun () ->
-      constrain_edge ~env ~landmarks acc_cond) in
+      constrain_edge ~synth:!(rctx.rc_synth) ~env ~landmarks acc_cond) in
   (* No constraint derived: nothing to deliver. *)
   if discarded then env_in
   else if AI.equal env AI.bottom then env

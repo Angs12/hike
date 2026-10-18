@@ -18,7 +18,7 @@ let access_value ~ptr_cell ctx scope llvm_builder blk_tid def exp =
   match Hike_stack_model.mem_node_of exp with
   | None -> (
       let storage =
-        if is_ptr_var (Def.lhs def) then Hike_def_slots.def_ptr_storage def
+        if is_ptr_var ctx (Def.lhs def) then Hike_def_slots.def_ptr_storage def
         else None
       in
       match storage with
@@ -96,7 +96,7 @@ let mem_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid def_tag def
         when Size.in_bits size <= Hike_abi.word_bits ctx.abi
              && Base.Option.is_none
                   (Hike_stack_model.store_data_of_rhs (Def.rhs def)) ->
-          let marker = marker_of_size size in
+          let marker = marker_of_size ctx size in
           let emit () =
             cell_value ctx ~ptr:ptr_cell size
               (Llvm.undef (cell_type ctx ~ptr:ptr_cell size))
@@ -232,7 +232,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
-  let ptr = is_ptr_var var in
+  let ptr = is_ptr_var ctx var in
   let ptr_cell = ptr && (match exp with Bil.Load _ -> true | _ -> false) in
   let res =
     match Core.Map.find !(scope.atomic_plan) (Term.tid def) with

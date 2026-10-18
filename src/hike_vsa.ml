@@ -24,13 +24,13 @@ type section_image = Vsa.section_image = {
 
 (* The per-sub written-register summary: every def whose lhs base is a
    persistent register; [Var.base] normalizes partial defs. *)
-let written_regs_of_sub (sub : sub term) : Var.Set.t =
+let written_regs_of_sub ~(synth : Hike_synth.table) (sub : sub term) : Var.Set.t =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum def_t)
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
       let lhs = Def.lhs d in
       match Var.typ (Var.base lhs) with
-      | Type.Imm _ when not (Hike_synth.is_temporary lhs) ->
+      | Type.Imm _ when not (Hike_synth.is_temporary ~table:synth lhs) ->
         Core.Set.add acc (Var.base lhs)
       | _ -> acc)
 
@@ -43,17 +43,18 @@ type paused = {
   p_seed : Vsa.vsa_sol;
   p_blocked : Tid.Set.t;
   p_wake : Tid.Set.t;
+  p_synth : Hike_synth.table;
 }
 
 type outcome =
-  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
+  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table
   | Paused of paused
 
 (* The callees the solution's reachable calls wait on, and the blocks
    of those calls.  Only a call with a continuation waits: nothing flows
    past a tail call (or the canonical return, which BAP exposes as
    one). *)
-let blocked_callees ~(lookup : lookup_fn)
+let blocked_callees ~(synth : Hike_synth.table) ~(lookup : lookup_fn)
     ~(callee : Tid.t -> Vsa.Call_effects.callee) (sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t * Tid.Set.t =
   let blocked t =
@@ -76,14 +77,14 @@ let blocked_callees ~(lookup : lookup_fn)
         (* Only an indirect target reads the post-state; a direct
            call's block is not replayed. *)
         let post =
-          lazy (snd (Vsa.fold_block_states ~sol blk ~init:()
+          lazy (snd (Vsa.fold_block_states ~synth ~sol blk ~init:()
                        ~f:(fun _ _ _ () -> ()))) in
         Base.List.fold calls ~init:acc ~f:(fun acc c ->
             let target =
               match Call.target c with
               | Direct t -> Some t
               | Indirect e -> (
-                match Vsa.denote_imm_exp e (Lazy.force post) with
+                match Vsa.denote_imm_exp ~synth e (Lazy.force post) with
                 | Ok ws -> Hike_resolve.resolve_target ~lookup ws
                 | Error _ -> None)
             in
@@ -108,19 +109,21 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(callee : Tid.t -> Vsa.Call_effects.callee)
     ~(foreign_slots : Core.Int64.Set.t) ~(sub : sub term)
     ~(resolved : Tid.Set.t Tid.Map.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(synth : Hike_synth.table)
     ~(seed : Vsa.vsa_sol option) ~(wake : Tid.Set.t) : outcome =
   self_arm target;
   let abi = Hike_abi.of_target target in
   (* The images arm the whole fused solve: every denotation the
      phases, the completion's rewrites, and the replay compute reads
      them through one bracket. *)
+  let synth = ref synth in
   Vsa.with_images images (fun () ->
       let rec phases (resolved : Tid.Set.t Tid.Map.t)
           (block_addrs : Tid.t Addr.Map.t)
           (init : Vsa.vsa_sol option) (wake : Tid.Set.t) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
-          Vsa.static_graph_vsa ~abi
+          Vsa.static_graph_vsa ~abi ~synth
             ~def_reads:(fun d -> Model.reads (`Def d))
             ~def_writes:(fun d -> Model.writes (`Def d))
             ~phi_reads:(fun p -> Model.reads (`Phi p))
@@ -130,14 +133,14 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
             ~callee ~resolved ~sub_lookup:lookup ~wake
             sub seed
         in
-        let blocked, blocks = blocked_callees ~lookup ~callee sol sub in
+        let blocked, blocks = blocked_callees ~synth:!synth ~lookup ~callee sol sub in
         if not (Core.Set.is_empty blocked) then
           `Paused { p_sub = sub; p_resolved = resolved;
                     p_block_addrs = block_addrs; p_seed = sol;
-                    p_blocked = blocked; p_wake = blocks }
+                    p_blocked = blocked; p_wake = blocks; p_synth = !synth }
         else
           let resolved', events =
-            Hike_cfg_complete.resolve_phase ~abi ~sol ~block_addrs
+            Hike_cfg_complete.resolve_phase ~abi ~sol ~synth:!synth ~block_addrs
               ~foreign_slots sub resolved
           in
           if events then phases resolved' block_addrs (Some sol) Tid.Set.empty
@@ -153,28 +156,30 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
       | `Paused p -> Paused p
       | `Drained (sol, block_addrs') ->
         let sub' =
-          Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
+          Hike_cfg_complete.materialize ~abi ~sol ~synth:!synth ~block_addrs:block_addrs'
             ~foreign_slots sub
         in
         (* The round-down normalization rides the returned sub: the
            attribution re-denotes from these rhs's, and the solve's
            materialization may reintroduce the shift pair. *)
-        let sub' = Vsa.normalize_round sub' in
-        let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub' in
-        Done (envs, stamped, block_addrs'))
+        let sub' = Vsa.normalize_round_with_synth ~synth sub' in
+        let envs, stamped = Vsa.stamp_envs_of_sol ~synth:!synth ~sol sub' in
+        Done (envs, stamped, block_addrs', !synth))
 
 let start (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)
     ~(callee : Tid.t -> Vsa.Call_effects.callee)
-    ~(block_addrs : Tid.t Addr.Map.t) ~(foreign_slots : Core.Int64.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(synth : Hike_synth.table)
+    ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) : outcome =
   solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub
-    ~resolved:Tid.Map.empty ~block_addrs ~seed:None ~wake:Tid.Set.empty
+    ~resolved:Tid.Map.empty ~block_addrs ~synth ~seed:None ~wake:Tid.Set.empty
 
 let resume (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)
     ~(callee : Tid.t -> Vsa.Call_effects.callee)
     ~(foreign_slots : Core.Int64.Set.t) (p : paused) : outcome =
   solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub:p.p_sub
-    ~resolved:p.p_resolved ~block_addrs:p.p_block_addrs ~seed:(Some p.p_seed)
+    ~resolved:p.p_resolved ~block_addrs:p.p_block_addrs ~synth:p.p_synth
+    ~seed:(Some p.p_seed)
     ~wake:p.p_wake

@@ -70,27 +70,35 @@ let prepare proj =
          (span.Hike_sections.ds_sec, span.ds_lo, span.ds_hi)));
   { target; images; linker_slots; text_range; data_spans }
 
-let normalize context program =
+let normalize context ~synth program =
   let addr_bits = Hike_abi.word_bits (Hike_abi.of_target context.target) in
   let program = Hike_atomic.normalize ~addr_bits program in
-  Term.map sub_t program ~f:(Hike_jump.compile_sub context.target)
-  |> Hike_split_mem.normalize |> Hike_coerce.coerce_program
-  |> Hike_fp.run_program
+  let cell = ref synth in
+  let program =
+    Term.map sub_t program ~f:(fun sub ->
+        Hike_synth.record cell (fun synth ->
+            Hike_jump.compile_sub ~synth context.target sub))
+  in
+  let synth, program = Hike_split_mem.normalize ~synth:!cell program in
+  let program = Hike_coerce.coerce_program program in
+  Hike_fp.run_program ~synth program
 
 (* The rip tag is read once, here: a tagged literal naming a function
    entry or a data section becomes a module address, so every
    denotation of it carries its [Rip] anchor. *)
-let tag_rip context ~(is_entry : int64 -> bool) program =
+let tag_rip context ~synth ~(is_entry : int64 -> bool) program =
   let is_address a =
     is_entry a
     || Base.List.exists context.data_spans ~f:(fun span ->
         Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
         && Int64.unsigned_compare a span.ds_hi <= 0)
   in
-  Hike_rip.prepare_program ~addr_bits:(Hike_abi.addr_size_bits context.target)
-    ~is_address program
+  Hike_rip.prepare_program ~synth
+    ~addr_bits:(Hike_abi.addr_size_bits context.target) ~is_address program
 
-let prepare_function context ~is_entry sub =
+(* The function's normalized body and the table grown by its minted vars. *)
+let prepare_function context ~synth ~is_entry sub =
   let program = Term.append sub_t (Program.create ()) sub in
-  Base.Option.value_exn
-    (Term.first sub_t (tag_rip context ~is_entry (normalize context program)))
+  let synth, program = normalize context ~synth program in
+  let synth, program = tag_rip context ~synth ~is_entry program in
+  (Base.Option.value_exn (Term.first sub_t program), synth)

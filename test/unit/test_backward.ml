@@ -77,9 +77,9 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
   let sol = run_anchored sub in
   let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
   let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
-  let head_post = Vsa.Test_seam.denote_defs head head_in in
+  let head_post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty head head_in in
   let cond_ws =
-    match Vsa.Test_seam.denote_imm_exp cond head_post with
+    match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty cond head_post with
     | Ok ws -> ws
     | Error _ -> failwith "a4: the guard does not denote"
   in
@@ -105,15 +105,15 @@ let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t
       ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
   in
   let sol =
-    static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+    static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
       (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
   in
-  let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+  let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
   let blk =
     Term.enum blk_t sub |> Seq.to_list
     |> List.find (fun b -> Tid.equal (Term.tid b) tids.(1))
   in
-  let post = Vsa.Test_seam.denote_defs blk (Graphlib.Std.Solution.get sol tids.(1)) in
+  let post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk (Graphlib.Std.Solution.get sol tids.(1)) in
   let edge = AI.add_word post ~key:zf ~data:(Ws.singleton Cbat_word.b1) in
   let out, _, _ =
     Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
@@ -591,7 +591,7 @@ let tests : unit Alcotest.test list =
           | _ -> assert false
         in
         check "BK-33"
-          (AI.equal (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:h_st4 (Jmp.cond jmp4)) h_st4));
+          (AI.equal (Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:h_st4 (Jmp.cond jmp4)) h_st4));
 
     (* L-3b: the equal-lower merge arm and the partition views. *)
 
@@ -978,7 +978,7 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:20)
         in
         let env1 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:st1
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:st1
             (t_load_exp
                (Bil.BinOp (Bil.MINUS, Bil.Var t_rsp, Bil.Int (Cbat_word.to_word (w64 8)))))
             (bk_iv64 ~lo:0 ~hi:9)
@@ -1000,7 +1000,7 @@ let tests : unit Alcotest.test list =
         in
         let st2 = AI.add_word st2 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env2 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:st2
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:st2
             (t_load_exp
                (Bil.BinOp
                   ( Bil.PLUS,
@@ -1023,7 +1023,7 @@ let tests : unit Alcotest.test list =
         in
         let st3 = AI.add_word st3 ~key:t_idx ~data:(bk_iv64 ~lo:4 ~hi:12) in
         let env3 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:st3
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:st3
             (t_load_exp (Bil.BinOp (Bil.PLUS, Bil.Var t_rbp, Bil.Var t_idx)))
             (bk_iv64 ~lo:0 ~hi:9)
         in
@@ -1045,7 +1045,7 @@ let tests : unit Alcotest.test list =
         in
         let st4 = AI.add_word st4 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env4 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:st4
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:st4
             (t_load_exp
                (Bil.BinOp
                   ( Bil.PLUS,
@@ -1083,7 +1083,7 @@ let tests : unit Alcotest.test list =
     pin "BK-71" "the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
       (fun () ->
         let s11 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
             (Bil.BinOp (Bil.LT, Bil.UnOp (Bil.NEG, Bil.Var s_t), Bil.Int (Cbat_word.to_word (s_r32 10))))
             (Ws.singleton (Cbat_word.of_word Word.b1))
         in
@@ -1100,7 +1100,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let env15b = mk_env [ (s_t, Ws.singleton (s_r32 0x100)) ] in
         let env15b' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env15b
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:env15b
             (Bil.BinOp
                ( Bil.LT,
                  Bil.Cast (Bil.SIGNED, 64, Bil.Var s_t),
@@ -1110,7 +1110,7 @@ let tests : unit Alcotest.test list =
         let c15b = s_w32_of_env env15b' s_t in
         let row15b =
           s_w32_of_env
-            (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+            (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                (Bil.BinOp
                   ( Bil.LT,
                     Bil.Cast (Bil.SIGNED, 64, Bil.Var s_t),
@@ -1157,7 +1157,7 @@ let tests : unit Alcotest.test list =
         let b1 = Ws.singleton (Cbat_word.of_word Word.b1) in
         let y16_read =
           s_w32_of_env
-            (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env16
+            (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:env16
                (Cbat_vsa_utils.complete_cond
                   (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var x16, Bil.Var y16))))
                b1)
@@ -1183,7 +1183,7 @@ let tests : unit Alcotest.test list =
         in
         let b1 = Ws.singleton (Cbat_word.of_word Word.b1) in
         let env16c' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env16c
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:env16c
             (Bil.BinOp
                ( Bil.AND,
                  Bil.BinOp (Bil.LT, Bil.Var a16, Bil.Var y16),
@@ -1203,12 +1203,12 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "BK-78"
           (AI.equal
-             (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+             (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                 (Bil.Int (Cbat_word.to_word (s_r32 5)))
                 (Ws.singleton (s_r32 7)))
              AI.bottom
           && AI.equal
-               (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
+               (Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                   (Bil.Int (Cbat_word.to_word (s_r32 5)))
                   (Ws.singleton (s_r32 5)))
                (mk_env [])));
@@ -1222,7 +1222,7 @@ let tests : unit Alcotest.test list =
           mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:10) ]
         in
         let env10' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env10
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:env10
             (Bil.Ite (Bil.Int Word.b1, Bil.Var s_t, Bil.Var s_u))
             (Ws.singleton (s_r32 5))
         in
@@ -1241,7 +1241,7 @@ let tests : unit Alcotest.test list =
               (c11, Ws.top 1) ]
         in
         let env11' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env11
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:env11
             (Bil.Ite (Bil.Var c11, Bil.Var s_t, Bil.Var s_u))
             (Ws.singleton (s_r32 5))
         in
@@ -1258,7 +1258,7 @@ let tests : unit Alcotest.test list =
        free — the hull [0x30, 0xFFFFFF3F]"
       (fun () ->
         let env13 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ())
             ~env:(mk_env [])
             (Bil.BinOp (Bil.AND, Bil.Var s_t,
                Bil.Int (Cbat_word.to_word (s_r32 0xF0))))
@@ -1280,7 +1280,7 @@ let tests : unit Alcotest.test list =
         let env = mk_env [ (x, bk_iv32 ~lo:0 ~hi:0xFFFFFFFF) ] in
         let widened = Bil.Cast (Bil.UNSIGNED, 64, Bil.Var x) in
         let env' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ())
             ~env (Bil.Cast (Bil.LOW, 32, widened)) (bk_iv32 ~lo:0 ~hi:0xF)
         in
         let r = AI.find_word 32 env' (Var.base x) in
@@ -1299,7 +1299,7 @@ let tests : unit Alcotest.test list =
               (y, Ws.singleton (w32 4)) ]
         in
         let env' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ())
             ~env
             (Bil.BinOp
                ( Bil.SLT,
@@ -1407,7 +1407,7 @@ let tests : unit Alcotest.test list =
         in
         let env = mk_env [ (s_t, cur) ] in
         let env' =
-          Vsa.Test_seam.constrain_operands
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
             ~landmarks:(Cbat_landmarks.create ()) ~env
             (Bil.BinOp (Bil.SLT, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 5))))
             (Ws.singleton (Cbat_word.of_word Word.b1))
@@ -1430,9 +1430,9 @@ let tests : unit Alcotest.test list =
         let sol = run_anchored sub in
         let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
         let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
-        let head_post = Vsa.Test_seam.denote_defs head head_in in
+        let head_post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty head head_in in
         let cond_ws =
-          match Vsa.Test_seam.denote_imm_exp cond head_post with
+          match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty cond head_post with
           | Ok ws -> ws
           | Error _ -> failwith "a4: the guard does not denote"
         in
@@ -1453,7 +1453,7 @@ let tests : unit Alcotest.test list =
         let env = mk_env [ (x, Ws.top 32) ] in
         let cstr16 = Ws.of_clp (Clp.interval ~width:16 (a4_w16 0) (a4_w16 3)) in
         let env' =
-          Vsa.Test_seam.constrain_operands
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
             ~landmarks:(Cbat_landmarks.create ()) ~env
             (Bil.Extract (15, 0, Bil.Var x)) cstr16
         in
@@ -1476,9 +1476,9 @@ let tests : unit Alcotest.test list =
         let sol = run_anchored sub in
         let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
         let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
-        let head_post = Vsa.Test_seam.denote_defs head head_in in
+        let head_post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty head head_in in
         let cond_ws =
-          match Vsa.Test_seam.denote_imm_exp cond head_post with
+          match Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty cond head_post with
           | Ok ws -> ws
           | Error _ -> failwith "a4: the guard does not denote"
         in
@@ -1500,7 +1500,7 @@ let tests : unit Alcotest.test list =
           !ws in
         let env = AI.add_word AI.top ~key:x ~data:ws09 in
         let env' =
-          Vsa.Test_seam.constrain_operands
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
             ~landmarks:(Cbat_landmarks.create ()) ~env
             (Bil.BinOp (Bil.SLT, Bil.Cast (Bil.LOW, 32, Bil.Var x),
                         Bil.Int (Cbat_word.to_word (w32 8))))
@@ -1580,11 +1580,11 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
@@ -1619,11 +1619,11 @@ let tests : unit Alcotest.test list =
         in
         let guard2 = tids2.(0) in
         let sol2 =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub2
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub2)
         in
-        let rctx2 = mk_rctx ~abi:Hike_abi.x86_64_sysv sub2 in
+        let rctx2 = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub2 in
         let guard2_blk =
           Term.enum blk_t sub2 |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard2)
@@ -1661,11 +1661,11 @@ let tests : unit Alcotest.test list =
         in
         let guard = tids.(0) in
         let sol =
-          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
         in
-        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard)
@@ -1925,7 +1925,7 @@ let tests : unit Alcotest.test list =
         let run els =
           let st = AI.add_word st0 ~key:i ~data:(Ws.of_list ~width:64 els) in
           let out =
-            Vsa.Test_seam.constrain_operands
+            Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
               ~landmarks:(Cbat_landmarks.create ()) ~env:st
               (Bil.Load (Bil.Var m, Bil.Var i, LittleEndian, `r32))
               produced
@@ -1972,7 +1972,7 @@ let tests : unit Alcotest.test list =
         let env = AI.add_word AI.top ~key:x ~data:(Ws.top 8) in
         let refined k vhi =
           AI.find_word 8
-            (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env
+            (Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env
                (Bil.BinOp (Bil.LE, Bil.BinOp (Bil.AND, Bil.Var x, b8 k), b8 vhi)))
             x
         in
@@ -1999,13 +1999,13 @@ let tests : unit Alcotest.test list =
         let false_ = Ws.singleton Cbat_word.b0 in
         (* The pushed form (AND of the two negations) reaches each flag. *)
         let pushed =
-          Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env
+          Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env
             (Cbat_vsa_utils.complete_cond cond) in
         check "BK-110.pushed-cf" (Ws.equal (AI.find_word 1 pushed cf) false_);
         check "BK-110.pushed-zf" (Ws.equal (AI.find_word 1 pushed zf) false_);
         (* The raw form exercises the NOT row then the OR=false row. *)
         let raw =
-          Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env cond in
+          Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env cond in
         check "BK-110.raw-cf" (Ws.equal (AI.find_word 1 raw cf) false_);
         check "BK-110.raw-zf" (Ws.equal (AI.find_word 1 raw zf) false_));
 
@@ -2025,9 +2025,9 @@ let tests : unit Alcotest.test list =
         in
         let blk = Term.find_exn blk_t sub tids.(0) in
         let observe disabled =
-          let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+          let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
           let entry = AI.add_word AI.top ~key:y ~data:(Ws.top 32) in
-          let env = Vsa.Test_seam.denote_defs blk entry in
+          let env = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk entry in
           Vsa.Test_seam.with_widening_head rctx (Some tids.(0)) (fun () ->
               Vsa.Test_seam.acquire_unsat ~rctx ~entry env blk disabled);
           Vsa.Test_seam.prefix_cached rctx blk
@@ -2113,7 +2113,7 @@ let tests : unit Alcotest.test list =
             ~at ce =
           let cells = ref ce in
           let env =
-            Vsa.Test_seam.constrain_operands ~cells
+            Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~cells
               ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
               (Bil.Store (Bil.Var mem, at, Bil.Var data, endian, bits))
               (Ws.top 64) in
@@ -2148,7 +2148,7 @@ let tests : unit Alcotest.test list =
           (not (bounded env d 64) && owed ce);
         let cells = ref (entry 0x1000) in
         let _ =
-          Vsa.Test_seam.constrain_operands ~cells
+          Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~cells
             ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
             (Bil.Store (Bil.Store (Bil.Var t_m, addr 0x2000, Bil.Var d,
                                    LittleEndian, `r64),

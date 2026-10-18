@@ -21,13 +21,13 @@ let jmps_of_blk sub i =
 (* The dispatch guard lives in the TARGET domain: the whole target
    expression equals the case word (a composed table's guards subtract
    the table base first; a plain bounded set has none). *)
-let eq_target (a : var) (b : var) (w : int64) j =
+let eq_target ~synth (a : var) (b : var) (w : int64) j =
   match Jmp.cond j with
   | Bil.BinOp
       (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), face) ->
     Var.equal a' a && Var.equal b' b
     && Base.Option.equal Int64.equal
-         (Hike_synth_addr.address_of_exp Hike_synth.empty face) (Some w)
+         (Hike_synth_addr.address_of_exp synth face) (Some w)
   | _ -> false
 
 (* The drive's arming: every indirect transfer's destinations are
@@ -99,11 +99,12 @@ let tests : unit Alcotest.test list =
         in
         let j1_retaddr =
           let sol =
-            static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
+            static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike.Abi.x86_64_sysv
               ~resolved:Tid.Map.empty j1
               (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv j1)
           in
-          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol j1
+          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv
+            ~synth:Hike.Synth.empty ~sol j1
         in
         check "RES-05" (Core.Set.mem j1_retaddr (Term.tid j1_ld)));
 
@@ -122,7 +123,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j1', _ =
-          produce (x86_target ()) (Program.create ~subs:[ j1 ] ()) j1
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j1 ] ()) j1
         in
         check "RES-06"
           (match jmps_of_blk j1' 0 with
@@ -148,7 +149,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j9', _ =
-          produce (x86_target ()) (Program.create ~subs:[ j9 ] ()) j9
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j9 ] ()) j9
         in
         check "RES-22"
           (match jmps_of_blk j9' 0 with
@@ -175,7 +176,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j1b', _ =
-          produce (x86_target ()) (Program.create ~subs:[ j1b ] ()) j1b
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j1b ] ()) j1b
         in
         check "RES-07"
           (match jmps_of_blk j1b' 0 with
@@ -211,7 +212,7 @@ let tests : unit Alcotest.test list =
           |> armed [ 0x3008L; 0x3010L ]
         in
         let envs, j2', ba' =
-          produce (x86_target ())
+          produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
             (Program.create ~subs:[ j2 ] ()) j2
         in
@@ -220,18 +221,18 @@ let tests : unit Alcotest.test list =
                ~block_addrs:ba' ~target:(x86_target ())) with
             foreign_slots = Core.Int64.Set.empty }
         in
-        let j2'' =
+        let synth, program =
           Hike.Split_blocks.materialize ~facts
             (Program.create ~subs:[ j2' ] ())
-          |> fun p -> Term.enum sub_t p |> Seq.hd_exn
         in
+        let j2'' = Term.enum sub_t program |> Seq.hd_exn in
         check "RES-08"
           (match jmps_of_blk j2'' 3 with
            | g1 :: g2 :: _ ->
              (match Jmp.kind g1, Jmp.kind g2 with
               | Goto (Direct t1), Goto (Direct t2) ->
                 Tid.equal t1 b1_tid && Tid.equal t2 b2_tid
-                && eq_target j2_sel j2_base 0x3008L g1
+                && eq_target ~synth j2_sel j2_base 0x3008L g1
                 && Hike.Stack_model.is_true_cond (Jmp.cond g2)
               | _ -> false)
            | _ -> false));
@@ -254,7 +255,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j5', _ =
-          produce (x86_target ())
+          produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:[ (0x3008L, j5_tids.(1)) ]
             (Program.create ~subs:[ j5 ] ()) j5
         in
@@ -290,7 +291,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let envs6, _, _ =
-          produce (x86_target ())
+          produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
             (Program.create ~subs:[ j6 ] ()) j6
         in
@@ -340,7 +341,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j7', _ =
-          produce (x86_target ())
+          produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:
             [ (0x3008L, j7_tids.(5)); (0x3010L, j7_tids.(6));
               (0x9000L, Tid.create ()) ]
@@ -379,7 +380,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j4', _ =
-          produce (x86_target ())
+          produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:[ (0x3008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
             (Program.create ~subs:[ j4 ] ()) j4
         in
@@ -404,7 +405,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, j3', _ =
-          produce (x86_target ()) (Program.create ~subs:[ j3 ] ()) j3
+          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j3 ] ()) j3
         in
         check "RES-15"
           (match jmps_of_blk j3' 0 with
@@ -452,12 +453,13 @@ let tests : unit Alcotest.test list =
                      ~data:(Mem.Val.create (Ws.singleton (w64 0)) LittleEndian))
             in
             let sol =
-              static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
+              static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike.Abi.x86_64_sysv
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
             let resolved5', events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
+                ~synth:Hike.Synth.empty
                                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
@@ -597,7 +599,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb |> armed [ 0x3000L; 0x3008L ]
         in
         let envs, sub25', ba' =
-          produce ~block_addrs:
+          produce ~synth:Hike.Synth.empty ~block_addrs:
             [ (0x2000L, tids.(0)); (0x2008L, tids.(1)); (0x2010L, tids.(2));
               (0x2018L, tids.(3)); (0x2020L, tids.(4)); (0x3000L, tids.(5));
               (0x3008L, tids.(6)); (0x2028L, tids.(7)) ]
@@ -613,7 +615,7 @@ let tests : unit Alcotest.test list =
             images;
             foreign_slots = Core.Int64.Set.empty }
         in
-        let materialized =
+        let _, materialized =
           Hike.Split_blocks.materialize ~facts
             (Program.create ~subs:[ sub25' ] ())
         in
@@ -660,8 +662,8 @@ let tests : unit Alcotest.test list =
         let tmp = v64 "t26_tmp" in
         let m = memv "t26_m" in
         let flag = v1 "t26_flag" in
-        let base_def =
-          Def.create rdx (Bil.Var (Hike_synth.module_addr ~addr_bits:64 0x4000L)) in
+        let synth, base = Hike_synth.mint_module_addr ~addr_bits:64 0x4000L Hike_synth.empty in
+        let base_def = Def.create rdx (Bil.Var base) in
         let zero_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 0L))) in
         let one_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 1L))) in
         let pop_def = Def.create rdx (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64)) in
@@ -710,7 +712,7 @@ let tests : unit Alcotest.test list =
         in
         let block_addrs = Base.List.init 7 ~f:(fun i -> (addrs.(i), tids.(i))) in
         let envs, sub26', ba' =
-          produce ~block_addrs ~images (x86_target ())
+          produce ~synth ~block_addrs ~images (x86_target ())
             (Program.create ~subs:[ stamped ] ()) stamped
         in
         let facts =
@@ -719,7 +721,8 @@ let tests : unit Alcotest.test list =
             images;
             foreign_slots = Core.Int64.Set.empty }
         in
-        let materialized =
+        let facts = Hike.Kb.with_synth facts (Hike.Synth.union facts.synth synth) in
+        let _, materialized =
           Hike.Split_blocks.materialize ~facts (Program.create ~subs:[ sub26' ] ())
         in
         let disp =

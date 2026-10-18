@@ -384,11 +384,10 @@ let tests : unit Alcotest.test list =
           && Hike.Stack_model.singleton_stack_position v = None
           && Hike.Stack_model.positions_of_offsets v = None in
         List.iter (fun v -> check "WS-40 (no stack identity)" (nonstack v))
-          [plain; Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base;
-           Ws.set_origin Ws.Origin.Abs base];
+          [plain; Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base];
         check "WS-40 (absolute memory key)"
           (match Ws.address_groups plain with
-           | [ (Ws.Origin.Abs, _) ] -> true | _ -> false);
+           | [ (None, _) ] -> true | _ -> false);
         List.iter (fun v ->
             check "WS-40 (stack-family identity)"
               (Ws.in_stack_segment v

@@ -27,6 +27,7 @@ type site = {
 type callee = Summary of Core.Int.Set.t option | Blocked
 
 val stack_arg_ranges :
+  synth:Hike_synth.table ->
   abi:Hike_abi.t -> block:Bap.Std.blk Bap.Std.term -> entry:AI.t -> AI.t ->
   (Cbat_word.t * Cbat_word.t) list
 
@@ -35,6 +36,7 @@ val stack_arg_ranges :
    reads that sub through [callee]; anything unresolved is
    [Summary None]. *)
 val indirect_callee :
+  synth:Hike_synth.table ->
   lookup:(int64 -> Tid.t option) ->
   callee:(Tid.t -> callee) ->
   env:AI.t -> exp -> callee

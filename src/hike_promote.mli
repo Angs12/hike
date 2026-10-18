@@ -24,7 +24,7 @@ val call_resolution :
     real BIR args, the sites' outgoing stores gain their call-arg defs,
     and singleton-resolved indirect targets become direct. *)
 val promote_sub :
-  addr_bits:int -> facts -> sub term -> sub term
+  synth:Hike_synth.table ref -> addr_bits:int -> facts -> sub term -> sub term
 
 
 (** One call-site binding: the outgoing slot and the storing def. *)
@@ -58,5 +58,5 @@ val rewrite_program :
   spans:Hike_sections.data_span list ->
   ctx:Hike_sections.ctx ->
   program term ->
-  program term
+  Hike_synth.table * program term
 

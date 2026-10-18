@@ -11,23 +11,28 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     ~(tls : Hike_spec.tls_spec option)
     ~(relative : (int64 * int64) list) ~(externals : (int64 * string) list)
     (program : program term) : result =
-  let program = Hike_split_blocks.materialize ~facts program in
+  let synth, program = Hike_split_blocks.materialize ~facts program in
+  let facts = Hike_kb.with_synth facts synth in
   let addr_bits = Hike_abi.addr_size_bits facts.target in
-  let program = Hike_tls.rewrite_program ~addr_bits ~tls ~denote:facts.denote program in
+  let synth, program =
+    Hike_tls.rewrite_program ~synth ~addr_bits ~tls ~denote:facts.denote program
+  in
+  let facts = Hike_kb.with_synth facts synth in
   (* A copy-relocated slot's bytes are externally owned: the access keeps
      its absolute address so the emitter's relocation path renders it. *)
   let slots =
     Base.List.concat_map spans ~f:(fun span -> span.Hike_sections.ds_slots)
   in
   let layout ~synth program =
-    let facts = { facts with Hike_kb.synth } in
+    let facts = Hike_kb.with_synth facts synth in
     let sections =
       Hike_sections.attribute ~facts ~word ~entry ~spans program
     in
-    let program =
+    let synth, program =
       Term.map sub_t program ~f:(Hike_sections.stamp_tags sections)
       |> Hike_promote.rewrite_program ~word ~entry ~facts ~spans ~ctx:sections
     in
+    let facts = Hike_kb.with_synth facts synth in
     let spec =
       Hike_sections.section_spec_of ~word
         ~comps:(Hike_sections.global_comps_of ~word ~spans sections)
@@ -43,9 +48,9 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       @ Base.List.map spec.spec_whole ~f:(fun (id, lo, hi) ->
             { Hike_synth_addr.id; lo; hi })
     in
-    (program, regions, Hike_kb.with_attribution facts ~spec)
+    (program, regions, synth, Hike_kb.with_attribution facts ~spec)
   in
-  let program, facts =
-    Hike_rip.resolve_with_layout ~addr_bits ~slots ~layout program
+  let program, synth, facts =
+    Hike_rip.resolve_with_layout ~addr_bits ~slots ~synth ~layout program
   in
-  { program; facts = { facts with Hike_kb.synth = Hike_synth.table_of_program program } }
+  { program; facts = Hike_kb.with_synth facts (Hike_synth.restrict_to_program synth program) }

@@ -17,8 +17,8 @@ let plus_addr sp (off : int64) : exp =
 
 (* The fixture stamps the producer's facts onto the terms, then runs the
    promotion as a BIR rewrite — what the pipeline's vsa pass does. *)
-let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
-  Hike.Promote.promote_sub ~addr_bits:64 facts sub
+let stamp ~synth (facts : Hike.Promote.facts) (sub : sub term) : sub term =
+  Hike.Promote.promote_sub ~synth ~addr_bits:64 facts sub
 
 (* Family 8: stack-arg promotion emission.  A promoted callee (two proven
    slots) and two callers — one resolved indirect site with the outgoing
@@ -32,6 +32,8 @@ let t4_fixture () : sub term * string * string =
   let rsp = sp in
   let slot0 = ivar64 "hike_slot0" in
   let slot1 = ivar64 "hike_slot1" in
+  let synth = ref (Hike.Synth.add
+      (Hike.Synth.add Hike.Synth.empty slot0 (K_slot 0)) slot1 (K_slot 1)) in
   let acc = v64 "prom_acc" in
   let rdi = int_param 0 in
   let rsi = int_param 1 in
@@ -92,9 +94,9 @@ let t4_fixture () : sub term * string * string =
       ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some (Term.tid callee)))
       ()
   in
-  let callee = stamp callee_facts callee in
-  let caller = stamp caller_facts caller in
-  let ir = emit_ir_spec escape_spec [ caller; callee ] in
+  let callee = stamp ~synth callee_facts callee in
+  let caller = stamp ~synth caller_facts caller in
+  let ir = emit_ir_spec ~synth:!synth escape_spec [ caller; callee ] in
   let caller2, _ =
     sub_of "prom_caller2"
       [ [],
@@ -108,8 +110,8 @@ let t4_fixture () : sub term * string * string =
   let caller2_facts : Hike.Promote.facts =
     mk_facts ~prom_resolved:(Tid.Map.singleton (Term.tid j2) None) ()
   in
-  let caller2 = stamp caller2_facts caller2 in
-  let ir2 = emit_ir_spec escape_spec [ caller2; callee ] in
+  let caller2 = stamp ~synth caller2_facts caller2 in
+  let ir2 = emit_ir_spec ~synth:!synth escape_spec [ caller2; callee ] in
   (callee, ir, ir2)
 in
 t4_fixture ())
@@ -152,7 +154,7 @@ let pr_a4_sub () : sub term =
 (* The A4 sub's storage over [sec; lo, hi], read through its tree. *)
 let pr_a4_storage (a4 : sub term) (sec : Hike.Stack_model.sec) (lo : int64) (hi : int64) :
     Hike.Sections.storage option =
-  let ctx = fixture_ctx [ a4 ] in
+  let ctx = fixture_ctx ~synth:Hike.Synth.empty [ a4 ] in
   Base.Option.bind (Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid a4))
     ~f:(fun tree ->
       Base.Option.map
@@ -219,7 +221,7 @@ let prwc_mk_defs () : def term * def term * def term * def term * def term * var
 
 (* The -O0 frame shape: push rbp; mov rbp, rsp; sub rsp, 16 — one local
    store/load pair at [RBP-16] and an indexed store at [RBP-16+i*8]. *)
-let rw_frame () : sub term =
+let rw_frame () : Hike.Synth.table * sub term =
   let m = memv "rw_m" in
   let rsp = sp in
   let rbp = frame_ptr in
@@ -258,12 +260,12 @@ let rw_frame () : sub term =
              Bil.Int (Cbat_word.to_word (w64 7)),
              LittleEndian, `r64 )) ]
   in
-  rewrite_one (straight_sub "rw_frame" defs)
+  rewrite_one_synth ~synth:Hike.Synth.empty (straight_sub "rw_frame" defs)
 
 (* The same -O0 frame with the index in a return register (RAX) holding
    a bounded non-stack value: the per-use leaf classification must fold
    the runtime piece and rebase the indexed access into its region. *)
-let rw_abi_index () : sub term =
+let rw_abi_index () : Hike.Synth.table * sub term =
   let m = memv "rw_m" in
   let rsp = sp in
   let rbp = frame_ptr in
@@ -302,13 +304,13 @@ let rw_abi_index () : sub term =
              Bil.Int (Cbat_word.to_word (w64 7)),
              LittleEndian, `r64 )) ]
   in
-  rewrite_one (straight_sub "rw_abi_index" defs)
+  rewrite_one_synth ~synth:Hike.Synth.empty (straight_sub "rw_abi_index" defs)
 
 (* The saved-then-reloaded pointer: the address of the local is stored
    into a cell and the through-pointer store dereferences the reload —
    the escaped cell write-closes into the residue, and the reloaded
    base still routes to the storage's base + displacement. *)
-let rw_reload () : sub term =
+let rw_reload () : Hike.Synth.table * sub term =
   let m = memv "rw_m" in
   let rsp = sp in
   let rbp = frame_ptr in
@@ -344,7 +346,7 @@ let rw_reload () : sub term =
            ( Bil.Var m, Bil.Var p, Bil.Int (Cbat_word.to_word (w64 7)),
              LittleEndian, `r64 )) ]
   in
-  rewrite_one (straight_sub "rw_reload" defs)
+  rewrite_one_synth ~synth:Hike.Synth.empty (straight_sub "rw_reload" defs)
 
 (* The defs of [sub] whose address expression references [name]. *)
 let rw_accesses_named (sub : sub term) (name : string) : def term list =
@@ -361,7 +363,7 @@ let rw_accesses_named (sub : sub term) (name : string) : def term list =
 (* The caller-window fixture: a callee whose above-entry (Args) read
    crosses slot cells (write-closed, never an Arg_slot) and a pure
    window-value def. *)
-let rw_window () : sub term =
+let rw_window () : Hike.Synth.table * sub term =
   let m = memv "rw_m" in
   let rsp = sp in
   let rbp = frame_ptr in
@@ -385,7 +387,7 @@ let rw_window () : sub term =
              Bil.BinOp (Bil.PLUS, Bil.Var rbp, k20),
              LittleEndian, `r64 )) ]
   in
-  rewrite_one (straight_sub "rw_window" defs)
+  rewrite_one_synth ~synth:Hike.Synth.empty (straight_sub "rw_window" defs)
 
 
 (* The lifted va_list construction: the incoming GP parameter registers
@@ -432,7 +434,7 @@ let rw_variadic ~(overflow : bool) () : sub term =
 (* The section-constant fixture: a def whose value is a .rodata
    constant address; the span owns it, so the value takes the
    component's base var. *)
-let rw_sec () : sub term =
+let rw_sec () : Hike.Synth.table * sub term =
   let m = memv "rw_m" in
   let sub0 =
     straight_sub "rw_sec"
@@ -449,18 +451,18 @@ let rw_sec () : sub term =
         Hike.Sections.ds_hi = 0x1010L;
         Hike.Sections.ds_slots = [] } ]
   in
-  let facts, subs, _ = fixture_facts [ sub0 ] in
+  let facts, subs, _ = fixture_facts ~synth:Hike.Synth.empty [ sub0 ] in
   let prog = Program.create ~subs () in
   let ctx =
     Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
       ~spans prog
   in
   let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
-  let prog =
+  let synth, prog =
     Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base
       ~facts ~spans ~ctx prog
   in
-  Term.first sub_t prog |> Base.Option.value_exn
+  (synth, Term.first sub_t prog |> Base.Option.value_exn)
 
 (* The A7 fixture: a callee whose above-entry reads span several word
    cells (slots 0 and 2, so the arity is 3 and the gap is real). *)
@@ -478,13 +480,15 @@ let pr_slot_callee () : sub term * def term * def term =
   in
   (straight_sub "pr_slot_callee" [ d_rbp; ld0; ld2 ], ld0, ld2)
 
-(* The slot a promoted access addresses, by the slot var's name. *)
-let slot_of_addr (d : def term) : string option =
+(* The registered slot a promoted access addresses. *)
+let slot_of_addr ~synth (d : def term) : int option =
   match Def.rhs d with
   | Bil.Load (_, a, _, _) -> (
       match a with
-      | Bil.Var v -> Some (Var.name v)
-      | Bil.BinOp (Bil.PLUS, Bil.Var v, _) -> Some (Var.name v)
+      | Bil.Var v | Bil.BinOp (Bil.PLUS, Bil.Var v, _) ->
+        (match Hike.Synth.storage_of synth v with
+         | Some (Hike.Synth.Slot i) -> Some i
+         | _ -> None)
       | _ -> None)
   | _ -> None
 
@@ -570,7 +574,7 @@ let tests : unit Alcotest.test list =
                  `r64 ))
         in
         let keep_sub0 = straight_sub "t10_keep" [ keep; keep_st ] in
-        let keep_ctx = fixture_ctx [ keep_sub0 ] in
+        let keep_ctx = fixture_ctx ~synth:Hike.Synth.empty [ keep_sub0 ] in
         let keep_sub = Hike.Sections.stamp_tags keep_ctx keep_sub0 in
         let keep_def = Base.Option.value_exn (t10_find_def keep_sub (Term.tid keep)) in
         check "PR-12" (Ds.sec_tag keep_def <> None));
@@ -596,12 +600,13 @@ let tests : unit Alcotest.test list =
         let a2 = straight_sub "pr_a2_retaddr" [ a2_ld ] in
         let a2_retaddr =
           let sol =
-            static_graph_vsa
+            static_graph_vsa ~synth:Hike.Synth.empty
               ~abi:Hike_abi.x86_64_sysv
               ~resolved:Tid.Map.empty a2
               (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv a2)
           in
-          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol a2
+          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv
+            ~synth:Hike.Synth.empty ~sol a2
         in
         check "PR-16" (Core.Set.mem a2_retaddr (Term.tid a2_ld)));
 
@@ -628,7 +633,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let a6, body, _, a6_st2 = pr_a6_sub () in
         check "PR-19"
-          (let fa6, a6 = fixture_facts_sub a6 in
+          (let fa6, a6 = fixture_facts_sub ~synth:Hike.Synth.empty a6 in
            let bindings =
              Hike.Promote.site_bindings_of_sub ~word:8 ~sp
                ~denote:fa6.denote a6
@@ -644,7 +649,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let a6, _, j, _ = pr_a6_sub () in
         check "PR-20"
-          (let fa6, a6 = fixture_facts_sub a6 in
+          (let fa6, a6 = fixture_facts_sub ~synth:Hike.Synth.empty a6 in
            let resolved =
              Hike.Promote.call_resolution ~denote:fa6.denote
                ~lookup:(fun _ -> None) a6
@@ -664,7 +669,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         check "PR-21"
-          (let ctx = fixture_ctx [ mid ] in
+          (let ctx = fixture_ctx ~synth:Hike.Synth.empty [ mid ] in
            match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid mid) with
            | None -> false
            | Some tree ->
@@ -692,7 +697,7 @@ let tests : unit Alcotest.test list =
             [ [ prologue; al; ptr ], [ (1, mk_goto) ];
               [ store ], [ (0, mk_ret) ] ]
         in
-        let twin' = rewrite_one twin in
+        let _, twin' = rewrite_one_synth ~synth:Hike.Synth.empty twin in
         check "PR-22"
           (match t10_find_def twin' (Term.tid ptr) with
            | Some d -> Ds.def_is_window_value d
@@ -702,7 +707,7 @@ let tests : unit Alcotest.test list =
        folded displacement (zero here — the base itself). *)
     pin "PR-23" "a region address def's value is its storage base + displacement"
       (fun () ->
-        let sub' = rw_frame () in
+        let synth, sub' = rw_frame () in
         let find v =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d -> Var.equal (Var.base (Def.lhs d)) v)
@@ -724,8 +729,8 @@ let tests : unit Alcotest.test list =
                    Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst) )
            with
            | Some (Bil.Var pv), Some (Bil.Var av) ->
-               Cu.region_ptr_id_of pv = Some 2
-               && Cu.region_ptr_id_of av = Some 1
+               Cu.region_ptr_id_of synth pv = Some 2
+               && Cu.region_ptr_id_of synth av = Some 1
            | _ -> false));
 
     (* PR-39: a runtime index in an ABI lane (a bounded non-stack value)
@@ -733,7 +738,7 @@ let tests : unit Alcotest.test list =
        base plus the piece, never the raw frame arithmetic. *)
     pin "PR-39" "an ABI-lane runtime index folds into the access's region"
       (fun () ->
-        let sub' = rw_abi_index () in
+        let synth, sub' = rw_abi_index () in
         let indexed =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d ->
@@ -748,9 +753,9 @@ let tests : unit Alcotest.test list =
              Base.Option.bind indexed ~f:(fun d ->
                  Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst)
            with
-           | Some (Bil.Var b) -> Cu.region_ptr_id_of b = Some 1
+           | Some (Bil.Var b) -> Cu.region_ptr_id_of synth b = Some 1
            | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) ->
-               Cu.region_ptr_id_of b = Some 1
+               Cu.region_ptr_id_of synth b = Some 1
            | _ -> false));
 
     (* PR-24: the emitter lowers the rewritten address as the storage's
@@ -762,13 +767,13 @@ let tests : unit Alcotest.test list =
        into the residue and the pure address def over it names it. *)
     pin "PR-26" "a residue access and value name the residue base"
       (fun () ->
-        let sub' = rw_reload () in
+        let synth, sub' = rw_reload () in
         let through = rw_accesses_named sub' "rw_p" in
         let addr_ok a =
           match a with
-          | Bil.Var b -> Cu.region_ptr_id_of b = Some 0
+          | Bil.Var b -> Cu.region_ptr_id_of synth b = Some 0
           | Bil.BinOp (Bil.PLUS, Bil.Var b, _) ->
-              Cu.region_ptr_id_of b = Some 0
+              Cu.region_ptr_id_of synth b = Some 0
           | _ -> false
         in
         let q =
@@ -788,14 +793,14 @@ let tests : unit Alcotest.test list =
                | Some (a, _) -> addr_ok a
                | None -> false)
           && Base.Option.value_map q ~default:false
-               ~f:(fun b -> Cu.region_ptr_id_of b = Some 0)));
+               ~f:(fun b -> Cu.region_ptr_id_of synth b = Some 0)));
 
     (* PR-25: a reloaded-base access routes to its proven storage — the
        through-pointer store's address is the storage base plus the
        displacement over the reloaded pointer's offset, never the raw
        lane. *)
     pin "PR-25" "a reloaded-base access routes to its storage base" (fun () ->
-        let sub' = rw_reload () in
+        let synth, sub' = rw_reload () in
         let through = rw_accesses_named sub' "rw_p" in
         let addr_base a =
           match a with
@@ -808,13 +813,13 @@ let tests : unit Alcotest.test list =
                match Cu.addr_of_rhs (Def.rhs d) with
                | Some (a, _) ->
                    Base.Option.value_map (addr_base a) ~default:false
-                     ~f:Cu.is_region_ptr
+                     ~f:(Cu.is_region_ptr synth)
                | None -> false)));
 
     (* PR-27: a window access's address is the window parameter plus the
        entry-relative displacement. *)
     pin "PR-27" "a window access address is hike_window plus off" (fun () ->
-        let sub' = rw_window () in
+        let synth, sub' = rw_window () in
         let win_addr =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.filter_map ~f:(fun d ->
@@ -822,8 +827,8 @@ let tests : unit Alcotest.test list =
           |> Seq.exists ~f:(fun a ->
                  match a with
                  | Bil.BinOp (Bil.PLUS, Bil.Var b, _) ->
-                     Cu.is_window_var b
-                 | Bil.Var b -> Cu.is_window_var b
+                     Cu.is_window_var synth b
+                 | Bil.Var b -> Cu.is_window_var synth b
                  | _ -> false)
         in
         check "PR-27" win_addr);
@@ -831,7 +836,7 @@ let tests : unit Alcotest.test list =
     (* PR-28: a window value def (at/above the args base) takes the
        window parameter as its base. *)
     pin "PR-28" "a window value def value is hike_window plus off" (fun () ->
-        let sub' = rw_window () in
+        let synth, sub' = rw_window () in
         let w =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d ->
@@ -840,14 +845,14 @@ let tests : unit Alcotest.test list =
         in
         check "PR-28"
           (match w with
-           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) -> Cu.is_window_var b
-           | Some (Bil.Var b) -> Cu.is_window_var b
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) -> Cu.is_window_var synth b
+           | Some (Bil.Var b) -> Cu.is_window_var synth b
            | _ -> false));
 
     (* PR-30: a constant address def's value is its component's base var
        (the displacement folds to zero at the component's low bound). *)
     pin "PR-30" "a constant address def's value is its component base" (fun () ->
-        let sub' = rw_sec () in
+        let synth, sub' = rw_sec () in
         let c =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d ->
@@ -856,9 +861,9 @@ let tests : unit Alcotest.test list =
         in
         check "PR-30"
           (match c with
-           | Some (Bil.Var pv) -> Cu.is_sec_comp_ptr pv
+           | Some (Bil.Var pv) -> Cu.is_sec_comp_ptr synth pv
            | Some (Bil.BinOp (Bil.PLUS, Bil.Var pv, _)) ->
-               Cu.is_sec_comp_ptr pv
+               Cu.is_sec_comp_ptr synth pv
            | _ -> false));
 
     (* PR-31: the per-word-cell split — each access is its own cell's slot,
@@ -868,12 +873,12 @@ let tests : unit Alcotest.test list =
       "the per-word-cell split: a two-cell Args binding promotes each cell to its own slot"
       (fun () ->
         let sub, ld0, ld2 = pr_slot_callee () in
-        let sub' = rewrite_one sub in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         check "PR-31"
           (match (t10_find_def sub' (Term.tid ld0), t10_find_def sub' (Term.tid ld2)) with
            | Some d0, Some d2 ->
-               slot_of_addr d0 = Some "hike_slot0"
-               && slot_of_addr d2 = Some "hike_slot2"
+               slot_of_addr ~synth d0 = Some 0
+               && slot_of_addr ~synth d2 = Some 2
            | _ -> false));
 
     (* PR-32: the pointer convention — a promoted access is a REAL
@@ -882,12 +887,12 @@ let tests : unit Alcotest.test list =
     pin "PR-32" "a promoted access keeps its memory node, addressed at the slot pointer"
       (fun () ->
         let sub, ld0, _ = pr_slot_callee () in
-        let sub' = rewrite_one sub in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         check "PR-32"
           (match t10_find_def sub' (Term.tid ld0) with
            | Some d -> (
                match Def.rhs d with
-               | Bil.Load (_, Bil.Var v, LittleEndian, `r64) -> Cu.is_arg_slot v
+               | Bil.Load (_, Bil.Var v, LittleEndian, `r64) -> Cu.is_arg_slot synth v
                | _ -> false)
            | None -> false));
 
@@ -895,16 +900,16 @@ let tests : unit Alcotest.test list =
        signature and the body agree on the address. *)
     pin "PR-33" "the promoted slot parameter is a pointer (Mem-typed)" (fun () ->
         let sub, _, _ = pr_slot_callee () in
-        let sub' = rewrite_one sub in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         let slots =
           Term.enum arg_t sub' |> Base.Sequence.to_list
-          |> Base.List.filter ~f:(fun a -> Cu.is_arg_slot (Arg.lhs a))
+          |> Base.List.filter ~f:(fun a -> Cu.is_arg_slot synth (Arg.lhs a))
         in
         check "PR-33"
           (Base.List.length slots = 3
           && Base.List.for_all slots ~f:(fun a -> Cu.is_mem (Arg.lhs a))
           && Base.List.exists slots ~f:(fun a ->
-                 String.equal (Var.name (Arg.lhs a)) "hike_slot2")));
+                 Hike.Synth.storage_of synth (Arg.lhs a) = Some (Hike.Synth.Slot 2))));
 
     (* PR-34: the caller binds the slot ADDRESS — the store's own address,
        already re-pointed at the caller's storage — never the stored
@@ -941,11 +946,11 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let sub' = rewrite_one sub in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         let arg0 =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d ->
-                 String.equal (Var.name (Var.base (Def.lhs d))) "hike_arg0")
+                 Hike.Synth.storage_of synth (Def.lhs d) = Some (Hike.Synth.Argument 0))
         in
         check "PR-34"
           (match arg0 with
@@ -962,8 +967,8 @@ let tests : unit Alcotest.test list =
       "the emitted slot parameter is an LLVM pointer and the access loads through it"
       (fun () ->
         let sub, _, _ = pr_slot_callee () in
-        let sub' = rewrite_one sub in
-        let ir = emit_ir [ sub' ] in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
+        let ir = emit_ir ~synth [ sub' ] in
         check_ir "PR-35" "ptr %hike_slot0" ir);
 
     (* PR-36: the twin forwards the window GEP'd at the slot — a pointer,
@@ -981,18 +986,18 @@ let tests : unit Alcotest.test list =
        variadic, and the emitted definition is a real LLVM variadic. *)
     pin "PR-37" "the va_list construction stamps the sub variadic"
       (fun () ->
-        let sub' = rewrite_one (rw_variadic ~overflow:true ()) in
+        let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty (rw_variadic ~overflow:true ()) in
         check "PR-37a" (Hike.Variadic.is_variadic sub');
         check "PR-37c"
           (match Term.get_attr sub' Hike.Stack_model.layout_tag with
            | Some layout -> layout.Hike.Stack_model.window_param
            | None -> false);
-        check_ir "PR-37b" ", ...)" (emit_ir [ sub' ]));
+        check_ir "PR-37b" ", ...)" (emit_ir ~synth [ sub' ]));
 
     (* PR-38: the same registers spilled into the frame with no
        overflow pointer are not the va_list construction. *)
     pin "PR-38" "the register spills alone are not variadic" (fun () ->
-        let sub' = rewrite_one (rw_variadic ~overflow:false ()) in
+        let _, sub' = rewrite_one_synth ~synth:Hike.Synth.empty (rw_variadic ~overflow:false ()) in
         check "PR-38" (not (Hike.Variadic.is_variadic sub')))
   ]
 

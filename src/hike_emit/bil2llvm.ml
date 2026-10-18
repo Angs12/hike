@@ -439,7 +439,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
      must still fit the machine convention.  The synthetic conventions:
      the indirect call and every escaped sub.  Their signatures are
      DERIVED from the ABI — only their names are held. *)
-  let has_slot_args args = count_slot_args args > 0 in
+  let has_slot_args args = count_slot_args synth args > 0 in
   let synthetic =
     Base.List.fold subs_list
       ~init:(Core.Set.of_list (module Tid) [ indirect_call_tid ])

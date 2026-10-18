@@ -188,7 +188,7 @@ let tests : unit Alcotest.test list =
           AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x5000))
         in
         check "CE-08"
-          (match Ce.indirect_callee ~lookup ~callee ~env:bounded (Bil.Var tgt) with
+          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:bounded (Bil.Var tgt) with
           | Ce.Summary (Some ws) -> Core.Int.Set.equal ws gs
           | _ -> false));
 
@@ -205,7 +205,7 @@ let tests : unit Alcotest.test list =
             ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ])
         in
         check "CE-09"
-          (match Ce.indirect_callee ~lookup ~callee ~env:spread (Bil.Var tgt) with
+          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:spread (Bil.Var tgt) with
           | Ce.Summary None -> true
           | _ -> false));
 
@@ -221,7 +221,7 @@ let tests : unit Alcotest.test list =
           AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x9000))
         in
         check "CE-10"
-          (match Ce.indirect_callee ~lookup ~callee ~env:foreign (Bil.Var tgt) with
+          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:foreign (Bil.Var tgt) with
           | Ce.Summary None -> true
           | _ -> false));
 
@@ -300,7 +300,6 @@ let tests : unit Alcotest.test list =
         let env, m = ce_raw_env () in
         let values =
           [ Ws.singleton (w64 0x1000);
-            Ws.set_origin Hike_origin.Abs (Ws.stack_word_i64 0x1000L);
             Ws.set_origin (Hike_origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 0x1000L) ] in
         Base.List.iter values ~f:(fun rsp ->
             let post = ce_call (AI.add_word env ~key:ce_abi.Hike_abi.sp ~data:rsp)
@@ -383,8 +382,8 @@ let tests : unit Alcotest.test list =
                        Bil.Int (Cbat_word.to_word (w64 8))));
                    store 0 0x1234]
             ~jmps:[mk_call_jmp continuation (Term.tid callee)] () in
-        let post_defs = Vsa.Test_seam.denote_defs block entry in
-        let ranges = Ce.stack_arg_ranges ~abi:ce_abi ~block ~entry post_defs in
+        let post_defs = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty block entry in
+        let ranges = Ce.stack_arg_ranges ~synth:Hike.Synth.empty ~abi:ce_abi ~block ~entry post_defs in
         check "CE-29 both actual outgoing slots are cleared"
           (ranges = [(w64 0x1000, w64 0x100f)]));
 
@@ -416,7 +415,7 @@ let tests : unit Alcotest.test list =
                   ~data:(Mem.Val.create (Ws.singleton (w64 value)) LittleEndian))
         in
         let env = AI.add_memory env ~key:memory_var ~data:memory in
-        let stack_args = Ce.stack_arg_ranges ~abi:ce_abi ~block ~entry:env env in
+        let stack_args = Ce.stack_arg_ranges ~synth:Hike.Synth.empty ~abi:ce_abi ~block ~entry:env env in
         let post =
           Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
             ~site:{ Ce.summary = None; read_lanes = []; pushed = false } env
@@ -440,7 +439,7 @@ let tests : unit Alcotest.test list =
         let env =
           AI.add_word AI.top ~key:local ~data:(Ws.stack_word_i64 (-16L))
         in
-        let post = Vsa.Test_seam.denote_def store env in
+        let post = Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty store env in
         check "CE-24" (AI.frame_escaped post));
 
     pin "CE-25" "a stack address stored in the sub's own frame stays contained" (fun () ->
@@ -460,7 +459,7 @@ let tests : unit Alcotest.test list =
                ~data:(Ws.stack_word_i64 0L))
             ~key:local ~data:(Ws.stack_word_i64 (-16L))
         in
-        let post = Vsa.Test_seam.denote_def store env in
+        let post = Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty store env in
         check "CE-25" (not (AI.frame_escaped post)));
 
     pin "CE-27" "the frame-escape bit joins by OR and participates in equality" (fun () ->

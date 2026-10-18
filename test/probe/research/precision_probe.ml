@@ -93,10 +93,10 @@ let addr_exp_of_rhs (e : exp) : exp option =
   | _ -> None
 
 (* One L2a DIAG line for a bottom word def. *)
-let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
+let diag_bottom ~synth (bname : string) (sub' : sub term) (b : blk term)
     (d : def term) (input_bottom : bool) (st_before : AI.t) : unit =
   let class_of (e : exp) : string =
-    match Vsa.Test_seam.denote_imm_exp e st_before with
+    match Vsa.Test_seam.denote_imm_exp ~synth e st_before with
     | Error _ -> "err"
     | Ok ws -> classify_operand ws in
   let kind, op1, op2 =
@@ -114,10 +114,10 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
 
 (* One DIAG_DEF line: the def's value class, cardinality, extrema and
    rhs, so two runs' dumps attribute every bucket move to a def. *)
-let diag_def (bname : string) (sub' : sub term) (b : blk term) (d : def term)
+let diag_def ~synth (bname : string) (sub' : sub term) (b : blk term) (d : def term)
     (st_before : AI.t) (ws : Ws.t) : unit =
   let class_of (e : exp) : string =
-    match Vsa.Test_seam.denote_imm_exp e st_before with
+    match Vsa.Test_seam.denote_imm_exp ~synth e st_before with
     | Error _ -> "err"
     | Ok ws -> classify_operand ws in
   let kind, op1, op2 =
@@ -153,7 +153,7 @@ let diag_def (bname : string) (sub' : sub term) (b : blk term) (d : def term)
    (segment-relative) and absolute extrema under the tag-meet view, and
    its offset extrema under the def's before-state (the production
    denotation). *)
-let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
+let diag_acc ~synth (bname : string) (sub' : sub term) (b : blk term) (d : def term)
     (stack : bool) (ws : Ws.t) (a : exp) (st_before : AI.t) : unit =
   let i64_of_word (w : Cbat_word.t) : string =
     match Cbat_word.to_int64 w with
@@ -166,7 +166,7 @@ let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
     | Some lo, Some hi ->
       Printf.sprintf "%s..%s" (i64_of_word lo) (i64_of_word hi)
     | _ -> "n/a" in
-  let pre = match Vsa.Test_seam.denote_imm_exp a st_before with
+  let pre = match Vsa.Test_seam.denote_imm_exp ~synth a st_before with
     | Ok ws' -> offs_of ws'
     | Error _ -> "err" in
   let signed_of ws' = match Ws.min_elem_signed ws', Ws.max_elem_signed ws' with
@@ -182,8 +182,8 @@ let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
 (* Walk blocks in def order, re-denote, classify. *)
 (* The seeding predicate and the tag-state meet come from the shared probe
    seam. *)
-let is_stack_access st addr =
-  match Vsa.Test_seam.denote_imm_exp addr st with
+let is_stack_access ~synth st addr =
+  match Vsa.Test_seam.denote_imm_exp ~synth addr st with
   | Error _ -> false
   | Ok ws -> Rows.is_stack_value ws
 
@@ -202,7 +202,7 @@ let st_tag_of ~(tags : Vsa.vsa_sol) (blk : blk term) (addr : exp)
         else AI.add_word acc ~key:v ~data:mm
       | Type.Mem _ | Type.Unk -> acc)
 
-let collect_stats (bname : string) (sub' : sub term)
+let collect_stats ~synth (bname : string) (sub' : sub term)
     (sol : Vsa.vsa_sol) (tags : Vsa.vsa_sol) : Sub_stats.t =
   let s = Sub_stats.create (Sub.name sub') in
   (* L2a counters: bottom defs, live vs dead. *)
@@ -221,13 +221,13 @@ let collect_stats (bname : string) (sub' : sub term)
       |> Seq.iter ~f:(fun d ->
           let st_before = !st in
           (* Sequential denotation, like the fixpoint. *)
-          st := Vsa.Test_seam.denote_def d !st;
+          st := Vsa.Test_seam.denote_def ~synth d !st;
           (* Word-lhs defs only; bottom split by entry state. *)
           (match Var.typ (Def.lhs d) with
            | Type.Imm w ->
              let ws = AI.find_word w !st (Def.lhs d) in
               (* Gate-free: every def is denoted (spec §2.1). *)
-             if defs_on () then diag_def bname sub' b d st_before ws;
+             if defs_on () then diag_def ~synth bname sub' b d st_before ws;
              let stack = Rows.is_stack_value ws in
              let shape = Rows.shape_of ws in
              let b =
@@ -237,12 +237,12 @@ let collect_stats (bname : string) (sub' : sub term)
                  if input_bottom then begin
                    incr bottom_dead;
                    if diag_on () then
-                     diag_bottom bname sub' b d input_bottom
+                     diag_bottom ~synth bname sub' b d input_bottom
                        st_before
                  end else begin
                    incr bottom_live;
                    if diag_on () then
-                     diag_bottom bname sub' b d input_bottom
+                     diag_bottom ~synth bname sub' b d input_bottom
                        st_before
                  end;
                  if input_bottom then `Bottom_dead else `Bottom_live
@@ -258,14 +258,14 @@ let collect_stats (bname : string) (sub' : sub term)
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
            | Some a ->
-             let stack = is_stack_access st_before a in
+             let stack = is_stack_access ~synth st_before a in
              (* Addresses denoted with block IN-state, not re-denoted values. *)
               let st_tag = st_tag_of ~tags b a st_before in
-             (match Vsa.Test_seam.denote_imm_exp a st_tag with
+             (match Vsa.Test_seam.denote_imm_exp ~synth a st_tag with
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1
               | Ok ws ->
-                if acc_on () then diag_acc bname sub' b d stack ws a st_before;
+                if acc_on () then diag_acc ~synth bname sub' b d stack ws a st_before;
                 (* Bottom split uses [input_bottom], as the def series. *)
                 let lb = classify_ld ws input_bottom in
                 Sub_stats.add_ld s ~stack ~shape:(Rows.shape_of ws) lb;
@@ -372,7 +372,7 @@ let run_sub (bname : string) (facts : Hike.Kb.facts) (sub : sub term) : outcome 
     (* The walk re-denotes defs, so it reads the images the solve read. *)
     let st =
       Vsa.with_images facts.Hike.Kb.images
-        (fun () -> collect_stats bname sub sol sol) in
+        (fun () -> collect_stats ~synth:facts.synth bname sub sol sol) in
     Ok st
   with e ->
     Crash (describe_exn e, Printexc.get_backtrace ())

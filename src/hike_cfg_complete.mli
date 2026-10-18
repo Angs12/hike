@@ -49,7 +49,7 @@ open Bap.Std
   (** The defs whose load address denotates, in the def's own
       before-env, to the stack-symbolic entry-RSP cell. *)
   val retaddr_defs :
-    abi:Hike_abi.t -> sol:Cbat_vsa.vsa_sol -> sub term -> Tid.Set.t
+    abi:Hike_abi.t -> synth:Hike_synth.table -> sol:Cbat_vsa.vsa_sol -> sub term -> Tid.Set.t
 
   (** One resolution event pass on the phase's solution: the resolved
       dispatches contribute their target sets to the extra edges.  The
@@ -60,6 +60,7 @@ open Bap.Std
   val resolve_phase :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
+    synth:Hike_synth.table ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
     sub term ->
@@ -76,6 +77,7 @@ open Bap.Std
   val materialize :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
+    synth:Hike_synth.table ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
     sub term -> sub term

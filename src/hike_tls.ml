@@ -4,16 +4,20 @@ open Bap.Std
 module Ws = Cbat_vsa.WordSet
 module P = Cbat_clp.Pieces
 
-let rewrite_program ~addr_bits ~(tls : Hike_spec.tls_spec option)
+let rewrite_program ~synth ~addr_bits ~(tls : Hike_spec.tls_spec option)
     ~(denote : Hike_kb.denote) program =
+  let cell = ref synth in
   let int n = Bil.Int (Word.of_int64 ~width:addr_bits n) in
-  let address off = Bil.Var (Hike_synth.thread_addr ~addr_bits off) in
+  let thread_addr off =
+    Hike_synth.record cell (Hike_synth.mint_thread_addr ~addr_bits off) in
+  let address off = Bil.Var (thread_addr off) in
   let own lo hi = match tls with
     | Some t -> lo >= t.tls_base && hi < Int64.add t.tls_base t.tls_memsz
     | None -> false in
   let native lo hi = match tls with
     | Some t -> hi < t.tls_base || lo >= Int64.add t.tls_base t.tls_memsz
     | None -> true in
+  let program =
   Term.map sub_t program ~f:(fun sub ->
       Term.map blk_t sub ~f:(fun blk ->
           Term.map def_t blk ~f:(fun def ->
@@ -65,7 +69,7 @@ let rewrite_program ~addr_bits ~(tls : Hike_spec.tls_spec option)
                        | None -> native_value
                        | Some t ->
                          let owned = Hike_synth_addr.base_plus
-                             (Hike_synth.thread_addr ~addr_bits t.tls_base)
+                             (thread_addr t.tls_base)
                              ~rel:t.tls_base off in
                          if own lo hi then owned
                          else if native lo hi then native_value
@@ -85,3 +89,5 @@ let rewrite_program ~addr_bits ~(tls : Hike_spec.tls_spec option)
                     | _ -> rendered)
               end in
               Def.map_exp def ~f:mapper#map_exp)))
+  in
+  (!cell, program)

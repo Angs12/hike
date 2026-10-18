@@ -119,6 +119,22 @@ let has_sized_rows (name : string) : bool =
       && String.length n > String.length bare
       && n.[String.length bare] = '_')
 
+(* The lifter's own lane temps, before [hike-fp] gives them a width: the
+   vars its intrinsic semantics write before and read after a call.  They
+   are born outside Hike, so the lifter's vocabulary is declared here:
+   operands [intrinsic:x0..x3], results [intrinsic:y0..y1]. *)
+let lifter_lanes : (Hike_synth.lane * int) Var.Map.t =
+  let lane kind c i =
+    Var.create ~is_virtual:false ~fresh:false (Printf.sprintf "intrinsic:%c%d" c i)
+      (Type.Imm 64), (kind, i)
+  in
+  Core.Map.of_alist_exn (module Var)
+    (Base.List.init 4 ~f:(lane Hike_synth.Input 'x')
+     @ Base.List.init 2 ~f:(lane Hike_synth.Output 'y'))
+
+let lifter_lane (v : Var.t) : (Hike_synth.lane * int) option =
+  Core.Map.find lifter_lanes (Var.base v)
+
 (* The static model interface of each mapped op: the input temps the
    call block defines (fp_args) and the result temps consumers read
    (fp_rets); FCONVERT w reads x0 at the complementary width. *)

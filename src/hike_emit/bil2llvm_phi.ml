@@ -20,7 +20,7 @@ let create ctx scope blks =
       |> Seq.iter ~f:(fun phi ->
           let var = Phi.lhs phi in
           let res =
-            if var_is_ptr var then
+            if var_is_ptr ctx var then
               Bil2llvm_value.Ptr (Llvm.build_empty_phi ctx.ptr_ty "" llvm_builder)
             else
               Bil2llvm_value.Int

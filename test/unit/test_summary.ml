@@ -25,8 +25,9 @@ let tail_to (callee : tid) : tid -> jmp term =
 
 let summarize ?(callee = fun _ -> None) (sub : sub term) : S.t =
   let envs, sub', block_addrs =
-    produce (x86_target ()) (Program.create ~subs:[ sub ] ()) sub in
-  S.of_solved ~abi ~callee ~slot:(fun _ -> None) ~lookup:(fun _ -> None)
+    produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ sub ] ()) sub in
+  S.of_solved ~abi ~synth:Hike.Synth.empty
+    ~callee ~slot:(fun _ -> None) ~lookup:(fun _ -> None)
     ~foreign_slots:Core.Int64.Set.empty ~block_addrs ~envs sub'
 
 let writes (s : S.t) (v : var) : bool =

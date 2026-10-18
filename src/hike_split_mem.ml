@@ -9,7 +9,7 @@ open Bap.Std
 (* The first memory node stays inline (the one the VSA's
    classification describes); every distinct later load becomes a
    fresh synthetic def; equal later nodes share one def. *)
-let split_def (d : def term) : def term list =
+let split_def ~(synth : Hike_synth.table ref) (d : def term) : def term list =
   let rhs = Def.rhs d in
   if Hike_stack_model.mem_node_count rhs <= 1 then [ d ]
   else
@@ -20,7 +20,8 @@ let split_def (d : def term) : def term list =
       | Some v -> v
       | None ->
         let v =
-          Hike_synth.fresh ~bits:(Size.in_bits bits) Hike_synth.Load
+          Hike_synth.record synth
+            (Hike_synth.mint_fresh ~bits:(Size.in_bits bits) Hike_synth.Load)
         in
         later := (node, v) :: !later;
         v
@@ -49,7 +50,7 @@ let split_def (d : def term) : def term list =
     hoists @ [ Def.with_rhs d rhs' ]
 
 (* Identity unless a def needs splitting. *)
-let split_sub (sub : sub term) : sub term =
+let split_sub ~(synth : Hike_synth.table ref) (sub : sub term) : sub term =
   (* One traversal decides; the map pass re-checks only the blocks it
      visits after the cheap whole-sub reject. *)
   let offending =
@@ -66,8 +67,11 @@ let split_sub (sub : sub term) : sub term =
     let offending = Tid.Set.of_list offending in
     Term.map blk_t sub ~f:(fun blk ->
         if Core.Set.mem offending (Term.tid blk) then
-          Term.concat_map def_t blk ~f:split_def
+          Term.concat_map def_t blk ~f:(split_def ~synth)
         else blk)
 
-let normalize (prog : program term) : program term =
-  Term.map sub_t prog ~f:split_sub
+let normalize ~(synth : Hike_synth.table) (prog : program term) :
+    Hike_synth.table * program term =
+  let cell = ref synth in
+  let prog = Term.map sub_t prog ~f:(split_sub ~synth:cell) in
+  (!cell, prog)

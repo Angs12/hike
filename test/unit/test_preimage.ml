@@ -23,7 +23,7 @@ let tests =
           Cbat_vsa.AI.add_word Cbat_vsa.AI.top ~key:v ~data:(S.of_clp arg)
         in
         let env =
-          Cbat_vsa.Test_seam.constrain_operands ~env
+          Cbat_vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~env
             ~landmarks:(Cbat_landmarks.create ())
             (Bil.Cast (Bil.LOW, 8, Bil.Var v))
             (S.of_clp result)
@@ -198,7 +198,7 @@ let tests =
         let landmarks = Cbat_landmarks.create () and head = Tid.create () in
         Cbat_landmarks.with_widening_head landmarks (Some head) (fun () ->
             ignore
-              (Cbat_vsa.Test_seam.constrain_operands ~env ~landmarks
+              (Cbat_vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~env ~landmarks
                  (Bil.BinOp
                     ( Bil.EQ,
                       Bil.BinOp
@@ -231,12 +231,12 @@ let tests =
           Blk.create () |> fun b -> Term.append def_t b (Def.create zf eq)
         in
         let sub = Sub.create () |> fun s -> Term.append blk_t s blk in
-        let rctx = Hike_test.Common.mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = Hike_test.Common.mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let landmarks = V.Test_seam.landmarks_of rctx in
         let entry =
           V.AI.add_word V.AI.top ~key:v ~data:(S.of_clp (iv 32 0 10))
         in
-        let env = V.Test_seam.denote_defs blk entry in
+        let env = V.Test_seam.denote_defs ~synth:Hike.Synth.empty blk entry in
         V.Test_seam.with_widening_head rctx
           (Some (Term.tid blk))
           (fun () ->
@@ -275,7 +275,7 @@ let tests =
         check "INV-10.width"
           (S.backward0 ~value:c ~result:(S.of_clp (iv 16 8 20)));
         let env =
-          Cbat_vsa.Test_seam.constrain_operands ~env:Cbat_vsa.AI.top
+          Cbat_vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty ~env:Cbat_vsa.AI.top
             ~landmarks:(Cbat_landmarks.create ())
             (Bil.Int (Word.of_int ~width:8 7))
             (S.of_clp (iv 8 8 20))

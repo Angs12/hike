@@ -7,7 +7,8 @@ module KB = Bap_knowledge.Knowledge
    addresses, which the VSA denotes with their [Rip] anchor.  The later
    storage bind turns every Load/Store into its storage form. *)
 
-let prepare_program ~addr_bits ~is_address program =
+let prepare_program ~synth ~addr_bits ~is_address program =
+  let cell = ref synth in
 #ifdef VSA_DEBUG
   let resolved = ref false in
 #endif
@@ -20,7 +21,7 @@ let prepare_program ~addr_bits ~is_address program =
 #ifdef VSA_DEBUG
           resolved := true;
 #endif
-          Bil.Var (Synth.module_addr ~addr_bits a)
+          Bil.Var (Synth.record cell (Synth.mint_module_addr ~addr_bits a))
         | _ -> Bil.Int w
       (* A store's data is not an address: only the address operand
          takes the synthetic form. *)
@@ -28,7 +29,7 @@ let prepare_program ~addr_bits ~is_address program =
         Bil.Store (mem, self#map_exp addr, exp, endian, size)
     end
   in
-  (object
+  let program = (object
      inherit Term.mapper
      method! map_def d =
        if not (KB.Value.get rip_relative_addr (Def.value d)) then d
@@ -46,28 +47,37 @@ let prepare_program ~addr_bits ~is_address program =
 #endif
          d
        end
-   end)#run program
+   end)#run program in
+  (!cell, program)
 
 (* The finalized component layout exists after attribution.  Named
    accesses take their storage's byte offset; a generic access keeps its
    runtime address value. *)
 let bind_program ~addr_bits ~synth ~regions ~slots ~named_only program =
-  (object
-     inherit Term.mapper
-     method! map_def d =
-       Hike_synth_addr.rewrite_def ~addr_bits synth ~regions ~slots ~named_only d
-   end)#run program
+  let cell = ref synth in
+  let program =
+    (object
+       inherit Term.mapper
+       method! map_def d =
+         Hike_synth_addr.rewrite_def ~addr_bits ~synth:cell ~regions ~slots
+           ~named_only d
+     end)#run program
+  in
+  (!cell, program)
 
-let resolve ~addr_bits ~named_only ~slots ~layout program =
-  let synth = Synth.empty in
-  let program, regions, result = layout ~synth program in
-  (bind_program ~addr_bits ~synth ~regions ~slots ~named_only program, result)
+let resolve ~addr_bits ~named_only ~slots ~synth ~layout program =
+  let program, regions, synth, result = layout ~synth program in
+  let synth, program =
+    bind_program ~addr_bits ~synth ~regions ~slots ~named_only program in
+  (program, synth, result)
 
-let resolve_with_layout ~addr_bits ~slots ~layout program =
-  resolve ~addr_bits ~named_only:true ~slots ~layout program
+let resolve_with_layout ~addr_bits ~slots ~synth ~layout program =
+  resolve ~addr_bits ~named_only:true ~slots ~synth ~layout program
 
-let resolve_program ?(slots = []) ~addr_bits ~regions program =
-  fst
-    (resolve ~addr_bits ~named_only:false ~slots
-       ~layout:(fun ~synth:_ program -> (program, regions, ()))
-       program)
+let resolve_program ?(slots = []) ~addr_bits ~synth ~regions program =
+  let program, synth, () =
+    resolve ~addr_bits ~named_only:false ~slots ~synth
+      ~layout:(fun ~synth program -> (program, regions, synth, ()))
+      program
+  in
+  (synth, program)

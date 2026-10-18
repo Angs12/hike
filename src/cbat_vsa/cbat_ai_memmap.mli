@@ -33,7 +33,7 @@ module Key : sig
   val step : t -> int
 
   (* The key's own line; cells of other lines never match a query. *)
-  val origin : t -> Hike_origin.t
+  val origin : t -> Hike_origin.t option
 
   (* The key's hull ends as unsigned words, low end first. *)
   val hull : t -> Cbat_word.t * Cbat_word.t
@@ -122,7 +122,7 @@ val is_bottom : t -> bool
 (* Whether a stored cell's key intersects the byte range [lo, hi]
    (inclusive addresses); unkeyable bounds answer true. *)
 val has_cell_in :
-  t -> origin:Hike_origin.t -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
+  t -> origin:Hike_origin.t option -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
 
 (* The stored cells: key and value.  The treap walk is a full scan, so
    callers use it only where a per-cell decision is needed (the backward

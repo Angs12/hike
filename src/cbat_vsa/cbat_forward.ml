@@ -121,7 +121,7 @@ let denote_jump
        arm. *)
     Option.iter jp.jp_disabled
       ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~entry
+        Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~entry
           ~landmarks:rctx.rc_landmarks ~cache:rctx.rc_prefix
           ~witness:rctx.rc_nonneg
           env b dc);
@@ -135,7 +135,8 @@ let denote_jump
     let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
       let read_lanes, _ = plan.bp_call_facts in
       let stack_args =
-        Cbat_call_effects.stack_arg_ranges ~abi:rctx.Cbat_runctx.rc_abi
+        Cbat_call_effects.stack_arg_ranges ~synth:!(rctx.rc_synth)
+          ~abi:rctx.Cbat_runctx.rc_abi
           ~block:b ~entry env
       in
       let kept =
@@ -164,7 +165,8 @@ let denote_jump
           | Direct ct -> callee ct
           | Indirect texp ->
             Cbat_call_effects.indirect_callee
-              ~lookup:rctx.Cbat_runctx.rc_sub_lookup ~callee ~env texp
+              ~synth:!(rctx.rc_synth) ~lookup:rctx.Cbat_runctx.rc_sub_lookup
+              ~callee ~env texp
         in
         match site_callee with
         | Cbat_call_effects.Blocked -> AI.bottom
@@ -191,7 +193,8 @@ let denote_jump
       | Ret (Indirect _) -> env in
     AI.join acc env_res in
   Seq.fold
-    (reachable_jumps_by ~jmp:(fun jp -> jp.jp_jmp) env (Seq.of_list plan.bp_jumps))
+    (reachable_jumps_by ~synth:!(rctx.rc_synth)
+       ~jmp:(fun jp -> jp.jp_jmp) env (Seq.of_list plan.bp_jumps))
     ~init:AI.bottom
     ~f:per_jump
 
@@ -214,8 +217,9 @@ let denote_block
     | _ ->
       let p =
         if plan.bp_has_conds then
-          Cbat_backward.denote_defs_cached rctx.Cbat_runctx.rc_prefix b env
-        else denote_defs b env in
+          Cbat_backward.denote_defs_cached ~synth:!(rctx.rc_synth)
+            rctx.Cbat_runctx.rc_prefix b env
+        else denote_defs ~synth:!(rctx.rc_synth) b env in
       rctx.Cbat_runctx.rc_post :=
         Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
       p

@@ -139,6 +139,8 @@ type t = {
   abi : Hike_abi.t;
   slot_names : string Core.Int64.Map.t;
   mutable state : Disasm.Driver.state;
+  (* The synthetic vars the solves' normalization minted. *)
+  mutable synth : Hike_synth.table;
   (* The symtab entries, discovered roots, materialised code words and
      resolved jump destinations, with each address's decode role. *)
   frontier : frontier;
@@ -503,7 +505,10 @@ and arm t (sub : sub term) : sub term =
 (* The solve, paused at each unsolved callee until it is solved. *)
 and solve t frame (raw : sub term) : func =
   let ctx = t.context in
-  let sub = Hike_program_vsa.prepare_function ctx ~is_entry:(is_entry t) raw in
+  let sub, synth =
+    Hike_program_vsa.prepare_function ctx ~synth:t.synth ~is_entry:(is_entry t) raw
+  in
+  t.synth <- synth;
   let block_addrs =
     Term.enum blk_t sub
     |> Seq.filter_map ~f:(fun b ->
@@ -529,17 +534,20 @@ and solve t frame (raw : sub term) : func =
   in
   let images = ctx.images and foreign_slots = ctx.linker_slots in
   let rec run = function
-    | Hike_vsa.Done (envs, solved, block_addrs) -> (envs, solved, block_addrs)
+    | Hike_vsa.Done (envs, solved, block_addrs, synth) ->
+      t.synth <- synth;
+      (envs, solved, block_addrs)
     | Paused p ->
       Core.Set.iter p.p_blocked ~f:(fun tid ->
           ignore (summary t frame (Core.Hashtbl.find_exn t.by_tid tid)));
       run (Hike_vsa.resume ctx.target ~lookup ~images ~callee ~foreign_slots p)
   in
   let envs, solved, block_addrs =
-    run (Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs ~foreign_slots sub)
+    run (Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs
+           ~foreign_slots ~synth:t.synth sub)
   in
   let summary =
-    S.of_solved ~abi:t.abi
+    S.of_solved ~abi:t.abi ~synth:t.synth
       ~callee:(fun tid ->
           match known tid with
           | `Symbol s -> Some s
@@ -590,7 +598,7 @@ and learn_dests t cfg (f : func) : bool =
             Term.enum jmp_t blk |> Seq.to_list
             |> Base.List.filter_map ~f:indirect_target
             |> Base.List.concat_map ~f:(fun e ->
-                match Vsa.denote_exp_at ~pre ~post ~blk e with
+                match Vsa.denote_exp_at ~synth:t.synth ~pre ~post ~blk e with
                 | Ok ws ->
                   Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
                     ~f:(fun w ->
@@ -634,7 +642,7 @@ and code_words t (f : func) : int64 list =
   let args = ints t.abi.Hike_abi.int_param_regs in
   let rets = ints t.abi.Hike_abi.return_regs in
   let text ~blk post v =
-    match Vsa.denote_exp_at ~pre:post ~post ~blk (Bil.Var v) with
+    match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk (Bil.Var v) with
     | Ok ws -> text_words ws
     | Error _ -> []
   in
@@ -662,7 +670,7 @@ and code_words t (f : func) : int64 list =
 and materialised_words t (f : func) : int64 list =
   let wb = Hike_abi.word_bits t.abi in
   let text ~pre ~post ~blk ~def e =
-    match Vsa.denote_exp_at ~pre ~post ~blk ~def e with
+    match Vsa.denote_exp_at ~synth:t.synth ~pre ~post ~blk ~def e with
     | Ok ws -> text_words ws
     | Error _ -> []
   in
@@ -702,6 +710,7 @@ let create proj ~file ~state ~subroutines : t =
       Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
         (Hike_image.external_references proj);
     state;
+    synth = Hike_synth.empty;
     frontier = frontier_create ~subroutines;
     dests = Core.Int64.Map.empty;
     entries = Core.Hashtbl.create (module Core.Int64);
@@ -768,7 +777,7 @@ let main_of t (f : func) : int64 option =
         in
         match Core.Map.find f.envs (Term.tid blk) with
         | Some (_, post) when calls -> (
-          match Vsa.denote_exp_at ~pre:post ~post ~blk (Bil.Var arg0) with
+          match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk (Bil.Var arg0) with
           | Ok ws -> (match bounded_words ws with Some [ w ] -> Some w | _ -> None)
           | Error _ -> None)
         | _ -> None)
@@ -798,10 +807,10 @@ let unresolved_call t (f : func) : bool =
         |> Seq.exists ~f:(fun j ->
             match indirect_target j with
             | Some e when not (Hike_return.is_jmp j) -> (
-              match Hike_transfer.slot_of_target ~index e with
+              match Hike_transfer.slot_of_target ~synth:t.synth ~index e with
               | Some a when Core.Set.mem t.context.linker_slots a -> false
               | _ -> (
-                match Vsa.denote_exp_at ~pre ~post ~blk e with
+                match Vsa.denote_exp_at ~synth:t.synth ~pre ~post ~blk e with
                 | Ok ws -> (
                   match bounded_words ws with
                   | Some words ->
@@ -853,14 +862,17 @@ let facts t : Hike_kb.facts =
     |> Base.List.map ~f:(fun e -> (Addr.of_int64 e.addr, tid_of e))
     |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
   in
-  { (Hike_kb.build ~target:t.context.target ~lookup
-       ~block_envs:(Base.List.fold funcs ~init:Tid.Map.empty ~f:(fun acc (_, f) ->
-           Core.Map.merge_skewed acc f.envs ~combine:(fun ~key:_ a _ -> a)))
-       ~block_addrs:(union (Base.List.map funcs ~f:(fun (_, f) -> f.block_addrs))))
-    with
+  let built =
+    Hike_kb.build ~target:t.context.target ~lookup
+      ~block_envs:(Base.List.fold funcs ~init:Tid.Map.empty ~f:(fun acc (_, f) ->
+          Core.Map.merge_skewed acc f.envs ~combine:(fun ~key:_ a _ -> a)))
+      ~block_addrs:(union (Base.List.map funcs ~f:(fun (_, f) -> f.block_addrs)))
+  in
+  Hike_kb.with_synth { built with
     Hike_kb.sub_addrs;
     images = t.context.images;
     foreign_slots = t.context.linker_slots }
+    (Hike_synth.union built.synth t.synth)
 
 (* The worklist's program: main's closure (or, on refusal, that of
    every subroutine entry and every materialised code word) as solved

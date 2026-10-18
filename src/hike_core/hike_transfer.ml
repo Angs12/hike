@@ -37,7 +37,7 @@ let rec resolve_index ~(index : index) ~(seen : var list) (e : exp) : exp =
    component-relative access recovers its absolute slot.  [index] shares
    one per-sub def scan across many resolutions; without it (and with
    [sub]) each call builds its own. *)
-let slot_of_target ?index ?(synth = Hike_synth.empty)
+let slot_of_target ?index ~synth
     ?(origin : (var -> int64 option) option) ?(sub : sub term option)
     (target : exp) : int64 option =
   let index =

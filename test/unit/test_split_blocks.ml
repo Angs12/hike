@@ -82,7 +82,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [] ]
         in
-        let split = Hike.Split_blocks.split_sub sub in
+        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub in
         check "SBLK-03"
           (tids_of sub = tids_of split
           && Base.List.length (blocks_of split) = 3));
@@ -105,7 +105,7 @@ let tests : unit Alcotest.test list =
         let split_holder = ref sub in
         let err =
           capture_stderr (fun () ->
-              split_holder := Hike.Split_blocks.split_sub sub)
+              split_holder := Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub)
         in
         check "SBLK-04"
           (contains_substring err "hike: split-blocks:"
@@ -132,10 +132,10 @@ let tests : unit Alcotest.test list =
                       Bil.Int (Cbat_word.to_word (w64 2)))) ],
               [ (0, mk_ret) ] ]
         in
-        let split = Hike.Split_blocks.split_sub sub in
+        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub in
         check "SBLK-05"
           (Base.List.map
-             (Hike.Split_blocks.free_regs ~abi:Hike.Abi.x86_64_sysv split)
+             (Hike.Split_blocks.free_regs ~synth:Hike.Synth.empty ~abi:Hike.Abi.x86_64_sysv split)
            ~f:Var.name
            = []));
 
@@ -171,7 +171,7 @@ let tests : unit Alcotest.test list =
           materialize_facts ~program ~words
             ~subs:[ (0x2000L, Term.tid callee_a); (0x3000L, Term.tid callee_b) ]
         in
-        let result = Hike.Split_blocks.materialize ~facts program in
+        let _, result = Hike.Split_blocks.materialize ~facts program in
         let caller' =
           Term.find sub_t result (Term.tid caller)
           |> Base.Option.value_exn
@@ -229,7 +229,7 @@ let tests : unit Alcotest.test list =
           materialize_facts ~program
             ~words:(Cbat_vsa.WordSet.singleton (w64 0x1008)) ~subs:[]
         in
-        let result = Hike.Split_blocks.materialize ~facts program in
+        let _, result = Hike.Split_blocks.materialize ~facts program in
         let sub' = Term.find sub_t result (Term.tid sub) |> Base.Option.value_exn in
         let gotos =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum jmp_t)

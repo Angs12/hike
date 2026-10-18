@@ -27,8 +27,8 @@ let bump (key : string) : unit =
   let n = Core.Hashtbl.find counts key |> Core.Option.value ~default:0 in
   Core.Hashtbl.set counts ~key ~data:(n + 1)
 
-let denote (e : exp) (env : AI.t) : Ws.t option =
-  match Vsa.Test_seam.denote_imm_exp e env with Ok v -> Some v | Error _ -> None
+let denote ~synth (e : exp) (env : AI.t) : Ws.t option =
+  match Vsa.Test_seam.denote_imm_exp ~synth e env with Ok v -> Some v | Error _ -> None
 
 let shape_retained (v : Ws.t) : bool = Core.Option.is_some (Ws.stack_offsets v)
 
@@ -64,7 +64,7 @@ let blind_op : Bil.binop -> bool = function
 
 (* The root mechanism of a top expression: the innermost bit-reading op
    on a stack operand, the memory root, or a shadowed var's cause. *)
-let rec mech (env : AI.t) (e : exp) : string =
+let rec mech ~synth (env : AI.t) (e : exp) : string =
   match e with
   | Bil.Var v -> (
       match Core.Map.find !shadow (Var.base v) with
@@ -74,63 +74,63 @@ let rec mech (env : AI.t) (e : exp) : string =
           | Type.Imm _ when not (Var.is_virtual v) -> "call_reg"
           | _ -> "var"))
   | Bil.BinOp (op, e1, e2) ->
-    let v1 = denote e1 env and v2 = denote e2 env in
+    let v1 = denote ~synth e1 env and v2 = denote ~synth e2 env in
     let s1 = Core.Option.value_map v1 ~default:false ~f:is_stack in
     let s2 = Core.Option.value_map v2 ~default:false ~f:is_stack in
     if blind_op op && (s1 || s2) then "blind." ^ op_name op
     else (
       match v1, v2 with
-      | Some v, _ when Ws.is_top v -> mech env e1
-      | _, Some v when Ws.is_top v -> mech env e2
+      | Some v, _ when Ws.is_top v -> mech ~synth env e1
+      | _, Some v when Ws.is_top v -> mech ~synth env e2
       | _ -> if s1 || s2 then "wide_offset" else "other")
   | Bil.UnOp (op, e1) -> (
-      match op, denote e1 env with
+      match op, denote ~synth e1 env with
       | Bil.NOT, Some v when is_stack v -> "blind.not"
       | Bil.NEG, Some v when is_stack v -> "blind.neg"
-      | _, Some v when Ws.is_top v -> mech env e1
+      | _, Some v when Ws.is_top v -> mech ~synth env e1
       | _ -> "other")
   | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) -> (
-      match denote a env with
-      | Some va when Ws.is_top va -> mech env a
+      match denote ~synth a env with
+      | Some va when Ws.is_top va -> mech ~synth env a
       | Some va when is_stack va -> "call_top"
       | Some _ -> "foreign"
       | None -> "other")
   | Bil.Cast (_, _, e1) -> (
-      match denote e1 env with
+      match denote ~synth e1 env with
       | Some v when is_stack v -> "blind.cast"
-      | Some v when Ws.is_top v -> mech env e1
+      | Some v when Ws.is_top v -> mech ~synth env e1
       | _ -> "other")
   | Bil.Extract (_, _, e1) -> (
-      match denote e1 env with
+      match denote ~synth e1 env with
       | Some v when is_stack v -> "blind.extract"
-      | Some v when Ws.is_top v -> mech env e1
+      | Some v when Ws.is_top v -> mech ~synth env e1
       | _ -> "other")
   | Bil.Concat (e1, e2) ->
-    let s e = Core.Option.value_map (denote e env) ~default:false ~f:is_stack in
+    let s e = Core.Option.value_map (denote ~synth e env) ~default:false ~f:is_stack in
     if s e1 || s e2 then "blind.concat"
     else (
-      match denote e1 env with
-      | Some v when Ws.is_top v -> mech env e1
+      match denote ~synth e1 env with
+      | Some v when Ws.is_top v -> mech ~synth env e1
       | _ -> "other")
   | Bil.Ite (_, y, n) -> (
-      match mech env y with "other" -> mech env n | m -> m)
+      match mech ~synth env y with "other" -> mech ~synth env n | m -> m)
   | Bil.Let (v, value, body) ->
     let env' =
-      match denote value env with
+      match denote ~synth value env with
       | Some w -> AI.add_word env ~key:v ~data:w
       | None -> env
     in
-    mech env' body
+    mech ~synth env' body
   | Bil.Int _ -> "other"
   | Bil.Unknown _ -> "unknown"
 
-let classify_top_addr (env : AI.t) (a : exp) : string =
-  match denote a env with
+let classify_top_addr ~synth (env : AI.t) (a : exp) : string =
+  match denote ~synth a env with
   | None -> "denote_err"
   | Some v ->
     if not (Ws.is_top v) then "bounded"
-    else if shape_retained v then "stack_wide." ^ mech env a
-    else mech env a
+    else if shape_retained v then "stack_wide." ^ mech ~synth env a
+    else mech ~synth env a
 
 let def_bucket (v : Ws.t) : string =
   if Ws.is_top v then "top"
@@ -192,14 +192,14 @@ let span_bucket (sp : int64) : string =
 (* gcc -O0's alignment spelling: (x >> k) << k, split across two defs. *)
 let shift_pend : Word.t VarMap.t ref = ref VarMap.empty
 
-let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
+let census_addr ~synth ~(sub : string) ~(env : AI.t) (a : exp) : unit =
   bump "ld.total";
-  match denote a env with
+  match denote ~synth a env with
   | None -> bump "ld.denote_err"
   | Some v ->
     if Ws.is_top v then begin
       bump "ld.top";
-      let m = classify_top_addr env a in
+      let m = classify_top_addr ~synth env a in
       bump ("ld.top." ^ m);
       if verbose then
         Printf.printf "VERBOSE ld.top sub=%s addr=%s mech=%s\n" sub
@@ -212,7 +212,7 @@ let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
       (match Ws.caller_split (Ws.classify v) with
        | Ws.Infinite (lo, hi) when Ws.is_unbounded_span lo hi ->
          bump "stack.unbounded";
-         let m = classify_top_addr env a in
+         let m = classify_top_addr ~synth env a in
          bump ("unbounded.stack." ^ m);
          bump ("unbounded.stack@" ^ sub);
          if verbose then
@@ -223,7 +223,7 @@ let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
     else if Ws.is_top v then begin
       bump "stack.def";
       bump "stack.unbounded";
-      let m = classify_top_addr env a in
+      let m = classify_top_addr ~synth env a in
       bump ("unbounded.stack." ^ m);
       bump ("unbounded.stack@" ^ sub);
       if verbose then
@@ -231,9 +231,9 @@ let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
           (Format.asprintf "%a" Exp.pp a) m
     end
 
-let census_sub (sub : sub term) : unit =
+let census_sub ~synth (sub : sub term) : unit =
   try
-    let sol = Probe_common.run_sub_fixpoint sub in
+    let sol = Probe_common.run_sub_fixpoint ~synth sub in
     let sname = Sub.name sub in
     shadow := VarMap.empty;
     shift_pend := VarMap.empty;
@@ -244,9 +244,9 @@ let census_sub (sub : sub term) : unit =
         |> Seq.iter ~f:(fun d ->
             let st_before = !st in
             (match Vsa.Test_seam.mem_addr_of (Def.rhs d) with
-             | Some a -> census_addr ~sub:sname ~env:st_before a
+             | Some a -> census_addr ~synth ~sub:sname ~env:st_before a
              | None -> ());
-            st := Vsa.Test_seam.denote_def d !st;
+            st := Vsa.Test_seam.denote_def ~synth d !st;
             match Var.typ (Def.lhs d) with
             | Type.Imm w ->
               let v = AI.find_word w !st (Def.lhs d) in
@@ -289,7 +289,7 @@ let census_sub (sub : sub term) : unit =
               if Ws.is_top v then
                 shadow :=
                   Core.Map.set !shadow ~key:base
-                    ~data:(mech st_before (Def.rhs d))
+                    ~data:(mech ~synth st_before (Def.rhs d))
               else shadow := Core.Map.remove !shadow base
             | Type.Mem _ | Type.Unk -> ()))
   with
@@ -317,7 +317,7 @@ let () =
          with
          | Error e -> ws_load_fail path e
          | Ok proj ->
-           let prog = production_input proj in
-           Term.enum sub_t prog |> Seq.iter ~f:census_sub);
+           let synth, prog = production_input proj in
+           Term.enum sub_t prog |> Seq.iter ~f:(census_sub ~synth));
         dump ();
         Core.Hashtbl.clear counts)

@@ -14,7 +14,7 @@ let i32 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.I
 (* constrain_edge over the anchored top env, reading [v] at [width]. *)
 let assume (width : int) (v : var) (cond : exp) : Ws.t =
   AI.find_word width
-    (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:AI.top
+    (Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:(Cbat_landmarks.create ()) ~env:AI.top
        (Jmp.cond (mk_jmp_to (Tid.create ()) cond)))
     v
 
@@ -390,7 +390,7 @@ let tests : unit Alcotest.test list =
               img_slots = Core.Int64.Set.empty } ]
         in
         let envs, _, _ =
-          produce ~images (x86_target ())
+          produce ~synth:Hike.Synth.empty ~images (x86_target ())
             (Program.create ~subs:[ sub ] ()) sub
         in
         let blk = Term.first blk_t sub |> Base.Option.value_exn in
@@ -420,6 +420,7 @@ let tests : unit Alcotest.test list =
         let solve ~callee =
           Hv.start (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
             ~callee ~block_addrs:(Core.Map.empty (module Addr))
+            ~synth:Hike.Synth.empty
             ~foreign_slots:Core.Int64.Set.empty sub in
         let resume p ~callee =
           Hv.resume (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
@@ -431,7 +432,7 @@ let tests : unit Alcotest.test list =
           check "VSA-68.seed"
             (AI.equal (Graphlib.Std.Solution.get p.p_seed tids.(2)) AI.bottom);
           match resume p ~callee:(fun _ -> writes_rcx), solve ~callee:(fun _ -> writes_rcx) with
-          | Hv.Done (warm, _, _), Hv.Done (cold, _, _) ->
+          | Hv.Done (warm, _, _, _), Hv.Done (cold, _, _, _) ->
             check "VSA-68.equal"
               (Core.Map.equal (fun (a, b) (c, d) -> AI.equal a c && AI.equal b d) warm cold);
             check "VSA-68.flowed"

@@ -44,7 +44,7 @@ let def_of_tid (sub : sub term) (dtid : tid) : def term option =
 
 (* The def with the given lhs in the sub. *)
 let tree_of (sub : sub term) =
-  let ctx = fixture_ctx [ sub ] in
+  let ctx = fixture_ctx ~synth:Hike.Synth.empty [ sub ] in
   Base.Option.value_exn
     (Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid sub))
 
@@ -161,10 +161,10 @@ let tests : unit Alcotest.test list =
                  `r64 ))
         in
         let c3 = straight_sub "pr_c3_abi" [ d_rbp; c3_rd; c3_st ] in
-        let c3' = rewrite_one c3 in
+        let synth, c3' = rewrite_one_synth ~synth:Hike.Synth.empty c3 in
         check_bound "MOD-17" (def_of_tid c3' (Term.tid c3_rd)) (fun d ->
             match Def.rhs d with
-            | Bil.Load (_, Bil.Var a, _, _) -> Sm.is_arg_slot a
+            | Bil.Load (_, Bil.Var a, _, _) -> Sm.is_arg_slot synth a
             | _ -> false));
 
     pin "MOD-18"
@@ -193,11 +193,11 @@ let tests : unit Alcotest.test list =
         let n3 =
           straight_sub "pr_n3_rmw" [ n3_d_rbp; n3_rmw ]
           |> fun sub -> Program.create ~subs:[ sub ] ()
-          |> Hike.Split_mem.normalize
+          |> Hike.Split_mem.normalize ~synth:Hike.Synth.empty |> snd
           |> Term.first sub_t
           |> Base.Option.value_exn
         in
-        let n3' = rewrite_one n3 in
+        let synth, n3' = rewrite_one_synth ~synth:Hike.Synth.empty n3 in
         let n3_defs =
           Term.enum blk_t n3'
           |> Seq.concat_map ~f:(Term.enum def_t)
@@ -215,13 +215,13 @@ let tests : unit Alcotest.test list =
                   method! visit_load ~mem:_ ~addr:addr_v _ _ acc =
                     acc
                     || (match addr_v with
-                       | Bil.Var v -> Sm.is_arg_slot v
+                       | Bil.Var v -> Sm.is_arg_slot synth v
                        | _ -> false)
 
                   method! visit_store ~mem:_ ~addr:addr_v ~exp:_ _ _ acc =
                     acc
                     || (match addr_v with
-                       | Bil.Var v -> Sm.is_arg_slot v
+                       | Bil.Var v -> Sm.is_arg_slot synth v
                        | _ -> false)
                 end
               in
@@ -255,7 +255,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
-        let c4 = Hike.Jump.compile_sub jump_target c4_pre in
+        let _, c4 = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target c4_pre in
         let has_load (e : exp) : bool =
           let vis =
             object
@@ -293,8 +293,8 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
-        let c4 = Hike.Jump.compile_sub jump_target c4_pre in
-        let c4' = rewrite_one c4 in
+        let _, c4 = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target c4_pre in
+        let c4' = rewrite_one ~synth:Hike.Synth.empty c4 in
         check_bound "MOD-20" (def_of_tid c4' (Term.tid c4_ld)) (fun d ->
             match Def.rhs d with
             | Bil.Load (Bil.Var mem, _, _, _) ->
@@ -560,7 +560,7 @@ let tests : unit Alcotest.test list =
           Def.create t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Ite (Bil.Var c, k 16, k 32)))
         in
         let sub = straight_sub "vla44_redzone" [ d_t ] in
-        let facts, sub = fixture_facts_sub sub in
+        let facts, sub = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let blk = Term.first blk_t sub |> Base.Option.value_exn in
         check "MOD-44 the value is its stack positions"
           (match facts.Hike.Kb.denote ~blk (Bil.Var t) with

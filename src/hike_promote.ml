@@ -31,8 +31,8 @@ let site_bindings_of_sub ~(word : int) ~(sp : var)
    base plus the storage-relative displacement. ---- *)
 
 (* Each binding's [hike_argN] def goes just before its storing def. *)
-let bind_site_args ~(addr_bits : int) (bindings : site_binding list)
-    (blk : blk term) : blk term =
+let bind_site_args ~(synth : Hike_synth.table ref) ~(addr_bits : int)
+    (bindings : site_binding list) (blk : blk term) : blk term =
   Base.List.fold bindings ~init:blk ~f:(fun blk b ->
       (* [b.sb_def] is the PRE-rewrite term; its address is read off the
          rewritten block, whose mapper has already run. *)
@@ -52,7 +52,10 @@ let bind_site_args ~(addr_bits : int) (bindings : site_binding list)
              ^ Int.to_string b.sb_slot
              ^ "'s storing def is not in its block")
       in
-      let arg = Def.create (Model.call_arg ~addr_bits b.sb_slot) addr in
+      let call_arg =
+        Hike_synth.record synth
+          (Hike_synth.mint_base ~addr_bits (Hike_synth.Argument b.sb_slot)) in
+      let arg = Def.create call_arg addr in
       match Term.next def_t blk (Term.tid b.sb_def) with
       | Some next -> Term.prepend def_t blk ~before:(Term.tid next) arg
       | None -> Term.append def_t blk arg)
@@ -103,7 +106,7 @@ let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
    and singleton-resolved indirect targets become direct.
    Fixed-signature subs (the intrinsics, @main) get no callee-side
    rewrite; the caller side runs for every sub. *)
-let promote_sub ~(addr_bits : int) (facts : facts)
+let promote_sub ~(synth : Hike_synth.table ref) ~(addr_bits : int) (facts : facts)
     (sub : sub term) : sub term =
   let with_signature sub =
     if Hike_stack_model.fixed_signature sub then sub
@@ -113,8 +116,10 @@ let promote_sub ~(addr_bits : int) (facts : facts)
          caller's cell ADDRESS, so the parameter is a pointer. *)
       let slots =
         Base.List.init facts.prom_arity ~f:(fun i ->
-            Arg.create ~intent:In (Model.arg_slot ~addr_bits i)
-              (Bil.Var (Model.arg_slot ~addr_bits i)))
+            let slot =
+              Hike_synth.record synth
+                (Hike_synth.mint_base ~addr_bits (Hike_synth.Slot i)) in
+            Arg.create ~intent:In slot (Bil.Var slot))
       in
       Model.set_sig sub slots
   in
@@ -124,8 +129,8 @@ let promote_sub ~(addr_bits : int) (facts : facts)
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
    products. *)
-let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
-    ~(abi : Hike_abi.t)
+let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
+    ~(entry : int64) ~(addr_bits : int) ~(abi : Hike_abi.t)
     ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
@@ -141,7 +146,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
   let arity = Sections.slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
-  let sub = promote_sub ~addr_bits facts sub in
+  let sub = promote_sub ~synth ~addr_bits facts sub in
   (* Keep the window-value stamp for denotations at/above entry. The
      layout decides whether an actual Args-space memory access needs an
      incoming window parameter. *)
@@ -164,7 +169,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
      reads off it, and the rewrite's value forms must not perturb the
      region geometry the layout measures. *)
   let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
-  let storages = Sections.spans_of_layout ~word layout in
+  let storages = Sections.spans_of_layout ~synth ~word layout in
   (* The window forms need an Args-space access, including the overflow
      area consumed by a recognized va_list construction. A dead
      SP-derived value does not need the incoming lane. *)
@@ -172,7 +177,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     layout.Hike_stack_model.window_param && not callee_exempt
   in
   let facts =
-    Sections.def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
+    Sections.def_facts ~synth ~word ~entry ~abi ~tree ~data:ctx.data_tree
       ~projections:ctx.projections ~conversions:ctx.conversions ~storages
       ~window_param:window_ok ~spans ~denote sub
   in
@@ -194,13 +199,13 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
                 (* The conversion names the address's own alloca; carry
                    it on the def so the emitter materializes into that
                    region, never the operand's. *)
-                Hike_synth_addr.rewrite_storage ~addr_bits ~conv:f.Sections.fr_conv ~bits:f.Sections.fr_bits
+                Hike_synth_addr.rewrite_storage ~synth ~addr_bits ~conv:f.Sections.fr_conv ~bits:f.Sections.fr_bits
                   ?addr:f.Sections.fr_addr d)
 
       method! map_blk blk =
         let blk = super#map_blk blk in
         match Core.Map.find sites (Term.tid blk) with
-        | Some (bs, _) -> bind_site_args ~addr_bits bs blk
+        | Some (bs, _) -> bind_site_args ~synth ~addr_bits bs blk
         | None -> blk
     end
   in
@@ -211,7 +216,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
 let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
     ~(spans : Sections.data_span list)
     ~(ctx : Sections.ctx)
-    (prog : program term) : program term =
+    (prog : program term) : Hike_synth.table * program term =
+  let synth = ref facts.synth in
   let abi = facts.abi in
   let denote = facts.denote in
   let sp = abi.Hike_abi.sp in
@@ -234,12 +240,15 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
            let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
-  Term.map sub_t prog ~f:(fun sub ->
-      let sites, resolved =
-        Core.Map.find sides (Term.tid sub)
-        |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
-      in
-      rewrite_sub ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx ~sites
-        ~resolved
-        ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
-        sub)
+  let prog =
+    Term.map sub_t prog ~f:(fun sub ->
+        let sites, resolved =
+          Core.Map.find sides (Term.tid sub)
+          |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
+        in
+        rewrite_sub ~synth ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx
+          ~sites ~resolved
+          ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
+          sub)
+  in
+  (!synth, prog)

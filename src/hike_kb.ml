@@ -45,8 +45,9 @@ type facts = {
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
   spec : Hike_spec.section_spec option;
-  (* All synthetic kinds, recorded once at attribution's facts boundary
-     after storage and dispatch materialization. *)
+  (* The run's synthetic vars with their kinds: each pass that creates
+     one records it here, and a var absent from the table is not
+     synthetic. *)
   synth : Hike_synth.table;
 }
 
@@ -54,10 +55,19 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     ~(lookup : int64 -> Tid.t option)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(target : Bap_core_theory.Theory.Target.t) : facts =
-  let blk_envs blk =
-    match Core.Map.find block_envs (Term.tid blk) with
-    | Some pair -> pair
-    | None -> (Cbat_vsa.AI.top, Cbat_vsa.AI.top)
+  let abi = Hike_abi.of_target target in
+  let synth =
+    Base.List.fold abi.Hike_abi.env_regs ~init:Hike_synth.empty
+      ~f:Hike_synth.add_environment
+    |> fun synth ->
+    Hike_synth.add_window synth ~addr_bits:(Hike_abi.word_bits abi)
+  in
+  let denote ~synth ~blk ?def e =
+    let pre, post =
+      Option.value (Core.Map.find block_envs (Term.tid blk))
+        ~default:(Cbat_vsa.AI.top, Cbat_vsa.AI.top)
+    in
+    Cbat_vsa.denote_exp_at ~synth ~pre ~post ~blk ?def e
   in
   { envs = block_envs;
     block_addrs;
@@ -65,14 +75,11 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     images = [];
     foreign_slots = Core.Int64.Set.empty;
     target;
-    abi = Hike_abi.of_target target;
+    abi;
     lookup;
-    denote =
-      (fun ~blk ?def e ->
-        let pre, post = blk_envs blk in
-        Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e);
+    denote = denote ~synth;
     spec = None;
-    synth = Hike_synth.empty }
+    synth }
 
 (* The run's record, installed once at the discover boundary. *)
 let run : facts option ref = ref None
@@ -86,6 +93,16 @@ let facts () =
 
 (* The optional read for passes that also run on fixtures (no analysis). *)
 let facts_opt () : facts option = !run
+
+let with_synth (f : facts) (synth : Hike_synth.table) : facts =
+  let denote ~blk ?def e =
+    let pre, post =
+      Option.value (Core.Map.find f.envs (Term.tid blk))
+        ~default:(Cbat_vsa.AI.top, Cbat_vsa.AI.top)
+    in
+    Cbat_vsa.denote_exp_at ~synth ~pre ~post ~blk ?def e
+  in
+  { f with synth; denote }
 
 (* The attribution pass adds the emitter spec to the installed record. *)
 let with_attribution (f : facts) ~(spec : Hike_spec.section_spec) : facts =

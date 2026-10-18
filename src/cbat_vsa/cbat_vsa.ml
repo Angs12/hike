@@ -120,11 +120,12 @@ let defs_of (defs : def term list) : (def term * bool) Var.Map.t =
    sub-address lookup.  The fixpoint and the fixtures' seam build the same
    context through this one builder. *)
 let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
-    ~phi_writes ~jmp_reads ?sub_lookup (s : sub term) :
+    ~phi_writes ~jmp_reads ~(synth : Hike_synth.table ref) ?sub_lookup
+    (s : sub term) :
     Cbat_runctx.refine_ctx =
   let rctx =
     Cbat_runctx.mk_rctx ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
-      ~jmp_reads ?sub_lookup s
+      ~jmp_reads ~synth ?sub_lookup s
   in
   let all_defs =
     Term.enum blk_t s |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list in
@@ -143,7 +144,8 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
       (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
 
 (* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
-let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
+let preserved_of_sub ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
+    ~def_reads (s : sub term) :
     Int.Set.t =
   let regs =
     abi.Hike_abi.sp :: abi.Hike_abi.thread_pointer :: abi.Hike_abi.callee_saved
@@ -153,11 +155,12 @@ let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
     |> Seq.concat_map ~f:(Term.enum def_t)
     |> Seq.fold ~init:Var.Set.empty ~f:begin fun acc d ->
       let acc =
-        if Hike_synth.is_temporary (Def.lhs d)
+        if Hike_synth.is_temporary ~table:synth (Def.lhs d)
         then Core.Set.add acc (Var.base (Def.lhs d)) else acc in
       def_reads d
       |> Core.Set.fold ~init:acc ~f:begin fun acc v ->
-        if Hike_synth.is_temporary v then Core.Set.add acc (Var.base v) else acc
+        if Hike_synth.is_temporary ~table:synth v
+        then Core.Set.add acc (Var.base v) else acc
       end
     end in
   Cbat_var_id.intern_set (Core.Set.union regs virt)
@@ -250,7 +253,8 @@ let compute_need ~def_reads
    identity exactly. *)
 type rewrite = [ `Mask of var * exp * word | `Temp of var * exp * word ]
 
-let normalize_round (s : Sub.t) : Sub.t =
+let normalize_round_with_synth ~(synth : Hike_synth.table ref)
+    (s : Sub.t) : Sub.t =
   let mask_of (k : word) (w : int) : word option =
     let kk = Word.to_int64_exn k in
     if w > 0 && w <= 64 && Stdlib.Int64.compare kk 0L > 0
@@ -288,9 +292,10 @@ let normalize_round (s : Sub.t) : Sub.t =
                   | Some (d0, x, k, w) when Word.equal k j -> (
                       match mask_of k w with
                       | Some mask ->
-                          let t =
-                            Hike_synth.fresh ~bits:w Hike_synth.Refinement
-                          in
+                          let synth', t =
+                            Hike_synth.mint_fresh ~bits:w Hike_synth.Refinement
+                              !synth in
+                          synth := synth';
                           (* d0's tid keys the temp insertion; d's tid keys
                              the mask rewrite. *)
                           let m =
@@ -329,6 +334,9 @@ let normalize_round (s : Sub.t) : Sub.t =
                 [ Def.create t x; d ]
               | None -> [ d ]))
 
+let normalize_round (s : Sub.t) : Sub.t =
+  normalize_round_with_synth ~synth:(ref Hike_synth.empty) s
+
 #ifdef VSA_DEBUG
 (* Forward witness: every guard cond from [p] to [v] denotates false on
    the pred's entry state, so the edge is dead without the backward
@@ -355,7 +363,7 @@ let edge_forward_dead ~(rctx : Cbat_runctx.refine_ctx) ~edge_conds ~get
         with
         | None -> false
         | Some cond -> (
-            match Cbat_transfer.denote_imm_exp cond (get p) with
+            match Cbat_transfer.denote_imm_exp ~synth:!(rctx.rc_synth) cond (get p) with
             | Ok w -> not (WordSet.elem Cbat_word.b1 w)
             | Error _ -> false))
 
@@ -428,9 +436,10 @@ let static_graph_vsa
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     ?(wake : Tid.Set.t = Tid.Set.empty)
+    ~(synth : Hike_synth.table ref)
     (s : Sub.t) (init : vsa_sol) : vsa_sol =
-  let s = normalize_round s in
-  let preserved = preserved_of_sub ~abi ~def_reads s in
+  let s = normalize_round_with_synth ~synth s in
+  let preserved = preserved_of_sub ~abi ~synth:!synth ~def_reads s in
   let edge_conds = edge_conds_of s in
   let disabled_conds = disabled_conds_of ~edge_conds s in
   (* Pseudo-nodes never reach denotation. *)
@@ -440,7 +449,7 @@ let static_graph_vsa
     |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   let rctx =
     mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
-      ~jmp_reads ~sub_lookup s
+      ~jmp_reads ~synth ~sub_lookup s
   in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
@@ -501,7 +510,7 @@ let static_graph_vsa
               Cbat_forward.denote_block ~preserved ~callee ~plan_of
                 ~rctx
                 ~source:p p_entry ~target:v) in
-          let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
+          let res = Stages.time `Glue (fun () -> AI.gc ~synth:!synth res ~keep) in
 #ifdef VSA_DEBUG
           debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;
 #endif
@@ -646,6 +655,7 @@ type section_image = Cbat_transfer.section_image = {
 
 let set_section_images = Cbat_transfer.set_section_images
 let with_images = Cbat_transfer.with_images
+let normalize_round_with_synth = normalize_round_with_synth
 let denote_def = Cbat_transfer.denote_def
 let denote_defs = Cbat_transfer.denote_defs
 let denote_imm_exp = Cbat_transfer.denote_imm_exp
@@ -697,13 +707,18 @@ module Test_seam = struct
 
   let mem_addr_of = Cbat_def_origin.mem_addr_of
   type refine_ctx = Cbat_runctx.refine_ctx
-  let denote_def = denote_def
-  let denote_defs = denote_defs
-  let denote_imm_exp = denote_imm_exp
-  let fold_block_states = fold_block_states
-  let reachable_jumps = reachable_jumps
-  let constrain_edge ~env ~landmarks cond =
-    Cbat_backward.constrain_edge ~env ~landmarks cond
+  let denote_def ~synth d env =
+    Cbat_transfer.denote_def ~synth d env
+  let denote_defs ~synth blk =
+    Cbat_transfer.denote_defs ~synth blk
+  let denote_imm_exp ~synth e env =
+    Cbat_transfer.denote_imm_exp ~synth e env
+  let fold_block_states ~synth =
+    Cbat_transfer.fold_block_states ~synth
+  let reachable_jumps ~synth env jmps =
+    Cbat_transfer.reachable_jumps ~synth env jmps
+  let constrain_edge ~synth ~env ~landmarks cond =
+    Cbat_backward.constrain_edge ~synth ~env ~landmarks cond
   let refine_edge_inline ~sol ~rctx ~discarded blk env cond =
     Cbat_backward.refine_edge_inline
       ~entry:(Solution.get sol (Term.tid blk)) ~rctx ~discarded blk env cond
@@ -714,8 +729,8 @@ module Test_seam = struct
       { Cbat_backward.pm = mem; prange = range; pc; pbits = bits;
         pendian = endian }
   let cells_owed ce = not (Core.Map.is_empty ce)
-  let constrain_operands ~env ?cells ?nonneg ~landmarks e produced =
-    Cbat_backward.constrain_operands ~env ?cells ?nonneg ~landmarks e produced
+  let constrain_operands ~synth ~env ?cells ?nonneg ~landmarks e produced =
+    Cbat_backward.constrain_operands ~synth ~env ?cells ?nonneg ~landmarks e produced
   let mk_rctx = mk_rctx_with_oracle
   let normalize_round = normalize_round
   (* The context's landmark table and the widening-head bracket: a refine
@@ -727,7 +742,8 @@ module Test_seam = struct
   let refine_edge_count_writes = refine_edge_count_writes
 
   let acquire_unsat ~(rctx : refine_ctx) ~entry env blk disabled =
-    Cbat_backward.acquire_unsat ~entry ~landmarks:rctx.Cbat_runctx.rc_landmarks
+    Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~entry
+      ~landmarks:rctx.Cbat_runctx.rc_landmarks
       ~cache:rctx.rc_prefix ~witness:rctx.rc_nonneg env blk disabled
 
   let prefix_cached (rctx : refine_ctx) blk =

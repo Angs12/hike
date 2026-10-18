@@ -388,7 +388,7 @@ let range_of_denotation ~(word : int)
       { Hike_synth_addr.id; lo = span.ds_lo; hi = span.ds_hi }) in
   let basis = Base.Option.bind (Hike_synth_addr.address_basis synth address)
       ~f:(fun a -> Base.Option.map
-          (Hike_synth_addr.of_address ~addr_bits:(Model.word_bits word) ~regions a)
+          (Hike_synth_addr.region_index ~addr_bits:(Model.word_bits word) ~regions a)
           ~f:(fun _ -> a)) in
   if Base.Option.equal Hike_origin.equal (Vsa.WordSet.origin ws)
        (Some Hike_origin.Fs) then
@@ -839,7 +839,7 @@ let region_id_of_storage (s : storage) : int =
 (* The rewrite decision reads the attribution's own projection of the
    def (ctx.projections) — the collect path computed it; the rewrite
    cannot disagree with the tree. *)
-let conversion_of ~(word : int) ~(entry : int64)
+let conversion_of ~(word : int) ~(entry : int64) ~(synth : Hike_synth.table)
     ~(tree : sub_tree) ~(data : data_tree)
     ~(projected : projection option)
     ~(access : (exp * int * bool) option) : conv * Tag.t option =
@@ -874,7 +874,7 @@ let conversion_of ~(word : int) ~(entry : int64)
                 p.pt_elig
                 && (if is_sub_local p.pt_sec then not retaddr_cell
                     else Base.Option.is_some
-                        (Hike_synth_addr.address_of_exp Hike_synth.empty addr)))
+                        (Hike_synth_addr.address_of_exp synth addr)))
           in
           match owned with
           | [ p ] -> (
@@ -954,8 +954,8 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
                         (Core.Map.find collected.projections (Term.tid d))
                     in
                     let c, _ =
-                      conversion_of ~word ~entry ~tree ~data:data_tree
-                        ~projected ~access
+                      conversion_of ~word ~entry ~synth:facts.synth ~tree
+                        ~data:data_tree ~projected ~access
                     in
                     Core.Map.set acc ~key:(Term.tid d) ~data:c))
   in
@@ -1164,17 +1164,19 @@ let no_fact = { fr_conv = Keep; fr_bits = 0; fr_addr = None; fr_rhs = None }
 
 (* The sub's storage spans: the layout's regions in the synth fact
    shape, built once and read by every consumer. *)
-let spans_of_layout ~(word : int) (layout : Hike_stack_model.sub_layout) :
-    Hike_synth.storage_span list =
+let spans_of_layout ~(synth : Hike_synth.table ref) ~(word : int)
+    (layout : Hike_stack_model.sub_layout) : Hike_synth.storage_span list =
   Base.List.map layout.Hike_stack_model.regions
     ~f:(fun { Model.Sub_layout.r_id = id; r_lo = lo; r_hi = hi; _ } ->
-        Hike_synth.storage_span ~addr_bits:(Model.word_bits word)
-          (Hike_synth.Stack id) ~lo ~hi)
+        Hike_synth.record synth
+          (Hike_synth.storage_span ~addr_bits:(Model.word_bits word)
+             (Hike_synth.Stack id) ~lo ~hi))
 
 (* The per-def rewrite facts of one sub: every access keeps its
    conversion; every address def whose value routes to a storage takes
    the base + displacement form. *)
-let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
+let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
+    ~(abi : Hike_abi.t)
     ~(tree : sub_tree) ~(data : data_tree)
     ~(projections : projection option Tid.Map.t)
     ~(conversions : conv Tid.Map.t)
@@ -1190,6 +1192,13 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let census _ = () in
 #endif
   let addr_bits = Model.word_bits word in
+  let window_var () =
+    Hike_synth.record synth (Hike_synth.mint_base ~addr_bits Hike_synth.Window)
+  in
+  let sec_comp_ptr id =
+    Hike_synth.record synth
+      (Hike_synth.mint_base ~addr_bits (Hike_synth.Global id))
+  in
   (* The rewrite's admissibility: the address's whole range lies inside
      the storage's allocated extent — a value or access outside it names
      no storage, and the model arithmetic keeps it. *)
@@ -1248,7 +1257,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         let f =
           match
             Hike_synth_addr.base_form ~leaves
-              ~base:(Model.hike_window_var ~word) ~rel:0L addr
+              ~base:(window_var ()) ~rel:0L addr
           with
           | Some a -> { fact with fr_addr = Some a }
           | None -> fact
@@ -1329,15 +1338,13 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                         | Ok k
                           when Stdlib.Int64.equal k c ->
                             Hike_synth_addr.base_plus
-                              (Model.sec_comp_ptr
-                                 ~addr_bits id)
+                              (sec_comp_ptr id)
                               ~rel:comp_lo (Bil.Int w)
                         | _ ->
                             Bil.BinOp
                               ( Bil.PLUS,
                                 Bil.Var
-                                  (Model.sec_comp_ptr
-                                     ~addr_bits id),
+                                  (sec_comp_ptr id),
                                 Bil.BinOp
                                   ( Bil.MINUS,
                                     Bil.Int w,
@@ -1374,7 +1381,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                      && window_param -> (
                   match
                     Hike_synth_addr.base_form ~leaves
-                      ~base:(Model.hike_window_var ~word)
+                      ~base:(window_var ())
                       ~rel:0L (Def.rhs d)
                   with
                   | Some rhs ->
@@ -1419,7 +1426,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
          Term.enum def_t blk
          |> Seq.fold ~init:acc ~f:(fun acc d ->
                 let leaves =
-                  Hike_synth_addr.address_leaves ~denote ~storages ~blk
+                  Hike_synth_addr.address_leaves ~synth:!synth ~denote ~storages ~blk
                     ~def:d (Def.rhs d) in
                 match access_of d with
                 | Some access -> access_fact ~leaves acc d access

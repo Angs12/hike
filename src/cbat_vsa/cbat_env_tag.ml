@@ -61,22 +61,22 @@ let set_env_tag (env : AI.t) (d : def term) : def term =
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
    completion loop, ONLY.  Consumers use the seam [denote_exp_at];
    this is a raw replay from the given state. *)
-let solve_denote :
+let solve_denote ~(synth : Hike_synth.table) :
     pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
     (WordSet.t, Type.error) Result.t =
   fun ~pre ~blk ?def e ->
     let env =
       match def with
-      | None -> denote_defs blk pre
+      | None -> denote_defs ~synth blk pre
       | Some d ->
         Term.enum def_t blk
         |> Seq.fold_until ~init:pre
           ~f:(fun env x ->
               if Tid.equal (Term.tid x) (Term.tid d) then Stop env
-              else Continue (denote_def x env))
+              else Continue (denote_def ~synth x env))
           ~finish:(fun _ -> AI.top)
     in
-    denote_imm_exp e env
+    denote_imm_exp ~synth e env
 
 #ifdef VSA_DEBUG
 (* The Env Tag differential: every def-level query replays from [pre]
@@ -119,14 +119,14 @@ let env_tag_result_str (r : (WordSet.t, Type.error) Result.t) : string =
       | _ -> "?")
   | Error e -> "error: " ^ Type.Error.to_string e
 
-let env_tag_check ~pre ~blk ~(tagged : bool) (d : def term) (e : exp)
+let env_tag_check ~synth ~pre ~blk ~(tagged : bool) (d : def term) (e : exp)
     (answer : (WordSet.t, Type.error) Result.t) : unit =
   let sub =
     Hashtbl.find env_tag_sub_of_blk (Term.tid blk)
     |> Base.Option.value ~default:"?"
   in
   let lost = (not tagged) && Hashtbl.mem env_tag_stamped (Term.tid d) in
-  let replay = solve_denote ~pre ~blk ~def:d e in
+  let replay = solve_denote ~synth ~pre ~blk ~def:d e in
   let mismatch =
     lost
     || (tagged
@@ -155,31 +155,32 @@ let env_tag_check ~pre ~blk ~(tagged : bool) (d : def term) (e : exp)
    postcondition.  [pre] feeds the VSA_DEBUG differential's replay
    only. *)
 let denote_exp_at :
-    ?post:AI.t -> pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+    synth:Hike_synth.table -> ?post:AI.t -> pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
     (WordSet.t, Type.error) Result.t =
-  fun ?(post = AI.top) ~pre ~blk ?def e ->
+  fun ~synth ?(post = AI.top) ~pre ~blk ?def e ->
     match def with
     | None ->
 #ifdef VSA_DEBUG
       let () = Cbat_kb_census.bump "seam.query.nodef" in
 #endif
-      denote_imm_exp e post
+      denote_imm_exp ~synth e post
     | Some d ->
 #ifdef VSA_DEBUG
       let () = Cbat_kb_census.bump "seam.query.def" in
 #endif
       let tag = env_tag d in
       let env = match tag with Some env -> env | None -> AI.top in
-      let answer = denote_imm_exp e env in
+      let answer = denote_imm_exp ~synth e env in
 #ifdef VSA_DEBUG
-      env_tag_check ~pre ~blk ~tagged:(Base.Option.is_some tag) d e answer;
+      env_tag_check ~synth ~pre ~blk ~tagged:(Base.Option.is_some tag) d e answer;
 #endif
       answer
 
 (* The solve's boundary sweep: one (pre, post) env pair per block (pre
    the solution's entry state, post the block's def replay from it) and
    the sub with every def stamped with the env its own transfer reads. *)
-let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
+let stamp_envs_of_sol ~(synth : Hike_synth.table)
+    ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
     (AI.t * AI.t) Tid.Map.t * sub term =
   let envs = ref Tid.Map.empty in
   let sub' =
@@ -189,9 +190,9 @@ let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
         let blk' =
           Term.map def_t blk ~f:(fun d ->
               let before = !env in
-              let after = denote_def d before in
+              let after = denote_def ~synth d before in
               env := after;
-              let d = Cbat_def_origin.stamp_origin ~before d after in
+              let d = Cbat_def_origin.stamp_origin ~synth ~before d after in
 #ifdef VSA_DEBUG
               Hashtbl.set env_tag_stamped ~key:(Term.tid d) ~data:();
               env_tag_bump ~sub:(Sub.name sub) ~stamped:1 ~queried:0

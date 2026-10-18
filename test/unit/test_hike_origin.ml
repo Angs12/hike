@@ -28,10 +28,10 @@ let ori_01 () =
 let ori_02 () =
   let listed (o : Origin.t) : Origin.t =
     match o with
-    | Origin.Abs | Origin.Stack | Origin.Fs | Origin.Rip _ -> o
+    | Origin.Stack | Origin.Fs | Origin.Rip _ -> o
   in
   List.iter
-    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ]
+    [ Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ]
     ~f:(fun o ->
         let n = Origin.name (listed o) in
         check (sprintf "name %s nonempty" n) (String.length n > 0))
@@ -67,10 +67,10 @@ let round_trip (offs : int64) : Origin.t option =
   let sub = straight_sub "rt" [ store; load ] in
   let entry = anchored_entry () in
   let sol =
-    static_graph_vsa ~abi sub
+    static_graph_vsa ~synth:Hike.Synth.empty ~abi sub
       (Vsa.init_sol ~abi ~entry sub)
   in
-  let _, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  let _, stamped = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
   let blk = Term.enum blk_t stamped |> Seq.to_list |> List.hd_exn in
   let defs = Term.enum def_t blk |> Seq.to_list in
   match List.rev defs with
@@ -86,14 +86,14 @@ let ori_07 () =
    true; a plain or module-relative origin answers false. *)
 let ori_18 () =
   check "Stack names the stack line" (Origin.names_stack_line Origin.Stack);
-  check "an absolute origin names no stack line"
-    (not (Origin.names_stack_line Origin.Abs));
+  check "a thread-pointer origin names no stack line"
+    (not (Origin.names_stack_line Origin.Fs));
   check "a module-relative origin names no stack line"
     (not (Origin.names_stack_line (Origin.Rip Hike_section.Rodata)))
 
 let ori_19 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata;
+    [ Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata;
       Origin.Rip Hike_section.Data ]
   in
   let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
@@ -108,7 +108,7 @@ let ori_19 () =
       check "offset arithmetic retains its source origin"
         (Option.equal Origin.equal
            (Ws.origin (Ws.add (value a) (Ws.singleton (i2w 1L))))
-           (if Origin.equal a Origin.Abs then None else Some a)));
+           (Some a)));
   let region = Origin.Rip Hike_section.Rodata in
   let rip = value region in
   let plain k = Ws.singleton (i2w k) in
@@ -136,27 +136,31 @@ let ori_19 () =
      Ws.equal u (Ws.union data rip)
      && Ws.equal (Ws.diff u (plain 5L)) rip
      && Ws.equal (Ws.diff u (plain 3L)) data);
-  List.iter [ Origin.Abs; region; Origin.Stack ] ~f:(fun o ->
+  List.iter [ region; Origin.Stack ] ~f:(fun o ->
       check "memory namespace follows the carried origin"
         (match Ws.address_groups (value o) with
-         | [ (key, _) ] -> Origin.equal key (Ws.key_line o)
+         | [ (key, _) ] -> Option.equal Origin.equal key (Ws.key_line o)
          | _ -> false))
 
 let ori_20 () =
-  let abs k = Ws.set_origin Origin.Abs (Ws.stack_word_i64 k) in
   let plain k = Ws.singleton (i2w k) in
   List.iter [ 3L; -1L; Stdlib.Int64.min_int ] ~f:(fun k ->
-      check "Abs union preserves exact absolute bits"
-        (Ws.equal (Ws.union (abs k) (plain k)) (plain k));
-      check "Abs multiplication uses absolute arithmetic"
-        (Ws.equal (Ws.mul (abs k) (plain 2L)) (Ws.mul (plain k) (plain 2L)));
-      check "Abs negation uses absolute arithmetic"
-        (Ws.equal (Ws.neg (abs k)) (Ws.neg (plain k))))
+      check "plain union preserves exact absolute bits"
+        (Ws.equal (Ws.union (plain k) (plain k)) (plain k));
+      check "plain multiplication wraps in 64 bits"
+        (Ws.equal (Ws.mul (plain k) (plain 2L)) (plain (Stdlib.Int64.mul k 2L)));
+      check "plain negation wraps in 64 bits"
+        (Ws.equal (Ws.neg (plain k)) (plain (Stdlib.Int64.neg k))))
 
 let ori_22 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ] in
-  let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
+    [ None; Some Origin.Stack; Some Origin.Fs;
+      Some (Origin.Rip Hike_section.Rodata) ] in
+  let name = function None -> "plain" | Some o -> Origin.name o in
+  let key_line = Option.bind ~f:Ws.key_line in
+  let value = function
+    | None -> Ws.singleton (i2w 0L)
+    | Some o -> Ws.set_origin o (Ws.stack_word_i64 0L) in
   let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
   let cell = key (Ws.singleton (i2w 0x1000L)) in
   List.iter origins ~f:(fun a ->
@@ -165,11 +169,11 @@ let ori_22 () =
           (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
           ~key:cell ~data:(Mem.Val.create data LittleEndian) in
       let loaded = Mem.Val.data (Mem.find (64, LittleEndian) mem cell) in
-      check ("full-width memory preserves " ^ Origin.name a) (Ws.equal data loaded);
+      check ("full-width memory preserves " ^ name a) (Ws.equal data loaded);
       List.iter origins ~f:(fun b ->
           check "memory aliases only the explicit shared coordinate line"
             (Bool.equal (Mem.Key.overlap (key data) (key (value b)))
-               (Origin.equal (Ws.key_line a) (Ws.key_line b)))))
+               (Option.equal Origin.equal (key_line a) (key_line b)))))
 
 let ori_23 () =
   List.iter [ Origin.Stack ] ~f:(fun o ->
@@ -234,9 +238,9 @@ let ori_27 () =
   in
   let entry = anchored_entry () in
   let sol =
-    static_graph_vsa ~abi sub (Vsa.init_sol ~abi ~entry sub)
+    static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi ~entry sub)
   in
-  let envs, _ = Vsa.stamp_envs_of_sol ~sol sub in
+  let envs, _ = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
   let post =
     Core.Map.data envs
     |> List.map ~f:(fun (_, post) -> AI.find_word 64 post rsp)
@@ -264,8 +268,8 @@ let ori_28 () =
         Def.create m (Bil.Store (Bil.Var m, slot, Bil.Var p, LittleEndian, `r64));
         Def.create q (Bil.Load (Bil.Var m, slot, LittleEndian, `r64));
         Def.create out (Bil.Load (Bil.Var m, Bil.Var q, LittleEndian, `r64)) ] in
-  let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
-  let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
+  let envs, stamped = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
   let defs = Term.enum blk_t stamped |> Seq.concat_map ~f:(Term.enum def_t)
       |> Seq.to_list in
   List.iter defs ~f:(fun d ->
@@ -279,7 +283,7 @@ let ori_28 () =
   let pointer = AI.find_word 64 state q in
   check "FS pointers use their own memory namespace"
     (match Ws.address_groups pointer with
-     | [(o, offs)] -> String.equal (Origin.name o) "fs"
+     | [(Some o, offs)] -> String.equal (Origin.name o) "fs"
                      && Clp.elem (i2w (-8L)) offs
      | _ -> false)
 
@@ -297,12 +301,13 @@ let ori_29 () =
      && Ws.is_bottom (Ws.meet p (Ws.bottom 64)));
   check "a mixed union and widening keep the FS memory line"
     (List.exists (Ws.address_groups (Ws.widen_join mixed (Ws.union (fs (-16L)) zero)))
-       ~f:(fun (o, _) -> Origin.equal o Origin.Fs));
+       ~f:(fun (o, _) -> Option.equal Origin.equal o (Some Origin.Fs)));
   check "a shared FS base cancels in pointer subtraction"
     (Ws.equal (Ws.sub (fs (-8L)) (fs (-16L))) (Ws.singleton (i2w 8L)));
-  let root = Bil.Var (Hike.Synth.thread_addr ~addr_bits:64 0L) in
+  let synth, root = Hike.Synth.mint_thread_addr ~addr_bits:64 0L Hike.Synth.empty in
+  let root = Bil.Var root in
   check "same-origin pointer equality compares offsets"
-    (match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.EQ, root, root)) AI.top with
+    (match Vsa.Test_seam.denote_imm_exp ~synth (Bil.BinOp (Bil.EQ, root, root)) AI.top with
      | Ok v -> Ws.equal v (Ws.singleton Cbat_word.b1)
      | Error _ -> false)
 
@@ -314,8 +319,8 @@ let ori_30 () =
              ~return:(Direct target) ())))];
         [Def.create p (Bil.Load (Bil.Var m, Bil.Var abi.thread_pointer,
                                  LittleEndian, `r64))], [(0, mk_ret)] ]) in
-  let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi sub) in
-  let envs, _ = Vsa.stamp_envs_of_sol ~sol sub in
+  let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
+  let envs, _ = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
   check "a foreign call preserves FS and its self-pointer load"
     (Core.Map.exists envs ~f:(fun (_, post) ->
          Option.equal String.equal (origin_name (Ws.origin (AI.find_word 64 post p)))
@@ -329,10 +334,10 @@ let ori_31 () =
   let mv = Mem.add (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
       ~key ~data:(Mem.Val.create data LittleEndian) in
   let env = AI.add_memory AI.top ~key:m ~data:mv in
-  let exp = Bil.Load (Bil.Var m,
-      Bil.Var (Hike.Synth.thread_addr ~addr_bits:64 0L), LittleEndian, `r64) in
+  let synth, address = Hike.Synth.mint_thread_addr ~addr_bits:64 0L Hike.Synth.empty in
+  let exp = Bil.Load (Bil.Var m, Bil.Var address, LittleEndian, `r64) in
   check "a stored self cell takes precedence over the ABI default"
-    (match Vsa.Test_seam.denote_imm_exp exp env with
+    (match Vsa.Test_seam.denote_imm_exp ~synth exp env with
      | Ok v -> Ws.equal v data | Error _ -> false)
 
 let () =
@@ -352,7 +357,7 @@ let () =
 
       pin "ORI-18" "the D10 namespace test" ori_18;
       pin "ORI-19" "all origins retain identity and use their own facts" ori_19;
-      pin "ORI-20" "absolute-origin arithmetic preserves bits" ori_20;
+      pin "ORI-20" "plain arithmetic preserves high-bit words" ori_20;
       pin "ORI-22" "all-origin memory round trips and alias namespaces" ori_22;
       pin "ORI-23" "rounding crosses base-residue block boundaries" ori_23;
       pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24;

@@ -102,7 +102,7 @@ val phi_reads_from : phi term -> Tid.t -> Var.Set.t
 (* The mem-typed defs a call-bearing block hands its callee: the
    storages the site's stores built and the call-argument address
    temps. *)
-val blk_boundary_reads : blk term -> Var.Set.t
+val blk_boundary_reads : Hike_synth.table -> blk term -> Var.Set.t
 val word_bits : int -> int
 val is_true_cond : exp -> bool
 
@@ -128,14 +128,14 @@ val fixed_signature : sub term -> bool
 
 val arg_slot : addr_bits:int -> int -> var
 val call_arg : addr_bits:int -> int -> var
-val is_call_arg : var -> bool
-val is_arg_slot : var -> bool
+val is_call_arg : Hike_synth.table -> var -> bool
+val is_arg_slot : Hike_synth.table -> var -> bool
 
 val window_mem : addr_bits:int -> var
-val is_window_mem : var -> bool
+val is_window_mem : Hike_synth.table -> var -> bool
 
 val hike_window_var : word:int -> var
-val is_window_var : var -> bool
+val is_window_var : Hike_synth.table -> var -> bool
 
 val region_name : int -> string
 val residue_id : int
@@ -149,17 +149,17 @@ val args_cell_of_span : word:int -> entry:int64 -> int64 -> int64 -> int option
 val region_mem : addr_bits:int -> int -> var
 
 val region_ptr : addr_bits:int -> int -> var
-val is_region_ptr : var -> bool
+val is_region_ptr : Hike_synth.table -> var -> bool
 
 
 val sec_comp_ptr : addr_bits:int -> int -> var
-val is_sec_comp_ptr : var -> bool
+val is_sec_comp_ptr : Hike_synth.table -> var -> bool
 
-val is_storage_base : var -> bool
-val region_ptr_id_of : var -> int option
+val is_storage_base : Hike_synth.table -> var -> bool
+val region_ptr_id_of : Hike_synth.table -> var -> int option
 
 val is_mem : var -> bool
-val is_region_mem : var -> bool
+val is_region_mem : Hike_synth.table -> var -> bool
 type sec_comp = {
   comp_id : int;
   sec_lo : int64;
@@ -184,10 +184,10 @@ type sec_meta = {
 val sec_comp_name : int -> string
 val sec_comp_mem : addr_bits:int -> int -> var
 val sec_res_name : int -> string
-val is_sec_comp_mem : var -> bool
+val is_sec_comp_mem : Hike_synth.table -> var -> bool
 
 (* A model-owned storage var: a fissioned memory family or a storage base. *)
-val is_model_storage : var -> bool
+val is_model_storage : Hike_synth.table -> var -> bool
 
 (* The tid-name sanitization. *)
 val sanitize_tid_name : string -> string
@@ -286,7 +286,7 @@ val reads :
 val writes :
   [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
 val prepare_effects :
-  abi:Abi.t -> callee:(Tid.t -> sub term option) -> sub term -> sub term
+  synth:Hike_synth.table -> abi:Abi.t -> callee:(Tid.t -> sub term option) -> sub term -> sub term
 val map_effects : read:(var -> var) -> write:(var -> var) -> jmp term -> jmp term
 
 (* The lane type/kind flags on the arg terms. *)

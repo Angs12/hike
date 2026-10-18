@@ -2,5 +2,6 @@
 open Bap.Std
 
 
-  val split_sub : sub term -> sub term
-  val normalize : program term -> program term
+  val split_sub : synth:Hike_synth.table ref -> sub term -> sub term
+  val normalize :
+    synth:Hike_synth.table -> program term -> Hike_synth.table * program term

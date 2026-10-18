@@ -85,7 +85,8 @@ let base_plus (base : var) ~(rel : int64) (disp : exp) : exp =
    module address is an integer value, a stack storage's base is its
    allocated offset); a var with no synthetic identity asks the
    denotation. *)
-let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
+let address_leaves ~(synth : Hike_synth.table)
+    ~(denote : blk:blk term -> ?def:def term -> exp ->
                      (Cbat_clp_set_composite.t, Type.error) Result.t)
     ~(storages : Hike_synth.storage_span list)
     ~(blk : blk term) ~(def : def term) (e : exp) : leaf Var.Map.t =
@@ -113,7 +114,7 @@ let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
            Core.Map.set acc ~key:v ~data:`Int
          | Ok _ | Error _ -> acc
        in
-       match Hike_synth.classify Hike_synth.empty v with
+       match Hike_synth.classify synth v with
        | Some (Hike_synth.Module_addr _) ->
          Core.Map.set acc ~key:v ~data:`Int
        | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> (
@@ -135,12 +136,18 @@ let contains r a =
   Int64.unsigned_compare r.lo a <= 0
   && Int64.unsigned_compare a r.hi <= 0
 
-(* Both attribution and resolution use the owning byte span's base. *)
-let of_address ~addr_bits ~regions a =
+(* The owning span and the address's index within it. *)
+let region_index ~addr_bits ~regions a =
   Base.Option.map (Base.List.find regions ~f:(fun r -> contains r a))
     ~f:(fun r ->
-      (Hike_synth.bytes ~addr_bits (Hike_synth.Global r.id),
-       Bil.Int (Word.of_int64 ~width:addr_bits (Int64.sub a r.lo))))
+      (r, Bil.Int (Word.of_int64 ~width:addr_bits (Int64.sub a r.lo))))
+
+(* Both attribution and resolution use the owning byte span's base. *)
+let of_address ~synth ~addr_bits ~regions a =
+  Base.Option.map (region_index ~addr_bits ~regions a) ~f:(fun (r, index) ->
+      (Hike_synth.record synth
+         (Hike_synth.mint_bytes ~addr_bits (Hike_synth.Global r.id)),
+       index))
 
 let address_of_exp table e =
   Hike_exp_fold.fold
@@ -186,7 +193,8 @@ let access_address ?origin table mem index =
    access goes through the pointer the loader stores there: the memory
    operand stays and the address becomes a load at the slot's own
    absolute address (the emitter's section path renders it). *)
-let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
+let access ?(slots = []) ~addr_bits ~regions ~named_only ~synth mem addr ~size =
+  let tbl = !synth in
   let owner =
     match mem with Bil.Var mv -> Hike_synth.storage_of tbl mv | _ -> None
   in
@@ -194,7 +202,7 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
   | Some a when Base.List.exists slots ~f:(Int64.equal a) ->
     (* The slot's pointer read: the slot's own storage form, so the
        emitter resolves it through the one component map. *)
-    Base.Option.map (of_address ~addr_bits ~regions a)
+    Base.Option.map (of_address ~synth ~addr_bits ~regions a)
       ~f:(fun (slot_mem, slot_index) ->
         (mem, Bil.Load (Bil.Var slot_mem, slot_index, LittleEndian, `r64)))
   | addr_value -> (
@@ -209,10 +217,11 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
        | Bil.BinOp (Bil.MINUS, _, Bil.Var v)
          when Var.equal v (Hike_synth.base ~addr_bits storage) -> None
        | _ ->
-         Some
-           (Bil.Var (Hike_synth.bytes ~addr_bits storage),
-            Bil.BinOp (Bil.MINUS, addr,
-                       Bil.Var (Hike_synth.base ~addr_bits storage))))
+         let bytes =
+           Hike_synth.record synth (Hike_synth.mint_bytes ~addr_bits storage) in
+         let base =
+           Hike_synth.record synth (Hike_synth.mint_base ~addr_bits storage) in
+         Some (Bil.Var bytes, Bil.BinOp (Bil.MINUS, addr, Bil.Var base)))
     | Some _, None -> None
     | None, _ when named_only -> None
     | _, Some a ->
@@ -222,25 +231,25 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
             Base.List.filter regions ~f:(fun r ->
                 Int64.unsigned_compare last a >= 0 && contains r last)
           in
-          Base.Option.map (of_address ~addr_bits ~regions a)
+          Base.Option.map (of_address ~synth ~addr_bits ~regions a)
             ~f:(fun (mv, index) -> (Bil.Var mv, index)))
     | None, None -> None)
 
-let rewrite_def ?slots ~addr_bits tbl ~regions ~named_only d =
+let rewrite_def ?slots ~addr_bits ~synth ~regions ~named_only d =
   let memory = ref None in
   let mapper =
     object
       inherit Exp.mapper as super
       method! map_load ~mem ~addr endian size =
         match
-          access ?slots ~addr_bits ~regions ~named_only tbl mem addr
+          access ?slots ~addr_bits ~regions ~named_only ~synth mem addr
             ~size:(Size.in_bytes size)
         with
         | Some (mem', addr') -> Bil.Load (mem', addr', endian, size)
         | None -> Bil.Load (mem, addr, endian, size)
       method! map_store ~mem ~addr ~exp endian size =
         match
-          access ?slots ~addr_bits ~regions ~named_only tbl mem addr
+          access ?slots ~addr_bits ~regions ~named_only ~synth mem addr
             ~size:(Size.in_bytes size)
         with
         | Some (Bil.Var mv, addr') ->
@@ -298,8 +307,8 @@ let addr_mapper (addr : exp) =
 (* One def's rewrite: re-point to the owning storage's mem var at the
    storage-relative address, or address its memory node at the caller's
    slot or at [addr]. *)
-let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
-    ?(addr : exp option) (d : def term) : def term =
+let rewrite_storage ~(synth : Hike_synth.table ref) ~(addr_bits : int)
+    ~(conv : conv) ~(bits : int) ?(addr : exp option) (d : def term) : def term =
   (* Re-points every mem node at [mem_var]; a mem-defining lhs follows. *)
   let repoint ?addr mem_var d =
     let d = Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e) in
@@ -310,11 +319,25 @@ let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
       match addr with
       | Some a -> Def.map_exp d ~f:(fun e -> (addr_mapper a)#map_exp e)
       | None -> d)
-  | Conv_region id -> repoint ?addr (Model.region_mem ~addr_bits:bits id) d
-  | Conv_window -> repoint ?addr (Model.window_mem ~addr_bits:bits) d
-  | Conv_global id -> repoint (Model.sec_comp_mem ~addr_bits id) d
+  | Conv_region id ->
+      repoint ?addr
+        (Hike_synth.record synth
+           (Hike_synth.mint_bytes ~addr_bits:bits (Hike_synth.Stack id)))
+        d
+  | Conv_window ->
+      repoint ?addr
+        (Hike_synth.record synth
+           (Hike_synth.mint_bytes ~addr_bits:bits Hike_synth.Window))
+        d
+  | Conv_global id ->
+      repoint
+        (Hike_synth.record synth
+           (Hike_synth.mint_bytes ~addr_bits (Hike_synth.Global id)))
+        d
   | Conv_slot (i, byte_offset) ->
-      let slot = Model.arg_slot ~addr_bits i in
+      let slot =
+        Hike_synth.record synth
+          (Hike_synth.mint_base ~addr_bits (Hike_synth.Slot i)) in
       let addr =
         base_plus slot ~rel:0L
           (Bil.Int

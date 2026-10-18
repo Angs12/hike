@@ -45,7 +45,8 @@ let uses_of (s : sub term) : Var.Set.t = Hike_stack_model.sub_reads s
    rewritten before the jump, is bound to a fresh 1-bit def at its own
    position — the VSA tags the def, and the tag licenses the emitter's
    frame addressing. *)
-let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
+let compile_sub ~(synth : Hike_synth.table) (target : Theory.Target.t)
+    (sub : sub term) : Hike_synth.table * sub term =
   let flags = flag_vars target in
   let g = B.graph_of_sub sub in
   let plans =
@@ -55,15 +56,17 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
         |> Seq.filter_map ~f:(fun j ->
             Option.map (compile_jmp ~flags g b j) ~f:(fun f -> (Term.tid j, f))))
     |> Seq.to_list in
-  if List.is_empty plans then sub
+  if List.is_empty plans then (synth, sub)
   else
-    let conds, binds =
-      List.fold plans ~init:(Tid.Map.empty, []) ~f:(fun (conds, binds) (jt, (f : B.form)) ->
+    let conds, binds, synth =
+      List.fold plans ~init:(Tid.Map.empty, [], synth)
+        ~f:(fun (conds, binds, synth) (jt, (f : B.form)) ->
           if B.holds f f.exp && not (Hike_stack_model.reads_mem f.exp) then
-            (Core.Map.set conds ~key:jt ~data:f.exp, binds)
+            (Core.Map.set conds ~key:jt ~data:f.exp, binds, synth)
           else
-            let v = Hike_synth.fresh ~bits:1 Hike_synth.Comparison in
-            (Core.Map.set conds ~key:jt ~data:(Bil.Var v), (f, v) :: binds)) in
+            let synth, v =
+              Hike_synth.mint_fresh ~bits:1 Hike_synth.Comparison synth in
+            (Core.Map.set conds ~key:jt ~data:(Bil.Var v), (f, v) :: binds, synth)) in
     let consumed =
       List.fold plans ~init:Var.Set.empty ~f:(fun acc (_, (f : B.form)) ->
           Core.Set.union acc (Core.Set.filter f.substituted ~f:(is_flag flags))) in
@@ -75,7 +78,8 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
               | Some c -> Jmp.with_cond j c
               | None -> j)) in
     let dead = Core.Set.diff consumed (uses_of sub1) in
-    if Core.Set.is_empty dead then sub1
+    if Core.Set.is_empty dead then (synth, sub1)
     else
-      Term.map blk_t sub1 ~f:(fun blk ->
-          Term.filter def_t blk ~f:(fun d -> not (Core.Set.mem dead (Def.lhs d))))
+      (synth,
+       Term.map blk_t sub1 ~f:(fun blk ->
+           Term.filter def_t blk ~f:(fun d -> not (Core.Set.mem dead (Def.lhs d)))))

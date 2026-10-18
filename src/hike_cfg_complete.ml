@@ -12,9 +12,9 @@ module Model = Hike_stack_model
 type denote = Hike_kb.denote
 
 (* The phase solution's denotation. *)
-let denote_of_sol (sol : Vsa.vsa_sol) : denote =
+let denote_of_sol ~(synth : Hike_synth.table) (sol : Vsa.vsa_sol) : denote =
   fun ~blk ?def e ->
-    Vsa.solve_denote
+    Vsa.solve_denote ~synth
       ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk)) ~blk ?def e
 
 (* A load of at most one word; its address, if so. *)
@@ -32,17 +32,18 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
    the solve proved dead) keeps the return shape with a bottom address.
    One replay per block: the fold carries each def's before-env, so
    the per-def address denotations ride the block's single pass. *)
-let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+let retaddr_defs ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
+    ~(sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t =
   let word_bits = Hike_abi.word_bits abi in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
          fst
-           (Vsa.fold_block_states ~sol blk ~init:acc
+           (Vsa.fold_block_states ~synth ~sol blk ~init:acc
               ~f:(fun before _after d acc ->
                   match load_addr_of word_bits d with
                   | Some addr -> (
-                      match Vsa.denote_imm_exp addr before with
+                      match Vsa.denote_imm_exp ~synth addr before with
                       | Ok ws when Model.is_return_address ws ->
                         Core.Set.add acc (Term.tid d)
                       | Ok ws
@@ -65,7 +66,7 @@ let retaddr_read ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
    stack-symbolic cell, and a slot-read target is a foreign boundary —
    the dynamic linker fills the value, so the file bytes are not a
    dispatch's case words.  Neither is ever a dispatch. *)
-let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
+let dispatch_target ~synth ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     ~(index : Hike_transfer.index) ~(foreign_slots : Core.Int64.Set.t)
     (j : jmp term) : exp option =
   let target =
@@ -77,7 +78,7 @@ let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
   match target with
   | Some (Bil.Var v) when retaddr_read ~last_defs ~retaddr v -> None
   | Some t when
-      Base.Option.value_map (Hike_transfer.slot_of_target ~index t)
+      Base.Option.value_map (Hike_transfer.slot_of_target ~synth ~index t)
         ~default:false ~f:(fun a -> Core.Set.mem foreign_slots a) -> None
   | t -> t
 
@@ -380,7 +381,7 @@ let fallthroughs (sub : sub term) : Tid.t Tid.Map.t =
    reach cannot execute — no other sub transfers into it (a jump into
    another sub's interior is the tail-call rule, its entry only) — so
    dropping it is dead-code removal, never a missing definition. *)
-let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
+let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t) (sub : sub term) : sub term =
   (* The walk starts at the sub's own entry — the block at the address
@@ -419,7 +420,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
       | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> Some Tid.Set.empty
       | _ -> (
         match
-          Base.Option.bind (Hike_transfer.slot_of_target ~index texp)
+          Base.Option.bind (Hike_transfer.slot_of_target ~synth ~index texp)
             ~f:(fun a -> Base.Option.some_if (Core.Set.mem foreign_slots a) a)
         with
         | Some _ -> Some Tid.Set.empty
@@ -532,12 +533,13 @@ let materialize_fallthroughs (sub : sub term) : sub term =
    bodies from the raw transfers' own denotations, so the completion
    carries no fact channel. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+    ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     Tid.Set.t Tid.Map.t * bool =
-  let denote = denote_of_sol sol in
-  let retaddr = retaddr_defs ~abi ~sol sub in
+  let denote = denote_of_sol ~synth sol in
+  let retaddr = retaddr_defs ~abi ~synth ~sol sub in
   let sub_tids = sub_tids sub in
   let index = Hike_transfer.index_of_sub sub in
   let resolved', grew =
@@ -546,7 +548,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
         let last_defs = Vsa.last_defs blk in
         Term.enum jmp_t blk
         |> Seq.fold ~init:acc ~f:(fun ((m, grew) as acc) j ->
-            match dispatch_target ~last_defs ~retaddr ~index ~foreign_slots j with
+            match dispatch_target ~synth ~last_defs ~retaddr ~index ~foreign_slots j with
             | None -> acc
             | Some texp -> (
                 match
@@ -573,11 +575,12 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
    [Split_blocks.materialize].  The denotations read the images through
    the caller's bracket. *)
 let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+    ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) : sub term =
-  let retaddr = retaddr_defs ~abi ~sol sub in
+  let retaddr = retaddr_defs ~abi ~synth ~sol sub in
   let sub = rewrite_jmps_once ~retaddr sub in
-  prune_unreachable ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
+  prune_unreachable ~synth ~denote:(denote_of_sol ~synth sol) ~retaddr ~block_addrs
     ~foreign_slots sub
   |> materialize_fallthroughs

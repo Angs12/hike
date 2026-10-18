@@ -42,7 +42,7 @@ let caller_frame (ws : Ws.t) : bool =
 let classify_shape (ws : Ws.t) : shape =
   match Ws.origin ws with
   | Some Origin.Stack -> if caller_frame ws then `Window else `Stack
-  | Some (Origin.Abs | Origin.Rip _ | Origin.Fs) -> `Other
+  | Some (Origin.Rip _ | Origin.Fs) -> `Other
   | None -> `Lost
 
 (* Bottom remains in the diagnostic buckets; address identity uses the

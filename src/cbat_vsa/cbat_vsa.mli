@@ -27,7 +27,7 @@ module Mem = Cbat_ai_memmap
 
 (* The per-def runtime origin: the origin the solve computed for the
    def's value, stamped at the solve boundary.  [None] = outside the
-   analysis boundary (reads Abs). *)
+   analysis boundary (reads no origin). *)
 module Def_origin : sig
   val def_origin : def term -> Hike_origin.t option
   val with_origin : Hike_origin.t -> def term -> def term
@@ -81,6 +81,7 @@ val entry_block_of : sub term -> blk term option
 (* The round-down idiom normalization: the two-def [(x >> k) << k]
    pair becomes the mask AND + identity copy. *)
 val normalize_round : Sub.t -> Sub.t
+val normalize_round_with_synth : synth:Hike_synth.table ref -> Sub.t -> Sub.t
 
 (* The fixpoint from [init]; a [wake] block's successors re-join even
    when no state changes (a resumed solve's blocked calls). *)
@@ -95,24 +96,25 @@ val static_graph_vsa :
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
   ?wake:Tid.Set.t ->
-  Sub.t -> vsa_sol -> vsa_sol
+  synth:Hike_synth.table ref ->  Sub.t -> vsa_sol -> vsa_sol
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
    completion loop, ONLY.  Consumers use the seam [denote_exp_at];
    this is a raw replay from the given state. *)
 val solve_denote :
-  pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+  synth:Hike_synth.table -> pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
 (* The word-set denotation of an exp in a given env — the vocabulary
    of the completion loop's own folds. *)
-val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
+val denote_imm_exp : synth:Hike_synth.table -> exp -> AI.t -> (WordSet.t, Type.error) Result.t
 
 (* One replay per block: the block's defs fold [denote_def] from the
    solution's entry state and [f] folds over each def's (before, after)
    states.  The completion's per-def queries ride this fold — one
    replay per block, never one per def. *)
 val fold_block_states :
+  synth:Hike_synth.table ->
   sol:(tid, AI.t) Solution.t ->
   blk term ->
   init:'acc ->
@@ -125,6 +127,7 @@ val fold_block_states :
    postcondition.  [pre] feeds the VSA_DEBUG differential's replay
    only. *)
 val denote_exp_at :
+  synth:Hike_synth.table ->
   ?post:AI.t ->
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
@@ -143,7 +146,7 @@ val set_env_tag : AI.t -> def term -> def term
    the solution's entry state, post the block's def replay from it) and
    the sub with every def stamped with its before-state. *)
 val stamp_envs_of_sol :
-  sol:vsa_sol -> sub term -> (AI.t * AI.t) Tid.Map.t * sub term
+  synth:Hike_synth.table -> sol:vsa_sol -> sub term -> (AI.t * AI.t) Tid.Map.t * sub term
 
 (* The block's last def per lhs var (the reaching def at the block's
    end). *)
@@ -154,26 +157,28 @@ val last_defs : blk term -> def term Var.Map.t
 module Test_seam : sig
   val mem_addr_of : exp -> exp option
 
-  val denote_def : def term -> AI.t -> AI.t
+  val denote_def : synth:Hike_synth.table -> def term -> AI.t -> AI.t
 
-  val denote_defs : blk term -> AI.t -> AI.t
+  val denote_defs : synth:Hike_synth.table -> blk term -> AI.t -> AI.t
 
-  val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
+  val denote_imm_exp : synth:Hike_synth.table -> exp -> AI.t -> (WordSet.t, Type.error) Result.t
 
   (* One per-block state replay: the block's defs fold [denote_def]
      from its solution entry state; [f] folds over each def's (before,
      after) states. *)
   val fold_block_states :
+    synth:Hike_synth.table ->
     sol:(tid, AI.t) Solution.t ->
     blk term ->
     init:'acc ->
     f:(AI.t -> AI.t -> def term -> 'acc -> 'acc) ->
     'acc * AI.t
 
-  val reachable_jumps : AI.t -> jmp term seq -> jmp term seq
+  val reachable_jumps : synth:Hike_synth.table -> AI.t -> jmp term seq -> jmp term seq
 
   (* Constrain a state by an edge's cond (the context's landmark table). *)
   val constrain_edge :
+    synth:Hike_synth.table ->
     env:AI.t -> landmarks:Cbat_landmarks.t -> exp -> AI.t
 
   (* One backward rule per node kind, the mirror of the forward transfer —
@@ -187,7 +192,7 @@ module Test_seam : sig
     cells -> mem:var -> range:Cbat_ai_memmap.Key.t -> bits:int ->
     endian:endian -> WordSet.t -> cells
   val cells_owed : cells -> bool
-  val constrain_operands : env:AI.t -> ?cells:cells ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
+  val constrain_operands : synth:Hike_synth.table -> env:AI.t -> ?cells:cells ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* One fixpoint run's context: the static per-block facts, the
      convention facts, and the run's mutable state. *)
@@ -204,6 +209,7 @@ module Test_seam : sig
     phi_reads:(phi term -> Var.Set.t) ->
     phi_writes:(phi term -> Var.Set.t) ->
     jmp_reads:(jmp term -> Var.Set.t) ->
+    synth:Hike_synth.table ref ->
     ?sub_lookup:(int64 -> Tid.t option) -> sub term -> refine_ctx
 
   (* The context's landmark table (one source of truth). *)
@@ -237,7 +243,7 @@ module Test_seam : sig
      piece's elements against a stored cell on [line] (with [bytes]-wide
      reads), and against the threaded section images. *)
   val piece_touches_cell :
-    Mem.t -> line:Hike_origin.t -> bytes:int -> Cbat_clp.t -> bool
+    Mem.t -> line:Hike_origin.t option -> bytes:int -> Cbat_clp.t -> bool
 
   val piece_touches_image : bytes:int -> Cbat_clp.t -> bool
 

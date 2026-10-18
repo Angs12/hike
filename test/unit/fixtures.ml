@@ -270,7 +270,7 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * 
 let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
   Result.fold
-    (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st)
+    (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st)
     ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
 
 (* Finite non-top non-bottom set bounded above by [maxv]. *)
@@ -299,8 +299,8 @@ let jump_target =
         [parity_flag], [flag (Var.name sysv.Hike.Abi.parity_flag)]]
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
-  let sub = Hike.Jump.compile_sub jump_target sub in
-  static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+  let _, sub = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub in
+  static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
@@ -1020,7 +1020,7 @@ let empty_spec : B2l.section_spec =
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec ?(types = fun prog -> prog) (spec : B2l.section_spec)
+let emit_ir_spec ~synth ?(types = fun prog -> prog) (spec : B2l.section_spec)
     (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
@@ -1034,22 +1034,38 @@ let emit_ir_spec ?(types = fun prog -> prog) (spec : B2l.section_spec)
      types pass writes each sub's signature onto its [arg] terms; the
      SSA pass materializes the phis the emitter renders. *)
   let prog = Hike.Atomic.normalize ~addr_bits:64 prog in
-  let prog = Hike.Fp.run_program prog in
-  let prog = Hike.Types.sign_program ~target:(x86_target ()) prog in
-  let prog = Hike.Split_blocks.normalize prog in
-  let prog = Hike.Ssa.ssa_program ~target:(x86_target ()) prog in
+  let synth = Hike.Synth.union (top_facts ()).Hike.Kb.synth synth in
+  (* A fixture's storage declarations create their canonical variables. *)
+  let storage synth storage =
+    let synth, _ = Hike.Synth.mint_base ~addr_bits:64 storage synth in
+    fst (Hike.Synth.mint_bytes ~addr_bits:64 storage synth)
+  in
+  let synth = Base.List.fold spec.spec_comps ~init:synth
+      ~f:(fun synth c -> storage synth (Hike.Synth.Global c.Hike.Stack_model.comp_id)) in
+  let synth = Base.List.fold spec.spec_whole ~init:synth
+      ~f:(fun synth (id, _, _) -> storage synth (Hike.Synth.Global id)) in
+  let synth = Base.List.fold subs ~init:synth ~f:(fun synth sub ->
+      match Term.get_attr sub Hike.Stack_model.layout_tag with
+      | None -> synth
+      | Some layout ->
+        Base.List.fold layout.Hike.Stack_model.regions ~init:(storage synth Hike.Synth.Window)
+          ~f:(fun synth r -> storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id))) in
+  let synth, prog = Hike.Fp.run_program ~synth prog in
+  let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
+  let prog = Hike.Split_blocks.normalize ~synth prog in
+  let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
   (* The types pass runs on the SSA program; a fixture stamps its own. *)
   let prog = types prog in
   B2l.emit_program llvm_ctx llvm_module
     ~target:(x86_target ()) ~addr_bits:64
-    ~symtab:None ~synth:(Hike_synth.table_of_program prog) spec prog;
+    ~symtab:None ~synth:synth spec prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx;
   s
 
-let emit_ir ?types (subs : sub term list) : string =
-  emit_ir_spec ?types empty_spec subs
+let emit_ir ~synth ?types (subs : sub term list) : string =
+  emit_ir_spec ~synth ?types empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

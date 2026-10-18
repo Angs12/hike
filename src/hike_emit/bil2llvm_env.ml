@@ -100,7 +100,7 @@ type emit_ctx = {
   synthetic : Tid.Set.t;
   (* The KB's synthetic-variable table: every synthetic var's kind, so
      the evaluator resolves through one function. *)
-  synth : Hike_synth.table;
+  mutable synth : Hike_synth.table;
   (* Bound once per emission. *)
   llvm_ctx : Llvm.llcontext;
   llvm_module : Llvm.llmodule;
@@ -206,12 +206,12 @@ let typ_lltype ctx typ =
 (* A var's value is a pointer when its sort is [Mem] (the type pass's
    pointer versions and the model's storage) or it is the caller
    window. *)
-let var_is_ptr var =
-  Hike_stack_model.is_window_var var
+let var_is_ptr ctx var =
+  Hike_stack_model.is_window_var ctx.synth var
   || match Var.typ var with Type.Mem _ -> true | _ -> false
 
 let var_lltype ctx var =
-  if var_is_ptr var then ctx.ptr_ty else typ_lltype ctx (Var.typ var)
+  if var_is_ptr ctx var then ctx.ptr_ty else typ_lltype ctx (Var.typ var)
 
 (* An environment register's process-global cell: one internal module
    global per register, zero-initialized.  Reads load it, defs and phi
@@ -234,11 +234,11 @@ let load_env_reg ctx llvm_builder (v : var) =
 
 (* A var whose value is a stack address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
-let is_ptr_var (v : Var.t) : bool =
-  (match Hike_synth.classify Hike_synth.empty v with
+let is_ptr_var ctx (v : Var.t) : bool =
+  (match Hike_synth.classify ctx.synth v with
    | Some (Hike_synth.Bytes _) -> false
    | _ -> true)
-  && var_is_ptr v
+  && var_is_ptr ctx v
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -271,8 +271,9 @@ let indirect_call_tid : tid = Tid.for_name "indirect_call"
 
 (* The promoted slots in a signature: the thunk twin's arity, and the
    has-slots test's count. *)
-let count_slot_args (args : Arg.t list) : int =
-  Base.List.count args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
+let count_slot_args synth (args : Arg.t list) : int =
+  Base.List.count args ~f:(fun a ->
+      Hike_stack_model.is_arg_slot synth (Arg.lhs a))
 
 let bb_find map tid =
   match Core.Map.find map tid with
@@ -311,7 +312,7 @@ let synthetic_rets ctx =
    pointers, a return lane wider than a word (the vector carrier) is a
    vector of words so the machine returns it in the vector register, the
    rest keep the BIR type. *)
-let lane_is_ptr (a : Arg.t) : bool = var_is_ptr (Arg.lhs a)
+let lane_is_ptr ctx (a : Arg.t) : bool = var_is_ptr ctx (Arg.lhs a)
 
 (* The vector carrier: a return lane wider than a word. *)
 let lane_vector ctx (a : Arg.t) : Llvm.lltype option =
@@ -323,15 +324,15 @@ let lane_vector ctx (a : Arg.t) : Llvm.lltype option =
   | _ -> None
 
 let lane_type ctx (a : Arg.t) : Llvm.lltype =
-  if lane_is_ptr a then ctx.ptr_ty
+  if lane_is_ptr ctx a then ctx.ptr_ty
   else
     match lane_vector ctx a with
     | Some t -> t
     | None -> typ_lltype ctx (Var.typ (Arg.lhs a))
 
 (* A lane's LLVM value at its typed home. *)
-let lane_value_of (a : Arg.t) (v : Llvm.llvalue) : Bil2llvm_value.t =
-  if lane_is_ptr a then Bil2llvm_value.Ptr v else Bil2llvm_value.Int v
+let lane_value_of ctx (a : Arg.t) (v : Llvm.llvalue) : Bil2llvm_value.t =
+  if lane_is_ptr ctx a then Bil2llvm_value.Ptr v else Bil2llvm_value.Int v
 
 (* A sub's lanes are its own signature; a tid that is no sub (the
    indirect convention, the twins) takes the machine's. *)
@@ -486,7 +487,7 @@ let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
       in
       let v = Llvm.build_freeze (Llvm.undef typ) "hike_undef" b in
       let v =
-        if var_is_ptr var then Bil2llvm_value.Ptr v
+        if var_is_ptr ctx var then Bil2llvm_value.Ptr v
         else Bil2llvm_value.Int v
       in
       scope.undef_vals := WVarMap.add (wvar_of var) v !(scope.undef_vals);

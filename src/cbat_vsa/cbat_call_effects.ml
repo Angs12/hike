@@ -16,9 +16,9 @@ type site = {
 
 type callee = Summary of Int.Set.t option | Blocked
 
-let indirect_callee ~(lookup : int64 -> Tid.t option)
+let indirect_callee ~(synth : Hike_synth.table) ~(lookup : int64 -> Tid.t option)
     ~(callee : Tid.t -> callee) ~(env : AI.t) (texp : exp) : callee =
-  match Cbat_transfer.denote_imm_exp texp env with
+  match Cbat_transfer.denote_imm_exp ~synth texp env with
   | Error _ -> Summary None
   | Ok ws ->
     (match WordSet.enumerate ~cap:1 ws with
@@ -38,7 +38,7 @@ let range_of (ws : WordSet.t) : (Cbat_word.t * Cbat_word.t) option =
    is shared with promotion: only a singleton stack store beginning at a
    word-aligned slot above the call-time SP contributes. Store addresses
    use their before-states, before a later call push changes SP. *)
-let stack_arg_ranges ~(abi : Hike_abi.t) ~(block : blk term)
+let stack_arg_ranges ~(synth : Hike_synth.table) ~(abi : Hike_abi.t) ~(block : blk term)
     ~(entry : AI.t) (env : AI.t) :
     (Cbat_word.t * Cbat_word.t) list =
   if not (Term.enum jmp_t block |> Seq.exists ~f:Hike_stack_model.machine_call)
@@ -55,7 +55,7 @@ let stack_arg_ranges ~(abi : Hike_abi.t) ~(block : blk term)
           let acc = match Hike_stack_model.addr_of_rhs (Def.rhs d),
                 Hike_stack_model.store_data_of_rhs (Def.rhs d) with
           | Some (addr, size), Some _ ->
-            (match Cbat_transfer.denote_imm_exp addr before with
+            (match Cbat_transfer.denote_imm_exp ~synth addr before with
              | Error _ -> acc
              | Ok address ->
                (match Hike_stack_model.singleton_stack_position address with
@@ -78,7 +78,7 @@ let stack_arg_ranges ~(abi : Hike_abi.t) ~(block : blk term)
                      (lo, hi') :: acc)
                 | _ -> acc))
           | _ -> acc in
-          (acc, Cbat_transfer.denote_def d before))
+          (acc, Cbat_transfer.denote_def ~synth d before))
       |> fst
     in
     (match ranges with

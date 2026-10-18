@@ -49,10 +49,10 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          static_graph_vsa ~abi sub
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
-        let rctx = mk_rctx ~abi sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
@@ -76,7 +76,7 @@ let tests : unit Alcotest.test list =
       "a refine under the context's widening head records the empty meet's boundary in the context's own table"
       (fun () ->
         let sub = straight_sub "sc_lm" [] in
-        let rctx = mk_rctx ~abi sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi sub in
         let lm = Vsa.Test_seam.landmarks_of rctx in
         let x = Var.create ~is_virtual:false ~fresh:false "sc_lm_x" (Type.Imm 32) in
         let head = Tid.for_name "sc_lm_head" in
@@ -85,7 +85,7 @@ let tests : unit Alcotest.test list =
           Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 20)))
         in
         Vsa.Test_seam.with_widening_head rctx (Some head) (fun () ->
-            ignore (Vsa.Test_seam.constrain_edge ~landmarks:lm ~env cond));
+            ignore (Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~landmarks:lm ~env cond));
         check "SEAM-03"
           (match Cbat_landmarks.entries lm head (Cbat_landmarks.Word x) with
           | e :: _ -> Cbat_word.equal e.Cbat_landmarks.bound (w32 20)
@@ -133,10 +133,10 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          static_graph_vsa ~abi sub
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
-        let rctx = mk_rctx ~abi sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
@@ -163,8 +163,8 @@ let tests : unit Alcotest.test list =
           let sub = straight_sub "dead_edge" defs in
           let entry =
             AI.add_word (anchored_entry ()) ~key:x ~data:xval in
-          let sol = static_graph_vsa ~abi sub (Vsa.init_sol ~abi ~entry sub) in
-          let rctx = mk_rctx ~abi sub in
+          let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi ~entry sub) in
+          let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi sub in
           let blk = List.hd (Term.enum blk_t sub |> Seq.to_list) in
           let env = Graphlib.Std.Solution.get sol (Term.tid blk) in
           let out = ref AI.bottom in

@@ -21,20 +21,20 @@ let ws_str (w : Ws.t) : string =
 let exp_str (e : exp) : string = Format.asprintf "%a" Exp.pp e
 
 (* Walks the sub like the production producer; `on_unbounded` compares replica vs production. *)
-let audit_sub (sub : sub term) : unit =
+let audit_sub ~synth (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   (* The production per-def verdict, recomputed from the denotations. *)
-  let sol = run_sub_fixpoint sub in
+  let sol = run_sub_fixpoint ~synth sub in
   (* The seam reads the defs' Env Tags: audit the sweep's stamped sub. *)
-  let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
+  let _, sub = Vsa.stamp_envs_of_sol ~synth ~sol sub in
   let kind_of (blk : blk term) (d : def term) : Ws.kind option =
     let open Base.Option in
     Base.Option.bind
       (Vsa.Test_seam.mem_addr_of (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
-          (Vsa.denote_exp_at
+          (Vsa.denote_exp_at ~synth
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))
     >>= fun ws ->
@@ -73,7 +73,7 @@ let audit_sub (sub : sub term) : unit =
             ~init:(Graphlib.Std.Solution.get tags (Term.tid blk))
             ~f:(fun st d ->
                  let st_before = st in
-                 let st_after = Vsa.Test_seam.denote_def d st in
+                 let st_after = Vsa.Test_seam.denote_def ~synth d st in
                  (match Def.rhs d with
                   | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
                   | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
@@ -96,8 +96,8 @@ let audit_sub (sub : sub term) : unit =
                                 then acc
                                 else AI.add_word acc ~key:v ~data:mm
                               | Type.Mem _ | Type.Unk -> acc) in
-                        let ws_before = Vsa.Test_seam.denote_imm_exp addr st_before in
-                        let ws_tag = Vsa.Test_seam.denote_imm_exp addr st_tag in
+                        let ws_before = Vsa.Test_seam.denote_imm_exp ~synth addr st_before in
+                        let ws_tag = Vsa.Test_seam.denote_imm_exp ~synth addr st_tag in
                         Printf.printf "  DEF %s (blk %s): %s\n"
                           (Tid.to_string (Term.tid d))
                           (Tid.to_string (Term.tid blk))
@@ -148,16 +148,16 @@ let audit_sub (sub : sub term) : unit =
    fixpoint report and skip. *)
 let wbig_main (path : string) : unit =
   let proj = load_project path in
-  let prog = production_input proj in
+  let synth, prog = production_input proj in
   let total = ref 0 in
   let skipped = ref 0 in
   all_subs prog
   |> List.iter (fun sub ->
       try
         let n = ref 0 in
-        let sub', sol = analyze_and_fixpoint sub in
+        let sub', sol = analyze_and_fixpoint ~synth sub in
         (* The analyze pass's solution is the kind source — no re-solve. *)
-        let kind_of = Probe_common.seam_kinds_of sol sub' in
+        let kind_of = Probe_common.seam_kinds_of ~synth sol sub' in
         Term.enum blk_t sub'
         |> Seq.iter ~f:(fun b ->
             let has_call =
@@ -170,7 +170,7 @@ let wbig_main (path : string) : unit =
             |> Seq.iter ~f:(fun d ->
                 (match Def.rhs d with
                  | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                   (match Vsa.Test_seam.denote_imm_exp addr !st with
+                   (match Vsa.Test_seam.denote_imm_exp ~synth addr !st with
                     | Ok ws when ws_window_big ws ->
                       incr n;
                       Printf.printf "w_big\t%s\t%s\t%s\t%s\tcall=%b\tkind=%s\n"
@@ -181,7 +181,7 @@ let wbig_main (path : string) : unit =
                          | None -> "-")
                     | _ -> ())
                  | _ -> ());
-                st := Vsa.Test_seam.denote_def d !st));
+                st := Vsa.Test_seam.denote_def ~synth d !st));
         Printf.printf "=== %s: %d w_big access(es)\n" (Sub.name sub') !n;
         total := !total + !n
       with e ->
@@ -205,11 +205,11 @@ let () =
        (* The address width follows the loaded target ABI. *)
        let target = Project.target proj in
          Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
-       let prog = production_input proj in
+       let synth, prog = production_input proj in
        (if String.equal subname "ALL" then
-          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sub)
+          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub ~synth sub)
         else
           match Seq.find (Term.enum sub_t prog) ~f:(fun s -> String.equal (Sub.name s) subname) with
-          | Some sub -> audit_sub sub
+          | Some sub -> audit_sub ~synth sub
           | None -> Printf.printf "sub '%s' not found\n" subname);
        flush stdout)

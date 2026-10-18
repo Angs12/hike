@@ -17,7 +17,7 @@ type lm_entry = {
 (* The cell a landmark is about: the memory key's byte hull (each end as
    width/value) and stride — per-stride cells keep their own rows. *)
 type cell_desc = {
-  origin : Hike_origin.t;
+  origin : Hike_origin.t option;
   lo_width : int;
   lo_value : int64;
   hi_width : int;

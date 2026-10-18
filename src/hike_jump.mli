@@ -7,5 +7,8 @@ open Bap_core_theory
     walk reads the BIR's edges: a resolved dispatch's arms are direct
     gotos.  Flags are the vars [target] registers for the core-theory flag
     roles.  A cond with no flag-free form is unchanged; every def of a
-    consumed flag var no read survives is dropped. *)
-val compile_sub : Theory.Target.t -> sub term -> sub term
+    consumed flag var no read survives is dropped.  The comparison defs
+    it binds are recorded in the returned table. *)
+val compile_sub :
+  synth:Hike_synth.table -> Theory.Target.t -> sub term ->
+  Hike_synth.table * sub term

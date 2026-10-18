@@ -25,9 +25,9 @@ type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
 (* The byte hull plus the address stride: step 1 claims every byte
    of the hull; step > 1 claims only the grid lo + i*step.  The origin
-   namespaces the key. Stack addresses key on the Stack line; Rip and Abs
-   stay separate. *)
-type t = {origin : Hike_origin.t; lo : point; hi : point; step : int}
+   namespaces the key: [None] is the absolute line (plain and Rip
+   addresses), Stack and Fs have their own. *)
+type t = {origin : Hike_origin.t option; lo : point; hi : point; step : int}
 [@@deriving bin_io, sexp]
 let compare_point (p1 : point) (p2 : point) : int =
     let c = Int.compare p1.pwidth p2.pwidth in
@@ -72,7 +72,7 @@ let upper (k : t) : point = k.hi
 let lower (k : t) : point = k.lo
 
 (* The key's origin namespace. *)
-let origin (k : t) : Hike_origin.t = k.origin
+let origin (k : t) : Hike_origin.t option = k.origin
 
 (* The cell's stride (>= 1). *)
 let step (k : t) : int = k.step
@@ -157,7 +157,7 @@ let piece (k : t) ~lo ~hi : t option =
    partial order would silently drop a cell sharing origin+lower with a
    different extent. *)
 let compare (k1 : t) (k2 : t) : int =
-    let c = Hike_origin.compare k1.origin k2.origin in
+    let c = Option.compare Hike_origin.compare k1.origin k2.origin in
     let c = if c <> 0 then c else compare_point (lower k1) (lower k2) in
     let c = if c <> 0 then c else compare_point (upper k1) (upper k2) in
     if c <> 0 then c else Int.compare (step k1) (step k2)
@@ -167,7 +167,7 @@ let contains (k : t) (pt : point) : bool =
 
 (* Cells of different origins are disjoint namespaces. *)
 let overlap (k1 : t) (k2 : t) : bool =
-    Hike_origin.equal k1.origin k2.origin
+    Option.equal Hike_origin.equal k1.origin k2.origin
     && (contains k1 (lower k2) || contains k2 (lower k1))
 
 (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
@@ -179,7 +179,7 @@ let overlap (k1 : t) (k2 : t) : bool =
    full value (the tree stays single-keyed).  An empty piece names no
    address; a piece too wide for a point keys its whole line. *)
 let of_wordset (p : WordSet.t) : t list =
-  let of_piece (origin : Hike_origin.t) (q : WordSet.Clp.t) : t option =
+  let of_piece (origin : Hike_origin.t option) (q : WordSet.Clp.t) : t option =
     let stride =
       if WordSet.Clp.is_infinite q then 1
       else
@@ -227,7 +227,7 @@ let intersection (k1 : t) (k2 : t) : t =
 (* Results may be unordered.  A key of another origin is disjoint. *)
 let interval_diff (k1 : t) (k2 : t) : t list =
   let pieces ps = List.filter_opt ps in
-  if not (Hike_origin.equal k1.origin k2.origin) then [ k1 ]
+  if not (Option.equal Hike_origin.equal k1.origin k2.origin) then [ k1 ]
   else if lt (lower k1) (lower k2) then
     if lt (upper k1) (lower k2) then [ k1 ]
     else if contains k2 (upper k1) then
@@ -244,7 +244,7 @@ let interval_diff (k1 : t) (k2 : t) : t list =
 (* Gaps between cells within [k]. *)
 let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
     (* Only the same-origin cells can cover [k]'s bytes. *)
-    let s = Seq.filter s ~f:(fun (k', _) -> Hike_origin.equal k'.origin k.origin) in
+    let s = Seq.filter s ~f:(fun (k', _) -> Option.equal Hike_origin.equal k'.origin k.origin) in
     (* Next point, if any. *)
     let next_pt pt =
       let next = succ pt in
@@ -296,7 +296,7 @@ let seq_product (s1 : t seq) (s2 : t seq) : (side * t) seq =
       | Some (a, rest), None -> emit Left a rest s2
       | None, Some (b, rest) -> emit Right b s1 rest
       | Some (a, rest1), Some (b, rest2) ->
-        if not (Hike_origin.equal a.origin b.origin) then
+        if not (Option.equal Hike_origin.equal a.origin b.origin) then
           if compare a b < 0 then emit Left a rest1 s2
           else emit Right b s1 rest2
         else if lt a.hi b.lo then emit Left a rest1 s2

@@ -70,7 +70,7 @@ let storage_base_of_id scope ~addr_bits id : (Llvm.llvalue * int64) option =
 
 (* A memory var's storage global, without the block context. *)
 let memory_value ctx v : Llvm.llvalue option =
-  Base.Option.bind (Hike_synth.memory_var ~addr_bits:ctx.addr_bits v)
+  Base.Option.bind (Hike_synth.memory_var ctx.synth ~addr_bits:ctx.addr_bits v)
     ~f:(fun mv -> Core.Map.find !(ctx.synth_vals) mv)
 
 (* A storage var's native byte origin, from the component bindings. *)
