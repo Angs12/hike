@@ -616,7 +616,7 @@ let tests : unit Alcotest.test list =
             P.union wrapped (p32 [ 0x7FFFFFF0; 0x80000010 ]); capped ]);
 
     pin "PCS-28"
-      "add, sub and neg build their ascending result directly: it equals the \
+      "add, sub, neg, lnot and translate build their ascending result directly: it equals the \
        sorted, deduplicated image of the same per-pair results, over \
        multi-piece, wrapping, near-0/near-max, constant and over-budget \
        operands at widths 8, 32 and 64"
@@ -684,6 +684,15 @@ let tests : unit Alcotest.test list =
             (P.equal (P.add a b) (image (fun () -> pairs a b Cbat_clp_arith.add)));
           check (Printf.sprintf "PCS-28.sub.%d" i)
             (P.equal (P.sub a b) (image (fun () -> pairs a b Cbat_clp_arith.sub)));
+          check (Printf.sprintf "PCS-28.lnot.%d" i)
+            (P.equal (P.lnot a)
+               (image (fun () ->
+                    List.map Cbat_clp_core.lnot (P.to_list a))));
+          let d = word width in
+          check (Printf.sprintf "PCS-28.translate.%d" i)
+            (P.equal (P.translate a d)
+               (image (fun () ->
+                    List.concat_map (fun p -> Cbat_clp_core.translate p d) (P.to_list a))));
           check (Printf.sprintf "PCS-28.neg.%d" i)
             (P.equal (P.neg a)
                (image (fun () ->

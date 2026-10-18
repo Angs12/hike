@@ -856,20 +856,28 @@ module Pieces_base = struct
               List.iter ob ~f:(fun ob ->
                   List.iter (A.logxor_ops oa ob) ~f:emit)))
 
-  let lnot = map (fun p -> [ C.lnot p ])
+  (* The pieces' ranges are ascending and pairwise disjoint. *)
+  let rec disjoint_ranges = function
+    | p :: (q :: _ as rest) ->
+      (match C.max_elem p, C.min_elem q with
+       | Some hi, Some lo -> Cbat_word.(<) hi lo && disjoint_ranges rest
+       | _ -> false)
+    | _ -> true
+
+  (* Complement reverses disjoint finite ranges without wrapping. *)
+  let lnot (ps : t) : t =
+    match ps.pieces with
+    | _ :: _ :: _ as pieces
+      when finite_pieces pieces && disjoint_ranges pieces ->
+      stream [ List.rev_map pieces ~f:C.lnot ]
+    | _ -> map (fun p -> [ C.lnot p ]) ps
+
   (* Negation reverses disjoint finite ranges.  Only a piece holding 0
      wraps: 0 comes first, the rest of its image last. *)
   let neg (ps : t) : t =
-    let rec disjoint = function
-      | p :: (q :: _ as rest) ->
-        (match C.max_elem p, C.min_elem q with
-         | Some hi, Some lo -> Cbat_word.(<) hi lo && disjoint rest
-         | _ -> false)
-      | _ -> true
-    in
     match ps.pieces with
     | [] | [ _ ] -> map A.neg ps
-    | pieces when finite_pieces pieces && disjoint pieces ->
+    | pieces when finite_pieces pieces && disjoint_ranges pieces ->
       let head, tail =
         match pieces with
         | p :: rest when Cbat_word.is_zero (C.base_of p) -> Some p, rest
@@ -897,7 +905,13 @@ module Pieces_base = struct
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
     if Cbat_word.is_zero delta then ps
-    else map (fun p -> C.translate p delta) ps
+    else
+      match ps.pieces with
+      | _ :: _ :: _ as pieces
+        when finite_pieces pieces
+             && Stdlib.Int.equal (Cbat_word.bitwidth delta) (width_of ps) ->
+        shift_all pieces [ delta ]
+      | _ -> map (fun p -> C.translate p delta) ps
 
   (* The widening pairing: the two sorted atom lists merge with an origin
      tag, then one pass pairs the corresponding atoms.  An overlapping
