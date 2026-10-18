@@ -158,6 +158,10 @@ let provide_dest ~(file : string) ~(site : int64) (dest : int64) : unit =
      Kb.provide Theory.Semantics.slot label
        (Kb.Value.put Insn.Slot.dests sema (Some (Core.Set.add cur dest))))
 
+let in_code (proj : Project.t) (a : int64) : bool =
+  let a = Addr.of_int64 a in
+  Base.List.exists (code_mems proj) ~f:(fun m -> Memory.contains m a)
+
 (* The decode context: every root in [roots] answers [is_subroutine]
    through the entry promise, and every provided destination fact is
    read.  The driver classifies each code address through a scoped
@@ -203,15 +207,19 @@ let scan (proj : Project.t) ~(file : string) ~(roots : int64 list) : Driver.stat
 
 (* The decode resumed from [starts] over the regions holding them: the
    driver's own pending-work step, so only the code reachable from the
-   starts is decoded again and no start becomes a subroutine. *)
-let resume (proj : Project.t) ~(file : string) ~(roots : int64 list)
-    (state : Driver.state) ~(starts : int64 list) : Driver.state =
+   starts is decoded again.  A start becomes a subroutine only when
+   [subroutines] says it is a root. *)
+let resume ?(subroutines = false) (proj : Project.t) ~(file : string)
+    ~(roots : int64 list) (state : Driver.state) ~(starts : int64 list) :
+    Driver.state =
   let starts = Base.List.map starts ~f:Addr.of_int64 in
   decoding proj ~file ~roots
     (kb_fold (fun s mem ->
          match Base.List.filter starts ~f:(Memory.contains mem) with
          | [] -> Kb.return s
-         | here -> Driver.resume (Core.Set.of_list (module Addr) here) mem s)
+         | here ->
+             Driver.resume ~record:subroutines
+               (Core.Set.of_list (module Addr) here) mem s)
         state (code_mems proj))
 
 (* Each decoded block's start address and its terminator instruction's

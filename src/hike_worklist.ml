@@ -181,11 +181,32 @@ let is_entry t (a : int64) : bool =
 let rescan t =
   t.state <- D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
 
+(* The frontier roots a full scan would record that [state] does not
+   yet: in a code region, neither a subroutine nor rejected as data. *)
+let pending_roots t state =
+  Base.List.filter (frontier_roots t.frontier) ~f:(fun a ->
+      let w = Addr.of_int64 a in
+      D.in_code t.proj a
+      && (not (Disasm.Driver.is_subroutine state w))
+      && not (Disasm.Driver.is_data state w))
+
+(* [state] with every pending frontier root decoded as a subroutine. *)
+let with_pending_roots t state =
+  match pending_roots t state with
+  | [] -> state
+  | starts ->
+      D.resume ~subroutines:true t.proj ~file:t.file
+        ~roots:(frontier_roots t.frontier) state ~starts
+
+(* A resumed state stands only if no frontier root is left pending: each
+   is now a subroutine or was rejected as data. *)
+let settled t state = Base.List.is_empty (pending_roots t state)
+
 (* A function's learned destinations change only the code its dispatch
-   instructions reach: resume the decode from those instructions.  The resumed state
-   stands only if every learned jump records its destination and each
-   destination is a decoded block; else the whole binary is scanned
-   again. *)
+   instructions reach: resume the decode from those instructions, and
+   from any root a scan would add.  The resumed state stands only if
+   every learned jump records its destination and each destination is a
+   decoded block; else the whole binary is scanned again. *)
 let rescan_function t (learned : (int64 * int64) list) =
   let starts =
     Base.List.dedup_and_sort ~compare:Core.Int64.compare
@@ -194,6 +215,7 @@ let rescan_function t (learned : (int64 * int64) list) =
   let resumed =
     D.resume t.proj ~file:t.file ~roots:(frontier_roots t.frontier) t.state
       ~starts
+    |> with_pending_roots t
   in
   let decoded (site, w) =
     let w = Addr.of_int64 w in
@@ -202,22 +224,34 @@ let rescan_function t (learned : (int64 * int64) list) =
      | None -> false)
     && (Disasm.Driver.is_block resumed w || Disasm.Driver.is_data resumed w)
   in
-  let kept = Base.List.for_all learned ~f:decoded in
+  let kept = settled t resumed && Base.List.for_all learned ~f:decoded in
 #ifdef VSA_DEBUG
   let full = D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier) in
-  Printf.eprintf "hike-dbg-rescan: starts=%d resume=%s equal=%b\n%!"
+  Printf.eprintf "hike-dbg-rescan: starts=%d resume=%s equal=%b subs=%b\n%!"
     (List.length starts) (if kept then "kept" else "fallback")
-    (Disasm.Driver.equal resumed full);
-  let hex set =
-    Core.Set.to_list set |> Base.List.take_while ~f:(fun _ -> true)
-    |> (fun l -> Base.List.take l 6)
-    |> Base.List.map ~f:(fun a -> Printf.sprintf "%Lx" (Word.to_int64_exn a))
-    |> String.concat ","
-  in
-  let br = Disasm.Driver.blocks resumed and bf = Disasm.Driver.blocks full in
-  Printf.eprintf "hike-dbg-diff: only-resumed=%d [%s] only-full=%d [%s]\n%!"
-    (Core.Set.length (Core.Set.diff br bf)) (hex (Core.Set.diff br bf))
-    (Core.Set.length (Core.Set.diff bf br)) (hex (Core.Set.diff bf br));
+    (Disasm.Driver.equal resumed full)
+    (Core.Set.equal (Disasm.Driver.subroutines resumed)
+       (Disasm.Driver.subroutines full));
+  t.state <- (if kept then resumed else full)
+#else
+  if kept then t.state <- resumed else rescan t
+#endif
+
+(* New roots change the decode only where they and their reach lie:
+   resume from every pending root as a subroutine.  A root outside the
+   code regions has no effect on a scan; the resumed state stands only if
+   every other root is a subroutine or was rejected as data, else the
+   whole binary is scanned again. *)
+let rescan_roots t =
+  let resumed = with_pending_roots t t.state in
+  let kept = settled t resumed in
+#ifdef VSA_DEBUG
+  let full = D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier) in
+  Printf.eprintf "hike-dbg-rescan: roots=%d resume=%s equal=%b subs=%b\n%!"
+    (List.length (pending_roots t t.state)) (if kept then "kept" else "fallback")
+    (Disasm.Driver.equal resumed full)
+    (Core.Set.equal (Disasm.Driver.subroutines resumed)
+       (Disasm.Driver.subroutines full));
   t.state <- (if kept then resumed else full)
 #else
   if kept then t.state <- resumed else rescan t
@@ -784,7 +818,7 @@ let solve_roots t ~(addresses : int64 list) (addrs : int64 list) : unit =
   in
   if not (Base.List.is_empty fresh) then begin
     frontier_add_roots t.frontier fresh;
-    rescan t
+    rescan_roots t
   end;
   Base.List.iter addrs ~f:(fun a -> ignore (summary t { reach = max_int } (entry_of t a)))
 

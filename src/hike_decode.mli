@@ -17,11 +17,15 @@ val provide_dest : file:string -> site:int64 -> int64 -> unit
     fact. *)
 val scan : Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state
 
+(** Whether [a] lies in a code region of the project. *)
+val in_code : Project.t -> int64 -> bool
+
 (** The decode resumed from [starts]: only the code they reach is
-    decoded again, merged into the state. *)
+    decoded again, merged into the state.  With [subroutines] the starts
+    are recorded as subroutines. *)
 val resume :
-  Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state ->
-  starts:int64 list -> Disasm.Driver.state
+  ?subroutines:bool -> Project.t -> file:string -> roots:int64 list ->
+  Disasm.Driver.state -> starts:int64 list -> Disasm.Driver.state
 
 (** One function's candidate graph from the decoded state: the blocks
     [entry] reaches without entering another entry, every edge kept. *)
