@@ -725,22 +725,39 @@ module Pieces_base = struct
         List.iter a.pieces ~f:(fun pa ->
             List.iter (diff_piece pa b.pieces) ~f:emit))
 
-  (* Unary images enter their ordered index as they are produced; an
-     image is a piece or the two arcs of one across the modulus. *)
+  (* Arithmetic returns one progression or its ordered low/high arcs.
+     Merge those producers directly; no operand shape needs a special
+     case, and no complete row of results is built before consumption. *)
+  let merge_streams inputs ~f =
+    List.fold inputs ~init:Sequence.empty ~f:(fun acc input ->
+        Sequence.merge_sorted acc (Sequence.of_lazy (lazy (f input)))
+          ~compare:compare_piece)
+
+  let arc_stream arcs =
+    let arcs = List.filter arcs ~f:(fun p -> not (C.is_bottom p)) in
+#ifdef VSA_DEBUG
+    assert (List.is_sorted arcs ~compare:compare_piece);
+#endif
+    Sequence.of_list arcs
+
+  let stream ?on_general pieces =
+    close ?on_general (Sequence.fold pieces ~init:empty_acc ~f:push)
+
   let map ?on_general (f : progression -> progression list) (ps : t) : t =
     match ps.pieces with
     | [] -> empty
     | [ p ] -> of_arcs_with ?on_general (f p)
-    | pieces ->
-      produce ?on_general (fun emit -> List.iter pieces ~f:(fun p -> List.iter (f p) ~f:emit))
+    | pieces -> stream ?on_general
+                  (merge_streams pieces ~f:(fun p -> arc_stream (f p)))
 
-  let lift2 ?on_general (f : progression -> progression -> progression list) (a : t) (b : t)
-    : t =
+  let lift2 ?on_general (f : progression -> progression -> progression list)
+      (a : t) (b : t) : t =
     match a.pieces, b.pieces with
     | [ pa ], [ pb ] -> of_arcs_with ?on_general (f pa pb)
-    | ap, bp -> produce ?on_general (fun emit ->
-        List.iter ap ~f:(fun pa ->
-            List.iter bp ~f:(fun pb -> List.iter (f pa pb) ~f:emit)))
+    | [], _ | _, [] -> empty
+    | ap, bp -> stream ?on_general
+                  (merge_streams ap ~f:(fun pa ->
+                       merge_streams bp ~f:(fun pb -> arc_stream (f pa pb))))
 
   (* Each piece produces any number of result pieces directly into the
      ordered image. *)
@@ -755,97 +772,8 @@ module Pieces_base = struct
         List.iter a.pieces ~f:(fun qa ->
             List.iter b.pieces ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
 
-  let point_pieces (ps : progression list) : bool =
-    List.for_all ps ~f:(fun p -> Cbat_word.is_one (C.cardn_of p))
-
-  let finite_pieces (ps : progression list) : bool =
-    List.for_all ps ~f:(fun p -> not (C.is_infinite p))
-
-  (* The pieces' unsigned ranges are ascending and pairwise disjoint. *)
-  let rec disjoint_ranges = function
-    | p :: (q :: _ as rest) ->
-      (match C.max_elem p, C.min_elem q with
-       | Some hi, Some lo -> Cbat_word.(<) hi lo && disjoint_ranges rest
-       | _ -> false)
-    | _ -> true
-
-  (* Only the current head of each ordered producer is evaluated. *)
-  let stream ?on_general (pieces : progression Sequence.t) : t =
-    close ?on_general (Sequence.fold pieces ~init:empty_acc ~f:push)
-
-  let images ps ~f =
-    Sequence.concat_map (Sequence.of_list ps)
-      ~f:(fun p -> Sequence.of_list (f p))
-
-  (* Finite ranges rotate at [-c]. Interleaved ranges are also safe when
-     no piece straddles that cut. Otherwise their low arcs need sorting. *)
-  let shiftable ps c =
-    finite_pieces ps
-    && (disjoint_ranges ps
-        || Cbat_word.is_zero c
-        || let cut = Cbat_word.neg c in
-           List.for_all ps ~f:(fun p ->
-               match C.min_elem p, C.max_elem p with
-               | Some lo, Some hi ->
-                 Cbat_word.(>=) lo cut || Cbat_word.(<) hi cut
-               | _ -> false))
-
-  (* At most one range crosses the cut. Its low arc starts the wrapped
-     run and its high arc ends the unwrapped run. A two-point image may
-     instead be one reordered piece; its minimum still leads the wrap. *)
-  let shifted ps c =
-    if Cbat_word.is_zero c then Sequence.of_list ps
-    else
-      let cut = Cbat_word.neg c in
-      let before, after =
-        List.split_while ps ~f:(fun p ->
-            Cbat_word.(<) (Option.value_exn (C.min_elem p)) cut) in
-      let before, crossing =
-        match List.rev before with
-        | p :: rest when Cbat_word.(>=) (Option.value_exn (C.max_elem p)) cut ->
-          List.rev rest, C.translate p c
-        | _ -> before, [] in
-      let low, high =
-        List.partition_tf crossing ~f:(fun p ->
-            Cbat_word.(<) (Option.value_exn (C.min_elem p)) c) in
-      Sequence.concat
-        (Sequence.of_list
-           [ Sequence.of_list low; images after ~f:(fun p -> C.translate p c);
-             images before ~f:(fun p -> C.translate p c); Sequence.of_list high ])
-
-  let shift_all ?on_general ps deltas =
-    let rows = List.map deltas ~f:(shifted ps) in
-    let pieces =
-      List.fold rows ~init:Sequence.empty ~f:(fun a b ->
-          Sequence.merge_sorted a b ~compare:compare_piece) in
-    stream ?on_general pieces
-
-  let add_with ?on_general (a : t) (b : t) : t =
-    let shift ps pts =
-      point_pieces pts
-      && List.for_all pts ~f:(fun p -> shiftable ps (C.base_of p)) in
-    match a.pieces, b.pieces with
-    | [ _ ], [ _ ] -> lift2 ?on_general A.add a b
-    | [], _ | _, [] -> empty
-    | ap, bp when Stdlib.Int.equal (width_of a) (width_of b) ->
-      if shift ap bp then shift_all ?on_general ap (List.map bp ~f:C.base_of)
-      else if shift bp ap then shift_all ?on_general bp (List.map ap ~f:C.base_of)
-      else lift2 ?on_general A.add a b
-    | _ -> lift2 ?on_general A.add a b
-
-  let sub_with ?on_general (a : t) (b : t) : t =
-    match a.pieces, b.pieces with
-    | [ _ ], [ _ ] -> lift2 ?on_general A.sub a b
-    | [], _ | _, [] -> empty
-    | ap, bp when point_pieces bp
-                  && Stdlib.Int.equal (width_of a) (width_of b) ->
-      let deltas = List.map bp ~f:(fun p -> Cbat_word.neg (C.base_of p)) in
-      if List.for_all deltas ~f:(shiftable ap) then shift_all ?on_general ap deltas
-      else lift2 ?on_general A.sub a b
-    | _ -> lift2 ?on_general A.sub a b
-
-  let add a b = add_with a b
-  let sub a b = sub_with a b
+  let add = lift2 A.add
+  let sub = lift2 A.sub
   let mul = lift2 A.mul
   let div = lift2 A.div
   let sdiv = lift2 A.sdiv
@@ -871,34 +799,8 @@ module Pieces_base = struct
               List.iter ob ~f:(fun ob ->
                   List.iter (A.logxor_ops oa ob) ~f:emit)))
 
-  (* Complement reverses unsigned ranges, including rays and circular
-     grids. Interleaved ranges can reverse their maximum order. *)
-  let lnot (ps : t) : t =
-    if disjoint_ranges ps.pieces then
-      stream (images (List.rev ps.pieces) ~f:(fun p -> [ C.lnot p ]))
-    else map (fun p -> [ C.lnot p ]) ps
-
-  (* Zero remains first; every other reflected range reverses. *)
-  let neg_with ?on_general (ps : t) : t =
-    match ps.pieces with
-    | [] | [ _ ] -> map ?on_general A.neg ps
-    | pieces when disjoint_ranges pieces ->
-      let head, tail =
-        match pieces with
-        | p :: rest when Cbat_word.is_zero (Option.value_exn (C.min_elem p)) ->
-          A.neg p, rest
-        | _ -> [], pieces in
-      let low, high =
-        List.partition_tf head ~f:(fun p ->
-            Cbat_word.is_zero (Option.value_exn (C.min_elem p))) in
-      stream ?on_general
-        (Sequence.concat
-           (Sequence.of_list
-              [ Sequence.of_list low; images (List.rev tail) ~f:A.neg;
-                Sequence.of_list high ]))
-    | _ -> map ?on_general A.neg ps
-
-  let neg ps = neg_with ps
+  let lnot = map (fun p -> [ C.lnot p ])
+  let neg = map A.neg
 
   let extract ?hi ?lo (ps : t) : t =
     let w = bitwidth ps in
@@ -914,8 +816,6 @@ module Pieces_base = struct
 
   let translate (ps : t) (delta : Cbat_word.t) : t =
     if Cbat_word.is_zero delta then ps
-    else if Cbat_word.bitwidth delta = width_of ps && shiftable ps.pieces delta then
-      stream (shifted ps.pieces delta)
     else map (fun p -> C.translate p delta) ps
 
   (* Per-call measurement uses the same workers as the public operations;
@@ -925,9 +825,9 @@ module Pieces_base = struct
       let general = ref false in
       let value = f (fun () -> general := true) in
       value, !general
-    let add a b = measure (fun on_general -> add_with ~on_general a b)
-    let sub a b = measure (fun on_general -> sub_with ~on_general a b)
-    let neg a = measure (fun on_general -> neg_with ~on_general a)
+    let add a b = measure (fun on_general -> lift2 ~on_general A.add a b)
+    let sub a b = measure (fun on_general -> lift2 ~on_general A.sub a b)
+    let neg a = measure (fun on_general -> map ~on_general A.neg a)
   end
 
   (* The widening pairing: the two sorted atom lists merge with an origin

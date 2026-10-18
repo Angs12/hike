@@ -718,6 +718,55 @@ let tests : unit Alcotest.test list =
         Printf.printf "PCS-28: %d/9000 operation calls used general re-placement\n%!" !fallbacks;
         check "PCS-28.general" (!fallbacks >= 24));
 
+    pin "PCS-29"
+      "binary arc images merge to exactly the old generally ordered image, \
+       including rays, circular grids, mixed widths and modular wrap"
+      (fun () ->
+        let module A = Cbat_clp_arith in
+        let rs = Random.State.make [| 29; 2026 |] in
+        let rnd n = Random.State.int rs n in
+        let operand width =
+          let w = Cbat_word.of_int ~width in
+          let base () =
+            let v = w (rnd 220) in
+            if rnd 3 = 0 then Cbat_word.neg v else v in
+          let piece () =
+            let step = w (1 + rnd 9) in
+            match rnd 8 with
+            | 0 -> [ Clp.create_ascending ~width ~base:(base ()) ~step ]
+            | 1 -> [ Clp.create_descending ~width ~base:(base ()) ~step ]
+            | 2 -> [ Clp.infinite (base (), step) ]
+            | _ -> Clp.arcs ~width ~step
+                     ~cardn:(Cbat_word.of_int ~width:(width + 1) (1 + rnd 12)) (base ()) in
+          List.fold_left
+            (fun acc _ -> P.union acc (P.of_arcs (piece ())))
+            (P.bottom width) (List.init (1 + rnd 4) Fun.id) in
+        let ops =
+          [ "mul", P.mul, A.mul; "div", P.div, A.div;
+            "sdiv", P.sdiv, A.sdiv; "modulo", P.modulo, A.modulo;
+            "smodulo", P.smodulo, A.smodulo;
+            "logand", P.logand, A.logand; "logor", P.logor, A.logor;
+            "concat", P.concat, A.concat ] in
+        for i = 1 to 1200 do
+          let width = [| 8; 32; 64; 128 |].(i mod 4) in
+          let a = operand width in
+          let b = operand (if i mod 11 = 0 then width * 2 else width) in
+          List.iter
+            (fun (name, op, pair) ->
+               let pieces =
+                 List.concat_map
+                   (fun pa -> List.concat_map (fun pb -> pair pa pb) (P.to_list b))
+                   (P.to_list a) in
+               let expected =
+                 P.of_progressions
+                   (List.sort_uniq P.compare_piece
+                      (List.filter (fun p -> not (Clp.is_bottom p)) pieces)) in
+               let actual = op a b in
+               check (Printf.sprintf "PCS-29.%s.%d" name i)
+                 (P.equal actual expected && P.compare actual expected = 0))
+            ops
+        done);
+
   ]
 
 let () = run "pieces" tests
