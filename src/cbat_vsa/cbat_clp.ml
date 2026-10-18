@@ -259,50 +259,73 @@ module Pieces_base = struct
     in
     scan true [] acc
 
-  (* [assemble] combines an already-ascending stream.  While hulls stay
+  (* The streaming combine of an ascending stream.  While hulls stay
      disjoint a piece can only meet the tail.  Once its minimum reaches
      the largest placed maximum (kept with each placed piece), an
      overlap can hide behind an interleaved tail, so it is checked against
      every placed piece.  A hull across the modulus or a hidden overlap
-     falls back to the general placement.  No sort runs here. *)
-  let assemble (ps : progression list) : progression list =
-    let push x acc =
-      let hi =
-        match acc, C.max_elem x with
-        | [], m -> m
-        | (_, Some a) :: _, Some b -> Some (Cbat_word.max a b)
-        | _ -> None
-      in
-      (x, hi) :: acc
-    in
-    let hidden x = function
-      | [] -> false
-      | (_, hi) :: _ as placed ->
-        (match hi, C.min_elem x with
-         | Some hi, Some lo -> Cbat_word.(<=) lo hi
-         | _ -> true)
-        && List.exists placed ~f:(fun (q, _) -> overlap_exact x q)
-    in
-    let rec go acc = function
-      | [] -> `Done (List.rev_map acc ~f:fst)
-      | p :: rest -> (
-        match acc with
-        | [] -> go (push p acc) rest
+     marks the stream [general]: the inputs ([raw], newest first) are
+     then re-placed by [merge_arc] at [close].  No sort runs here. *)
+  type acc =
+    { placed : (progression * Cbat_word.t option) list;
+      raw : progression list;
+      n : int;
+      general : bool }
+
+  let empty_acc = { placed = []; raw = []; n = 0; general = false }
+
+  (* [push acc p]: [p] is not below the last pushed piece; an exact
+     repeat is dropped. *)
+  let push (acc : acc) (p : progression) : acc =
+    match acc.raw with
+    | q :: _ when compare_piece q p = 0 -> acc
+    | _ ->
+#ifdef VSA_DEBUG
+      assert (match acc.raw with q :: _ -> compare_piece q p <= 0 | [] -> true);
+#endif
+      let acc = { acc with raw = p :: acc.raw } in
+      if acc.general then acc
+      else
+        let place x placed =
+          let hi =
+            match placed, C.max_elem x with
+            | [], m -> m
+            | (_, Some a) :: _, Some b -> Some (Cbat_word.max a b)
+            | _ -> None
+          in
+          (x, hi) :: placed
+        in
+        let hidden x = function
+          | [] -> false
+          | (_, hi) :: _ as placed ->
+            (match hi, C.min_elem x with
+             | Some hi, Some lo -> Cbat_word.(<=) lo hi
+             | _ -> true)
+            && List.exists placed ~f:(fun (q, _) -> overlap_exact x q)
+        in
+        match acc.placed with
+        | [] -> { acc with placed = place p []; n = 1 }
         | (q, _) :: tl ->
-          let join r = if hidden r tl then `General else go (push r tl) rest in
+          let join r =
+            if hidden r tl then { acc with general = true }
+            else { acc with placed = place r tl }
+          in
           if overlap_exact p q then begin
             match C.union p q with
             | [ r ] -> join r
-            | _ -> `General
+            | _ -> { acc with general = true }
           end
           else (
             match adjacent_merge q p with
             | Some r -> join r
-            | None -> if hidden p acc then `General else go (push p acc) rest))
-    in
-    match go [] ps with
-    | `Done ps -> ps
-    | `General -> List.fold ps ~init:[] ~f:merge_arc
+            | None ->
+              if hidden p acc.placed then { acc with general = true }
+              else { acc with placed = place p acc.placed; n = acc.n + 1 })
+
+  (* The combined pieces, ascending. *)
+  let combined (acc : acc) : progression list =
+    if acc.general then List.fold (List.rev acc.raw) ~init:[] ~f:merge_arc
+    else List.rev_map acc.placed ~f:fst
 
   (* Mixed widths collapse to top at the widest — a producer's rule; a
      canonical value is single width. *)
@@ -348,15 +371,20 @@ module Pieces_base = struct
   let cap (ps : progression list) : progression list =
     if within_budget ps then ps else hull ps
 
-  (* The producer finish: combine the already-ordered stream, then
-     collapse a union past the budget to its hull.  No sort: the caller
-     ordered its own output. *)
-  let finish (ps : progression list) : t =
-    let r = cap (assemble ps) in
+  (* The streaming consumer's end: a union past the budget collapses to
+     its hull. *)
+  let close (acc : acc) : t =
+    let r =
+      if (not acc.general) && acc.n <= U.max_pieces then combined acc
+      else cap (combined acc) in
 #ifdef VSA_DEBUG
     census_len (List.length r);
 #endif
     mk r
+
+  (* The producer finish for an already-ordered list. *)
+  let finish (ps : progression list) : t =
+    close (List.fold ps ~init:empty_acc ~f:push)
 
   (* The pieces of a result: its arcs, ascending and disjoint. *)
   let of_arcs (arcs : progression list) : t =
@@ -750,18 +778,27 @@ module Pieces_base = struct
       (merge_progressions (List.sort partial ~compare:compare_piece) whole)
       above
 
-  (* Each piece of [ps] shifted by each delta; the rows merge into the one
-     ascending stream the image index would hold. *)
-  let shift_all (ps : progression list) (deltas : Cbat_word.t list) : t =
-    let rec dedup = function
-      | a :: (b :: _ as rest) ->
-        if compare_piece a b = 0 then dedup rest else a :: dedup rest
-      | l -> l
+  (* Ascending rows pushed in merged order, the lowest head first. *)
+  let stream (rows : progression list list) : t =
+    let rec go acc = function
+      | [] -> close acc
+      | rows ->
+        let best =
+          List.reduce_exn rows ~f:(fun x y ->
+              if compare_piece (List.hd_exn x) (List.hd_exn y) <= 0 then x
+              else y) in
+        let acc = push acc (List.hd_exn best) in
+        go acc
+          (List.filter_map rows ~f:(fun r ->
+               if phys_equal r best then
+                 (match r with _ :: (_ :: _ as tl) -> Some tl | _ -> None)
+               else Some r))
     in
-    of_progressions
-      (dedup
-         (List.fold deltas ~init:[] ~f:(fun acc c ->
-              merge_progressions acc (shifted ps c))))
+    go empty_acc rows
+
+  (* Each piece of [ps] shifted by each delta: one row per delta. *)
+  let shift_all (ps : progression list) (deltas : Cbat_word.t list) : t =
+    stream (List.map deltas ~f:(shifted ps))
 
   (* A shift by constants: one operand all single points, the other all
      finite pieces of the same width.  [None]: general pairs. *)
@@ -835,11 +872,11 @@ module Pieces_base = struct
         | _ -> None, pieces
       in
       let rest = List.concat (List.rev_map tail ~f:A.neg) in
-      of_progressions
-        (match Option.map head ~f:A.neg with
-         | None -> rest
-         | Some [ low; high ] -> (low :: rest) @ [ high ]
-         | Some arcs -> arcs @ rest)
+      stream
+        [ (match Option.map head ~f:A.neg with
+           | None -> rest
+           | Some [ low; high ] -> (low :: rest) @ [ high ]
+           | Some arcs -> arcs @ rest) ]
     | _ -> map A.neg ps
 
   let extract ?hi ?lo (ps : t) : t =

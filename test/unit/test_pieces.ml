@@ -642,8 +642,23 @@ let tests : unit Alcotest.test list =
             | [] -> Clp.singleton (word width)
             | l -> List.nth l (rnd (List.length l)) in
         let operand width =
-          match rnd 6 with
+          match rnd 8 with
           | 0 -> P.singleton (word width)
+          | 6 | 7 ->
+            (* Interleaving strides: offsets over a strided run. *)
+            let stride = 2 + rnd 6 in
+            let base = word width in
+            let offs = List.init (1 + rnd 4) (fun _ -> rnd stride) in
+            P.of_list ~width
+              (List.sort_uniq Cbat_word.compare
+                 (List.concat_map
+                    (fun k ->
+                       List.map
+                         (fun o ->
+                            Cbat_word.add base
+                              (Cbat_word.of_int ~width (((k * stride) + o) land 255)))
+                         offs)
+                    (List.init (2 + rnd 20) Fun.id)))
           | 1 ->
             P.of_list ~width
               (List.sort_uniq Cbat_word.compare
