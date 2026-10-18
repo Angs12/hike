@@ -367,6 +367,16 @@ let slot_index_of_offset ~(word : int) (rel : int64) : int =
     (Stdlib.Int64.div (Stdlib.Int64.sub rel (Stdlib.Int64.of_int word))
        (Stdlib.Int64.of_int word))
 
+(* The slot-binding rule shared by attribution, promotion and call
+   effects: a start is an argument slot when it is word-aligned above SP. *)
+let call_arg_slot ~(word : int) ~(call_sp : int64) ~(start : int64) : int option =
+  let rel = Stdlib.Int64.sub start call_sp in
+  let word64 = Stdlib.Int64.of_int word in
+  if Stdlib.Int64.compare rel word64 >= 0
+     && Stdlib.Int64.equal (Stdlib.Int64.rem rel word64) 0L
+  then Some (slot_index_of_offset ~word rel)
+  else None
+
 (* The word cell of an Args span wholly inside one cell at/above the
    args base: its slot index, else [None]. *)
 let args_cell_of_span ~(word : int) ~(entry : int64) (lo : int64)
@@ -549,6 +559,52 @@ let has_call_push (sub : sub term) : bool =
   |> Seq.exists ~f:(fun blk ->
          Term.enum jmp_t blk |> Seq.exists ~f:call_pushes)
 
+type call_arg_store = {
+  sb_slot : int;
+  sb_def : def term;
+}
+
+(* The call-site correspondence shared by attribution and promotion: a
+   store's singleton aligned start [a] against the block's call-time SP
+   [d_sp] is slot [(a - d_sp - word) / word]. *)
+let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
+    ~(denote : blk:blk term -> ?def:def term -> exp ->
+                (Cbat_clp_set_composite.t, Type.error) Result.t)
+    (sub : sub term) : (call_arg_store list * blk term) Tid.Map.t =
+  let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
+      int64 option =
+    match denote ~blk ?def e with
+    | Error _ -> None
+    | Ok ws -> singleton_stack_position ws
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun sites blk ->
+      let btid = Term.tid blk in
+      let has_call =
+        Term.enum jmp_t blk |> Seq.exists ~f:machine_call
+      in
+      if not has_call then sites
+      else
+        match singleton_at ~blk (Bil.Var sp) with
+        | None -> Core.Map.set sites ~key:btid ~data:([], blk)
+        | Some call_sp ->
+          let bindings =
+            Term.enum def_t blk
+            |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
+                match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
+                | Some (addr, _), Some _ ->
+                  (match singleton_at ~def:d ~blk addr with
+                   | Some start ->
+                     (match call_arg_slot ~word ~call_sp ~start with
+                      | Some slot ->
+                        Core.Map.set acc ~key:slot
+                          ~data:{ sb_slot = slot; sb_def = d }
+                      | None -> acc)
+                   | None -> acc)
+                | _ -> acc)
+          in
+          Core.Map.set sites ~key:btid ~data:(Core.Map.data bindings, blk))
+
 (* The emitter's per-sub inputs are structure (BIR args, direct targets,
    def tags) plus this layout fact: the alloca-construction inputs alone. *)
 
@@ -570,8 +626,8 @@ module Sub_layout = struct
      model address resolves against one region's base. *)
   type t = {
     regions : region list;
-    (* The sub reads its incoming window: its direct-call signature carries
-       the hike_window parameter. *)
+    (* The sub accesses Args space directly or through a va_list
+       overflow pointer, so its signature carries hike_window. *)
     window_param : bool;
     (* The residue's below-entry extent is unbounded or exceeds
        [frame_alloca_max]: its storage is the runtime stack. *)

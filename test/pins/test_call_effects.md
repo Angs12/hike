@@ -1,13 +1,14 @@
 # Pins — test_call_effects
 
 Module: `test/unit/test_call_effects.ml` (group `call_effects`, ids
-`CE-01`…`CE-15`), merging the `CE1`…`CE10` checks of
+`CE-01`…`CE-29` (with retired-number gaps), merging the `CE1`…`CE10` checks of
 `test_cbat/test_forward.ml` (the forward Call_effects family) and the
 `C1-1`…`C1-5` checks of `test_cbat/test_vsa.ml`.  Every source `check`
 site is carried as one pin; none retired.  Production mechanism:
 `src/cbat_vsa/cbat_call_effects.ml` (`Cbat_vsa.Call_effects.transfer` /
 `indirect_callee`) with the frame-keep core in
-`src/cbat_vsa/cbat_ai_representation.ml` (`AI.call_abstraction_frame`).
+`src/cbat_vsa/cbat_ai_representation.ml` (the sticky frame-escape bit) and
+`src/cbat_vsa/cbat_ai_memmap.ml` (`Mem.call_keep`).
 
 There is no `Test_seam` for this pass, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The
@@ -21,7 +22,7 @@ closure — no cross-pin state.
 | CE-01 | `transfer`'s `Some summary` arm unions the callee's never-written caller-saved GPRs into `preserved` (a `ws` member is kept, a non-member is added unless it is a return reg), so a non-written GPR (`g2`) stays bounded. | In `transfer`, make the `Some ws` arm a no-op: `| Some _ -> preserved`. | CE-01: `Ws.equal (AI.find_word 64 kept g2) (Ws.singleton (w64 2))` fails — `g2` is TOPed (review). |
 | CE-02 | `transfer`'s `None` summary arm keeps only the base `preserved` set (unknown/kill-all callee); `g1`/`g2` are TOPed. | In `transfer`, make `None` add all caller-saved GPRs to `preserved` (`| None -> Core.Set.union preserved (Core.Set.of_list (module Var) abi.Hike_abi.caller_saved_gprs)`). | CE-02: `Ws.is_top (AI.find_word 64 killed g1)` fails — the "killed" set retains `g1`/`g2` (review). |
 | CE-03 | `AI.call_abstraction_frame` keeps caller-frame cells at/above the highest possible call-time RSP and drops the cells below it (the call-time RSP is `{0x1000}`). | In `transfer`, bypass the frame keep: `let abs = AI.top in`. | CE-03: `Ws.equal (ce_reads m 0x2000 kept_frame) (Ws.singleton (w64 42))` fails — the kept cell reads TOP (review). |
-| CE-04 | The escape set is the denotation of `written_lanes`; the caller frame outside an escape lane's range survives, inside it dies. | In `transfer`, drop the escapes: `let escape = [] in`. | CE-04: `Ws.is_top (ce_reads m 0x2000 escaped)` fails — the rdi-range cell survives (review). |
+| CE-04 | A stack address in a call-read lane sets the sticky frame-escape bit and clears every retained Stack cell. | In `transfer`, force `frame_escaped = false`. | CE-04: the Stack cell at `0x3000` remains `{9}` instead of TOP. |
 | CE-05 | A pushed site's SP gains one word (`WordSet.add` of the word-size singleton) — the popped retaddr. | In `transfer`, ignore the push: `if false && site.pushed then …` (or `let pushed = false`). | CE-05: `Ws.elem (w64 0x1008) rsp'` fails — only `0x1000` remains (review). |
 | CE-06 | `pushed = false` (a trap) leaves the SP untouched — it pops no retaddr. | In `transfer`, make the push unconditional: `if true then …` (or delete the `site.pushed` guard). | CE-06: `Ws.equal (AI.find_word 64 trap abi.Hike_abi.sp) (Ws.singleton (w64 0x1000))` fails — the SP gains `0x1008` (review). |
 | CE-08 | `indirect_callee` denotes the target exp; a singleton word passes `Cbat_word.to_int64` into `lookup`, then `callee`. | In `indirect_callee`, answer `Summary None` for the singleton arm. | CE-08: the `Summary (Some ws)` arm is never taken, so the match falls to `false` (review). |
@@ -31,8 +32,16 @@ closure — no cross-pin state.
 | CE-13 | A preserved `RSP` (no push) keeps its value-set; the preserved fold is var-identity based, not name based. | In `transfer`, ignore `preserved`: `let preserved = Var.Set.empty in`. | CE-13: `Ws.equal (AI.find_word 64 e' rsp) (Ws.singleton (w64 0x10))` fails — the RSP is TOPed (review). |
 | CE-14 | A call with an unbounded RSP keeps no frame: `call_abstraction_frame` falls back to the whole-memory top when the RSP denotation is not a single word. | In `call_abstraction_frame`, drop the RSP-bound guard and run the frame split regardless of `Ws.cardinal rsp`. | CE-14: the stored `{0x11}` at `[0x10]` survives, so `Mem.equal … (Mem.top …)` fails (review). |
 | CE-16 | The frame-keep namespace rule: a plain-top escape cannot name the stack line (a stack address is `Rel`), so it never forces the whole-memory top — the caller's frame survives (`frame_keep` in `src/cbat_vsa/cbat_call_effects.ml` omits non-relative escapes). | In `src/cbat_vsa/cbat_call_effects.ml` `frame_keep`, restore the all-or-nothing escape composition (a `None` range forces top). | CE-16: the frame cells drop (review). |
-| CE-17 | A `Rel` escape of bounded extent carves exactly its range; the rest of the frame above the call-time SP survives. | In `src/cbat_vsa/cbat_call_effects.ml` `frame_keep`, drop the escape from the list (or `call_keep`'s `in_escape`). | CE-17: the escape cell survives (review). |
-| CE-03/04/07 | The frame-keep boundary is OFFSET-space: `keep_lo` is the SP's segment-relative offset (the space Stack cells key by), not the absolute position — the keep is real now, not a degenerate all-drop. | In `src/cbat_vsa/cbat_call_effects.ml` `frame_keep`, restore the `+ stack_base` in `bound`. | CE-03: the cells at/above the SP drop (review). |
-
-| CE-18 | caller-frame survival requires an SP with a stack-family origin | use raw numeric SP bounds after stack_offsets fails | an originless SP incorrectly keeps caller-frame facts |
-| CE-19 | an escape lane holding a stack address or NULL carves the stack address's range (the escapes are each value's `stack_leaves`) | read escapes through `in_stack_segment` again | the escaped cell at `0x2000` survives the call |
+| CE-17 | A bounded stack address in a read lane clears the whole retained frame; its byte extent is intentionally not used in Phase 1. | In `transfer`, force `frame_escaped = false`. | CE-17: the Stack cell at `0x3000` remains `{9}` instead of TOP. |
+| CE-03/04 boundary | `keep_lo` is the SP's segment-relative offset, the namespace Stack cells use. | In `frame_keep`, add the concrete stack base to `keep_lo`. | CE-03: the cell at/above the SP is dropped. |
+| CE-18 | Caller-frame survival requires an SP with a stack-family origin. | Use raw numeric SP bounds after `stack_offsets` fails. | The originless SP incorrectly keeps caller-frame facts. |
+| CE-19 | A mixed call-read lane containing a Stack leaf sets the sticky bit and clears the whole retained frame. | Ignore Stack leaves when deriving `lane_escapes`. | The Stack cell at `0x3000` remains `{9}` instead of TOP. |
+| CE-20 | A call-read lane whose value was set in an earlier block carries its Stack leaf to the call and raises the bit. | Feed the call an environment without the earlier lane value. | The call post-state has no frame-escape bit. |
+| CE-21 | Once raised, the bit survives a later call with no stack pointer lane. | Clear `AI.escaped` after the first call. | The later call preserves a Stack cell. |
+| CE-23 | `Mem.call_keep` drops a Stack cell when its key overlaps an outgoing stack-argument hull. | Replace `Key.overlap` with start-point containment. | A cell straddling the hull survives. |
+| CE-24 | Storing a Stack address outside the sub's own below-entry frame raises the bit. | Remove the store escape check in `denote_exp_escaping`. | The post-store state remains contained. |
+| CE-25 | Storing a Stack address in the sub's own below-entry frame does not raise the bit. | Treat every Stack-address store as escaped. | The post-store state is marked escaped. |
+| CE-26 | The call's outgoing stack-store bindings produce one exact byte hull, and the transfer drops overlapping cells. | Omit `stack_arg_ranges` from `call_site_transfer`. | The outgoing slot at `0x1010` keeps `{5}`. |
+| CE-27 | The escape bit joins by OR and participates in equality. | Drop the escape component from join/equality. | The joined states compare equal when they should not. |
+| CE-28 | A real call reads the lane value set in a predecessor block, then clears the retained frame. | Limit call facts to integer lanes defined in the call block. | The call post-state lacks the escape bit and retains the local cell. |
+| CE-29 | Outgoing SP-relative stores retain their actual addresses when the call later pushes its return address. | Denote every store address in the final call environment. | The hull misses the second outgoing slot. |

@@ -22,8 +22,8 @@ module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
 (* Static per-block facts, one per sub block: the block's term, the
-   convention's integer-arg lanes the block writes plus the SP-push
-   marker, and the may-read set at block entry (the GC keep-set). *)
+   call-read lanes plus the SP-push marker, and the may-read set at block
+   entry (the GC keep-set). *)
 type block_facts = {
   bf_term : blk term;
   bf_call_facts : var list * bool;
@@ -41,7 +41,7 @@ type refine_ctx = {
      block's IN state, so one chain serves them. *)
   rc_prefix : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref;
   (* The run's convention facts (Hike_abi is the one home): the sp var
-     the walk anchors on, the call-written register lanes, and the
+     the walk anchors on, the call-read lanes, and the
      word size behind every word lookup. *)
   rc_abi : Hike_abi.t;
   rc_blocks : block_facts Tid.Map.t;
@@ -58,16 +58,25 @@ type refine_ctx = {
   rc_sub_lookup : int64 -> Tid.t option;
 }
 
-(* Static per-block call facts: the convention's integer-arg lanes the
-   block writes, and whether the block's call pushes a return address
+(* Static per-block call facts: the lanes a machine call reads, and
+   whether the block's call pushes a return address
    (a machine call with a return; an intrinsic is rendered inline and a
    no-return transfer is a tail, so neither pushes). *)
-let call_facts_of_block ~(abi : Hike_abi.t) ~def_writes (b : blk term) :
+let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
     var list * bool =
-  let defs = Term.enum def_t b |> Seq.to_list in
-  let written =
-    List.filter abi.Hike_abi.int_param_regs ~f:(fun v ->
-        List.exists defs ~f:(fun d -> Core.Set.mem (def_writes d) v)) in
+  let read_lanes =
+    Term.enum jmp_t b
+    |> Seq.filter_map ~f:(fun j ->
+           match Jmp.kind j with
+           | Call _ when Hike_stack_model.machine_call j ->
+             Some (Hike_stack_model.effects j).reads
+           | _ -> None)
+    |> Seq.concat_map ~f:Seq.of_list
+    |> Seq.filter ~f:(fun v -> not (Var.same v abi.Hike_abi.sp))
+    |> Seq.to_list
+    |> Var.Set.of_list
+    |> Core.Set.to_list
+  in
   let pushed =
     Term.enum jmp_t b
     |> Seq.exists ~f:(fun j ->
@@ -79,7 +88,7 @@ let call_facts_of_block ~(abi : Hike_abi.t) ~def_writes (b : blk term) :
                    | Direct t -> not (Hike_abi.is_intrinsic_target t)))
            | _ -> false)
   in
-  (written, pushed)
+  (read_lanes, pushed)
 
 (* Backward may-liveness over base-normalized vars. *)
 let base_vars vars =
@@ -126,7 +135,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
         Core.Map.set m ~key:(Term.tid b)
           ~data:{
             bf_term = b;
-            bf_call_facts = call_facts_of_block ~abi ~def_writes b;
+            bf_call_facts = call_facts_of_block ~abi b;
             bf_live_ids =
               Cbat_var_id.intern_set
                 (Option.value ~default:Var.Set.empty

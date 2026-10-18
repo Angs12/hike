@@ -835,13 +835,14 @@ let tests : unit Alcotest.test list =
           (Ws.equal (read64 fx.es_m st (-16L)) (Ws.singleton (w64 0xBB))));
 
     pin "SEC-58"
-      "C3: the caller-frame cell [RSP-8] survives the call with its value (frame not whole-memory-topped)"
+      "C3: the stack address read in RDI clears the whole retained caller frame"
       (fun () ->
         let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
         let sol = run_anchored fx.es_sub in
         let post_ai = Graphlib.Std.Solution.get sol fx.es_post_tid in
         check "SEC-58"
-          (Ws.equal (read64 fx.es_m post_ai (-8L)) (Ws.singleton (w64 0xAA))));
+          (Ws.is_top (read64 fx.es_m post_ai (-8L))
+          && Ws.is_top (read64 fx.es_m post_ai (-16L))));
 
 
 
@@ -955,6 +956,103 @@ let tests : unit Alcotest.test list =
                 call escape alone would claim. *)
              Stdlib.Int64.equal window 20L
            | None -> false));
+
+    pin "SEC-76" "two outgoing stack stores define the exact call-window hull" (fun () ->
+        let m = memv "w_exact_m" in
+        let store off value =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp
+                  (Bil.PLUS, Bil.Var sp,
+                   Bil.Int (Cbat_word.to_word (w64 off))),
+                Bil.Int (Cbat_word.to_word (w64 value)),
+                LittleEndian, `r64))
+        in
+        let callee = mk_selfloop_callee "w_exact_callee" in
+        let sub, _ =
+          sub_of "w_exact_caller"
+            [ [ store 8 11; store 16 22 ],
+              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        let tree = Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub)) in
+        let identity =
+          A.Tree.to_sequence tree |> Seq.to_list
+          |> Base.List.concat_map ~f:(fun (_, rs) -> rs.A.members)
+          |> Base.List.filter ~f:(fun m ->
+                 m.A.m_identity && Option.is_none m.A.m_def
+                 && A.equal_sec m.A.m_sec Sm.Args)
+        in
+        check "SEC-76"
+          (match identity with
+           | [ m ] ->
+             Int64.equal m.A.m_lo (pos 8L)
+             && Int64.equal m.A.m_hi (pos 23L)
+           | _ -> false));
+
+    pin "SEC-77" "two locals and a call without stack arguments keep separate regions" (fun () ->
+        let m = memv "w_locals_m" in
+        let store off value =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp
+                  (Bil.MINUS, Bil.Var sp,
+                   Bil.Int (Cbat_word.to_word (w64 off))),
+                Bil.Int (Cbat_word.to_word (w64 value)),
+                LittleEndian, `r64))
+        in
+        let callee = mk_selfloop_callee "w_locals_callee" in
+        let sub, _ =
+          sub_of "w_locals_caller"
+            [ [ store 8 11; store 16 22 ],
+              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        let tree = Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub)) in
+        let layout =
+          A.layout_of_tree ~word:8 ~entry ~abi:Hike.Abi.x86_64_sysv ~sub tree
+        in
+        check "SEC-77"
+          (List.length layout.Sm.regions = 2 && not layout.Sm.window_param));
+
+    pin "SEC-78"
+      "a stack pointer passed in a lane keeps the caller frame in shared storage"
+      (fun () ->
+        let m = memv "w_escape_m" in
+        let rdi = int_param 0 in
+        let store off value =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp
+                  (Bil.MINUS, Bil.Var sp,
+                   Bil.Int (Cbat_word.to_word (w64 off))),
+                Bil.Int (Cbat_word.to_word (w64 value)),
+                LittleEndian, `r64))
+        in
+        let set_rdi =
+          Def.create rdi
+            (Bil.BinOp
+               (Bil.MINUS, Bil.Var sp,
+                Bil.Int (Cbat_word.to_word (w64 24))))
+        in
+        let callee = mk_selfloop_callee "w_escape_callee" in
+        let sub, _ =
+          sub_of "w_escape_caller"
+            [ [ store 24 11; store 16 22; set_rdi ],
+              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        check "SEC-78"
+          (storage_at ctx sub Sm.Stack (pos (-24L)) (pos (-17L))
+           = Some A.Stack_residue
+          && storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
+             = Some A.Stack_residue));
 
     pin "SEC-66"
       "S2 (fp-GPR): an untagged heap-RBP store does NOT degrade the sub (the rsp cell keeps Region storage — stack-ness is the value proof alone)"

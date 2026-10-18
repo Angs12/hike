@@ -133,7 +133,11 @@ let denote_jump
       | None -> env in
 
     let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
-      let written_lanes, _ = plan.bp_call_facts in
+      let read_lanes, _ = plan.bp_call_facts in
+      let stack_args =
+        Cbat_call_effects.stack_arg_ranges ~abi:rctx.Cbat_runctx.rc_abi
+          ~block:b ~entry env
+      in
       let kept =
         Option.map summary ~f:(fun ws ->
             match jp.jp_preserved with
@@ -144,7 +148,8 @@ let denote_jump
               jp.jp_preserved <- Some (ws, p);
               p) in
       Cbat_call_effects.transfer ?kept ~abi:rctx.Cbat_runctx.rc_abi ~preserved
-        ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
+        ~stack_args
+        ~site:{ Cbat_call_effects.summary; read_lanes; pushed }
         env
     in
     let inspect_call c =

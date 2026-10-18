@@ -402,29 +402,29 @@ let meet_range_keep (m : t) ~key ~data : t =
     ~op_demoted:(fun _ d' -> d') m ~key ~data
 
 (* Keep the caller's frame across a call: all inputs are OFFSET-space
-   (the segment-relative line the Stack cells key by).  A called
-   function writes only its own frame below its entry SP and the
-   escape ranges — so Stack cells keep at/above [keep_lo]
-   outside [escape]; a plain (absolute) or rip cell names no stack line
-   and the callee may clobber any non-stack memory (it drops). *)
+   (the segment-relative line the Stack cells key by). A called
+   function writes below its entry SP, may write the outgoing stack
+   arguments, and may reach the whole retained frame after a pointer
+   escapes. A plain (absolute) or rip cell names no stack line and the
+   callee may clobber any non-stack memory (it drops). *)
 let call_keep (m : t) ~(keep_lo : Cbat_word.t)
-    ~(escape : (Cbat_word.t * Cbat_word.t) list) : t =
+    ~(stack_args : (Cbat_word.t * Cbat_word.t) list) ~(clear_frame : bool) : t =
   match m.itree with
   | None -> m
   | Some it ->
-    let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
+    let stack_arg_pts = Option.all (List.map stack_args ~f:(fun (lo, hi) ->
         Option.map2 (Key.of_word lo) (Key.of_word hi)
-          ~f:(fun lo hi -> (lo, hi)))) in
+          ~f:(fun lo hi ->
+            { Key.origin = Hike_origin.Stack; lo; hi; step = 1 }))) in
     let keep_lo_pt = Key.of_word keep_lo in
-    match keep_lo_pt, escape_pts with
-    | Some keep_lo_pt, Some escape_pts ->
-      let in_escape (k : Key.t) : bool =
-        List.exists escape_pts ~f:(fun (lo, hi) ->
-            Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
+    match keep_lo_pt, stack_arg_pts with
+    | Some keep_lo_pt, Some stack_arg_pts ->
+      let is_stack_arg (k : Key.t) : bool =
+        List.exists stack_arg_pts ~f:(Key.overlap k) in
       let keeps (k : Key.t) : bool =
         let o = Key.origin k in
-        Hike_origin.names_stack_line o
-        && (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt)
+        (not clear_frame) && Hike_origin.names_stack_line o
+        && (not (is_stack_arg k)) && not (Key.lt (Key.lower k) keep_lo_pt)
       in
       let kept =
         IT.to_sequence it

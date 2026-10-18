@@ -10,7 +10,7 @@ module WordSet = Cbat_clp_set_composite
 
 type site = {
   summary : Int.Set.t option;
-  written_lanes : var list;
+  read_lanes : var list;
   pushed : bool;
 }
 
@@ -34,18 +34,76 @@ let indirect_callee ~(lookup : int64 -> Tid.t option)
 let range_of (ws : WordSet.t) : (Cbat_word.t * Cbat_word.t) option =
   Hike_stack_bounds.key_extent ws
 
-(* The frame-keep boundary and the escape ranges are KEY-space:
-   stack-derived cells key by segment offsets, foreign cells by their
-   concrete addresses.  The callee writes below its own RSP, so the
-   keep boundary is the HIGHEST possible call-time SP's position — an
-   unbounded-below SP still has a highest position, and the callee
-   reaches below its entry only.  An unbounded-above SP keeps nothing
-   — the whole-memory top stays the sound fallback on any doubt.
+(* The call block's bounded outgoing stack-argument hull.  The slot test
+   is shared with promotion: only a singleton stack store beginning at a
+   word-aligned slot above the call-time SP contributes. Store addresses
+   use their before-states, before a later call push changes SP. *)
+let stack_arg_ranges ~(abi : Hike_abi.t) ~(block : blk term)
+    ~(entry : AI.t) (env : AI.t) :
+    (Cbat_word.t * Cbat_word.t) list =
+  if not (Term.enum jmp_t block |> Seq.exists ~f:Hike_stack_model.machine_call)
+  then []
+  else
+  let word_bits = Hike_abi.word_bits abi in
+  let rsp = AI.find_word word_bits env abi.Hike_abi.sp in
+  match Hike_stack_model.singleton_stack_position rsp with
+  | None -> []
+  | Some call_sp ->
+    let ranges =
+      Term.enum def_t block
+      |> Seq.fold ~init:([], entry) ~f:(fun (acc, before) d ->
+          let acc = match Hike_stack_model.addr_of_rhs (Def.rhs d),
+                Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+          | Some (addr, size), Some _ ->
+            (match Cbat_transfer.denote_imm_exp addr before with
+             | Error _ -> acc
+             | Ok address ->
+               (match Hike_stack_model.singleton_stack_position address with
+                | Some start
+                  when Option.is_some
+                         (Hike_stack_model.call_arg_slot ~word:abi.Hike_abi.word
+                            ~call_sp ~start) ->
+                  (match range_of address with
+                   | None -> acc
+                   | Some (lo, hi) ->
+                     let extra =
+                       Cbat_word.of_int ~width:word_bits
+                         (Size.in_bytes size - 1)
+                     in
+                     let hi' = Cbat_word.add hi extra in
+                     let hi' =
+                       if Cbat_word.(hi' < hi) then Cbat_word.ones word_bits
+                       else hi'
+                     in
+                     (lo, hi') :: acc)
+                | _ -> acc))
+          | _ -> acc in
+          (acc, Cbat_transfer.denote_def d before))
+      |> fst
+    in
+    (match ranges with
+     | [] -> []
+     | (lo, hi) :: rest ->
+       let lo, hi =
+         List.fold rest ~init:(lo, hi) ~f:(fun (lo, hi) (lo', hi') ->
+             ((if Cbat_word.(lo' < lo) then lo' else lo),
+              (if Cbat_word.(hi' > hi) then hi' else hi)))
+       in
+       [ lo, hi ])
 
-   Only the Stack origin certifies a frame-keep boundary or a stack
-   escape. An SP without that proof forces whole-memory top. *)
+(* The frame-keep boundary and outgoing stack-argument ranges are
+   KEY-space: stack-derived cells key by segment offsets, foreign cells
+   by their concrete addresses. The callee writes below its own RSP, so
+   the keep boundary is the HIGHEST possible call-time SP's position —
+   an unbounded-below SP still has a highest position, and the callee
+   reaches below its entry only. An unbounded-above SP keeps nothing —
+   the whole-memory top stays the sound fallback on any doubt.
+
+   Only the Stack origin certifies a frame-keep boundary. An SP without
+   that proof forces whole-memory top. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
-    ~(escape : WordSet.t list) (env : AI.t) : AI.t =
+    ~(frame_escaped : bool)
+    ~(stack_args : (Cbat_word.t * Cbat_word.t) list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
   Cbat_attr_census.bump "call.frame";
 #endif
@@ -60,21 +118,14 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
       | Some offs -> WordSet.Clp.Pieces.max_elem offs
       | None -> None
   in
-  (* The escape list: each escape's stack-line leaves (a mixed value's
-     stack addresses escape too).  A plain or module-relative escape
-     cannot collide with a Stack-line cell (the key namespaces by
-     origin); a bottom escape writes nothing.  Such an escape keeps its
-     bounded extent; a top one spans the whole line (the sound claim). *)
-  let escape_ranges =
-    List.concat_map escape ~f:(fun ws -> List.filter_map (WordSet.stack_leaves ws) ~f:range_of)
-  in
   match keep_lo with
   | Some lo ->
 #ifdef VSA_DEBUG
     Cbat_attr_census.bump "call.frame.kept";
 #endif
     AI.map_memories env ~f:(fun ~key:_ ~data ->
-        Mem.call_keep data ~keep_lo:lo ~escape:escape_ranges)
+        Mem.call_keep data ~keep_lo:lo ~stack_args
+          ~clear_frame:frame_escaped)
   | None ->
 #ifdef VSA_DEBUG
     Cbat_attr_census.bump "call.frame.top.rsp";
@@ -92,7 +143,7 @@ let preserved_with_summary ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
         then acc
         else Core.Set.add acc id)
 
-let transfer ?kept ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
+let transfer ?kept ?(stack_args = []) ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
     ~(site : site) (env : AI.t) : AI.t =
   let word_bits = Hike_abi.word_bits abi in
   let rsp = abi.Hike_abi.sp in
@@ -105,15 +156,21 @@ let transfer ?kept ~(abi : Hike_abi.t) ~(preserved : Int.Set.t)
     | None, Some ws -> preserved_with_summary ~abi ~preserved ws
     | None, None -> preserved
   in
-  (* The escape: the registers the call block wrote. *)
-  let escape =
-    List.map site.written_lanes ~f:(fun v -> AI.find_word word_bits env v) in
-  (* Every call keeps the caller frame at/above the highest possible
-     call-time RSP outside the escapes — a trap like an ABI call; the
-     whole-memory top stays the fallback on any doubt. *)
+  (* Any stack pointer in a lane the call reads may escape through the
+     callee.  Once raised, the bit survives every later call in the sub. *)
+  let lane_escapes =
+    List.exists site.read_lanes ~f:(fun v ->
+        not (Base.List.is_empty
+               (WordSet.stack_leaves (AI.find_word word_bits env v))))
+  in
+  let frame_escaped = AI.frame_escaped env || lane_escapes in
+  let env = if lane_escapes then AI.escape_frame env else env in
+  (* Every call clears the outgoing stack-argument hull.  Once any frame
+     address escaped, the simple rule clears the whole retained frame. *)
   let abs =
     frame_keep ~preserved
-      ~rsp:(AI.find_word word_bits env rsp) ~escape env in
+      ~rsp:(AI.find_word word_bits env rsp)
+      ~frame_escaped ~stack_args env in
   (* The SP restores by one word on returns: the callee's ret pops
      exactly the retaddr the caller pushed.  On a stack word the +word
      lands in the offsets exactly. *)

@@ -34,10 +34,7 @@ val range : sec -> int64 -> int64 -> range
 
 (** One membership fact: an access's occupied interval in one section,
     or an escape requirement ([m_def] absent, width 0).  [m_identity]
-    marks bytes that need shared, un-carved storage.  [m_callwin] marks
-    the extent a calling block exposes to its callee: it forces the
-    residue (the window shadow's storage) but is not an escape — the
-    callee reads the outgoing cells through the typed slot pointers. *)
+    marks bytes that need shared, un-carved storage. *)
 type member = {
   m_sec : sec;
   m_lo : int64;
@@ -47,7 +44,6 @@ type member = {
   m_width : int;
   m_store : bool;
   m_identity : bool;
-  m_callwin : bool;
 }
 [@@deriving equal, compare, sexp]
 

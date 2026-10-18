@@ -143,6 +143,7 @@ val residue_id : int
 (* Slot geometry. *)
 val slot_offset : word:int -> int -> int64
 val slot_index_of_offset : word:int -> int64 -> int
+val call_arg_slot : word:int -> call_sp:int64 -> start:int64 -> int option
 val args_cell_of_span : word:int -> entry:int64 -> int64 -> int64 -> int option
 
 val region_mem : addr_bits:int -> int -> var
@@ -198,6 +199,18 @@ val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 val machine_call : jmp term -> bool
 val call_pushes : jmp term -> bool
 val has_call_push : sub term -> bool
+
+type call_arg_store = {
+  sb_slot : int;
+  sb_def : def term;
+}
+
+val site_bindings_of_sub_with_blocks :
+  word:int ->
+  sp:var ->
+  denote:(blk:blk term -> ?def:def term -> exp ->
+          (Cbat_clp_set_composite.t, Type.error) Result.t) ->
+  sub term -> (call_arg_store list * blk term) Tid.Map.t
 
 (* The layout: every alloca of the sub, riding the sub term. *)
 module Sub_layout : sig
@@ -263,6 +276,11 @@ val sig_args : sub term -> Arg.t list
 val sig_rets : sub term -> Arg.t list
 
 (** Explicit operands and the implicit lanes carried by a BIR term. *)
+module Term_effects : sig
+  type t = { reads : var list; writes : var list }
+end
+
+val effects : jmp term -> Term_effects.t
 val reads :
   [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
 val writes :

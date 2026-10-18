@@ -1,6 +1,7 @@
 (* The variadic pass: a sub whose lifted body holds the va_list
    construction is stamped variadic, so the emitter defines it as a real
-   LLVM variadic and the attribution keeps its callers' windows. *)
+   LLVM variadic and attribution keeps only the stack argument reach its
+   accesses require. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types

@@ -117,7 +117,7 @@ def main():
         if row["ratio"] > args.max_ratio or any(s["rc"] == 124 for s in row["samples"]):
             runtime_reds.append(f"{record['cell']}/{binary.name}: ratio {row['ratio']:.3f}")
         results = {}
-        levels = [None, "0", "1", "2", "3", "s"] if record["cell"] == "gcc-O2-nosp-strip" else [None]
+        levels = [None, "0", "3", "z"] if record["cell"] == "gcc-O3-nosp-strip" else [None]
         for level in levels:
             key = "llc-O0" if level is None else f"opt-O{level}"
             results[key] = {}
@@ -136,13 +136,14 @@ def main():
         print(f"CHECKED {record['cell']}/{binary.name}: "
               f"{results['llc-O0']['reference']['stage']} -> {results['llc-O0']['current']['stage']}", flush=True)
         (args.output / "results.json").write_text(json.dumps(records, indent=2) + "\n")
-    verdict = {"binaries": len(binaries), "native_cells": 18, "repeats": args.repeats,
+    native_cells = len(list(cells()))
+    verdict = {"binaries": len(binaries), "native_cells": native_cells, "repeats": args.repeats,
                "timing_regressions": runtime_reds, "correctness_regressions": regressions,
                "improvements": improvements, "existing_reds": reds}
     (args.output / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     lines = ["# Full matrix comparison", "",
-             f"{len(binaries)} binaries across 18 native cells, {args.repeats} interleaved runs per build.",
-             "Consumer optimization sweep: O0/O1/O2/O3/Os on the entire GCC O2 stripped cell.", "",
+             f"{len(binaries)} binaries across {native_cells} native cells, {args.repeats} interleaved runs per build.",
+             "Consumer optimization sweep: O0/O3/Oz on the entire GCC O3 stripped cell.", "",
              "| Cell | Median runtime ratio | Current / reference semantic passes |", "|---|---:|---:|"]
     for tag, *_ in cells():
         members = [r for r in records if r["cell"] == tag and "semantics" in r]

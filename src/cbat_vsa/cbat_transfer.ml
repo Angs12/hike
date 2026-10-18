@@ -469,7 +469,27 @@ let rec static_kind (e : exp) : [ `Word | `Mem ] option =
   | Bil.Unknown (_, Type.Mem _) -> Some `Mem
   | Bil.Unknown (_, Type.Unk) | Bil.Store _ | Bil.Ite _ | Bil.Let _ -> None
 
-let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
+(* Whether a stored address is provably inside the sub's own frame
+   below entry: a Stack-origin value whose offset hull has a signed
+   maximum below the entry word.  The caller's frame, a foreign or mixed
+   address and TOP are outside. *)
+let in_own_frame (addr : wordset) : bool =
+  Option.equal Hike_origin.equal (WordSet.origin addr) (Some Hike_origin.Stack)
+  && Option.value_map (WordSet.stack_offsets addr) ~default:false
+       ~f:(fun hull ->
+           Option.value_map (Cbat_clp.Pieces.max_elem_signed hull)
+             ~default:false
+             ~f:(fun hi ->
+                 Option.value_map (Cbat_word.to_int64_opt hi) ~default:false
+                   ~f:Int64.is_negative))
+
+(* [escaped] is raised by a store that puts a stack address where a
+   callee may reach it: the data has a stack leaf and the address is not
+   in the sub's own frame below entry.  [denote_exp] discards it;
+   [denote_def] folds it into the state. *)
+let rec denote_exp_escaping ~(escaped : bool ref) (e : exp) (env : AI.t) :
+    val_t or_type_error =
+  let denote_exp = denote_exp_escaping ~escaped in
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
     if b then !!() else fail err in
@@ -515,6 +535,8 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     denote_exp u env >>= val_as_imm >>= fun v ->
+    if (not (Base.List.is_empty (WordSet.stack_leaves v))) && not (in_own_frame addr)
+    then escaped := true;
 
     if WordSet.is_top addr
     (* The store may write any cell: whole-memory top. *)
@@ -566,6 +588,9 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp body env'
   | Bil.Unknown (_,typ) -> val_top typ
 
+let denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
+  denote_exp_escaping ~escaped:(ref false) e env
+
 let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
@@ -574,12 +599,13 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
    words and memory ops key cells by their segment offsets.  A def the
    denotation cannot type adds nothing: its readers take the top
    identity. *)
-let denote_def (df : def term) (env : AI.t) : AI.t =
+let denote_def_escaping ~(escaped : bool ref) (df : def term) (env : AI.t) :
+    AI.t =
   let v = Def.lhs df in
   let e = Def.rhs df in
   match
     (let open Monad_type_error in
-     denote_exp e env >>| fun ev ->
+     denote_exp_escaping ~escaped e env >>| fun ev ->
      (match ev with
       | `Word p ->
         (* A partial-register write (EAX into RAX) zero-fills the base
@@ -602,6 +628,11 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
     not_implemented ~top:env
       (Format.asprintf "denote_def %s: %s" (Var.name v)
          (Type.Error.to_string err))
+
+let denote_def (df : def term) (env : AI.t) : AI.t =
+  let escaped = ref false in
+  let env' = denote_def_escaping ~escaped df env in
+  if !escaped then AI.escape_frame env' else env'
 
 let denote_defs (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)

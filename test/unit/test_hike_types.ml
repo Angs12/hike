@@ -103,6 +103,38 @@ let use_kinds (subs : sub term list) : use_kinds =
    [@main] — the name the fixed signature reads. *)
 let tests : unit Alcotest.test list =
   [
+    pin "TYPES-36" "pointer retyping preserves indirect calls and jumps"
+      (fun () ->
+        let target = v64 "types36_target" in
+        let continuation = Tid.create () in
+        let call = Jmp.create_call
+            (Call.create ~target:(Indirect (Bil.Var target))
+               ~return:(Direct continuation) ()) in
+        let jump = Jmp.create_goto (Indirect (Bil.Var target)) in
+        Base.List.iter [call; jump] ~f:(fun transfer ->
+            let blk = Blk.create ~jmps:[transfer] () in
+            let sub = Sub.create ~name:"types36" ~blks:[blk] () in
+            let typed = Types.retype_sub
+                ~mem_typ:(Types.mem_type_of_target (x86 ()))
+                ~ptr_vars:(Var.Set.singleton target)
+                ~ptr_rets:Var.Set.empty sub in
+            let blk = Term.first blk_t typed |> Base.Option.value_exn in
+            let typed_jmp = Term.first jmp_t blk |> Base.Option.value_exn in
+            let target_exp = match Jmp.kind transfer, Jmp.kind typed_jmp with
+              | Call _, Call c ->
+                check "TYPES-36 call continuation survives"
+                  (Call.return c = Some (Direct continuation));
+                (match Call.target c with Indirect e -> e | _ -> assert false)
+              | Goto _, Goto (Indirect e) -> e
+              | _ -> failwith "TYPES-36 transfer kind changed" in
+            check "TYPES-36 target retains its pointer type"
+              (Type.infer target_exp = Ok (Types.mem_type_of_target (x86 ())));
+            check "TYPES-36 target retains its SSA identity"
+              (match target_exp with
+               | Bil.Var v -> Var.same v target
+               | _ -> false);
+            check "TYPES-36 needs no scalar copies"
+              (Seq.is_empty (Term.enum def_t blk))));
 
 
     pin "TYPES-05" "tag_lane: a plain [In] register lane is not a pointer"

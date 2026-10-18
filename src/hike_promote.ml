@@ -9,10 +9,7 @@ module Vsa = Cbat_vsa
 module Tag = Hike_stack_model.Tag
 module Sections = Hike_sections
 
-(* The call-site correspondence: a store's singleton aligned start [a]
-   against the block's call-time SP [d_sp] is slot
-   [(a - d_sp - word) / word]. *)
-type site_binding = {
+type site_binding = Hike_stack_model.call_arg_store = {
   sb_slot : int;
   sb_def : def term;
 }
@@ -21,54 +18,7 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     (sub : sub term) : (site_binding list * blk term) Tid.Map.t =
-  let w64 = Stdlib.Int64.of_int word in
-  let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
-      int64 option =
-    match denote ~blk ?def e with
-    | Error _ -> None
-    | Ok ws -> Model.singleton_stack_position ws
-  in
-  let slot_of_start (a : int64) (d_sp : int64) : int option =
-    let rel = Stdlib.Int64.sub a d_sp in
-    if
-      Stdlib.Int64.compare rel w64 >= 0
-      && Stdlib.Int64.equal (Stdlib.Int64.rem rel w64) 0L
-    then Some (Model.slot_index_of_offset ~word rel)
-    else None
-  in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun sites blk ->
-         let btid = Term.tid blk in
-         let has_call =
-           Term.enum jmp_t blk
-           |> Seq.exists ~f:Hike_stack_model.machine_call
-         in
-         if not has_call then sites
-         else
-           match singleton_at ~blk (Bil.Var sp) with
-           | None -> Core.Map.set sites ~key:btid ~data:([], blk)
-           | Some d_sp ->
-               let bindings =
-                 Term.enum def_t blk
-                 |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
-                        match
-                          ( Model.addr_of_rhs (Def.rhs d),
-                            Model.store_data_of_rhs (Def.rhs d) )
-                        with
-                        | Some (addr, _size), Some _ -> (
-                            match singleton_at ~def:d ~blk addr with
-                            | Some a -> (
-                                match slot_of_start a d_sp with
-                                | Some i ->
-                                    Core.Map.set acc ~key:i
-                                      ~data:{ sb_slot = i; sb_def = d }
-                                | None -> acc)
-                            | None -> acc)
-                        | _ -> acc)
-               in
-               Core.Map.set sites ~key:btid
-                 ~data:
-                   (Core.Map.data bindings, blk))
+  Model.site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
 
 let site_bindings_of_sub ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
@@ -192,9 +142,9 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
   let sub = promote_sub ~addr_bits facts sub in
-  (* A non-memory def whose value is a caller-window address — the
-     model's one window denotation — is stamped; the emitter re-bases
-     its integer to the window parameter. *)
+  (* Keep the window-value stamp for denotations at/above entry. The
+     layout decides whether an actual Args-space memory access needs an
+     incoming window parameter. *)
   let window_values =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
@@ -215,14 +165,11 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
      region geometry the layout measures. *)
   let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
   let storages = Sections.spans_of_layout ~word layout in
-  (* The window forms need the signature's window parameter: a
-     fixed-signature sub (@main, the intrinsics) never carries it.  A
-     window-VALUE def forces the parameter (the layout is stamped with it
-     below), so the forms are available for it too. *)
+  (* The window forms need an Args-space access, including the overflow
+     area consumed by a recognized va_list construction. A dead
+     SP-derived value does not need the incoming lane. *)
   let window_ok =
-    (layout.Hike_stack_model.window_param
-    || not (Core.Set.is_empty window_values))
-    && not callee_exempt
+    layout.Hike_stack_model.window_param && not callee_exempt
   in
   let facts =
     Sections.def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
@@ -258,12 +205,6 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     end
   in
   let sub = rewrite#map_sub sub in
-  (* The signature carries the window parameter whenever a
-     window-value def exists. *)
-  let layout =
-    if Core.Set.is_empty window_values then layout
-    else { layout with Hike_stack_model.window_param = true }
-  in
   Hike_stack_model.set_layout layout sub
 
 (* The program driver: per-sub sites and resolution, the rewrite. *)

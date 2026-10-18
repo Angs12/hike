@@ -60,7 +60,7 @@
   cbat_env_tag
   cbat_def_origin
   cbat_vsa_stages)
- (libraries bap bap-knowledge hike_def_slot hike_abi hike_stack_bounds hike_bir_flow cbat_vsa_domain hike_synth bitvec core monads )
+ (libraries bap bap-knowledge hike_def_slot hike_abi hike_stack_bounds hike_bir_flow hike_core cbat_vsa_domain hike_synth bitvec core monads )
  ; The cppo chain (mirrors src/dune's hike library): the stages debug
  ; adapter carries #ifdef VSA_DEBUG, and without this stanza the raw
  ; directive reaches the parser — the trailing #ifdef then parses as a

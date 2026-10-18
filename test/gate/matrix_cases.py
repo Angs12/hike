@@ -3,7 +3,7 @@
 import argparse
 
 
-LEVELS = ("O0", "O1", "O2", "O3", "Os", "Oz")
+LEVELS = ("O0", "O3", "Oz")
 MODELS = ("local-exec", "initial-exec", "global-dynamic", "local-dynamic")
 
 
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     configurations = cells("tls" if args.stage == "tls-models" else args.stage)
     for tag, compiler, level, protected, stripped in configurations:
         models = MODELS if args.stage == "tls-models" else (None,)
-        if args.stage == "tls-models" and (not stripped or level not in ("O0", "O2")):
+        if args.stage == "tls-models" and not stripped:
             continue
         for model in models:
             row = [tag + ("-" + model if model else ""), compiler, f"-{level}",

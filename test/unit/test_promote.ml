@@ -651,10 +651,9 @@ let tests : unit Alcotest.test list =
            in
            Core.Map.find resolved (Term.tid j) = Some None));
 
-    (* PR-21: a pure window-value sub binds no Args cell: the window value
-       carries the caller's pointer, so no slot and no residue is
-       claimed. *)
-    pin "PR-21" "a pure window-value sub binds no Args cell (the value carries it)"
+    (* PR-21: an SP-derived value above entry alone does not make an
+       incoming window parameter. *)
+    pin "PR-21" "a pure window-value sub binds no Args cell or window parameter"
       (fun () ->
         let prologue, al, ptr, filler, store, gp_args = prwc_mk_defs () in
         let mid, _ =
@@ -669,18 +668,23 @@ let tests : unit Alcotest.test list =
            match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid mid) with
            | None -> false
            | Some tree ->
+               let layout =
+                 Hike.Sections.layout_of_tree ~word:8
+                   ~entry:Sm.segment_base ~abi:Hike.Abi.x86_64_sysv
+                   ~sub:mid tree
+               in
                not
                  (Base.List.exists
                     (Hike.Sections.Tree.to_sequence tree |> Seq.to_list)
                     ~f:(fun (k, _) ->
                       match k.Hike.Sections.lo.Hike.Sections.p_sec with
                       | Sm.Args -> true
-                      | _ -> false))));
+                      | _ -> false))
+               && not layout.Hike.Stack_model.window_param));
 
-    (* PR-22: the boundary-visible twin — the window value is produced in
-       a previous block and is stamped (the emitter re-bases it to the
-       window parameter at its use). *)
-    pin "PR-22" "the twin's window-value def is stamped (the window lane serves it)"
+    (* PR-22: the value stays marked as a caller-window address without
+       forcing a window parameter in a sub with no Args memory access. *)
+    pin "PR-22" "the twin's window-value def stays stamped without forcing a parameter"
       (fun () ->
         let prologue, al, ptr, _filler, store, _gp_args = prwc_mk_defs () in
         let twin, _ =
@@ -979,6 +983,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub' = rewrite_one (rw_variadic ~overflow:true ()) in
         check "PR-37a" (Hike.Variadic.is_variadic sub');
+        check "PR-37c"
+          (match Term.get_attr sub' Hike.Stack_model.layout_tag with
+           | Some layout -> layout.Hike.Stack_model.window_param
+           | None -> false);
         check_ir "PR-37b" ", ...)" (emit_ir [ sub' ]));
 
     (* PR-38: the same registers spilled into the frame with no

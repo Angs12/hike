@@ -142,7 +142,6 @@ type member = {
   m_width : int;
   m_store : bool;
   m_identity : bool;
-  m_callwin : bool;
 }
 [@@deriving equal, compare, sexp]
 
@@ -491,7 +490,7 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
   in
   { m_sec = p.pt_sec; m_lo = lo; m_hi = hi; m_sub = sub;
     m_def = def; m_width = width; m_store = store;
-    m_identity = not p.pt_elig; m_callwin = false }
+    m_identity = not p.pt_elig }
 
 (* The word cell of a promotable Args member: a def-backed, non-identity
    access wholly inside one word cell at/above the args base.  [None] for
@@ -501,30 +500,54 @@ let args_member_cell ~(word : int) ~(entry : int64) (m : member) : int option =
   if m.m_identity then None
   else Model.args_cell_of_span ~word ~entry m.m_lo m.m_hi
 
-(* The identity members of an escape extent, projected into the sub-local
-   spaces; no def.  Only the frame half binds this sub's storage: the Args
-   half names the caller's outgoing arguments, which the promoted slot
-   pointers carry, so it claims nothing here.  [sub_portions]'s two clip
-   windows ARE the sub-local line's geometry.  [~callwin] marks the
-   calling block's window extent — a residue requirement, not an escape. *)
-let escape_members ~(sub : Tid.t) ~(env : env) ~(callwin : bool)
+(* A stack pointer may be dereferenced at any offset in the escaped
+   caller frame. Keep that frame in one storage so pointer arithmetic
+   remains contiguous; def-backed accesses still size the allocation. *)
+let escape_members ~(sub : Tid.t) ~(env : env)
     (ext : int64 * int64) : member list =
   let lo, hi = ext in
   let _, parts =
     sub_portions ~entry:env.entry ~word:env.word
       ~elig:false ~alo:lo ~ahi:hi lo hi
   in
-  Base.List.map
-    (Base.List.filter parts ~f:(fun p ->
-         not (equal_sec p.pt_sec Args)))
-    ~f:(fun p ->
-      { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
-        m_def = None; m_width = 0; m_store = false; m_identity = true;
-        m_callwin = callwin })
+  if Base.List.exists parts ~f:(fun p -> equal_sec p.pt_sec Stack) then
+    [ { m_sec = Stack;
+        m_lo = Model.stack_floor ~entry:env.entry;
+        m_hi = Model.stack_top ~entry:env.entry ~word:env.word;
+        m_sub = sub; m_def = None; m_width = 0; m_store = false;
+        m_identity = true } ]
+  else []
 
-(* The caller-window hull's slack above the call-time SP: pushes and
-   alignment spillover the window must cover. *)
-let window_push_slop_words = 8
+(* The exact outgoing argument stores of a call block, shared with the
+   promotion's slot binding rule, are the caller-window member. *)
+let call_window_members ~(sub : Tid.t) ~(env : env) ~(blk : blk term)
+    (bindings : Model.call_arg_store list) : member list =
+  let extents =
+    Base.List.filter_map bindings ~f:(fun binding ->
+        match Model.addr_of_rhs (Def.rhs binding.Model.sb_def) with
+        | None -> None
+        | Some (addr, size) ->
+          (match env.denote ~blk ~def:binding.Model.sb_def addr with
+           | Error _ -> None
+           | Ok ws ->
+             Option.map (Model.singleton_stack_position ws) ~f:(fun lo ->
+                 (lo, Model.expand_hi ~cap:Model.args_ceiling lo
+                        (Size.in_bytes size)))))
+  in
+  match extents with
+  | [] -> []
+  | (lo, hi) :: rest ->
+    let lo, hi =
+      Base.List.fold rest ~init:(lo, hi) ~f:(fun (lo, hi) (lo', hi') ->
+          (Stdlib.Int64.min lo lo', Stdlib.Int64.max hi hi'))
+    in
+    let _, portions =
+      sub_portions ~entry:env.entry ~word:env.word ~elig:false
+        ~alo:lo ~ahi:hi lo hi
+    in
+    Base.List.map portions ~f:(fun p ->
+        { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
+          m_def = None; m_width = 0; m_store = false; m_identity = true })
 
 (* The def's memory access: (address, width in bytes, stores). *)
 let access_of (d : def term) : (exp * int * bool) option =
@@ -532,6 +555,15 @@ let access_of (d : def term) : (exp * int * bool) option =
       (addr, Size.in_bytes size, Option.is_some (Model.store_data_of_rhs (Def.rhs d))))
 
 let collect (env : env) (prog : program term) : collecting =
+  let site_bindings =
+    Term.enum sub_t prog
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
+        let sites =
+          Model.site_bindings_of_sub_with_blocks ~word:env.word ~sp:env.sp
+            ~denote:env.denote sub
+        in
+        Core.Map.set acc ~key:(Term.tid sub) ~data:sites)
+  in
   let ownership_visitor =
     object
       inherit [ collecting ] Term.visitor
@@ -554,46 +586,24 @@ let collect (env : env) (prog : program term) : collecting =
                    ~f:(Model.escape_extent ~entry:env.entry))
                 ~init:acc
                 ~f:(fun acc ext ->
-                  Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:false ext)
+                  Base.List.fold (escape_members ~sub:acc.sub ~env ext)
                     ~init:acc
                     ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
         in
-        (* A calling block exposes the call window to the callee —
-           those bytes must live in the residue, never a carved
-           region; the identity member spanning the window forces the
-           residue and grows its extent.  A non-singleton SP claims the
-           hull of its positions: the callee's window sits at the SP of
-           whichever run reaches the call. *)
-        let has_call =
-          Term.enum jmp_t acc.blk
-          |> Seq.exists ~f:(fun j -> Hike_stack_model.call_pushes j)
+        (* A call exposes only the stack-argument stores its caller
+           actually built in this block. *)
+        let bindings =
+          match Core.Map.find site_bindings acc.sub with
+          | None -> []
+          | Some sites ->
+            (match Core.Map.find sites (Term.tid acc.blk) with
+             | None -> []
+             | Some (bindings, _) -> bindings)
         in
-        if not has_call then acc
-        else
-          Option.fold
-            (Option.bind
-               (Result.ok (env.denote ~blk:acc.blk (Bil.Var env.sp)))
-               ~f:(Model.escape_extent ~entry:env.entry))
-            ~init:acc
-            ~f:(fun acc (lo, hi) ->
-              let win_lo =
-                Stdlib.Int64.sub lo (Stdlib.Int64.of_int env.word) in
-              let reach =
-                Stdlib.Int64.add
-                  (Stdlib.Int64.of_int (window_push_slop_words * env.word))
-                  Hike_stack_model.caller_window_bytes
-              in
-              (* Saturate at the line's ceiling. *)
-              let win_hi =
-                if Stdlib.Int64.compare hi
-                     (Stdlib.Int64.sub Model.args_ceiling reach) > 0
-                then Model.args_ceiling
-                else Stdlib.Int64.add hi reach
-              in
-              Base.List.fold
-                (escape_members ~sub:acc.sub ~env ~callwin:true (win_lo, win_hi))
-                ~init:acc
-                ~f:(fun acc m -> { acc with tree = insert acc.tree m }))
+        Base.List.fold
+          (call_window_members ~sub:acc.sub ~env ~blk:acc.blk bindings)
+          ~init:acc
+          ~f:(fun acc m -> { acc with tree = insert acc.tree m })
 
       method! enter_def d acc =
         let dtid = Term.tid d in
@@ -657,7 +667,7 @@ let collect (env : env) (prog : program term) : collecting =
                      ~f:(Model.escape_extent ~entry:env.entry)))
               ~init:acc
               ~f:(fun acc ext ->
-                Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:false ext)
+                Base.List.fold (escape_members ~sub:acc.sub ~env ext)
                   ~init:acc
                   ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
 
@@ -1031,8 +1041,9 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
          (Base.Sexp.to_string (sexp_of_point k.hi)))
   in
   let bindings = Tree.to_sequence tree |> Seq.to_list in
-  (* The Args-space residue members are the caller-window's readers:
-     they force the window and the window parameter alike. *)
+  (* Args-space residue accesses need the incoming caller window. A
+     recognized va_list construction also consumes the overflow area
+     through its stored pointer, even when the read is in a helper. *)
   let args_residue =
     Base.List.exists bindings ~f:(fun (k, rs) ->
         match rs.storage with
@@ -1133,7 +1144,7 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
       :: Base.List.rev carved
     else Base.List.rev carved
   in
-  let window_param = args_residue in
+  let window_param = args_residue || Hike_variadic.is_variadic sub in
   let runtime_residue =
     Base.List.exists bindings ~f:(fun (_, rs) ->
         match rs.storage with

@@ -107,11 +107,14 @@ val meet_range_keep : t -> key:Key.t -> data:Val.t -> t
    tree's value at the same key; join otherwise. *)
 val widen_join_op : (Key.t -> Val.t -> Val.t -> Val.t) -> t -> t -> t
 
-(* Keep cells at key >= [keep_lo] outside [escape]. *)
+(* Keep stack cells at key >= [keep_lo] outside [stack_args], unless
+   [clear_frame] removes every retained frame cell. A cell is dropped
+   whenever its key range overlaps an outgoing stack-argument range. *)
 val call_keep :
   t ->
   keep_lo:Cbat_word.t ->
-  escape:(Cbat_word.t * Cbat_word.t) list -> t
+  stack_args:(Cbat_word.t * Cbat_word.t) list ->
+  clear_frame:bool -> t
 
 (* Whether the map is the bottom map (no tree, no reads). *)
 val is_bottom : t -> bool

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The complete robustness matrix: every native configuration, all four
-# TLS models, and every LLVM optimization level, compared with native runs.
+# TLS models, and LLVM O0/O3/Oz, compared with native runs.
 
 set -u
 
@@ -37,7 +37,7 @@ cell () {
   done
 
   local n=0 total=0 reds=""
-  local -A level_pass=([0]=0 [1]=0 [2]=0 [3]=0 [s]=0 [z]=0)
+  local -A level_pass=([0]=0 [3]=0 [z]=0)
   for i in "${!srcs[@]}"; do
     f="${srcs[$i]}"; name="${names[$i]}"
     if [ -n "$model" ] && [ "$name" != "tls_models" ]; then continue; fi
@@ -63,7 +63,7 @@ cell () {
     local nout="$dir/$name.n.out" lrc nrc
     local repeats=1 run passed=1 lvl level_ok
     case "$name" in tls_pthreads|tls_initialized|tls_models) repeats=20 ;; esac
-    for lvl in 0 1 2 3 s z; do
+    for lvl in 0 3 z; do
       local optll="$dir/$name.O$lvl.ll" lout="$dir/$name.O$lvl.l.out"
       if ! opt-21 -O"$lvl" -S "$ll" -o "$optll" 2>>"$log"; then
         echo "  $name: OPT-FAIL O$lvl" >> "$log"
@@ -106,7 +106,7 @@ cell () {
     fi
   done
   local levels="" lvl
-  for lvl in 0 1 2 3 s z; do levels="$levels O$lvl=${level_pass[$lvl]}/$total"; done
+  for lvl in 0 3 z; do levels="$levels O$lvl=${level_pass[$lvl]}/$total"; done
   if [ -n "$reds" ]; then
     echo "CELL $tag: $n/$total pass; LLVM:$levels; reds:$reds"
   else

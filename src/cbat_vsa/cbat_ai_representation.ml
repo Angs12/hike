@@ -27,6 +27,24 @@ module Clp = Cbat_clp
 
 type wordset = WordSet.t
 
+(* The frame's escape set: the carried set K of the call-escape design
+   (T36 D5/D6) in its first form.  [Whole_frame] says a stack address
+   may be held where a callee reaches it (a call argument, or a store
+   outside the sub's own frame below entry), so no stack cell survives a
+   call.  It joins upward and never returns to [Contained] within a sub;
+   a region set grows from [Whole_frame] without replacing this field. *)
+type escape = Contained | Whole_frame
+[@@deriving bin_io, sexp, compare]
+
+let join_escape (a : escape) (b : escape) : escape =
+  match a, b with
+  | Contained, Contained -> Contained
+  | _ -> Whole_frame
+
+let precedes_escape (a : escape) (b : escape) : bool =
+  match a, b with
+  | Whole_frame, Contained -> false
+  | _ -> true
 
 (* Env keys are the vars' program-wide ids (Cbat_var_id): the maps
    compare ints, so a lookup never walks variable identifiers. *)
@@ -41,30 +59,44 @@ module WordEnv = MapLattice.Make_indexed_val(SlotKey)(WordSet)
 type t = {
   memories : MemEnv.t;
   words : WordEnv.t;
+  escaped : escape;
 } [@@deriving bin_io, sexp, compare]
 
+(* The escape set is a path fact that only a call or a store raises, so
+   [top], the entry state's base, starts [Contained] like [bottom]. *)
 let top : t =
   { memories = MemEnv.top;
     words = WordEnv.top;
+    escaped = Contained;
   }
 let bottom : t =
   { memories = MemEnv.bottom;
     words = WordEnv.bottom;
+    escaped = Contained;
   }
 
 let equal (e1 : t) e2 : bool =
   MemEnv.equal e1.memories e2.memories &&
-  WordEnv.equal e1.words e2.words
+  WordEnv.equal e1.words e2.words &&
+  compare_escape e1.escaped e2.escaped = 0
+
+let frame_escaped (e : t) : bool =
+  match e.escaped with Contained -> false | Whole_frame -> true
+
+let escape_frame (e : t) : t =
+  match e.escaped with
+  | Whole_frame -> e
+  | Contained -> { e with escaped = Whole_frame }
 
 (* A write that leaves the maps physically unchanged keeps the record,
    so physically keyed caches still hit. *)
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
   let memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data in
-  if phys_equal memories e.memories then e else {memories; words = e.words}
+  if phys_equal memories e.memories then e else { e with memories }
 
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
   let words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data in
-  if phys_equal words e.words then e else {memories = e.memories; words}
+  if phys_equal words e.words then e else { e with words }
 
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
   WordEnv.find i env.words (Cbat_var_id.intern v)
@@ -109,16 +141,19 @@ let pp ppf (e : t) =
 
 (* The join's result record is the first operand itself when both
    component maps come back physically unchanged. *)
-let rebuilt (e1 : t) memories words : t =
-  if phys_equal memories e1.memories && phys_equal words e1.words then e1
-  else { memories; words }
+let rebuilt (e1 : t) ~(escaped : escape) memories words : t =
+  if phys_equal memories e1.memories && phys_equal words e1.words
+     && compare_escape escaped e1.escaped = 0 then e1
+  else { memories; words; escaped }
 
 let join (e1 : t) (e2 : t) : t =
-  rebuilt e1 (MemEnv.join e1.memories e2.memories)
+  rebuilt e1 ~escaped:(join_escape e1.escaped e2.escaped)
+    (MemEnv.join e1.memories e2.memories)
     (WordEnv.join e1.words e2.words)
 
 let widen_join (e1 : t) (e2 : t) : t =
-  rebuilt e1 (MemEnv.widen_join e1.memories e2.memories)
+  rebuilt e1 ~escaped:(join_escape e1.escaped e2.escaped)
+    (MemEnv.widen_join e1.memories e2.memories)
     (WordEnv.widen_join e1.words e2.words)
 
 
@@ -232,7 +267,7 @@ let walk_landmarks ~(head : Tid.t)
                 ~data:(Mem.widen_join_op extr old nw)
             end)
     in
-    { memories; words }
+    { memories; words; escaped = join_escape e1.escaped e2.escaped }
 
 (* Extrapolate [need]'s keys by [steps]; each key still reads its own
    row first. *)
@@ -251,11 +286,12 @@ let meet (e1 : t) (e2 : t) : t =
   let memories = MemEnv.meet e1.memories e2.memories in
   let words = WordEnv.meet e1.words e2.words in
   if MemEnv.equal memories MemEnv.bottom || WordEnv.equal words WordEnv.bottom then bottom
-  else { memories; words }
+  else { memories; words; escaped = join_escape e1.escaped e2.escaped }
 
 let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
-  WordEnv.precedes e1.words e2.words
+  WordEnv.precedes e1.words e2.words &&
+  precedes_escape e1.escaped e2.escaped
 
 (* Top every word key not in [preserved]; the memories stay.  An absent
    key reads top, so the others are dropped.  Both the set's elements

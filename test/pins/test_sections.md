@@ -10,7 +10,9 @@ Red evidence is the assertion that flips under the recipe.
 The range/projection/claim pins (SEC-01..SEC-54) exercise the pure
 mechanism and the fixture chain; the regression pins (SEC-55..SEC-68)
 carry the Sections-owned C1/C3/C4b, A1/A4c, R12 and fp-GPR S2/S2b/S3
-assertions.
+assertions. SEC-76/77/78 pin Phase 1's exact outgoing-store window, the
+absence of a window member when a call has no stack arguments, and shared
+storage for a frame pointer that escapes.
 
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
@@ -51,7 +53,7 @@ assertions.
 | SEC-55 | the narrow `r16` store converts to `region_mem 1` at the storage base (`stack_r1_ptr`), keeping its width | make the region rewrite width-sensitive (skip narrow stores) | SEC-55 red: the narrow store's mem is not `region_mem 1` |
 | SEC-56 | the pre-call caller-frame cell `[RSP-8]` holds `{0xAA}` | break the store denotation at the frame cell | SEC-56 red: value ≠ `{0xAA}` |
 | SEC-57 | the pre-call outgoing slot `[RSP+16]` holds `{0xBB}` | drop the outgoing-slot store from the block | SEC-57 red: value ≠ `{0xBB}` |
-| SEC-58 | the caller-frame cell survives the call (frame-keep) | force whole-memory top at the call (`cbat_call_effects.transfer`) | SEC-58 red: post-call value ≠ `{0xAA}` |
+| SEC-58 | a Stack address in the call-read lane marks the frame escaped, so both the local and outgoing Stack cells clear | disable the frame-escape bit in `cbat_call_effects.transfer` | SEC-58 red: the post-call cells are not TOP |
 | SEC-60 | the widened (Infinite-class) store's component takes `Stack_residue`, never Region | treat the widened member as a bounded Region | SEC-60 red: storage ≠ `Stack_residue` |
 | SEC-61 | the constant cell joins the widened member's `Stack_residue` (together, not Region) | split the widened member from the constant cells | SEC-61 red: `[entry-16,entry-9]` storage ≠ `Stack_residue` |
 | SEC-65 | `layout_of_tree` — an 8-byte occupied span allocates 16 (align16 once, no width factor) | multiply the size by the access width in the layout rule | SEC-65 red: `regions ≠ [ (1, (entry-8,entry-1), 16) ]` |
@@ -63,3 +65,6 @@ assertions.
 | SEC-73 | storage selection: a depth beyond `frame_alloca_max` sets `runtime_residue` | drop the depth test in `member_runtime` | SEC-73 red: flag false |
 | SEC-74 | storage selection: an unbounded stack extent sets `runtime_residue` | claim a bounded range for `Unbounded_stack` | SEC-74 red: flag false |
 | SEC-75 | storage selection: a bounded frame keeps allocas, `runtime_residue` false | set the flag for every residue | SEC-75 red: flag true |
+| SEC-76 | the caller-window member is exactly the hull of two aligned outgoing stack-argument stores | restore the fixed `[SP-8, SP+64 KiB+64]` call member | SEC-76 red: the Args member bounds differ from the two stored bytes |
+| SEC-77 | two local Stack stores and a call with no outgoing stack arguments retain two regions and need no incoming window | add an unconditional call-window member | SEC-77 red: the layout has one residue or `window_param` is true |
+| SEC-78 | a stack pointer passed in a lane claims shared storage for the caller frame | limit the escape identity member to the pointer's own offsets | SEC-78 red: adjacent frame cells select different storage |

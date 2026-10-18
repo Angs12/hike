@@ -28,6 +28,14 @@ val add_memory : t -> key:var -> data:Cbat_ai_memmap.t -> t
 val find_word : WordSet.idx -> t -> var -> WordSet.t
 val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 
+(* The frame has escaped: a stack address may be held where a callee
+   reaches it, so a call keeps no stack cell.  A path fact that joins by
+   OR and never clears within a sub; [bottom] and the entry state have it
+   clear.  The first form of the call-escape design's carried set (T36);
+   a region set grows from it. *)
+val frame_escaped : t -> bool
+val escape_frame : t -> t
+
 (* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
 val gc : t -> keep:Core.Int.Set.t -> t
 

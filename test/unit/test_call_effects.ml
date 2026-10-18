@@ -60,7 +60,11 @@ let ce_raw_env ?(lanes = []) () =
 (* The VSA C1 call shape: unknown callee, no escapes, no push. *)
 let ce_call env preserved =
   Ce.transfer ~abi:ce_abi ~preserved
-    ~site:{ Ce.summary = None; written_lanes = []; pushed = false } env
+    ~site:{ Ce.summary = None; read_lanes = []; pushed = false } env
+
+let ce_call_reads ?(stack_args = []) env read_lanes =
+  Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
+    ~site:{ Ce.summary = None; read_lanes; pushed = false } env
 
 let ce_xy_env () =
   let x = v64 "c1_x" in
@@ -89,7 +93,7 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
-            ~site:{ Ce.summary = Some summary; written_lanes = []; pushed = false }
+            ~site:{ Ce.summary = Some summary; read_lanes = []; pushed = false }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
         check "CE-01"
@@ -110,7 +114,7 @@ let tests : unit Alcotest.test list =
         in
         let killed =
           Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
-            ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = []; pushed = false }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
         check "CE-02"
@@ -124,31 +128,32 @@ let tests : unit Alcotest.test list =
         let e, m = ce_raw_env () in
         let kept_frame =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = []; pushed = false } e
+            ~site:{ Ce.summary = None; read_lanes = []; pushed = false } e
         in
         check "CE-03"
           (Ws.equal (ce_reads m 0x2000L kept_frame) (Ws.singleton (w64 42))
           && Ws.equal (ce_reads m 0x3000L kept_frame) (Ws.singleton (w64 7))
           && Ws.is_top (ce_reads m 0x500L kept_frame)));
 
-    (* An escape lane's range dies with the call, the rest of the frame survives. *)
-    pin "CE-04" "an escape lane's range dies with the call, the rest of the frame survives"
+    (* A stack address in a call-read lane clears the whole retained frame. *)
+    pin "CE-04" "a stack address in a call-read lane clears the whole retained frame"
       (fun () ->
         let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
         let e, m = ce_raw_env ~lanes:[ rdi ] () in
         let escaped =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false } e
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false } e
         in
         check "CE-04"
           (Ws.is_top (ce_reads m 0x2000L escaped)
-          && Ws.equal (ce_reads m 0x3000L escaped) (Ws.singleton (w64 7))));
+          && Ws.is_top (ce_reads m 0x3000L escaped)
+          && AI.frame_escaped escaped));
 
     (* A pushed site's SP gains one word — the popped retaddr. *)
     pin "CE-05" "a pushed site's SP gains one word — the popped retaddr" (fun () ->
         let restored =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = []; pushed = true }
+            ~site:{ Ce.summary = None; read_lanes = []; pushed = true }
             (AI.add_word AI.top ~key:ce_abi.Hike_abi.sp
                ~data:(Ws.singleton (w64 0x1000)))
         in
@@ -161,7 +166,7 @@ let tests : unit Alcotest.test list =
         let trap =
           Ce.transfer ~abi:ce_abi
             ~preserved:(ids1 ce_abi.Hike_abi.sp)
-            ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = []; pushed = false }
             trap_env
         in
         check "CE-06"
@@ -269,15 +274,15 @@ let tests : unit Alcotest.test list =
         let env = AI.add_word e ~key:rdi ~data:(Ws.top 64) in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
             env
         in
         check "CE-16"
           (Ws.equal (ce_reads m 0x2000L kept) (Ws.singleton (w64 42))
           && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
 
-    (* A Rel escape of bounded extent carves exactly its range. *)
-    pin "CE-17" "a Rel escape of bounded extent carves its range" (fun () ->
+    (* Re-pin CE-17: bounded stack lanes now conservatively clear the frame. *)
+    pin "CE-17" "a bounded stack escape clears the whole retained frame" (fun () ->
         let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
         let e, m = ce_raw_env () in
         let env =
@@ -285,12 +290,12 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
             env
         in
         check "CE-17"
           (Ws.is_top (ce_reads m 0x2000L kept)
-          && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
+          && Ws.is_top (ce_reads m 0x3000L kept)));
     pin "CE-18" "call-frame retention requires a stack-origin SP" (fun () ->
         let env, m = ce_raw_env () in
         let values =
@@ -303,7 +308,7 @@ let tests : unit Alcotest.test list =
             check "a non-stack SP cannot certify caller-frame survival"
               (Ws.is_top (ce_reads m 0x2000L post))));
 
-    pin "CE-19" "a mixed escape (a stack address or NULL) carves its stack range" (fun () ->
+    pin "CE-19" "a mixed escape clears the whole retained frame" (fun () ->
         let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
         let e, m = ce_raw_env () in
         let env =
@@ -312,12 +317,189 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
             env
         in
         check "CE-19"
           (Ws.is_top (ce_reads m 0x2000L kept)
-          && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
+          && Ws.is_top (ce_reads m 0x3000L kept)));
+
+    pin "CE-20" "a lane set before the call block escapes at the call" (fun () ->
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let env, m = ce_raw_env ~lanes:[ rdi ] () in
+        let post = ce_call_reads env [ rdi ] in
+        check "CE-20"
+          (AI.frame_escaped post
+          && Ws.is_top (ce_reads m 0x2000L post)
+          && Ws.is_top (ce_reads m 0x3000L post)));
+
+    pin "CE-21" "a frame escape stays sticky for later calls" (fun () ->
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let env, m = ce_raw_env ~lanes:[ rdi ] () in
+        let first = ce_call_reads env [ rdi ] in
+        let memory = AI.find_memory ce_idx first m in
+        let memory =
+          Mem.add memory ~key:(ce_mkey 0x3000L)
+            ~data:(Mem.Val.create (Ws.singleton (w64 9)) LittleEndian)
+        in
+        let second = ce_call_reads (AI.add_memory first ~key:m ~data:memory) [] in
+        check "CE-21"
+          (AI.frame_escaped second && Ws.is_top (ce_reads m 0x3000L second)));
+
+    pin "CE-23" "an overlapping memory cell is cleared by an outgoing argument hull" (fun () ->
+        let key =
+          match
+            Mem.Key.of_wordset
+              (Ws.stack_word
+                 (Clp.interval ~width:64 (w64 0x1ff8) (w64 0x2000)))
+          with
+          | [ key ] -> key
+          | _ -> failwith "key"
+        in
+        let memory =
+          Mem.add (Mem.top ce_idx) ~key
+            ~data:(Mem.Val.create (Ws.singleton (w64 3)) LittleEndian)
+        in
+        let cleared =
+          Mem.call_keep memory ~keep_lo:(w64 0x1000)
+            ~stack_args:[ (w64 0x2000, w64 0x2007) ] ~clear_frame:false
+        in
+        check "CE-23" (List.is_empty (Mem.cells cleared)));
+
+    pin "CE-29" "outgoing stores use their SP before the call's return-address push" (fun () ->
+        let entry, m = ce_raw_env () in
+        let sp = ce_abi.Hike_abi.sp in
+        let store off value =
+          Def.create m (Bil.Store
+              (Bil.Var m,
+               Bil.BinOp (Bil.PLUS, Bil.Var sp,
+                          Bil.Int (Cbat_word.to_word (w64 off))),
+               Bil.Int (Cbat_word.to_word (w64 value)), LittleEndian, `r64)) in
+        let callee = mk_selfloop_callee "ce_pushed_window_callee" in
+        let continuation = Tid.create () in
+        let block = Blk.create
+            ~defs:[store 0 1; store 8 2;
+                   Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp,
+                       Bil.Int (Cbat_word.to_word (w64 8))));
+                   store 0 0x1234]
+            ~jmps:[mk_call_jmp continuation (Term.tid callee)] () in
+        let post_defs = Vsa.Test_seam.denote_defs block entry in
+        let ranges = Ce.stack_arg_ranges ~abi:ce_abi ~block ~entry post_defs in
+        check "CE-29 both actual outgoing slots are cleared"
+          (ranges = [(w64 0x1000, w64 0x100f)]));
+
+    pin "CE-26" "the call clears the exact hull of outgoing stack-argument stores" (fun () ->
+        let m = memv "ce_window_m" in
+        let store off value =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp (Bil.PLUS, Bil.Var ce_abi.Hike_abi.sp,
+                           Bil.Int (Cbat_word.to_word (w64 off))),
+                Bil.Int (Cbat_word.to_word (w64 value)),
+                LittleEndian, `r64))
+        in
+        let callee = mk_selfloop_callee "ce_window_callee" in
+        let sub, _ =
+          sub_of "ce_window_caller"
+            [ [ store 8 1; store 16 2 ],
+              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let block = Base.List.hd_exn (Term.enum blk_t sub |> Seq.to_list) in
+        let env, memory_var = ce_raw_env () in
+        let memory = AI.find_memory ce_idx env memory_var in
+        let memory =
+          Base.List.fold [ (0x1008L, 4); (0x1010L, 5); (0x1018L, 6) ]
+            ~init:memory ~f:(fun memory (address, value) ->
+                Mem.add memory ~key:(ce_mkey address)
+                  ~data:(Mem.Val.create (Ws.singleton (w64 value)) LittleEndian))
+        in
+        let env = AI.add_memory env ~key:memory_var ~data:memory in
+        let stack_args = Ce.stack_arg_ranges ~abi:ce_abi ~block ~entry:env env in
+        let post =
+          Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
+            ~site:{ Ce.summary = None; read_lanes = []; pushed = false } env
+        in
+        check "CE-26"
+          (stack_args = [ (w64 0x1008, w64 0x1017) ]
+          && Ws.is_top (ce_reads memory_var 0x1008L post)
+          && Ws.is_top (ce_reads memory_var 0x1010L post)
+          && Ws.equal (ce_reads memory_var 0x1018L post)
+               (Ws.singleton (w64 6))));
+
+    pin "CE-24" "storing a stack address outside the frame raises the escape bit" (fun () ->
+        let mem = memv "ce_escape_global_mem" in
+        let local = v64 "ce_escape_local" in
+        let store =
+          Def.create mem
+            (Bil.Store
+               (Bil.Var mem, Bil.Int (Cbat_word.to_word (w64 0x5000)),
+                Bil.Var local, LittleEndian, `r64))
+        in
+        let env =
+          AI.add_word AI.top ~key:local ~data:(Ws.stack_word_i64 (-16L))
+        in
+        let post = Vsa.Test_seam.denote_def store env in
+        check "CE-24" (AI.frame_escaped post));
+
+    pin "CE-25" "a stack address stored in the sub's own frame stays contained" (fun () ->
+        let mem = memv "ce_local_store_mem" in
+        let local = v64 "ce_local_store_ptr" in
+        let store =
+          Def.create mem
+            (Bil.Store
+               (Bil.Var mem,
+                Bil.BinOp (Bil.MINUS, Bil.Var ce_abi.Hike_abi.sp,
+                           Bil.Int (Cbat_word.to_word (w64 8))),
+                Bil.Var local, LittleEndian, `r64))
+        in
+        let env =
+          AI.add_word
+            (AI.add_word AI.top ~key:ce_abi.Hike_abi.sp
+               ~data:(Ws.stack_word_i64 0L))
+            ~key:local ~data:(Ws.stack_word_i64 (-16L))
+        in
+        let post = Vsa.Test_seam.denote_def store env in
+        check "CE-25" (not (AI.frame_escaped post)));
+
+    pin "CE-27" "the frame-escape bit joins by OR and participates in equality" (fun () ->
+        let contained = AI.top in
+        let escaped = AI.escape_frame contained in
+        let joined = AI.join contained escaped in
+        let widened = AI.widen_join contained escaped in
+        check "CE-27"
+          (AI.frame_escaped joined && AI.frame_escaped widened
+          && AI.equal joined escaped));
+
+    pin "CE-28" "a call reads a stack pointer set in an earlier block" (fun () ->
+        let m = memv "ce_earlier_m" in
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let callee = mk_selfloop_callee "ce_earlier_callee" in
+        let store =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp (Bil.MINUS, Bil.Var ce_abi.Hike_abi.sp,
+                           Bil.Int (Cbat_word.to_word (w64 8))),
+                Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
+        in
+        let set_rdi =
+          Def.create rdi
+            (Bil.BinOp (Bil.MINUS, Bil.Var ce_abi.Hike_abi.sp,
+                        Bil.Int (Cbat_word.to_word (w64 16))))
+        in
+        let sub, tids =
+          sub_of "ce_earlier_blocks"
+            [ [ store; set_rdi ], [ (1, mk_goto) ];
+              [], [ (2, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let sol = run_anchored sub in
+        let after_call = Graphlib.Std.Solution.get sol tids.(2) in
+        check "CE-28"
+          (AI.frame_escaped after_call
+          && Ws.is_top (ce_reads m (-8L) after_call)));
   ]
 
 let () = run "call_effects" tests
