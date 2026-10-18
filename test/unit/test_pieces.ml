@@ -771,6 +771,16 @@ let tests : unit Alcotest.test list =
             ops
         done);
 
+    pin "PCS-30"
+      "concat preserves the concrete elements of a descending high operand"
+      (fun () ->
+        let w = Cbat_word.of_int ~width:8 in
+        let high = Clp.create_descending ~width:8 ~base:(w 200) ~step:(w 3) in
+        let low = w 17 in
+        let result = P.concat (P.of_progression high) (P.singleton low) in
+        check "PCS-30.elements"
+          (List.for_all (fun h -> P.elem (Cbat_word.concat h low) result) (Clp.iter high)));
+
   ]
 
 let () = run "pieces" tests

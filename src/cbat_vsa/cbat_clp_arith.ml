@@ -663,6 +663,7 @@ let cast_parts ct (sz : int) (p : t) : t list =
 let extract_parts ?hi:hi ?lo:lo (p : t) : t list = extract_internal_parts ?hi ?lo p
 
 let concat (p1 : t) (p2 : t) : t list =
+  let p1 = forward p1 in
   let width1 = bitwidth p1 in
   let width2 = bitwidth p2 in
   let width = width1 + width2 in
