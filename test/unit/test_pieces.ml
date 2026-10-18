@@ -634,8 +634,14 @@ let tests : unit Alcotest.test list =
               (w (rnd (1 lsl (min width 29))))
               (Cbat_word.lshift (w (rnd 1000)) (w (max 0 (width - 12)))) in
         let piece width =
-          if rnd 3 = 0 then Clp.singleton (word width)
-          else
+          match rnd 8 with
+          | 0 -> Clp.singleton (word width)
+          | 1 -> Clp.create_ascending ~width ~base:(word width)
+                   ~step:(Cbat_word.of_int ~width (1 + rnd 12))
+          | 2 -> Clp.create_descending ~width ~base:(word width)
+                   ~step:(Cbat_word.of_int ~width (1 + rnd 12))
+          | 3 -> Clp.infinite (word width, Cbat_word.of_int ~width (1 + rnd 12))
+          | _ ->
             let step = Cbat_word.of_int ~width (1 + rnd 6) in
             let cardn = Cbat_word.of_int ~width:(width + 1) (2 + rnd 12) in
             match Clp.arcs ~width ~step ~cardn (word width) with
@@ -676,14 +682,25 @@ let tests : unit Alcotest.test list =
           List.concat_map
             (fun pa -> List.concat_map (fun pb -> f pa pb) (P.to_list b))
             (P.to_list a) in
-        let before = P.fallback_count () in
+        let fallbacks = ref 0 in
+        let measured (value, general) =
+          if general then incr fallbacks;
+          value in
         for i = 1 to 3000 do
           let width = [| 8; 32; 64 |].(i mod 3) in
-          let a = operand width and b = operand width in
+          let a =
+            if i mod 10 = 0 then
+              let w = Cbat_word.of_int ~width in
+              P.union
+                (P.of_progression (Clp.create_descending ~width ~base:(w 8) ~step:(w 3)))
+                (P.union (P.singleton (w 100))
+                   (P.of_progression (Clp.create_ascending ~width ~base:(w 200) ~step:(w 3))))
+            else operand width in
+          let b = if i mod 2 = 0 then P.singleton (word width) else operand width in
           check (Printf.sprintf "PCS-28.add.%d" i)
-            (P.equal (P.add a b) (image (fun () -> pairs a b Cbat_clp_arith.add)));
+            (P.equal (measured (P.For_testing.add a b)) (image (fun () -> pairs a b Cbat_clp_arith.add)));
           check (Printf.sprintf "PCS-28.sub.%d" i)
-            (P.equal (P.sub a b) (image (fun () -> pairs a b Cbat_clp_arith.sub)));
+            (P.equal (measured (P.For_testing.sub a b)) (image (fun () -> pairs a b Cbat_clp_arith.sub)));
           check (Printf.sprintf "PCS-28.lnot.%d" i)
             (P.equal (P.lnot a)
                (image (fun () ->
@@ -694,11 +711,12 @@ let tests : unit Alcotest.test list =
                (image (fun () ->
                     List.concat_map (fun p -> Cbat_clp_core.translate p d) (P.to_list a))));
           check (Printf.sprintf "PCS-28.neg.%d" i)
-            (P.equal (P.neg a)
+            (P.equal (measured (P.For_testing.neg a))
                (image (fun () ->
                     List.concat_map Cbat_clp_arith.neg (P.to_list a))))
         done;
-        check "PCS-28.general" (P.fallback_count () - before >= 24));
+        Printf.printf "PCS-28: %d/9000 operation calls used general re-placement\n%!" !fallbacks;
+        check "PCS-28.general" (!fallbacks >= 24));
 
   ]
 

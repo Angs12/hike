@@ -101,8 +101,6 @@ module Pieces : sig
   (* A result's pieces: one progression or the two arcs of one across the
      modulus, ascending. *)
   val of_arcs : progression list -> t
-  (* How many results needed the general re-placement. *)
-  val fallback_count : unit -> int
   (* The unsigned piece order. *)
   val compare_piece : progression -> progression -> int
   (* Merge ascending progression streams, without combining or capping. *)
@@ -160,6 +158,13 @@ module Pieces : sig
   val extract : ?hi:int -> ?lo:int -> t -> t
   val cast : Bil.cast -> int -> t -> t
   val concat : t -> t -> t
+
+  module For_testing : sig
+    (* The result and whether this call needed general re-placement. *)
+    val add : t -> t -> t * bool
+    val sub : t -> t -> t * bool
+    val neg : t -> t * bool
+  end
 
   (* The smallest arc of the circle holding every piece: one piece, or the
      two arcs of one across the modulus. *)
