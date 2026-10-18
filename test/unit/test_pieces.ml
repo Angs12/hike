@@ -569,6 +569,50 @@ let tests : unit Alcotest.test list =
           (P.elem (w32 300) grown && P.elem (w32 150) grown
            && P.elem (w32 5) grown && not (P.elem (w32 50) grown)));
 
+    pin "PCS-27"
+      "the cached circular hull and extrema equal their recomputation from \
+       the piece list, wrapped, capped, bottom and top values included"
+      (fun () ->
+        let recomputed_hull ps =
+          match P.to_list ps with
+          | [] -> []
+          | p :: rest ->
+            List.fold_left
+              (fun acc q -> Cbat_clp_core.union_arcs acc [ q ]) [ p ] rest in
+        let extreme f better ps =
+          List.fold_left
+            (fun acc p -> Cbat_word.keep_better ~better acc (f p))
+            None (P.to_list ps) in
+        let same_opt a b =
+          match a, b with
+          | None, None -> true
+          | Some x, Some y -> Cbat_word.equal x y
+          | _ -> false in
+        let wrapped = Clp.interval ~width:32 (w32 0xFFFFFFF0) (w32 0x10) in
+        let capped =
+          P.of_progressions
+            (List.init 65 (fun i -> int32 ~lo:(i * 100) ~hi:((i * 100) + 2))) in
+        List.iteri
+          (fun i ps ->
+             let name = Printf.sprintf "PCS-27.%d" i in
+             check (name ^ ".hull")
+               (List.equal Clp.equal (P.to_list (P.circular_hull ps))
+                  (recomputed_hull ps));
+             check (name ^ ".extrema")
+               (same_opt (P.min_elem ps)
+                  (extreme Clp.min_elem (Cbat_word.min_by ~signed:false) ps)
+                && same_opt (P.max_elem ps)
+                     (extreme Clp.max_elem (Cbat_word.max_by ~signed:false) ps)
+                && same_opt (P.min_elem_signed ps)
+                     (extreme Clp.min_elem_signed
+                        (Cbat_word.min_by ~signed:true) ps)
+                && same_opt (P.max_elem_signed ps)
+                     (extreme Clp.max_elem_signed
+                        (Cbat_word.max_by ~signed:true) ps)))
+          [ P.bottom 32; P.top 32; P.singleton (w32 7); p32 [ 0; 1; 2; 6; 7; 8 ];
+            P.union (prog32 ~lo:0 ~hi:9) (prog32 ~lo:100 ~hi:200); wrapped;
+            P.union wrapped (p32 [ 0x7FFFFFF0; 0x80000010 ]); capped ]);
+
   ]
 
 let () = run "pieces" tests

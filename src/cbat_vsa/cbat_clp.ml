@@ -47,34 +47,94 @@ let () =
 (* A canonical, capped union of progressions: sorted by unsigned minimum,
    disjoint, adjacent same-step runs merged, overlapping pieces hulled.
    The list is the set union; [] is bottom.  Smart constructors are the
-   only way in; no raw list escapes except through [to_list]. *)
+   only way in; no raw list escapes except through [to_list].  The other
+   fields are facts of the list, computed once when it is built: the
+   circular hull (None when the union is its own hull) and the four
+   extrema.  Order, equality, sexp and
+   bin_io are the list's alone. *)
 module Pieces_base = struct
-  type t = progression list [@@deriving bin_io, sexp, compare]
+  type t =
+    { pieces : progression list;
+      hull : t option;
+      min_u : Cbat_word.t option;
+      max_u : Cbat_word.t option;
+      min_s : Cbat_word.t option;
+      max_s : Cbat_word.t option }
 
   module C = Cbat_clp_core
   module A = Cbat_clp_arith
   module U = Cbat_vsa_utils
 
+  let extremum (f : C.t -> Cbat_word.t option)
+      ~(better : Cbat_word.t -> Cbat_word.t -> Cbat_word.t)
+      (ps : progression list) : Cbat_word.t option =
+    List.fold ps ~init:None ~f:(fun acc p ->
+        Cbat_word.keep_better ~better acc (f p))
+
+  (* The smallest arc of the circle holding every piece, as a piece or
+     the two arcs of one across the modulus; the empty union is its own
+     hull. *)
+  let hull_arcs (ps : progression list) : progression list =
+    match ps with
+    | [] | [ _ ] -> ps
+    | p :: rest ->
+      List.fold rest ~init:[ p ] ~f:(fun acc q -> C.union_arcs acc [ q ])
+
+  (* The one way to a value: derive the cached facts from the list.  A
+     union that is its own hull has none stored. *)
+  let rec mk (pieces : progression list) : t =
+    let min_u = extremum C.min_elem ~better:(Cbat_word.min_by ~signed:false) pieces in
+    let max_u = extremum C.max_elem ~better:(Cbat_word.max_by ~signed:false) pieces in
+    let min_s =
+      extremum C.min_elem_signed ~better:(Cbat_word.min_by ~signed:true) pieces in
+    let max_s =
+      extremum C.max_elem_signed ~better:(Cbat_word.max_by ~signed:true) pieces in
+    let arcs = hull_arcs pieces in
+    if phys_equal arcs pieces
+       || (List.length arcs = List.length pieces
+           && List.for_all2_exn arcs pieces ~f:C.equal)
+    then { pieces; hull = None; min_u; max_u; min_s; max_s }
+    else { pieces; hull = Some (mk arcs); min_u; max_u; min_s; max_s }
+
+  let empty : t = mk []
+
+  type repr = progression list [@@deriving bin_io, sexp, compare]
+
+  let sexp_of_t (ps : t) : Sexp.t = sexp_of_repr ps.pieces
+  let t_of_sexp (s : Sexp.t) : t = mk (repr_of_sexp s)
+  let compare (a : t) (b : t) : int = compare_repr a.pieces b.pieces
+
+  include Binable.Of_binable_with_uuid (struct
+      type t = repr [@@deriving bin_io]
+    end) (struct
+      type nonrec t = t
+      let to_binable (ps : t) : repr = ps.pieces
+      let of_binable : repr -> t = mk
+      let caller_identity = Bin_prot.Shape.Uuid.of_string "hike:cbat_clp.pieces/1"
+    end)
+
   (* The union's bit width (its pieces' common width). *)
   let width_of (ps : t) : int =
-    match ps with [] -> 0 | p :: _ -> C.bitwidth p
+    match ps.pieces with [] -> 0 | p :: _ -> C.bitwidth p
 
-  let to_list (ps : t) : progression list = ps
+  let to_list (ps : t) : progression list = ps.pieces
   let fold (ps : t) ~(init : 'a) ~(f : 'a -> progression -> 'a) : 'a =
-    List.fold ps ~init ~f
-  let iter (ps : t) ~(f : progression -> unit) : unit = List.iter ps ~f
-  let elements (ps : t) : Cbat_word.t list = List.concat_map ps ~f:C.iter
+    List.fold ps.pieces ~init ~f
+  let iter (ps : t) ~(f : progression -> unit) : unit = List.iter ps.pieces ~f
+  let elements (ps : t) : Cbat_word.t list = List.concat_map ps.pieces ~f:C.iter
 
-  let is_bottom (ps : t) : bool = ps = []
-  let is_top (ps : t) : bool = List.exists ps ~f:C.is_top
+  let is_bottom (ps : t) : bool = List.is_empty ps.pieces
+  let is_top (ps : t) : bool = List.exists ps.pieces ~f:C.is_top
   let bitwidth = width_of
 
   (* Cached per width, as [C.top] is. *)
-  let top_cache : t array = Stdlib.Array.init 257 (fun i -> if i > 0 then [ C.top i ] else [])
+  let top_cache : t array =
+    Stdlib.Array.init 257 (fun i -> if i > 0 then mk [ C.top i ] else empty)
 
   let top (i : int) : t =
-    if i > 0 && i < Stdlib.Array.length top_cache then top_cache.(i) else [ C.top i ]
-  let bottom (_ : int) : t = []
+    if i > 0 && i < Stdlib.Array.length top_cache then top_cache.(i)
+    else mk [ C.top i ]
+  let bottom (_ : int) : t = empty
 
   (* The unsigned piece order: minimum, maximum, step, then the record. *)
   let compare_piece (p1 : progression) (p2 : progression) : int =
@@ -200,7 +260,7 @@ module Pieces_base = struct
      overlap can hide behind an interleaved tail, so it is checked against
      every placed piece.  A hull across the modulus or a hidden overlap
      falls back to the general placement.  No sort runs here. *)
-  let assemble (ps : progression list) : t =
+  let assemble (ps : progression list) : progression list =
     let push x acc =
       let hi =
         match acc, C.max_elem x with
@@ -271,7 +331,7 @@ module Pieces_base = struct
 
   (* The one-piece hull of a union that leaves the budget.  A hull that
      traverses the wrap circulates to its circular grid. *)
-  let hull (ps : progression list) : t =
+  let hull (ps : progression list) : progression list =
     match ps with
     | [] -> []
     | p :: rest ->
@@ -280,7 +340,8 @@ module Pieces_base = struct
 #endif
       [ List.fold rest ~init:p ~f:coalesce ]
 
-  let cap (ps : t) : t = if within_budget ps then ps else hull ps
+  let cap (ps : progression list) : progression list =
+    if within_budget ps then ps else hull ps
 
   (* The producer finish: combine the already-ordered stream, then
      collapse a union past the budget to its hull.  No sort: the caller
@@ -290,7 +351,7 @@ module Pieces_base = struct
 #ifdef VSA_DEBUG
     census_len (List.length r);
 #endif
-    r
+    mk r
 
   (* The pieces of a result: its arcs, ascending and disjoint. *)
   let of_arcs (arcs : progression list) : t =
@@ -368,42 +429,32 @@ module Pieces_base = struct
   (* [of_list] requires an ascending, deduped word list — a precondition,
      not a sort.  The run builder consumes it directly. *)
   let of_list ~(width : int) (l : Cbat_word.t list) : t =
-    if width <= 0 then []
+    if width <= 0 then empty
     else
       match l with
       (* A point address, the common key: its one run is its singleton. *)
-      | [ w ] -> [ C.singleton (Cbat_word.extract_exn ~hi:(width - 1) ~lo:0 w) ]
+      | [ w ] -> mk [ C.singleton (Cbat_word.extract_exn ~hi:(width - 1) ~lo:0 w) ]
       | _ ->
         let l = List.map l ~f:(Cbat_word.extract_exn ~hi:(width - 1) ~lo:0) in
         finish (List.rev (runs_from_sorted_elements ~width l))
 
-  let singleton (w : Cbat_word.t) : t = [ C.singleton w ]
+  let singleton (w : Cbat_word.t) : t = mk [ C.singleton w ]
 
-  let extremum (f : C.t -> Cbat_word.t option)
-      ~(better : Cbat_word.t -> Cbat_word.t -> Cbat_word.t) (ps : t)
-    : Cbat_word.t option =
-    List.fold ps ~init:None ~f:(fun acc p ->
-        Cbat_word.keep_better ~better acc (f p))
-
-  let min_elem = extremum C.min_elem ~better:(Cbat_word.min_by ~signed:false)
-  let max_elem = extremum C.max_elem ~better:(Cbat_word.max_by ~signed:false)
-
-  let min_elem_signed =
-    extremum C.min_elem_signed ~better:(Cbat_word.min_by ~signed:true)
-
-  let max_elem_signed =
-    extremum C.max_elem_signed ~better:(Cbat_word.max_by ~signed:true)
+  let min_elem (ps : t) : Cbat_word.t option = ps.min_u
+  let max_elem (ps : t) : Cbat_word.t option = ps.max_u
+  let min_elem_signed (ps : t) : Cbat_word.t option = ps.min_s
+  let max_elem_signed (ps : t) : Cbat_word.t option = ps.max_s
 
   (* Saturating sum of the pieces' cardinalities. *)
   let cardinality (ps : t) : Cbat_word.t =
-    match ps with
+    match ps.pieces with
     | [ p ] -> C.cardinality p
-    | _ ->
+    | pieces ->
     let width = width_of ps in
     if width = 0 then Cbat_word.zero 1
     else
       let w1 = width + 1 in
-      List.fold ps ~init:(Cbat_word.zero w1) ~f:(fun acc p ->
+      List.fold pieces ~init:(Cbat_word.zero w1) ~f:(fun acc p ->
           let c = Cbat_word.cast Bil.UNSIGNED w1 (C.cardinality p) in
           let s = Cbat_word.add acc c in
           if Cbat_word.(<) s acc then Cbat_word.ones w1 else s)
@@ -416,37 +467,38 @@ module Pieces_base = struct
         let c = Cbat_word.to_int_sat (C.cardinality p) in
         c > left || go (left - c) rest
     in
-    go n ps
+    go n ps.pieces
 
   let elem (w : Cbat_word.t) (ps : t) : bool =
-    List.exists ps ~f:(fun p -> C.elem w p)
+    List.exists ps.pieces ~f:(fun p -> C.elem w p)
 
   let equal (a : t) (b : t) : bool =
     phys_equal a b
     ||
-    (match a, b with
+    (match a.pieces, b.pieces with
      | [ x ], [ y ] -> C.equal x y
-     | _ ->
+     | a, b ->
        List.length a = List.length b && List.for_all2_exn a b ~f:C.equal)
 
   let overlap (a : t) (b : t) : bool =
-    List.exists a ~f:(fun pa -> List.exists b ~f:(fun pb -> overlap_exact pa pb))
+    List.exists a.pieces ~f:(fun pa ->
+        List.exists b.pieces ~f:(fun pb -> overlap_exact pa pb))
 
   let splits_by (ps : t) (w : Cbat_word.t) : bool =
-    List.for_all ps ~f:(fun p -> C.splits_by p w)
+    List.for_all ps.pieces ~f:(fun p -> C.splits_by p w)
 
-  let is_ascending (ps : t) : bool = List.for_all ps ~f:C.is_ascending
-  let is_descending (ps : t) : bool = List.for_all ps ~f:C.is_descending
-  let is_circular (ps : t) : bool = List.for_all ps ~f:C.is_circular
+  let is_ascending (ps : t) : bool = List.for_all ps.pieces ~f:C.is_ascending
+  let is_descending (ps : t) : bool = List.for_all ps.pieces ~f:C.is_descending
+  let is_circular (ps : t) : bool = List.for_all ps.pieces ~f:C.is_circular
 
   (* Union-order coverage: every piece of [a] is contained in [b]'s union
      (a single covering piece, or a small piece covered element-wise). *)
   let precedes (a : t) (b : t) : bool =
-    List.for_all a ~f:(fun pa ->
-        List.exists b ~f:(fun pb -> C.subset pa pb)
+    List.for_all a.pieces ~f:(fun pa ->
+        List.exists b.pieces ~f:(fun pb -> C.subset pa pb)
         || (small_card pa
             && List.for_all (C.iter pa) ~f:(fun x ->
-                List.exists b ~f:(fun pb -> C.elem x pb))))
+                List.exists b.pieces ~f:(fun pb -> C.elem x pb))))
 
   (* Union's own construction: both operands are ascending and disjoint,
      so a two-way merge by minimum gives an ascending stream each of whose
@@ -455,18 +507,18 @@ module Pieces_base = struct
      collapses to top at the widest; only a hull across the modulus falls
      back. *)
   let union (a : t) (b : t) : t =
-    match a, b with
+    match a.pieces, b.pieces with
     | [], _ -> b
     | _, [] -> a
     | _ when equal a b -> a
     | _ when not (Stdlib.Int.equal (width_of a) (width_of b)) ->
-      finish (collapse_width (List.append a b))
-    | _ ->
+      finish (collapse_width (List.append a.pieces b.pieces))
+    | ap, bp ->
       (* [b] ascends, so each piece can only meet the placed tail; place
          it exactly. *)
-      let merged = List.fold b ~init:a ~f:merge_arc in
+      let merged = List.fold bp ~init:ap ~f:merge_arc in
       (* Every piece of [b] sat inside [a]'s pieces: [a] is the union. *)
-      if phys_equal merged a then a else finish merged
+      if phys_equal merged ap then a else finish merged
 
   (* Exact meet of one pair: a small side enumerates element-wise, else
      the CLP meet (sound over-approximation). *)
@@ -484,12 +536,12 @@ module Pieces_base = struct
         if C.is_bottom r then [] else [ r ]
 
   let intersection (a : t) (b : t) : t =
-    if is_bottom a || is_bottom b then []
+    if is_bottom a || is_bottom b then empty
     else if equal a b then a
     else
       produce (fun emit ->
-          List.iter a ~f:(fun pa ->
-              List.iter b ~f:(fun pb ->
+          List.iter a.pieces ~f:(fun pa ->
+              List.iter b.pieces ~f:(fun pb ->
                   List.iter (pair_intersection pa pb) ~f:emit)))
 
   (* The survivors of one finite non-wrapping grid after removing [es]
@@ -631,38 +683,41 @@ module Pieces_base = struct
     else minus_all a bs
 
   let diff (a : t) (b : t) : t =
-    if is_bottom a || equal a b then []
+    if is_bottom a || equal a b then empty
     else if is_bottom b then a
     else produce (fun emit ->
-        List.iter a ~f:(fun pa -> List.iter (diff_piece pa b) ~f:emit))
+        List.iter a.pieces ~f:(fun pa ->
+            List.iter (diff_piece pa b.pieces) ~f:emit))
 
   (* Unary images enter their ordered index as they are produced; an
      image is a piece or the two arcs of one across the modulus. *)
   let map (f : progression -> progression list) (ps : t) : t =
-    match ps with
-    | [] -> []
+    match ps.pieces with
+    | [] -> empty
     | [ p ] -> of_arcs (f p)
-    | _ -> produce (fun emit -> List.iter ps ~f:(fun p -> List.iter (f p) ~f:emit))
+    | pieces ->
+      produce (fun emit -> List.iter pieces ~f:(fun p -> List.iter (f p) ~f:emit))
 
   let lift2 (f : progression -> progression -> progression list) (a : t) (b : t)
     : t =
-    match a, b with
+    match a.pieces, b.pieces with
     | [ pa ], [ pb ] -> of_arcs (f pa pb)
-    | _ -> produce (fun emit ->
-        List.iter a ~f:(fun pa ->
-            List.iter b ~f:(fun pb -> List.iter (f pa pb) ~f:emit)))
+    | ap, bp -> produce (fun emit ->
+        List.iter ap ~f:(fun pa ->
+            List.iter bp ~f:(fun pb -> List.iter (f pa pb) ~f:emit)))
 
   (* Each piece produces any number of result pieces directly into the
      ordered image. *)
   let map_parts (f : progression -> progression list) (ps : t) : t =
-    produce (fun emit -> List.iter ps ~f:(fun q -> List.iter (f q) ~f:emit))
+    produce (fun emit ->
+        List.iter ps.pieces ~f:(fun q -> List.iter (f q) ~f:emit))
 
   (* Each pair likewise. *)
   let lift2_parts (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
     produce (fun emit ->
-        List.iter a ~f:(fun qa ->
-            List.iter b ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
+        List.iter a.pieces ~f:(fun qa ->
+            List.iter b.pieces ~f:(fun qb -> List.iter (f qa qb) ~f:emit)))
 
   let add = lift2 A.add
   let sub = lift2 A.sub
@@ -680,13 +735,13 @@ module Pieces_base = struct
 
   (* Each operand's derived values are built once, not once per pair. *)
   let logxor (a : t) (b : t) : t =
-    match a, b with
+    match a.pieces, b.pieces with
     | [ pa ], [ pb ] -> of_arcs (A.logxor pa pb)
-    | [], _ | _, [] -> []
-    | _ ->
-      let ob = List.map b ~f:(fun pb -> A.xor_operand pb) in
+    | [], _ | _, [] -> empty
+    | ap, bp ->
+      let ob = List.map bp ~f:(fun pb -> A.xor_operand pb) in
       produce (fun emit ->
-          List.iter a ~f:(fun pa ->
+          List.iter ap ~f:(fun pa ->
               let oa = A.xor_operand pa in
               List.iter ob ~f:(fun ob ->
                   List.iter (A.logxor_ops oa ob) ~f:emit)))
@@ -719,8 +774,8 @@ module Pieces_base = struct
      couple collapses the whole value (the studied termination escape). *)
   let positional (f : progression -> progression -> progression list) (a : t)
       (b : t) : t =
-    match a, b with
-    | [], [] -> []
+    match a.pieces, b.pieces with
+    | [], [] -> empty
     | [], _ -> b
     | _, [] -> a
     | _ ->
@@ -738,8 +793,8 @@ module Pieces_base = struct
       in
       let merged =
         merge
-          (List.map a ~f:(fun p -> (true, p)))
-          (List.map b ~f:(fun p -> (false, p)))
+          (List.map a.pieces ~f:(fun p -> (true, p)))
+          (List.map b.pieces ~f:(fun p -> (false, p)))
       in
       (* The unsigned distance from [p]'s upper end to [q]'s lower end,
          zero when the spans meet, unbounded when [p] has no maximum. *)
@@ -778,45 +833,39 @@ module Pieces_base = struct
         pass emit rest
       in
       let pieces = produce (fun emit -> pass emit merged) in
-      if !top_hit then [ C.top (width_of b) ] else pieces
+      if !top_hit then top (width_of b) else pieces
 
   let widen_join = positional C.widen_join
   let extrapolate_steps ~steps a b = positional (C.extrapolate_steps ~steps) a b
 
   (* ---- the circular hull: one arc of the circle ---- *)
 
-  (* The smallest arc of the circle holding every piece, as a piece or
-     the two arcs of one across the modulus; the empty union is its own
-     hull. *)
   let circular_hull (ps : t) : t =
-    match ps with
-    | [] | [ _ ] -> ps
-    | p :: rest ->
-      List.fold rest ~init:[ p ] ~f:(fun acc q -> C.union_arcs acc [ q ])
+    match ps.hull with None -> ps | Some h -> h
 
   (* The hull of two hulls. *)
-  let hull_union (a : t) (b : t) : t = of_arcs (C.union_arcs a b)
+  let hull_union (a : t) (b : t) : t = of_arcs (C.union_arcs a.pieces b.pieces)
 
   (* Sum and difference of two hulls, each result joined into one hull. *)
-  let hull_add (a : t) (b : t) : t = of_arcs (A.add_l a b)
-  let hull_sub (a : t) (b : t) : t = of_arcs (A.sub_l a b)
+  let hull_add (a : t) (b : t) : t = of_arcs (A.add_l a.pieces b.pieces)
+  let hull_sub (a : t) (b : t) : t = of_arcs (A.sub_l a.pieces b.pieces)
 
   (* [p] met with a hull: the hull of its meets with the hull's pieces. *)
   let hull_intersection (p : progression) (r : t) : t =
     of_arcs
-      (List.fold r ~init:[] ~f:(fun acc a ->
+      (List.fold r.pieces ~init:[] ~f:(fun acc a ->
            let i = C.intersection p a in
            if C.is_bottom i then acc else C.union_arcs acc [ i ]))
 
   (* The step of a hull: the progression it denotes (0 for a singleton). *)
   let hull_step (h : t) : Cbat_word.t =
-    match h with
+    match h.pieces with
     | [] -> Cbat_word.zero 1
     | [ p ] -> C.step_of p
-    | _ ->
-      (match A.unit_of h with
+    | pieces ->
+      (match A.unit_of pieces with
        | Some (_, step, _) -> step
-       | None -> C.step_of (List.hd_exn h))
+       | None -> C.step_of (List.hd_exn pieces))
 
   (* The hull of an ascending, deduplicated word list. *)
   let hull_of_list ~(width : int) (l : Cbat_word.t list) : t =
@@ -831,23 +880,23 @@ module Pieces_base = struct
      the modulus widens to its circular grid unless it is stable. *)
   let widen_hulls (f : progression -> progression -> progression list)
       (a : t) (b : t) : t =
-    match a, b with
+    match a.pieces, b.pieces with
     | [ x ], [ y ] -> of_arcs (f x y)
     | [], _ -> b
     | _ when equal a b -> a
-    | _ ->
-      let u = C.union_arcs a b in
+    | ap, bp ->
+      let u = C.union_arcs ap bp in
       match u, A.unit_of u with
       | _ :: _ :: _, Some (base, step, _) when precedes a b ->
-        [ C.infinite (base, step) ]
+        mk [ C.infinite (base, step) ]
       | _ -> of_arcs u
 
   let pp ppf (ps : t) =
-    match ps with
+    match ps.pieces with
     | [] -> ()
     | [ p ] -> C.pp ppf p
-    | low :: _ ->
-      (match A.unit_of ps, C.finite_end low with
+    | (low :: _) as pieces ->
+      (match A.unit_of pieces, C.finite_end low with
        | Some (base, step, cardn), Some last ->
          C.pp_span ppf ~width:(C.bitwidth low) ~base ~step ~cardn ~last
        | _ -> ())
@@ -986,17 +1035,16 @@ module Exact_base = struct
      non-wrapping: only the budget combines. *)
   let pieces (t : t) : Pieces_base.t =
     let runs = to_pieces t in
-    if List.length runs <= Cbat_vsa_utils.max_pieces then runs
-    else Pieces_base.hull runs
+    Pieces_base.mk (Pieces_base.cap runs)
 
   (* Piece minima ascend, but strided pieces can interleave.  Merge their
      ascending element streams to preserve the array's order. *)
   let of_pieces ~(width : int) (ps : Pieces_base.t) : t =
 #ifdef VSA_DEBUG
-    assert (List.for_all ps ~f:(fun p -> Cbat_clp_core.bitwidth p = width));
+    assert (List.for_all (Pieces_base.to_list ps) ~f:(fun p -> Cbat_clp_core.bitwidth p = width));
 #endif
     of_sorted_list ~width
-      (List.fold_right ps ~init:[] ~f:(fun p acc ->
+      (List.fold_right (Pieces_base.to_list ps) ~init:[] ~f:(fun p acc ->
            List.merge (Cbat_clp_core.iter p) acc ~compare:W.compare)
        |> List.remove_consecutive_duplicates ~equal:W.equal)
 
@@ -1563,7 +1611,7 @@ module Pieces_backward = Cbat_preimage.Make (struct
   let parts t = List.map (to_list t) ~f:of_progression
 
   let assemble ~width:_ = function
-    | [] -> []
+    | [] -> empty
     | [ p ] -> p
     | ts -> produce (fun emit -> List.iter ts ~f:(fun p -> iter p ~f:emit))
 
