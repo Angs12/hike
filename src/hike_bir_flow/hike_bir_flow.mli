@@ -32,3 +32,17 @@ val liveness :
   phi:(phi term -> Var.Set.t * Var.Set.t) ->
   jmp:(jmp term -> Var.Set.t * Var.Set.t) ->
   Var.Set.t solution
+
+(* A monotone rule over SSA versions: [fire] adds versions to the
+   solution given what it holds, and re-runs whenever a version in
+   [reads] joins.  Facts of a version, not of a program point, so the
+   solution is one set with no per-block state. *)
+type rule = {
+  reads : var list;
+  fire : holds:(var -> bool) -> add:(var -> unit) -> unit;
+}
+
+(* The least set containing the seeds and closed under the rules, each
+   rule fired once up front and again per joining read.  Compile the
+   rules once, then solve per seed list. *)
+val closure : rule list -> var list -> var list

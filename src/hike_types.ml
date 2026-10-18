@@ -277,9 +277,6 @@ type ptr_facts = {
   vars : Var.Set.t;
 }
 
-let ptr_facts_empty =
-  { def_tids = Tid.Set.empty; def_storages = Tid.Map.empty; vars = Var.Set.empty }
-
 (* An address expression's candidate bases, read once: a lone var, or the
    spine's vars (each with its lazily-decided seed-independent base
    status). *)
@@ -287,28 +284,11 @@ type site =
   | Lone of var
   | Spine of (var * bool Lazy.t) list
 
-(* The pointer-kind inference, two [Hike_bir_flow] passes joined to a
-   fixpoint.  The forward pass (provenance) seeds on the VSA denotation (a
-   bounded stack value) plus the caller-proven lanes, and adds every def
-   whose rhs is a pointer-preserving shape over a proven operand.  The
-   backward pass (use) adds the base var of every load/store address,
-   and through a pointer-preserving def the operand of a proven var.
-   Each result seeds the other; both are unions over the finite set of
-   SSA versions, so the loop terminates.  A var is a pointer when any of
-   its defs is (the join is [int ⊑ ptr]).  Use-based pointers get no
-   stack storage: [storage_of] still needs a VSA proof.  [used] seeds
-   the backward pass (the versions a caller passes into pointer lanes).
-   Without SSA versions, or for a fixed signature's lanes, a use proves
-   nothing.
-
-   Every rule is monotone in the pointer set, but the two directions cannot
-   share one lattice: provenance flows def to use and use flows use to def,
-   so they need opposite edge directions.  They stay two incremental flows
-   feeding each other.  Their states hold only what the seed set lacks (the
-   seed set is consulted beside the state), and both resume from the
-   previous round's solution, within a solve and across solves with grown
-   seeds.  [ptr_solver sub] does the seed-independent setup once and
-   returns the solver for any seeds. *)
+(* Forward provenance and backward address uses meet at a local monotone
+   fixpoint over SSA versions (int <= ptr).  Callee contracts seed the
+   call results and pointer arguments; storage still needs a VSA proof.
+   Both Bir_flow directions retain their states within the local solve
+   and when a recursive callee's contract grows. *)
 let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     extra:Var.Set.t -> used:Var.Set.t -> ptr_facts =
   let layout =
@@ -368,20 +348,16 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     && Base.Option.is_none (Hike_stack_model.store_data_of_rhs (Def.rhs d))
     && is_addr_width d && load_word
   in
-  let add_value acc d =
-    if value_def d then Core.Set.add acc (Def.lhs d) else acc
-  in
   (* The entry SP is a pointer by construction; the window lane too. *)
-  let with_roots extra =
-    let sp = facts.Hike_kb.abi.Hike_abi.sp in
-    let window =
-      Hike_stack_model.hike_window_var ~word:facts.Hike_kb.abi.Hike_abi.word
-    in
-    Core.Set.add (Core.Set.add extra sp) window
+  let roots =
+    [ facts.Hike_kb.abi.Hike_abi.sp;
+      Hike_stack_model.hike_window_var ~word:facts.Hike_kb.abi.Hike_abi.word ]
   in
   (* Every var [is_ptr] sees occurs in the sub: classify each once. *)
-  let addrs = address_versions ~facts sub in
-  let is_ptr ptrs v = Core.Set.mem ptrs v || Core.Set.mem addrs v in
+  let addrs = Var.Table.create () in
+  Core.Set.iter (address_versions ~facts sub) ~f:(fun v ->
+      Core.Hashtbl.set addrs ~key:v ~data:());
+  let is_ptr holds v = holds v || Core.Hashtbl.mem addrs v in
   let is_stack_addr (ws : Vsa.WordSet.t) : bool =
     Vsa.WordSet.in_stack_segment ws
   in
@@ -405,96 +381,37 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     | Some st -> Lazy.force st
     | None -> None
   in
-  (* The provenance state holds only the pointers the seed set lacks;
-     [ptr] reads the seed set, the state and the address versions. *)
-  let rec shape_ptr (ptr : var -> bool) (e : exp) : bool =
+  (* The vars whose pointer-ness carries to an expression's value. *)
+  let rec shape_vars acc (e : exp) : var list =
     match e with
-    | Bil.Var v ->
-        ptr v || (match Var.typ v with Type.Mem _ -> true | _ -> false)
-    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) ->
-        shape_ptr ptr a || shape_ptr ptr b
-    | Bil.Ite (_, a, b) -> shape_ptr ptr a || shape_ptr ptr b
-    | _ -> false
+    | Bil.Var v -> v :: acc
+    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) | Bil.Ite (_, a, b) ->
+        shape_vars (shape_vars acc a) b
+    | _ -> acc
   in
-  (* Each block's stack-denoted defs: independent of the seeds. *)
-  let denot_seeds =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-           let seed =
-             Term.enum def_t blk
-             |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
-                    if Core.Map.mem stack_denots (Term.tid d) then
-                      add_value acc d
-                    else acc)
-           in
-           Core.Map.set m ~key:(Term.tid blk) ~data:seed)
+  (* The stack-denoted value defs: independent of the seeds. *)
+  let denot_vars =
+    Base.List.filter_map defs ~f:(fun (_, d) ->
+        if Core.Map.mem stack_denots (Term.tid d) && value_def d then
+          Some (Def.lhs d)
+        else None)
   in
-  let def seed ptrs d =
-    let ptr v = Core.Set.mem seed v || is_ptr ptrs v in
-    if shape_ptr ptr (Def.rhs d) && not (Core.Set.mem seed (Def.lhs d)) then
-      add_value ptrs d
-    else ptrs
-  in
-  let phi seed ptrs p =
-    let inc =
-      Phi.values p
-      |> Seq.exists ~f:(fun (_, e) ->
-             match e with
-             | Bil.Var v -> Core.Set.mem seed v || is_ptr ptrs v
-             | _ -> false)
-    in
-    if inc && is_value_var (Phi.lhs p) then
-      Core.Set.add ptrs (Phi.lhs p)
-    else ptrs
-  in
-  let jmp ptrs _ = ptrs in
-  let graph = Sub.to_graph sub in
-  (* The provenance closure of [extra], resumed from a previous round's
-     block-entry states (all below this round's, as [extra] only grows). *)
-  let forward ?resume extra =
-    let extra = with_roots extra in
-    let initial = Option.value resume ~default:denot_seeds in
-    let flow =
-      Hike_bir_flow.run ~graph ~sub ~rev:false ~initial
-        ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
-        ~def:(def extra) ~phi:(phi extra) ~jmp
-    in
-    let ptrs =
-      Core.Map.fold flow.after ~init:extra ~f:(fun ~key:_ ~data acc ->
-          Core.Set.union acc data)
-    in
-    (ptrs, flow.before)
-  in
-  (* The use pass.  Under SSA each version has one def, so the set only
-     grows; a use in a later block flows back to its def's block. *)
-  let versioned =
-    Model.is_ssa sub
-    && Seq.exists (Term.enum blk_t sub) ~f:(fun blk ->
-           Term.has_attr blk Model.versions_tag)
-  in
-  let fixed_lanes =
-    if Model.fixed_signature sub then
-      Var.Set.of_list (Base.List.map (Model.sig_args sub) ~f:Arg.lhs)
-    else Var.Set.empty
-  in
-  let def_of =
-    Base.List.fold defs ~init:Var.Map.empty ~f:(fun m (_, d) ->
-        Core.Map.set m ~key:(Def.lhs d) ~data:d)
-  in
+  let fixed_lanes = Var.Table.create () in
+  if Model.fixed_signature sub then
+    Base.List.iter (Model.sig_args sub) ~f:(fun a ->
+        Core.Hashtbl.set fixed_lanes ~key:(Arg.lhs a) ~data:());
+  let def_of = Var.Table.create () in
+  Base.List.iter defs ~f:(fun (_, d) ->
+      Core.Hashtbl.set def_of ~key:(Def.lhs d) ~data:d);
   (* Only a version that can hold a pointer: an address-width value, not
      a fixed signature's lane. *)
   let use_ok v =
-    versioned && is_value_var v
+    is_value_var v
     && (match Var.typ v with Type.Imm n -> Int.equal n addr_width | _ -> false)
-    && (not (Core.Set.mem fixed_lanes v))
-    && (match Core.Map.find def_of v with
+    && (not (Core.Hashtbl.mem fixed_lanes v))
+    && (match Core.Hashtbl.find def_of v with
         | Some d -> value_def d
         | None -> true)
-  in
-  let add_used seed acc vs =
-    Base.List.fold vs ~init:acc ~f:(fun acc v ->
-        if use_ok v && not (Core.Set.mem seed v) then Core.Set.add acc v
-        else acc)
   in
   let blk_of_def =
     Base.List.fold defs ~init:Tid.Map.empty ~f:(fun m (blk, d) ->
@@ -569,64 +486,80 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
         Core.Map.set m ~key:(Term.tid d)
           ~data:(addr, lazy (site_of d (Def.rhs d))))
   in
-  let bases seed (site : site Lazy.t) : var list =
+  let bases holds (site : site Lazy.t) : var list =
     match Lazy.force site with
     | Lone v -> [ v ]
     | Spine vs ->
         Base.List.filter_map vs ~f:(fun (v, fixed) ->
-            if is_ptr seed v || Lazy.force fixed then Some v else None)
+            if is_ptr holds v || Lazy.force fixed then Some v else None)
   in
-  (* The use state likewise holds only the versions [seed] lacks. *)
-  let used_def seed used d =
+  (* Pointer-ness is a fact of a version: provenance (a pointer operand
+     makes the result one) and use (an address base, or an operand of a
+     pointer, is one) close together in one flow-insensitive solve. *)
+  let use_all add vs = Base.List.iter vs ~f:(fun v -> if use_ok v then add v) in
+  let rec spine_of (e : exp) =
+    match e with
+    | Bil.Var v -> [ v ]
+    | Bil.Ite (_, a, b) | Bil.BinOp (Bil.PLUS, a, b) -> spine_of a @ spine_of b
+    | Bil.BinOp (Bil.MINUS, a, _) -> spine_of a
+    | _ -> []
+  in
+  let def_rules (_, d) =
+    let lhs = Def.lhs d in
     let addr, rhs = Core.Map.find_exn sites (Term.tid d) in
-    let used =
-      match addr with
-      | Some a -> add_used seed used (bases seed a)
-      | None -> used
+    let provenance =
+      if value_def d then
+        let vs = shape_vars [] (Def.rhs d) in
+        [ { Hike_bir_flow.reads = vs;
+            fire =
+              (fun ~holds ~add ->
+                if Base.List.exists vs ~f:(fun v -> is_ptr holds v || Model.is_mem v)
+                then add lhs) } ]
+      else []
     in
-    if Core.Set.mem seed (Def.lhs d) || Core.Set.mem used (Def.lhs d) then
-      add_used seed used (bases seed rhs)
-    else used
-  in
-  let used_phi seed used p =
-    if Core.Set.mem seed (Phi.lhs p) || Core.Set.mem used (Phi.lhs p) then
-      add_used seed used
-        (Phi.values p
-         |> Seq.filter_map ~f:(fun (_, e) ->
-                match e with Bil.Var v -> Some v | _ -> None)
-         |> Seq.to_list)
-    else used
-  in
-  (* The solution carried between rounds and solves: block-entry
-     provenance states, block-exit use states, the provenance set and the
-     seed set.  Seeds only grow and every rule is monotone, so each is
-     below the next solve's. *)
-  let fwd_state = ref None and bwd_state = ref None in
-  let last_ptrs = ref None and last_extra = ref Var.Set.empty in
-  let backward seed =
-    let flow =
-      Hike_bir_flow.run ~graph ~sub ~rev:true
-        ~initial:(Option.value !bwd_state ~default:Tid.Map.empty)
-        ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
-        ~def:(used_def seed) ~phi:(used_phi seed) ~jmp:(fun used _ -> used)
+    let addr_use =
+      match (addr, Hike_stack_model.addr_of_rhs (Def.rhs d)) with
+      | Some a, Some (e, _) ->
+          [ { Hike_bir_flow.reads = spine_of e;
+              fire = (fun ~holds ~add -> use_all add (bases holds a)) } ]
+      | _ -> []
     in
-    bwd_state := Some flow.after;
-    Core.Map.fold flow.before ~init:seed ~f:(fun ~key:_ ~data acc ->
-        Core.Set.union acc data)
+    let rhs_use =
+      { Hike_bir_flow.reads = lhs :: spine_of (Def.rhs d);
+        fire =
+          (fun ~holds ~add ->
+            if holds lhs then use_all add (bases holds rhs)) }
+    in
+    provenance @ addr_use @ [ rhs_use ]
   in
-  (* Provenance feeds use and back, until neither grows.  The use pass
-     depends only on the provenance set, so an unchanged set ends it. *)
-  let rec joint extra =
-    last_extra := extra;
-    let ptrs, entry = forward ?resume:!fwd_state extra in
-    fwd_state := Some entry;
-    let unchanged = Base.Option.exists !last_ptrs ~f:(Core.Set.equal ptrs) in
-    last_ptrs := Some ptrs;
-    if (not versioned) || unchanged then ptrs
-    else
-      let extra' = Core.Set.union extra (backward ptrs) in
-      if Core.Set.equal extra' extra then ptrs else joint extra'
+  let phi_rules p =
+    let lhs = Phi.lhs p in
+    let incoming =
+      Phi.values p
+      |> Seq.filter_map ~f:(fun (_, e) ->
+             match e with Bil.Var v -> Some v | _ -> None)
+      |> Seq.to_list
+    in
+    (if is_value_var lhs then
+       [ { Hike_bir_flow.reads = incoming;
+           fire =
+             (fun ~holds ~add ->
+               if Base.List.exists incoming ~f:(is_ptr holds) then add lhs) } ]
+     else [])
+    @ [ { Hike_bir_flow.reads = [ lhs ];
+          fire = (fun ~holds ~add -> if holds lhs then use_all add incoming) } ]
   in
+  let solve =
+    Hike_bir_flow.closure
+      (Base.List.concat_map defs ~f:def_rules
+       @ (Term.enum blk_t sub
+          |> Seq.concat_map ~f:(Term.enum phi_t)
+          |> Seq.to_list
+          |> Base.List.concat_map ~f:phi_rules))
+  in
+  (* The previous solve's pointers: seeds only grow across solves, so
+     they stay below the next solution. *)
+  let last = ref [] in
   (* The storage of each pointer def: the denotation's, else inherited
      from a pointer operand. *)
   let rec struct_storage (var_stors : Hike_stack_model.ptr_storage Var.Map.t)
@@ -673,11 +606,13 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     else stor_loop ptrs stors' var_stors'
   in
   fun ~extra ~used ->
-    let extra =
-      Core.Set.union (Core.Set.union extra !last_extra)
-        (add_used Var.Set.empty Var.Set.empty (Core.Set.to_list used))
+    let members =
+      solve
+        (roots @ Core.Set.to_list extra @ !last @ denot_vars
+         @ Base.List.filter (Core.Set.to_list used) ~f:use_ok)
     in
-    let ptrs = joint extra in
+    last := members;
+    let ptrs = Var.Set.of_list members in
     let stors, _ = stor_loop ptrs Tid.Map.empty Var.Map.empty in
     let tids =
       Base.List.fold defs ~init:Tid.Set.empty ~f:(fun acc (_, d) ->
@@ -685,213 +620,6 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
           else acc)
     in
     { def_tids = tids; def_storages = stors; vars = ptrs }
-
-let ptr_defs ?(extra = Var.Set.empty) ?(used = Var.Set.empty) ~facts sub =
-  ptr_solver ~facts sub ~extra ~used
-
-let sub_of_program (prog : program term) : sub term Tid.Map.t =
-  Term.enum sub_t prog
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-      Core.Map.set m ~key:(Term.tid s) ~data:s)
-
-(* A sub's pointer versions: its inferred ones and those its callers
-   prove. *)
-let ptr_vars_of ~(pks : Var.Set.t Tid.Map.t) ~(inferred : ptr_facts Tid.Map.t)
-    (sub : sub term) : Var.Set.t =
-  let vars =
-    Core.Map.find inferred (Term.tid sub)
-    |> Base.Option.value ~default:ptr_facts_empty
-    |> fun pf -> pf.vars
-  in
-  Core.Set.union vars
-    (Core.Map.find pks (Term.tid sub) |> Base.Option.value ~default:Var.Set.empty)
-
-(* Every direct call of [sub], in order, with its block. *)
-let fold_direct_calls (sub : sub term) ~(init : 'a)
-    ~(f : 'a -> blk term -> Tid.t -> 'a) : 'a =
-  Term.enum blk_t sub
-  |> Seq.fold ~init ~f:(fun acc blk ->
-         Term.enum jmp_t blk
-         |> Seq.fold ~init:acc ~f:(fun acc j ->
-                match Jmp.kind j with
-                | Call c -> (
-                    match Call.target c with
-                    | Direct t -> f acc blk t
-                    | Indirect _ -> acc)
-                | _ -> acc))
-
-(* The whole-program pointer-kind fixpoint.  A value is a pointer when
-   the VSA proves its denotation is a stack address, it flows from one
-   (a copy, an address offset, an ite), or it is used as a load/store
-   address; a callee parameter a caller proves; a caller's return lane
-   whose callee proves; a version a caller passes into a pointer lane.
-   The def-use part runs per sub ([ptr_defs]); the call-graph edges run
-   to a fixpoint over the subs.  A var is a pointer when any of its defs
-   is (the join is [int ⊑ ptr]; the emitter inttoptrs the integer paths). *)
-let ptr_fixpoint ?(pks = Tid.Map.empty) ?(uks = Tid.Map.empty)
-    ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
-    (prog : program term) :
-    Var.Set.t Tid.Map.t * Var.Set.t Tid.Map.t * ptr_facts Tid.Map.t * int =
-  let add acc t v =
-    Core.Map.update acc t ~f:(function
-        | None -> Var.Set.singleton v
-        | Some s -> Core.Set.add s v)
-  in
-  let subs = Term.enum sub_t prog |> Seq.to_list in
-  let extra_of pks sub =
-    Core.Map.find pks (Term.tid sub) |> Base.Option.value ~default:Var.Set.empty
-  in
-  (* The direct calls of each sub, and the subs calling each callee. *)
-  let calls =
-    Base.List.fold subs ~init:Tid.Map.empty ~f:(fun m caller ->
-        let edges =
-          fold_direct_calls caller ~init:[] ~f:(fun acc blk t ->
-              match Core.Map.find sub_of t with
-              | Some callee -> (blk, t, callee) :: acc
-              | None -> acc)
-          |> Base.List.rev
-        in
-        Core.Map.set m ~key:(Term.tid caller) ~data:edges)
-  in
-  let callers_of =
-    Base.List.fold subs ~init:Tid.Map.empty ~f:(fun m caller ->
-        Base.List.fold (Core.Map.find_exn calls (Term.tid caller)) ~init:m
-          ~f:(fun m (_, _, callee) ->
-            Core.Map.update m (Term.tid callee) ~f:(function
-                | None -> [ caller ]
-                | Some l -> caller :: l)))
-  in
-  (* One call edge's contribution to the seeds.  [pks] seeds a sub's
-     provenance pass, [uks] its use pass. *)
-  let edge ~ptr_vars_of (pks, uks) caller (blk, t, callee) =
-    let ctv = ptr_vars_of caller in
-    let callee_ptrs = ptr_vars_of callee in
-    (* the version the caller passes <-> the callee's parameter: a
-       pointer either way *)
-    let pks, uks =
-      Base.List.fold (Hike_stack_model.sig_args callee) ~init:(pks, uks)
-        ~f:(fun (pks, uks) a ->
-          let r = Arg.lhs a in
-          let passed = passed_at blk r in
-          let v = Base.Option.value ~default:r passed in
-          let pks =
-            if
-              Core.Set.mem ctv v
-              || is_address_reg ~facts v
-              || ptr_kind_of ~facts ~blk (Arg.rhs a)
-            then add pks t r
-            else pks
-          in
-          let uks =
-            match passed with
-            | Some v when Core.Set.mem callee_ptrs r ->
-                add uks (Term.tid caller) v
-            | _ -> uks
-          in
-          (pks, uks))
-    in
-    (* the callee's pointer return -> the caller's minted version *)
-    let pks =
-      Core.Set.fold
-        (ptr_returns ~facts callee callee_ptrs)
-        ~init:pks ~f:(fun pks r ->
-          match minted_at blk r with
-          | Some v -> add pks (Term.tid caller) v
-          | None -> pks)
-    in
-    (pks, uks)
-  in
-  (* The call-graph fixpoint as a worklist: a sub is solved when its seeds
-     changed (all, at first), and only the edges of a sub whose pointer
-     versions changed are re-read.  Seeds only grow, and a sub's solver
-     resumes from its previous solution. *)
-  let solvers = Tid.Table.create () in
-  let solver sub =
-    Core.Hashtbl.find_or_add solvers (Term.tid sub) ~default:(fun () ->
-        ptr_solver ~facts sub)
-  in
-  let rec fix (pks, uks) dirty inferred seen solves =
-    if Core.Set.is_empty dirty then (pks, uks, inferred, solves)
-    else
-      let solves = solves + Core.Set.length dirty in
-      let inferred, seen, changed =
-        Base.List.fold subs ~init:(inferred, seen, [])
-          ~f:(fun (inferred, seen, changed) sub ->
-            let tid = Term.tid sub in
-            if not (Core.Set.mem dirty tid) then (inferred, seen, changed)
-            else
-              let pf =
-                solver sub ~extra:(extra_of pks sub) ~used:(extra_of uks sub)
-              in
-              let vars = Core.Set.union pf.vars (extra_of pks sub) in
-              let inferred = Core.Map.set inferred ~key:tid ~data:pf in
-              let same =
-                match Core.Map.find seen tid with
-                | Some old -> Core.Set.equal old vars
-                | None -> false
-              in
-              if same then (inferred, seen, changed)
-              else
-                (inferred, Core.Map.set seen ~key:tid ~data:vars,
-                 sub :: changed))
-      in
-      let ptr_vars_of = ptr_vars_of ~pks ~inferred in
-      (* The edges to re-read: those of each changed sub, and those into
-         it from its callers. *)
-      let edges =
-        Base.List.concat_map (Base.List.rev changed) ~f:(fun s ->
-            let out =
-              Core.Map.find_exn calls (Term.tid s)
-              |> Base.List.map ~f:(fun e -> (s, e))
-            in
-            let into =
-              Core.Map.find callers_of (Term.tid s)
-              |> Base.Option.value ~default:[]
-              |> Base.List.concat_map ~f:(fun c ->
-                     Core.Map.find_exn calls (Term.tid c)
-                     |> Base.List.filter_map ~f:(fun ((_, _, callee) as e) ->
-                            if Tid.equal (Term.tid callee) (Term.tid s) then
-                              Some (c, e)
-                            else None))
-            in
-            out @ into)
-      in
-      let pks', uks' =
-        Base.List.fold edges ~init:(pks, uks) ~f:(fun acc (caller, e) ->
-            edge ~ptr_vars_of acc caller e)
-      in
-      let grew a b =
-        Core.Map.fold b ~init:Tid.Set.empty ~f:(fun ~key ~data acc ->
-            match Core.Map.find a key with
-            | Some old when Core.Set.equal old data -> acc
-            | _ -> Core.Set.add acc key)
-      in
-      let dirty' = Core.Set.union (grew pks pks') (grew uks uks') in
-      fix (pks', uks') dirty' inferred seen solves
-  in
-  fix (pks, uks)
-    (Tid.Set.of_list (Base.List.map subs ~f:Term.tid))
-    Tid.Map.empty Tid.Map.empty 0
-
-let ptr_kinds ~facts ~sub_of prog =
-  let pks, _, inferred, _ = ptr_fixpoint ~facts ~sub_of prog in
-  (pks, inferred)
-
-#ifdef VSA_DEBUG
-let kind_census (prog : program term) : unit =
-  let defs = ref 0 and ptrs = ref 0 and wins = ref 0 in
-  Term.enum sub_t prog
-  |> Seq.iter ~f:(fun sub ->
-      Term.enum blk_t sub
-      |> Seq.iter ~f:(fun blk ->
-          Term.enum def_t blk
-          |> Seq.iter ~f:(fun d ->
-              incr defs;
-              if Hike_def_slots.def_ptr_kind d then incr ptrs;
-              if Hike_def_slots.def_is_window_value d then incr wins)));
-  Printf.eprintf "hike-kinds: defs=%d ptr=%d window=%d\n%!" !defs !ptrs !wins
-#endif
-
 
 (* The value type of a pointer: `Mem (addr, byte)`; the emitter lowers
    it to LLVM `ptr`.  The address size is the target's, never a literal. *)
@@ -948,6 +676,153 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
              (Term.attrs a')
    end)#map_sub sub
 
+(* Every direct call of [sub], in order, with its block. *)
+let fold_direct_calls (sub : sub term) ~(init : 'a)
+    ~(f : 'a -> blk term -> Tid.t -> 'a) : 'a =
+  Term.enum blk_t sub
+  |> Seq.fold ~init ~f:(fun acc blk ->
+         Term.enum jmp_t blk
+         |> Seq.fold ~init:acc ~f:(fun acc j ->
+                match Jmp.kind j with
+                | Call c -> (
+                    match Call.target c with
+                    | Direct t -> f acc blk t
+                    | Indirect _ -> acc)
+                | _ -> acc))
+
+let pointer_lanes lanes =
+  Base.List.filter_map lanes ~f:(fun a ->
+      match Var.typ (Arg.lhs a) with
+      | Type.Mem _ -> Some (Arg.lhs a)
+      | _ when Model.is_ptr_arg a -> Some (Arg.lhs a)
+      | _ -> None)
+
+let type_sub ~facts ~mem_typ sub (pf : ptr_facts) =
+  let ptr_vars = Core.Set.union pf.vars (address_versions ~facts sub) in
+  let ptr_rets = ptr_returns ~facts sub ptr_vars in
+  sub
+  |> Hike_def_slots.stamp_ptr_kinds ~ptr_tids:pf.def_tids
+  |> Hike_def_slots.stamp_ptr_storages ~storages:pf.def_storages
+  |> retype_sub ~mem_typ ~ptr_vars ~ptr_rets
+
+#ifdef VSA_DEBUG
+let kind_census (prog : program term) : unit =
+  let defs = ref 0 and ptrs = ref 0 and wins = ref 0 in
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun sub ->
+      Term.enum blk_t sub
+      |> Seq.iter ~f:(fun blk ->
+          Term.enum def_t blk
+          |> Seq.iter ~f:(fun d ->
+              incr defs;
+              if Hike_def_slots.def_ptr_kind d then incr ptrs;
+              if Hike_def_slots.def_is_window_value d then incr wins)));
+  Printf.eprintf "hike-kinds: defs=%d ptr=%d window=%d\n%!" !defs !ptrs !wins
+#endif
+
+(* Callees publish concrete argument and return types before their
+   callers solve.  Only members of a recursive component can resume;
+   their declared lane types are the component's initial summaries. *)
+let type_program ~(facts : Hike_kb.facts) ~(mem_typ : Type.t)
+    (prog : program term) : program term =
+  let open Graphlib.Std in
+  let module G = Graphs.Callgraph in
+  let sub_of =
+    Term.enum sub_t prog
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
+           Core.Map.set m ~key:(Term.tid sub) ~data:sub)
+  in
+  let graph = Program.to_graph prog in
+  (* Targets without a sub term are native/external transfers, not
+     members of the program's type-inference call graph. *)
+  let graph =
+    G.nodes graph
+    |> Seq.fold ~init:graph ~f:(fun g tid ->
+           if Core.Map.mem sub_of tid then g else G.Node.remove tid g)
+  in
+  let partition = Graphlib.strong_components (module G) graph in
+  let components =
+    Graphlib.postorder_traverse (module G) graph
+    |> Seq.filter_map ~f:(fun tid ->
+           let group = Partition.group partition tid |> Base.Option.value_exn in
+           (* An SCC's DFS root exits after all of its callees. *)
+           if Tid.equal tid (Group.top group) then
+             Some (Group.enum group |> Seq.to_list)
+           else None)
+  in
+  let calls =
+    Core.Map.map sub_of ~f:(fun sub ->
+        fold_direct_calls sub ~init:[] ~f:(fun acc blk tid ->
+            if Core.Map.mem sub_of tid then (blk, tid) :: acc else acc)
+        |> Base.List.rev)
+  in
+  let summaries = ref Tid.Map.empty in
+  Seq.iter components ~f:(fun members ->
+      let member_set = Tid.Set.of_list members in
+      let solvers =
+        Base.List.fold members ~init:Tid.Map.empty ~f:(fun m tid ->
+            let sub = Core.Map.find_exn sub_of tid in
+            summaries := Core.Map.set !summaries ~key:tid ~data:sub;
+            Core.Map.set m ~key:tid ~data:(ptr_solver ~facts sub))
+      in
+      let pending = Stdlib.Queue.create () in
+      let queued = ref member_set in
+      Base.List.iter members ~f:(fun tid -> Stdlib.Queue.add tid pending);
+      while not (Stdlib.Queue.is_empty pending) do
+        let tid = Stdlib.Queue.take pending in
+        queued := Core.Set.remove !queued tid;
+        let sub = Core.Map.find_exn sub_of tid in
+        let extra, used =
+          Base.List.fold (Core.Map.find_exn calls tid)
+            ~init:
+              (Var.Set.of_list (pointer_lanes (Model.sig_args sub)), Var.Set.empty)
+            ~f:(fun (extra, used) (blk, target) ->
+              let callee = Core.Map.find_exn !summaries target in
+              let extra =
+                Base.List.fold (pointer_lanes (Model.sig_rets callee))
+                  ~init:extra ~f:(fun extra r ->
+                    match minted_at blk r with
+                    | Some v -> Core.Set.add extra v
+                    | None -> extra)
+              in
+              let used =
+                Base.List.fold (pointer_lanes (Model.sig_args callee))
+                  ~init:used ~f:(fun used r ->
+                    match passed_at blk r with
+                    | Some v -> Core.Set.add used v
+                    | None -> used)
+              in
+              (extra, used))
+        in
+        let pf = (Core.Map.find_exn solvers tid) ~extra ~used in
+        let typed = type_sub ~facts ~mem_typ sub pf in
+        let old = Core.Map.find_exn !summaries tid in
+        let changed =
+          not (Base.List.equal Var.same (pointer_lanes (Model.sig_args old))
+                 (pointer_lanes (Model.sig_args typed)))
+          || not (Base.List.equal Var.same (pointer_lanes (Model.sig_rets old))
+                    (pointer_lanes (Model.sig_rets typed)))
+        in
+        summaries := Core.Map.set !summaries ~key:tid ~data:typed;
+        if changed then
+          G.Node.inputs tid graph
+          |> Seq.iter ~f:(fun edge ->
+                 let caller = G.Edge.src edge in
+                 if Core.Set.mem member_set caller
+                    && not (Core.Set.mem !queued caller) then begin
+                   queued := Core.Set.add !queued caller;
+                   Stdlib.Queue.add caller pending
+                 end)
+      done);
+  let prog =
+    Term.map sub_t prog ~f:(fun sub ->
+        Core.Map.find_exn !summaries (Term.tid sub))
+  in
+#ifdef VSA_DEBUG
+  kind_census prog;
+#endif
+  prog
+
 (* The signature pass: write every sub's lane list onto its own [arg]
    terms.  It does not need the value types, so it runs BEFORE SSA. *)
 let sign_run (proj : Project.t) : Project.t =
@@ -958,34 +833,6 @@ let sign_run (proj : Project.t) : Project.t =
     | None -> Hike_synth.empty
   in
   Project.map_program proj ~f:(sign_program ~synth ~target)
-
-(* Infer every value's kind over [prog] (per version), stamp the lane
-   kinds, and retype the pointer versions. *)
-let type_program ~(facts : Hike_kb.facts) ~(mem_typ : Type.t)
-    (prog : program term) : program term =
-  let sub_of = sub_of_program prog in
-  let pks, inferred = ptr_kinds ~facts ~sub_of prog in
-  let ptr_vars_of_sub = ptr_vars_of ~pks ~inferred in
-  let prog =
-    Term.map sub_t prog ~f:(fun sub ->
-        let pf =
-          Core.Map.find inferred (Term.tid sub)
-          |> Base.Option.value ~default:ptr_facts_empty
-        in
-        let sub = Hike_def_slots.stamp_ptr_kinds ~ptr_tids:pf.def_tids sub in
-        let sub =
-          Hike_def_slots.stamp_ptr_storages ~storages:pf.def_storages sub
-        in
-        let ptr_vars =
-          Core.Set.union (ptr_vars_of_sub sub) (address_versions ~facts sub)
-        in
-        let ptr_rets = ptr_returns ~facts sub ptr_vars in
-        retype_sub ~mem_typ ~ptr_vars ~ptr_rets sub)
-  in
-#ifdef VSA_DEBUG
-  kind_census prog;
-#endif
-  prog
 
 (* The type pass: [type_program] on the SSA program.  The emitter reads
    [Var.typ]. *)

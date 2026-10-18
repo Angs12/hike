@@ -79,3 +79,32 @@ let liveness ~graph ~sub ~initial ~def ~phi ~jmp =
               | `Jmp j -> step acc (jmp j))
         in
         fun live -> Core.Set.union (Core.Set.diff live kill) gen)
+
+type rule = {
+  reads : var list;
+  fire : holds:(var -> bool) -> add:(var -> unit) -> unit;
+}
+
+let closure (rules : rule list) =
+  let waiting = Var.Table.create () in
+  List.iter rules ~f:(fun r ->
+      List.iter r.reads ~f:(fun v -> Hashtbl.add_multi waiting ~key:v ~data:r));
+  fun seeds ->
+    let members = Var.Table.create () in
+    let queue = Queue.create () in
+    let holds v = Hashtbl.mem members v in
+    let add v =
+      if not (holds v) then begin
+        Hashtbl.set members ~key:v ~data:();
+        List.iter (Hashtbl.find_multi waiting v) ~f:(Queue.enqueue queue)
+      end
+    in
+    List.iter seeds ~f:add;
+    List.iter rules ~f:(Queue.enqueue queue);
+    let rec drain () =
+      match Queue.dequeue queue with
+      | None -> ()
+      | Some r -> r.fire ~holds ~add; drain ()
+    in
+    drain ();
+    Hashtbl.keys members
