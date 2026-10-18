@@ -101,6 +101,8 @@ module Pieces : sig
   (* A result's pieces: one progression or the two arcs of one across the
      modulus, ascending. *)
   val of_arcs : progression list -> t
+  (* How many results needed the general re-placement. *)
+  val fallback_count : unit -> int
   (* The unsigned piece order. *)
   val compare_piece : progression -> progression -> int
   (* Merge ascending progression streams, without combining or capping. *)

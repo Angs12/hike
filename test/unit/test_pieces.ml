@@ -676,6 +676,7 @@ let tests : unit Alcotest.test list =
           List.concat_map
             (fun pa -> List.concat_map (fun pb -> f pa pb) (P.to_list b))
             (P.to_list a) in
+        let before = P.fallback_count () in
         for i = 1 to 3000 do
           let width = [| 8; 32; 64 |].(i mod 3) in
           let a = operand width and b = operand width in
@@ -687,7 +688,8 @@ let tests : unit Alcotest.test list =
             (P.equal (P.neg a)
                (image (fun () ->
                     List.concat_map Cbat_clp_arith.neg (P.to_list a))))
-        done);
+        done;
+        check "PCS-28.general" (P.fallback_count () - before >= 24));
 
   ]
 

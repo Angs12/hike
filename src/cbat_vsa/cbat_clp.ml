@@ -373,7 +373,11 @@ module Pieces_base = struct
 
   (* The streaming consumer's end: a union past the budget collapses to
      its hull. *)
+  let fallbacks = ref 0
+  let fallback_count () : int = !fallbacks
+
   let close (acc : acc) : t =
+    if acc.general then incr fallbacks;
     let r =
       if (not acc.general) && acc.n <= U.max_pieces then combined acc
       else cap (combined acc) in
