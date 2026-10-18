@@ -742,7 +742,8 @@ let tests : unit Alcotest.test list =
             (fun acc _ -> P.union acc (P.of_arcs (piece ())))
             (P.bottom width) (List.init (1 + rnd 4) Fun.id) in
         let ops =
-          [ "mul", P.mul, A.mul; "div", P.div, A.div;
+          [ "add", P.add, A.add; "sub", P.sub, A.sub;
+            "mul", P.mul, A.mul; "div", P.div, A.div;
             "sdiv", P.sdiv, A.sdiv; "modulo", P.modulo, A.modulo;
             "smodulo", P.smodulo, A.smodulo;
             "logand", P.logand, A.logand; "logor", P.logor, A.logor;
