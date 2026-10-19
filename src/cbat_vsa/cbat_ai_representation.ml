@@ -83,6 +83,7 @@ type scalar_store = {
 type scalar_view = {
   store : scalar_store;
   block : tid;
+  visible : Int.Set.t;
 } [@@deriving bin_io, sexp, compare]
 
 type t = {
@@ -129,9 +130,11 @@ let effective_word (width : int) (e : t) (key : int) : wordset =
     (match WordEnv.find_opt width e.words key with
      | Some value -> value
      | None ->
-       (match cell_word view key with
-        | Some value -> value
-        | None -> WordSet.top width))
+        if Set.mem view.visible key then
+          (match cell_word view key with
+           | Some value -> value
+           | None -> WordSet.top width)
+        else WordSet.top width)
 
 let equal (e1 : t) e2 : bool =
   phys_equal e1 e2 ||
@@ -272,14 +275,17 @@ let project ~keep ~block e =
     SliceEnv.filter_keys e.slices ~f:(fun k -> Set.mem keep (slice_owner k)) in
   { e with words; slices;
            scalar = (match e.scalar with
-             | Some v -> Some { v with block }
+             | Some v ->
+               let locals = Map.find_exn v.store.scopes block in
+               Some { v with block; visible = Set.union keep locals }
              | None -> None) }
 
 (* The block's env keeps its own incoming phi values; the definitions'
    values live in the cells. *)
 let enter_block store block e =
   if equal e bottom then bottom else
-  { e with scalar = Some { store; block } }
+  { e with scalar = Some
+      { store; block; visible = Map.find_exn store.scopes block } }
 
 (* A temporary walk's private cells: [copy_scalars e] keeps [e]'s view but
    its own copy of the cell array, so a seeded or replayed write cannot
@@ -298,7 +304,8 @@ let copy_scalars (e : t) : t =
 let adopt_scalars ~(from : t) (e : t) : t =
   match from.scalar, e.scalar with
   | Some fv, Some ev ->
-    { e with scalar = Some { store = fv.store; block = ev.block } }
+    { e with scalar = Some
+        { store = fv.store; block = ev.block; visible = ev.visible } }
   | _ -> e
 
 (* The env carries only incoming phi values and memory; a def's cell owns

@@ -484,13 +484,17 @@ let static_graph_vsa
     if not rctx.rc_ssa then None else
     let variables = Term.enum blk_t s
       |> Seq.fold ~init:Var.Set.empty ~f:(fun vars b ->
-          Blk.elts b |> Seq.fold ~init:vars ~f:(fun vars term ->
-              Set.union vars (Set.union (Hike_stack_model.reads term)
-                                (Hike_stack_model.writes term))))
+          let vars = Term.enum phi_t b |> Seq.fold ~init:vars
+              ~f:(fun vars p -> Set.add vars (Phi.lhs p)) in
+          Term.enum def_t b |> Seq.fold ~init:vars ~f:(fun vars d ->
+              Set.add vars (Def.lhs d)))
       |> Set.filter ~f:word |> Set.to_list in
     let blocks = Map.to_alist rctx.rc_blocks |> List.map ~f:(fun (tid, bf) ->
-        let locals = Term.enum def_t bf.bf_term |> Seq.map ~f:Def.lhs
-          |> Seq.filter ~f:word |> Seq.to_list |> Var.Set.of_list in
+        let locals =
+          let phis = Term.enum phi_t bf.bf_term |> Seq.map ~f:Phi.lhs in
+          let defs = Term.enum def_t bf.bf_term |> Seq.map ~f:Def.lhs in
+          Seq.append phis defs |> Seq.filter ~f:word |> Seq.to_list
+          |> Var.Set.of_list in
         (tid, locals)) in
     let seed = Solution.enum init |> Seq.find_map ~f:(fun (_, env) ->
         if AI.equal env AI.bottom then None else Some env)
@@ -556,14 +560,29 @@ let static_graph_vsa
           debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;
 #endif
           res) in
-    if List.is_empty preds then old
-    else
-      Option.value ~default:old
-        (List.fold preds ~init:None ~f:(fun acc p ->
-             let res = out p in
-             match acc with
-             | None -> Some res
-             | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
+    let incoming =
+      if List.is_empty preds then old
+      else
+        Option.value ~default:old
+          (List.fold preds ~init:None ~f:(fun acc p ->
+               let res = out p in
+               match acc with
+               | None -> Some res
+               | Some a -> Some (Stages.time `Join (fun () -> AI.join a res)))) in
+    (* Edge phi values first join in the environment. Publish the joined
+       values to their preallocated cells only after all incoming edges
+       have been combined. *)
+    match scalar_store, Core.Map.find rctx.rc_blocks v with
+    | Some store, Some bf when not (List.is_empty preds) ->
+      let incoming = AI.enter_block store v incoming in
+      Term.enum phi_t bf.Cbat_runctx.bf_term
+      |> Seq.fold ~init:incoming ~f:(fun env phi ->
+          match Var.typ (Phi.lhs phi) with
+          | Type.Imm width ->
+            let value = AI.find_word width env (Phi.lhs phi) in
+            AI.add_word env ~key:(Phi.lhs phi) ~data:value
+          | Type.Mem _ | Type.Unk -> env)
+    | _ -> incoming
   in
   (* A warm head whose join grew widens by the landmark module's arm:
      Finite extrapolates; Zero advances and joins; Inf widens.
@@ -605,16 +624,11 @@ let static_graph_vsa
       let sol = mk_sol () in
       raise (Fixpoint_not_converged (max_steps, sol))
     end;
-    let preds = preds v in
     let old = get v in
-    (* An entry has no predecessor: its seeded boundary inputs are not
-       edge-delivered phis and must not be projected away. *)
-    let old =
-      if List.is_empty preds then old
-      else match scalar_store, Map.find rctx.rc_blocks v with
-        | Some _, Some bf -> AI.project ~keep:bf.Cbat_runctx.bf_live_ids ~block:v old
-        | _ -> old
-    in
+    let old = match scalar_store, Map.find rctx.rc_blocks v with
+      | Some _, Some bf -> AI.project ~keep:bf.Cbat_runctx.bf_live_ids ~block:v old
+      | _ -> old in
+    let preds = preds v in
     let incoming = incoming_of v ~preds ~old in
 #ifdef VSA_DEBUG
     debug_entry ~rctx ~edge_conds ~get ~preds ~v incoming;

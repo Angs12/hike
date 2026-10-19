@@ -736,6 +736,12 @@ let tests : unit Alcotest.test list =
         check "VSA-81 target phi kept"
           (Ws.elem (w64 0x11) (AI.find_word 64 st (Phi.lhs join_phi))
            && Ws.elem (w64 0x22) (AI.find_word 64 st (Phi.lhs join_phi)));
+        let phi_cell = AI.project ~keep:Core.Int.Set.empty
+            ~block:tids.(3) st in
+        check "VSA-81 target phi cell"
+          (Ws.elem (w64 0x11) (AI.find_word 64 phi_cell (Phi.lhs join_phi))
+           && Ws.elem (w64 0x22)
+                (AI.find_word 64 phi_cell (Phi.lhs join_phi)));
         let keep = Cbat_var_id.intern_set (Var.Set.singleton (Phi.lhs join_phi)) in
         check "VSA-81 top stays top"
           (AI.equal AI.top (AI.project ~keep ~block:tids.(3) AI.top));
@@ -936,6 +942,36 @@ let tests : unit Alcotest.test list =
         check "VSA-86 taken" (Ws.elem (w64 2) low && bounded_above low (w64 5));
         check "VSA-86 fallthrough"
           (Ws.elem (w64 11) high && not (Ws.elem (w64 2) high)));
+
+    pin "VSA-87"
+      "SSA: read-only inputs stay in the environment without duplicate cells"
+      (fun () ->
+        let input = int_param 0 and output = callee_saved 0 in
+        let sub, _ = sub_of "readonly_cell"
+            [ [ Def.create output
+                  (Bil.BinOp (Bil.PLUS, Bil.Var input,
+                     Bil.Int (Cbat_word.to_word (w64 1)))) ],
+              [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "readonly_cell" in
+        let entry = Vsa.entry_block_of ssa |> Base.Option.value_exn in
+        let defined = Term.enum def_t entry
+          |> Seq.find ~f:(fun d -> Var.same (Def.lhs d) output)
+          |> Base.Option.value_exn |> Def.lhs in
+        let seed = AI.add_word (anchored_entry ()) ~key:input
+            ~data:(Ws.singleton (w64 42)) in
+        let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi:sysv ssa
+            (Vsa.init_sol ~abi:sysv ~entry:seed ssa) in
+        let state = in_state sol (Term.tid entry) in
+        check "VSA-87 input remains available"
+          (Ws.equal (AI.find_word 64 state input) (Ws.singleton (w64 42)));
+        let projected = AI.project ~keep:Core.Int.Set.empty
+            ~block:(Term.tid entry) state in
+        check "VSA-87 no read-only fallback cell"
+          (Ws.is_top (AI.find_word 64 projected input));
+        check "VSA-87 defined output retains its cell"
+          (Ws.equal (AI.find_word 64 projected defined) (Ws.singleton (w64 43)));
+        check "VSA-87 absent variable reads top"
+          (Ws.is_top (AI.find_word 64 projected (v64 "readonly_missing"))));
   ]
 
 let () = run "vsa" tests
