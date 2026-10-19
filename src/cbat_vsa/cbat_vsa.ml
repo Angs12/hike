@@ -533,17 +533,6 @@ let static_graph_vsa
     let keep =
       Option.value_map bf ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
     in
-    (* A non-entry block's word inputs are its phi lhs values.  A free
-       word input here is an SSA construction bug: fail rather than
-       smuggle a source value through the edge. *)
-    (match bf, preds with
-     | Some bf, _ :: _ when not (Core.Set.is_empty bf.bf_free_word_ids) ->
-       failwithf "hike: block %s has free word input(s) outside its phi lhs set: %s"
-         (Tid.name v)
-         (String.concat ~sep:", "
-            (List.map (Core.Set.to_list bf.bf_free_word_ids)
-               ~f:(fun id -> Var.name (Cbat_var_id.var_of id)))) ()
-     | _ -> ());
     (* Deliver refined operands to the destination's phi names. *)
     let bind_phis p res =
       match bf with

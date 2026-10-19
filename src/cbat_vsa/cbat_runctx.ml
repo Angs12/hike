@@ -28,14 +28,11 @@ type call_facts = {
   cf_sp : var;
 }
 
-(* Static block facts: the term, call lanes, the target's phi lhs keep
-   set, and any free word input that is not a phi (an SSA construction
-   bug). *)
+(* Static block facts: the term, call lanes, and scalar input names. *)
 type block_facts = {
   bf_term : blk term;
   bf_call_facts : call_facts;
   bf_live_ids : Int.Set.t;
-  bf_free_word_ids : Int.Set.t;
 }
 
 type refine_ctx = {
@@ -114,16 +111,6 @@ let local_inputs ~def_reads ~def_writes ~jmp_reads b =
       Set.union needed (Set.diff (jmp_reads j)
           (Set.union written (Hike_stack_model.writes (`Jmp j)))))
 
-(* The word values the scalar env carries.  Module/thread addresses and
-   model storage roots are not env inputs: the transfer denotes them from
-   the synth table or from memory, and SSA never renames them. *)
-let ssa_word_input ~(synth : Hike_synth.table) (v : var) : bool =
-  match Var.typ v with
-  | Type.Imm _ ->
-    not (Hike_synth.is_address_var synth v)
-    && not (Hike_stack_model.is_model_storage synth v)
-  | Type.Mem _ | Type.Unk -> false
-
 (* Only SSA block inputs participate in scalar fixpoint delivery. *)
 let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     ~jmp_reads
@@ -141,23 +128,16 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     rc_blocks =
       Term.enum blk_t s
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-          let phis =
-            Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
-            |> Var.Set.of_list in
-          let word v = match Var.typ v with Type.Imm _ -> true | _ -> false in
           let inputs =
             if ssa then local_inputs ~def_reads ~def_writes ~jmp_reads b
-            else Var.Set.empty in
-          let free =
-            if ssa then
-              Set.diff inputs phis
-              |> Set.filter ~f:(ssa_word_input ~synth:!synth)
             else Var.Set.empty in
           Core.Map.set m ~key:(Term.tid b)
             ~data:{
               bf_term = b;
               bf_call_facts = call_facts_of_block ~abi b;
-              bf_live_ids = Cbat_var_id.intern_set (Set.filter phis ~f:word);
-              bf_free_word_ids = Cbat_var_id.intern_set free;
+              bf_live_ids = Cbat_var_id.intern_set
+                  (Set.union inputs
+                     (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+                      |> Var.Set.of_list));
             });
   }

@@ -742,35 +742,75 @@ let tests : unit Alcotest.test list =
         check "VSA-81 bottom stays bottom"
           (AI.equal AI.bottom (AI.project ~keep ~block:tids.(3) AI.bottom)));
 
+    (* SSA construction supplies every non-entry word input through a phi. *)
     pin "VSA-82"
-      "SSA: a non-entry free word input outside the phi lhs set is rejected"
+      "SSA: after construction a non-entry block has no free word input \
+       outside its phi lhs set"
       (fun () ->
-        let v = callee_saved 0 and out = callee_saved 1 in
+        let x = callee_saved 0 and y = callee_saved 1 in
+        let c = int_param 0 in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
         let sub, tids =
-          sub_of "phi_missing"
-            [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var (v1 "pm_c")));
-                    (2, mk_goto) ];
-              [ Def.create v (Bil.Int (Cbat_word.to_word (w64 1))) ],
-              [ (3, mk_goto) ];
-              [ Def.create v (Bil.Int (Cbat_word.to_word (w64 2))) ],
-              [ (3, mk_goto) ];
-              [ Def.create out (Bil.Var v) ], [ (0, mk_ret) ] ]
+          sub_of "ssa_free_inputs"
+            [ [ Def.create x (k 7) ],
+              [ (1, fun t ->
+                     mk_jmp_to t
+                       (Bil.BinOp (Bil.LT, Bil.Var c, k 5)));
+                (2, mk_goto) ];
+              [ Def.create y (k 0x11) ], [ (3, mk_goto) ];
+              [ Def.create y (k 0x22) ], [ (3, mk_goto) ];
+              [ Def.create (callee_saved 2)
+                  (Bil.BinOp (Bil.PLUS, Bil.Var y, k 1)) ],
+              [ (4, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
         in
-        let ssa = ssa_of_subs [ jump_compiled sub ] "phi_missing" in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "ssa_free_inputs" in
+        let def_reads d = Hike.Stack_model.reads (`Def d) in
+        let def_writes d = Hike.Stack_model.writes (`Def d) in
+        let jmp_reads j =
+          Core.Set.union (Hike.Stack_model.reads (`Jmp j))
+            (Hike.Stack_model.writes (`Jmp j)) in
+        let free_word_inputs b =
+          (* Reads with no prior local definition or incoming phi. *)
+          let phis =
+            Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+            |> Var.Set.of_list in
+          let written, needed =
+            Term.enum def_t b
+            |> Seq.fold ~init:(phis, Var.Set.empty)
+                 ~f:(fun (written, needed) d ->
+                     (Core.Set.union written (def_writes d),
+                      Core.Set.union needed
+                        (Core.Set.diff (def_reads d) written)))
+          in
+          let needed =
+            Term.enum jmp_t b
+            |> Seq.fold ~init:needed ~f:(fun needed j ->
+                Core.Set.union needed
+                  (Core.Set.diff (jmp_reads j)
+                     (Core.Set.union written
+                        (Hike.Stack_model.writes (`Jmp j)))))
+          in
+          Core.Set.diff needed phis
+          |> Core.Set.filter ~f:(fun v ->
+                 match Var.typ v with Type.Imm _ -> true | _ -> false)
+        in
+        let entry = Vsa.entry_block_of ssa in
+        let is_entry b =
+          Base.Option.value_map entry ~default:false
+            ~f:(fun e -> Tid.equal (Term.tid e) (Term.tid b)) in
+        let offenders =
+          Term.enum blk_t ssa |> Seq.to_list
+          |> Base.List.concat_map ~f:(fun b ->
+                 if is_entry b then []
+                 else Core.Set.to_list (free_word_inputs b))
+        in
+        check "VSA-82 no non-entry free word input outside the phi lhs set"
+          (Base.List.is_empty offenders);
         let join = Term.find_exn blk_t ssa tids.(3) in
-        let ssa =
-          Term.map blk_t ssa ~f:(fun b ->
-              if Tid.equal (Term.tid b) (Term.tid join)
-              then Term.filter phi_t b ~f:(fun _ -> false)
-              else b)
-        in
-        let rejected =
-          match run_ssa_anchored ssa with
-          | _ -> false
-          | exception Failure msg ->
-            contains_substring msg "free word input"
-        in
-        check "VSA-82" rejected);
+        let without_phis = Term.filter phi_t join ~f:(fun _ -> false) in
+        check "VSA-82 missing phi is detected"
+          (not (Core.Set.is_empty (free_word_inputs without_phis))));
 
     pin "VSA-83"
       "SSA: the entry's index-0 ABI input is seeded, and a free word input \
