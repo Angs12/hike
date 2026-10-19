@@ -2129,6 +2129,43 @@ let tests : unit Alcotest.test list =
                         addr 0x3000, Bil.Var d, LittleEndian, `r64))
             (Ws.top 64) in
         Alcotest.(check bool) "BK-113.computed-memory-blocks" false (owed !cells));
+
+    (* The disabled-continuation observer runs on a private copy of the
+       scalar cells: the guard's seeds and the walk's replay must not reach
+       the store every permanent state shares, while the leaf meets still
+       record their landmarks. *)
+    pin "BK-114"
+      "the disabled-continuation observer leaves the shared scalar cells \
+       and a later query unchanged"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "bk114_x" (Type.Imm 32) in
+        let inc =
+          Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 1))) in
+        let sub, tids =
+          sub_of "bk114" [ [ Def.create x inc ], [ (0, mk_goto) ] ] in
+        let head = tids.(0) in
+        let blk =
+          Term.enum blk_t sub
+          |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) head) in
+        let store = AI.create_scalars ~variables:[ x ]
+            ~blocks:[ (head, Var.Set.singleton x) ] ~seed:AI.top in
+        let seed = Ws.singleton (w32 7) in
+        let base = AI.add_word (AI.enter_block store head AI.top) ~key:x ~data:seed in
+        let query () = AI.find_word 32 (AI.enter_block store head AI.top) x in
+        let before = query () in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
+        let disabled =
+          Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 3))) in
+        Vsa.Test_seam.with_widening_head rctx (Some head) (fun () ->
+            Vsa.Test_seam.acquire_unsat ~rctx ~entry:base base blk disabled);
+        check "BK-114.seed" (Ws.equal seed before);
+        check "BK-114.query" (Ws.equal before (query ()));
+        check "BK-114.landmark"
+          (not
+             (List.is_empty
+                (Cbat_landmarks.entries
+                   (Vsa.Test_seam.landmarks_of rctx) head
+                   (Cbat_landmarks.Word x)))));
   ]
 
 let () = run "backward" tests

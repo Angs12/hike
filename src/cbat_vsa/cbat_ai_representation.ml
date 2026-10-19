@@ -281,6 +281,26 @@ let enter_block store block e =
   if equal e bottom then bottom else
   { e with scalar = Some { store; block } }
 
+(* A temporary walk's private cells: [copy_scalars e] keeps [e]'s view but
+   its own copy of the cell array, so a seeded or replayed write cannot
+   reach the store every permanent state shares.  Copying the array is the
+   cheap option here — the maps in the store are persistent, so only the
+   mutable cells need isolating. *)
+let copy_scalars (e : t) : t =
+  match e.scalar with
+  | None -> e
+  | Some view ->
+    let values = Array.copy view.store.values in
+    { e with scalar = Some { view with store = { view.store with values } } }
+
+(* Put a state of the same temporary walk on [from]'s private store,
+   keeping [e]'s own block: [from] and [e] then share the walk's writes. *)
+let adopt_scalars ~(from : t) (e : t) : t =
+  match from.scalar, e.scalar with
+  | Some fv, Some ev ->
+    { e with scalar = Some { store = fv.store; block = ev.block } }
+  | _ -> e
+
 (* The env carries only incoming phi values and memory; a def's cell owns
    its value.  Drop block-local bindings a pre-state may have supplied, so
    they cannot shadow a cell. *)

@@ -30,6 +30,14 @@ val project : keep:Core.Int.Set.t -> block:tid -> t -> t
    definitions' values live in the cells. *)
 val enter_block : scalar_store -> tid -> t -> t
 
+(* A temporary walk's private cells: [copy_scalars e] gives [e] its own
+   copy of the shared cell array, so writes through it cannot reach the
+   store every permanent state shares.  [adopt_scalars ~from e] puts [e]
+   on [from]'s store, keeping [e]'s block, so two states of one walk
+   share the private cells. *)
+val copy_scalars : t -> t
+val adopt_scalars : from:t -> t -> t
+
 (* Drop block-local word/slice bindings a caller-supplied entry may have
    left behind after a def; the definitions' cells own those values. *)
 val scalar_snapshot : t -> t

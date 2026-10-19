@@ -1317,7 +1317,11 @@ let acquire_unsat ~(synth : Hike_synth.table)
   (* Outside a cycle no observation records, so the walk has no effect. *)
   if Cbat_landmarks.in_cycle landmarks then rooted ~landmarks disabled (fun () -> begin
     (* The observer seeds the requested facts even when the live state
-       excludes them. This temporary environment never enters the solve. *)
+       excludes them, and the walk replays the block forward; both write
+       on a private cell copy, so the probe cannot change the shared
+       store it observes.  The constrained environment is discarded. *)
+    let env = AI.copy_scalars env in
+    let entry = AI.adopt_scalars ~from:env entry in
     let constrained = constrain_operands ~synth ~seed:true ~env ~landmarks disabled
         (WordSet.singleton Cbat_word.b1) in
     if not (AI.equal constrained AI.bottom) then begin
