@@ -304,7 +304,7 @@ let tests : unit Alcotest.test list =
                    |> Seq.exists ~f:(fun j ->
                           match Jmp.cond j with
                           | Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int _) ->
-                              Var.equal v c4_t
+                              Var.equal v (Def.lhs d)
                           | _ -> false))
             | _ -> false));
 
@@ -563,7 +563,7 @@ let tests : unit Alcotest.test list =
         let facts, sub = fixture_facts_sub ~synth:Hike.Synth.empty sub in
         let blk = Term.first blk_t sub |> Base.Option.value_exn in
         check "MOD-44 the value is its stack positions"
-          (match facts.Hike.Kb.denote ~blk (Bil.Var t) with
+          (match facts.Hike.Kb.denote ~blk (Bil.Var (Sm.version_at_end blk t)) with
            | Ok ws ->
              Option.equal Hike_origin.equal (Cbat_vsa.WordSet.origin ws)
                (Some Hike_origin.Stack)

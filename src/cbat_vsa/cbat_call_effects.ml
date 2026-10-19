@@ -11,7 +11,6 @@ module WordSet = Cbat_clp_set_composite
 type site = {
   summary : Int.Set.t option;
   read_lanes : var list;
-  pushed : bool;
 }
 
 type callee = Summary of Int.Set.t option | Blocked
@@ -171,12 +170,4 @@ let transfer ?kept ?(stack_args = []) ~(abi : Hike_abi.t) ~(preserved : Int.Set.
     frame_keep ~preserved
       ~rsp:(AI.find_word word_bits env rsp)
       ~frame_escaped ~stack_args env in
-  (* The SP restores by one word on returns: the callee's ret pops
-     exactly the retaddr the caller pushed.  On a stack word the +word
-     lands in the offsets exactly. *)
-  if site.pushed then
-    AI.add_word abs ~key:rsp
-      ~data:(WordSet.add (AI.find_word word_bits abs rsp)
-               (WordSet.singleton
-                  (Cbat_word.of_int ~width:word_bits abi.Hike_abi.word)))
-  else abs
+  abs

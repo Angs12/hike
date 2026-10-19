@@ -96,9 +96,69 @@ let tag_rip context ~synth ~(is_entry : int64 -> bool) program =
   Hike_rip.prepare_program ~synth
     ~addr_bits:(Hike_abi.addr_size_bits context.target) ~is_address program
 
-(* The function's normalized body and the table grown by its minted vars. *)
-let prepare_function context ~synth ~is_entry sub =
+(* A transfer that is not a goto (a call, a trap) shares its block with
+   other jmps: it moves to a block of its own, entered under its guard, so
+   that the results a call defines lie on the call's own edge.  The new
+   blocks follow the existing ones, which keeps every implicit
+   fall-through. *)
+let isolate_transfers (sub : sub term) : sub term =
+  let moved = ref [] in
+  let is_goto j = match Jmp.kind j with Goto _ -> true | _ -> false in
+  let sub =
+    Term.map blk_t sub ~f:(fun blk ->
+        let jmps = Term.enum jmp_t blk |> Seq.to_list in
+        if Base.List.length jmps < 2 || Base.List.for_all jmps ~f:is_goto then blk
+        else
+          Term.concat_map jmp_t blk ~f:(fun j ->
+              if is_goto j then [ j ]
+              else begin
+                let own =
+                  Blk.create ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
+                in
+                moved := own :: !moved;
+                [ Jmp.create_goto ~cond:(Jmp.cond j) (Direct (Term.tid own)) ]
+              end))
+  in
+  Base.List.fold (Base.List.rev !moved) ~init:sub ~f:(Term.append blk_t)
+
+(* The function's normalized body in SSA and the table grown by its
+   minted vars.  The returns read the ABI's return lanes and the calls the
+   machine convention; signing narrows the calls later. *)
+let normalize_function context ~synth ~is_entry sub =
   let program = Term.append sub_t (Program.create ()) sub in
   let synth, program = normalize context ~synth program in
   let synth, program = tag_rip context ~synth ~is_entry program in
-  (Base.Option.value_exn (Term.first sub_t program), synth)
+  let sub = Base.Option.value_exn (Term.first sub_t program) in
+  let sub = isolate_transfers sub in
+  (sub, synth)
+
+let prepare_function context ~synth ~is_entry sub =
+  let sub, synth = normalize_function context ~synth ~is_entry sub in
+  (Hike_ssa.ssa_sub ~synth ~target:context.target sub, synth)
+
+(* Keep normalized blocks whose claims did not change. New normalization
+   can also change an existing block (for example a flag's backward slice),
+   so compare the normalized claims rather than only the decode's tids. *)
+let update_function context ~synth ~is_entry ~old raw =
+  let sub, synth = normalize_function context ~synth ~is_entry raw in
+  let sub = Hike_ssa.prepare_sub ~synth ~target:context.target sub in
+  let old_base = Hike_ssa.unssa_sub old in
+  let sub = Term.map blk_t sub ~f:(fun blk ->
+      match Term.find blk_t old_base (Term.tid blk) with
+      | Some before ->
+        let previous = Term.find_exn blk_t old (Term.tid blk) in
+        if Blk.equal before blk then previous
+        else if Base.List.equal Def.equal
+            (Term.enum def_t before |> Seq.to_list)
+            (Term.enum def_t blk |> Seq.to_list) then
+          let kept = Term.with_attrs previous (Term.attrs blk)
+            |> fun b -> Term.filter jmp_t b ~f:(Fun.const false) in
+          let kept = Seq.fold (Term.enum jmp_t blk) ~init:kept
+              ~f:(Term.append jmp_t) in
+          let stamp = Term.get_attr previous Hike_stack_model.versions_tag
+            |> Base.Option.value_exn ~message:"hike: normalized block has no SSA stamp" in
+          Term.set_attr kept Hike_stack_model.versions_tag stamp
+        else blk
+      | None -> blk) in
+  let sub, woken = Hike_ssa.update_sub_woken ~synth ~target:context.target ~old sub in
+  (sub, synth, woken)

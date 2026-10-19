@@ -582,7 +582,9 @@ let collect (env : env) (prog : program term) : collecting =
           Base.List.fold env.params ~init:acc ~f:(fun acc v ->
               Option.fold
                 (Option.bind
-                   (Result.ok (env.denote ~blk:acc.blk (Bil.Var v)))
+                   (Result.ok
+                      (env.denote ~blk:acc.blk
+                         (Bil.Var (Model.version_at_end acc.blk v))))
                    ~f:(Model.escape_extent ~entry:env.entry))
                 ~init:acc
                 ~f:(fun acc ext ->

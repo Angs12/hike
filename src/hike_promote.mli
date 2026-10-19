@@ -22,9 +22,11 @@ val call_resolution :
 
 (** The promotion rewrite: the sub gains its promoted parameters as
     real BIR args, the sites' outgoing stores gain their call-arg defs,
-    and singleton-resolved indirect targets become direct. *)
+    and singleton-resolved indirect targets become direct, their call
+    lanes and version stamps refreshed. *)
 val promote_sub :
-  synth:Hike_synth.table ref -> addr_bits:int -> facts -> sub term -> sub term
+  synth:Hike_synth.table ref -> addr_bits:int -> abi:Hike_abi.t -> facts ->
+  sub term -> sub term
 
 
 (** One call-site binding: the outgoing slot and the storing def. *)

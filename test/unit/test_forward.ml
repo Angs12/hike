@@ -443,7 +443,7 @@ let tests : unit Alcotest.test list =
       "a stored band pointer reloads with its band (the store->load round trip keeps the origin)"
       (fun () ->
         let sub, tids, rax = sp_roundtrip () in
-        let envs, _, _ =
+        let envs, solved, _ =
           solve ~synth:Hike.Synth.empty ~callee:(callee_of ~synth:Hike.Synth.empty (Program.create ~subs:[ sub ] ()))
             (x86_target ()) sub
         in
@@ -457,7 +457,7 @@ let tests : unit Alcotest.test list =
           | None -> AI.bottom
         in
         check "FWD-19"
-          (match Vsa.WordSet.stack_offsets (AI.find_word 64 post rax) with
+          (match Vsa.WordSet.stack_offsets (AI.find_word 64 post (Sm.version_at_end (Term.find_exn blk_t solved reload_tid) rax)) with
            | Some _ -> true
            | None -> false));
 

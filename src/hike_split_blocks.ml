@@ -222,9 +222,11 @@ let compilable_series (jmps : jmp term list) : bool =
       | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
       | _ -> false)
 
-let pieces ~synth (blk : blk term) : blk term list =
+(* The pieces, and for each original jmp edge the piece that now holds
+   it: a successor phi's incoming names that piece, not the old block. *)
+let pieces ~synth (blk : blk term) : blk term list * (Tid.t * Tid.t) list =
   match Term.enum jmp_t blk |> Seq.to_list with
-  | [] | [ _ ] -> [ blk ]
+  | [] | [ _ ] -> ([ blk ], [])
   | jmps ->
       let built =
         Base.List.map jmps ~f:(fun j ->
@@ -237,8 +239,20 @@ let pieces ~synth (blk : blk term) : blk term list =
                   |> Seq.map ~f:(fun d -> Def.create (Def.lhs d) (Def.rhs d))
                   |> Seq.to_list
                 in
-                Blk.create ~defs:bindings
-                  ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
+                let action =
+                  Blk.create ~defs:bindings
+                    ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
+                in
+                (* The call's argument and result versions sit with the call. *)
+                match Term.get_attr blk Model.versions_tag with
+                | None -> action
+                | Some vs ->
+                  let written = Model.writes (`Jmp j) in
+                  Term.set_attr action Model.versions_tag
+                    { vs with
+                      Model.Versions.rets =
+                        Base.List.filter vs.Model.Versions.rets
+                          ~f:(fun (_, v) -> Core.Set.mem written v) }
               in
               (Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action))),
                Some action)
@@ -259,6 +273,9 @@ let pieces ~synth (blk : blk term) : blk term list =
                 |> Term.filter def_t ~f:(fun d ->
                      Base.List.is_empty actions || not (Model.is_call_arg synth (Def.lhs d)))
                 |> fun b -> Term.append jmp_t b j
+                |> fun b ->
+                (if Base.List.is_empty actions then b
+                 else Term.del_attr b Model.versions_tag)
               else Blk.create ~tid ~jmps:[ j ] ()
             in
             match next with
@@ -266,10 +283,24 @@ let pieces ~synth (blk : blk term) : blk term list =
               Term.append jmp_t blk_i (Jmp.create (Goto (Direct next_tid)))
             | None -> blk_i)
       in
-      pieces @ actions
+      let holders =
+        Base.List.map2_exn jmps (Base.List.zip_exn built tids)
+          ~f:(fun j ((_, action), tid) ->
+            let holder = Base.Option.value_map action ~default:tid ~f:Term.tid in
+            match Jmp.kind j with
+            | Goto (Direct t) -> [ (t, holder) ]
+            | Call c ->
+              (match Call.return c with
+               | Some (Direct t) -> [ (t, holder) ]
+               | _ -> [])
+            | _ -> [])
+        |> Base.List.concat
+      in
+      (pieces @ actions, holders)
 
 let split_sub ~synth (sub : sub term) : sub term =
-  Term.concat_map blk_t sub ~f:(fun blk ->
+  let moved = ref [] in
+  let sub = Term.concat_map blk_t sub ~f:(fun blk ->
       let jmps = Term.enum jmp_t blk |> Seq.to_list in
       let needs_split =
         Base.List.length jmps > 2
@@ -278,12 +309,40 @@ let split_sub ~synth (sub : sub term) : sub term =
                    match Jmp.kind j with Call _ -> true | _ -> false))
       in
       if not needs_split then [ blk ]
-      else if compilable_series jmps then pieces ~synth blk
+      else if compilable_series jmps then begin
+        let bs, holders = pieces ~synth blk in
+        moved := (Term.tid blk, holders) :: !moved;
+        bs
+      end
       else begin
         Hike_diag.warn "split-blocks: sub %s: block %s: unsupported multi-jmp series; left unsplit"
           (Sub.name sub) (Tid.name (Term.tid blk));
         [ blk ]
       end)
+  in
+  (* Each successor phi's incoming from a split block becomes one
+     incoming per piece that holds an edge to it, all carrying the value. *)
+  Base.List.fold !moved ~init:sub ~f:(fun sub (orig, holders) ->
+      Base.List.map holders ~f:fst
+      |> Base.List.dedup_and_sort ~compare:Tid.compare
+      |> Base.List.fold ~init:sub ~f:(fun sub succ ->
+          match Term.find blk_t sub succ with
+          | None -> sub
+          | Some dst ->
+            let srcs =
+              Base.List.filter_map holders ~f:(fun (s, h) ->
+                  Base.Option.some_if (Tid.equal s succ) h)
+              |> Base.List.dedup_and_sort ~compare:Tid.compare
+            in
+            Term.update blk_t sub
+              (Term.map phi_t dst ~f:(fun phi ->
+                   Phi.of_list (Phi.lhs phi)
+                     (Phi.values phi
+                      |> Seq.to_list
+                      |> Base.List.concat_map ~f:(fun (s, e) ->
+                             if Tid.equal s orig then
+                               Base.List.map srcs ~f:(fun h -> (h, e))
+                             else [ (s, e) ]))))))
 
 let normalize ~synth (prog : program term) : program term =
   Term.map sub_t prog ~f:(split_sub ~synth)

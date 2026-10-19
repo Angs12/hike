@@ -78,7 +78,7 @@ let of_solved ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
      other way; the ABI restore is assumed either way (decision 8). *)
   let check_restore blk =
     let restored =
-      match denote ~blk (Bil.Var abi.Hike_abi.sp) with
+      match denote ~blk (Bil.Var (Model.version_at_end blk abi.Hike_abi.sp)) with
       | Ok ws ->
         Base.Option.equal Int64.equal (Model.singleton_stack_position ws)
           (Some (Int64.add Model.segment_base (Int64.of_int abi.Hike_abi.word)))

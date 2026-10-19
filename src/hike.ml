@@ -125,11 +125,6 @@ let pass_split_blocks proj =
   let synth = (Hike_kb.facts ()).synth in
   Project.map_program proj ~f:(Hike_split_blocks.normalize ~synth)
 
-let pass_ssa proj =
-  let target = Project.target proj in
-  let synth = (Hike_kb.facts ()).synth in
-  Project.map_program proj ~f:(Hike_ssa.ssa_program ~synth ~target)
-
 (* The pass chain in order: the plugin registers each stage as a pass
    and [lift] runs them in sequence, so the two entries cannot drift. *)
 let stages = [
@@ -138,7 +133,6 @@ let stages = [
   ("sections", pass_attrib);
   ("split-blocks", pass_split_blocks);
   ("sign", Hike_types.sign_run);
-  ("ssa", pass_ssa);
   ("types", Hike_types.run);
 ]
 

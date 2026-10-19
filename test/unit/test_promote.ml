@@ -18,7 +18,8 @@ let plus_addr sp (off : int64) : exp =
 (* The fixture stamps the producer's facts onto the terms, then runs the
    promotion as a BIR rewrite — what the pipeline's vsa pass does. *)
 let stamp ~synth (facts : Hike.Promote.facts) (sub : sub term) : sub term =
-  Hike.Promote.promote_sub ~synth ~addr_bits:64 facts sub
+  Hike.Ssa.ssa_sub ~synth:!synth ~target:(x86_target ()) sub
+  |> Hike.Promote.promote_sub ~synth ~addr_bits:64 ~abi:Hike.Abi.x86_64_sysv facts
 
 (* Family 8: stack-arg promotion emission.  A promoted callee (two proven
    slots) and two callers — one resolved indirect site with the outgoing
@@ -491,6 +492,76 @@ let slot_of_addr ~synth (d : def term) : int option =
          | _ -> None)
       | _ -> None)
   | _ -> None
+
+(* An SSA caller whose indirect call returns into a block that reads the
+   result; resolving it retargets the call.  Returns the callee, the SSA
+   caller and the call block's tid. *)
+let pr_ssa_caller () : sub term * sub term * Tid.t =
+  let ret_reg = int_ret 0 in
+  let callee, _ = sub_of "pr_ssa_callee" [ [], [ (0, mk_ret) ] ] in
+  let callee =
+    Term.append arg_t callee (Arg.create ~intent:Out ret_reg (Bil.Var ret_reg))
+  in
+  let caller, _ =
+    sub_of "pr_ssa_caller"
+      [ [ Def.create (int_param 0) (Bil.Int (Cbat_word.to_word (w64 1))) ],
+        [ (1,
+           fun t ->
+             Jmp.create
+               (Call (Call.create ~return:(Direct t)
+                        ~target:(Indirect (Bil.Var (v64 "pr_ssa_tptr"))) ()))) ];
+        [ Def.create (v64 "pr_ssa_use")
+            (Bil.BinOp (Bil.PLUS, Bil.Var ret_reg,
+                        Bil.Int (Cbat_word.to_word (w64 1)))) ],
+        [ (0, mk_ret) ] ]
+  in
+  let ssa = ssa_of_subs [ callee; caller ] "pr_ssa_caller" in
+  (callee, ssa, Term.tid (Term.first blk_t ssa |> Base.Option.value_exn))
+
+(* [ssa] promoted with its first call resolved to [target]: the call block. *)
+let pr_ssa_retarget (ssa : sub term) (call_blk : Tid.t) (target : Tid.t) :
+    blk term * blk term =
+  let before = Term.find_exn blk_t ssa call_blk in
+  let j = Term.first jmp_t before |> Base.Option.value_exn in
+  let facts =
+    mk_facts ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some target)) () in
+  let after =
+    Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64
+      ~abi:Hike.Abi.x86_64_sysv facts ssa
+  in
+  (before, Term.find_exn blk_t after call_blk)
+
+
+(* Every read of a versioned var has a definition, and no var is defined
+   twice, except the un-renamed model storage the rewrite repoints defs to. *)
+let ssa_valid ~synth (sub : sub term) : bool * bool =
+  let lhs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun b ->
+           Seq.append (Term.enum phi_t b |> Seq.map ~f:Phi.lhs)
+             (Term.enum def_t b |> Seq.map ~f:Def.lhs))
+    |> Seq.filter ~f:(fun v -> not (Hike.Stack_model.is_model_storage synth v))
+    |> Seq.to_list
+  in
+  let single =
+    Base.List.length lhs
+    = Base.List.length (Base.List.dedup_and_sort lhs ~compare:Var.compare)
+  in
+  let defined = Var.Set.of_list lhs in
+  let reads =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun b ->
+           Seq.append
+             (Term.enum phi_t b |> Seq.map ~f:Phi.free_vars)
+             (Term.enum def_t b |> Seq.map ~f:Def.free_vars))
+    |> Seq.fold ~init:Var.Set.empty ~f:Core.Set.union
+  in
+  let dominated =
+    Core.Set.for_all reads ~f:(fun v ->
+        Var.index v = 0 || Core.Set.mem defined v
+        || Hike.Stack_model.is_model_storage synth v)
+  in
+  (single, dominated)
 
 let tests : unit Alcotest.test list =
   [
@@ -999,6 +1070,103 @@ let tests : unit Alcotest.test list =
     pin "PR-38" "the register spills alone are not variadic" (fun () ->
         let _, sub' = rewrite_one_synth ~synth:Hike.Synth.empty (rw_variadic ~overflow:false ()) in
         check "PR-38" (not (Hike.Variadic.is_variadic sub')))
+    ;
+
+    (* PR-40: an SSA indirect call resolved to an ordinary sub keeps its
+       lanes at the versions the block stamps. *)
+    pin "PR-40" "retargeting an SSA call keeps its lanes at the stamped versions"
+      (fun () ->
+        let callee, ssa, call_blk = pr_ssa_caller () in
+        let before, after = pr_ssa_retarget ssa call_blk (Term.tid callee) in
+        let call = Term.first jmp_t after |> Base.Option.value_exn in
+        let stamp = Term.get_attr after Hike.Stack_model.versions_tag in
+        let eff = Hike.Stack_model.effects call in
+        check "PR-40 direct"
+          (match Jmp.kind call with
+           | Call c -> (match Call.target c with
+               | Direct t -> Tid.equal t (Term.tid callee)
+               | Indirect _ -> false)
+           | _ -> false);
+        check "PR-40 stamp unchanged"
+          (Base.Option.equal
+             (fun a b -> Hike.Stack_model.Versions.compare a b = 0)
+             stamp (Term.get_attr before Hike.Stack_model.versions_tag));
+        check "PR-40 results are the stamped rets"
+          (match stamp with
+           | Some vs ->
+               Core.Set.equal (Hike.Stack_model.writes (`Jmp call))
+                 (Var.Set.of_list (Base.List.map vs.Hike.Stack_model.Versions.rets ~f:snd))
+           | None -> false);
+        check "PR-40 arguments are the stamped args"
+          (match stamp with
+           | Some vs ->
+               Base.List.for_all eff.Hike.Stack_model.Term_effects.reads ~f:(fun r ->
+                   Base.List.Assoc.find vs.Hike.Stack_model.Versions.args (Var.base r)
+                     ~equal:Var.same
+                   |> Base.Option.value_map ~default:true ~f:(Var.equal r))
+           | None -> false));
+
+    (* PR-41: a target with fewer lanes drops them from the call and from
+       the block's result stamp. *)
+    pin "PR-41" "retargeting to a lane-free target drops the call's lanes and rets"
+      (fun () ->
+        let _, ssa, call_blk = pr_ssa_caller () in
+        let _, after =
+          pr_ssa_retarget ssa call_blk (Tid.for_name "interrupt:0")
+        in
+        let call = Term.first jmp_t after |> Base.Option.value_exn in
+        check "PR-41"
+          (Core.Set.is_empty (Hike.Stack_model.writes (`Jmp call))
+          && (match Term.get_attr after Hike.Stack_model.versions_tag with
+              | Some vs -> Base.List.is_empty vs.Hike.Stack_model.Versions.rets
+              | None -> false)));
+
+    (* PR-42: the promoted parameters of an SSA callee enter at version 0. *)
+    pin "PR-42" "promotion keeps an SSA sub SSA and its slot lanes at entry version"
+      (fun () ->
+        let _, ssa, _ = pr_ssa_caller () in
+        let sub' =
+          Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64
+            ~abi:Hike.Abi.x86_64_sysv (mk_facts ~prom_arity:2 ()) ssa
+        in
+        let slots = Term.enum arg_t sub' |> Seq.to_list in
+        check "PR-42"
+          (Base.List.length slots = 2
+          && Base.List.for_all slots ~f:(fun a -> Var.index (Arg.lhs a) = 0)))
+    ;
+
+    (* PR-43: the storage rewrite of an SSA sub with stack, window and
+       global accesses gives no var a second definition and leaves no
+       read of an undefined version. *)
+    pin "PR-43" "the storage rewrite keeps an SSA sub's definitions single and reads defined"
+      (fun () ->
+        let m = memv "pr43_m" and rbp = frame_ptr in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let at off = Bil.BinOp (Bil.PLUS, Bil.Var rbp, k off) in
+        let sub0 =
+          straight_sub "pr43"
+            [ Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, k 8));
+              Def.create m (Bil.Store (Bil.Var m, Bil.Var sp, Bil.Var rbp, LittleEndian, `r64));
+              Def.create rbp (Bil.Var sp);
+              Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, k 16));
+              Def.create m (Bil.Store (Bil.Var m, at (-16), k 42, LittleEndian, `r64));
+              Def.create (v64 "pr43_t") (Bil.Load (Bil.Var m, at (-16), LittleEndian, `r64));
+              Def.create (v64 "pr43_w") (Bil.Load (Bil.Var m, at 20, LittleEndian, `r64));
+              Def.create (v64 "pr43_c") (Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 0x1000L)));
+              Def.create (v64 "pr43_g") (Bil.Load (Bil.Var m, Bil.Var (v64 "pr43_c"), LittleEndian, `r64));
+              Def.create m (Bil.Store (Bil.Var m, Bil.Var (v64 "pr43_c"), Bil.Var (v64 "pr43_t"), LittleEndian, `r64)) ]
+        in
+        let spans =
+          [ { Hike.Sections.ds_sec = Hike.Stack_model.Data;
+              Hike.Sections.ds_lo = 0x1000L;
+              Hike.Sections.ds_hi = 0x1010L;
+              Hike.Sections.ds_slots = [] } ]
+        in
+        let result = run_chain_attrib_result ~synth:Hike.Synth.empty ~spans [ sub0 ] in
+        let sub' = Term.first sub_t result.program |> Base.Option.value_exn in
+        let single, defined = ssa_valid ~synth:result.facts.Hike.Kb.synth sub' in
+        check "PR-43 single definitions" single;
+        check "PR-43 reads defined" defined)
   ]
 
 let () = run "promote" tests

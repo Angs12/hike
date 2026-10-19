@@ -626,6 +626,25 @@ let denote_imm_exp ~(synth : Hike_synth.table) (e : exp) (env : AI.t) :
   let open Monad_type_error in
   denote_exp ~synth e env >>= val_as_imm
 
+(* The value [ev] bound to [v].  A partial-register write (EAX into
+   RAX) zero-fills the base register's remaining bytes — the machine's
+   narrow write.  Wider-than-declared values keep their width. *)
+let bind_value (v : var) (e : exp) (ev : val_t) (env : AI.t) : AI.t =
+  match ev with
+  | `Word p ->
+    let p =
+      match Var.typ (Var.base v) with
+      | Type.Imm n when n > WordSet.bitwidth p ->
+        WordSet.cast Bil.UNSIGNED n p
+      | _ -> p
+    in
+#ifdef VSA_DEBUG
+    debug_store_width v e p;
+#endif
+    ignore e;
+    AI.add_word env ~key:v ~data:p
+  | `Mem m -> AI.add_memory env ~key:v ~data:m
+
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
    words and memory ops key cells by their segment offsets.  A def the
    denotation cannot type adds nothing: its readers take the top
@@ -638,22 +657,7 @@ let denote_def_escaping ~(synth : Hike_synth.table) ~(escaped : bool ref)
   match
     (let open Monad_type_error in
      denote_exp_escaping ~synth ~escaped e env >>| fun ev ->
-     (match ev with
-      | `Word p ->
-        (* A partial-register write (EAX into RAX) zero-fills the base
-           register's remaining bytes — the machine's narrow write.
-           Wider-than-declared values keep their width. *)
-        let p =
-          match Var.typ (Var.base v) with
-          | Type.Imm n when n > WordSet.bitwidth p ->
-            WordSet.cast Bil.UNSIGNED n p
-          | _ -> p
-        in
-#ifdef VSA_DEBUG
-        debug_store_width v e p;
-#endif
-        AI.add_word env ~key:v ~data:p
-      | `Mem m -> AI.add_memory env ~key:v ~data:m))
+     bind_value v e ev env)
   with
   | Ok env' -> env'
   | Error err ->
@@ -667,10 +671,38 @@ let denote_def ~(synth : Hike_synth.table) (df : def term) (env : AI.t) : AI.t =
   if !escaped then AI.escape_frame env' else env'
 
 let denote_defs ~(synth : Hike_synth.table) (b : blk term) : AI.t -> AI.t =
-  (* Phis are the identity. *)
   fun env0 ->
     Term.enum def_t b
     |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def ~synth df env)
+
+(* The phis of [blk] along the edge from [source]: each reads its
+   operand in the state the edge delivers, then all bind together.  A
+   phi the edge has no operand for, or one the denotation cannot type,
+   leaves its lhs top. *)
+let denote_phis ~(synth : Hike_synth.table) ~(source : tid) (blk : blk term)
+    (env : AI.t) : AI.t =
+  if AI.equal env AI.bottom then env
+  else
+    let incoming (p : phi term) : exp option =
+      Seq.find_map (Phi.values p) ~f:(fun (src, e) ->
+          if Tid.equal src source then Some e else None) in
+    let value (p : phi term) : (exp * val_t) option =
+      let top () =
+        match val_top (Var.typ (Phi.lhs p)) with
+        | Ok ev -> Some (Bil.Var (Phi.lhs p), ev)
+        | Error _ -> None in
+      match incoming p with
+      | None -> top ()
+      | Some e -> (
+          match denote_exp ~synth e env with
+          | Ok ev -> Some (e, ev)
+          | Error _ -> top ()) in
+    Term.enum phi_t blk |> Seq.to_list
+    |> List.map ~f:(fun p -> (Phi.lhs p, value p))
+    |> List.fold ~init:env ~f:(fun env (lhs, v) ->
+        match v with
+        | Some (e, ev) -> bind_value lhs e ev env
+        | None -> env)
 
 (* One per-block state replay: the block's defs fold [denote_def]
    from its entry state; [f] folds over each def's (before, after)

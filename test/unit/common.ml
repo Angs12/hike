@@ -171,7 +171,7 @@ let mk_rctx ~abi ~synth ?sub_lookup sub =
   Vsa.Test_seam.mk_rctx ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
-    ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
+    ~phi_writes:(fun p -> Sm.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
     ?sub_lookup sub
 (* The record vocabulary: test_fixtures resolves [Cu] through this open. *)
@@ -214,14 +214,15 @@ let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.call
 (* The production solve with every callee summarized, so it never
    pauses: the block environments, the rewritten sub and the grown
    block-address map. *)
-let solve_with_synth ~synth ?(images = [])
+let solve_with_synth ~synth ?(ssa = true) ?(images = [])
     ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) =
+  let sub = if ssa then Hike.Ssa.ssa_sub ~synth ~target sub else sub in
   match
     Hv.start target ~lookup:(fun _ -> None) ~images ~callee ~block_addrs
       ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hv.Done (envs, sub', block_addrs', synth) -> (envs, sub', block_addrs', synth)
+  | Hv.Done (envs, sub', block_addrs', synth, _) -> (envs, sub', block_addrs', synth)
   | Hv.Paused _ -> Alcotest.fail "solve: a fixture callee is blocked"
 
 let solve ~synth ?images ?block_addrs ~callee target sub =
@@ -281,13 +282,13 @@ let run_chain_attrib ~synth ?spans (subs : sub term list) : program term =
 (* The fixtures' analysis facts: the subs' converged environments, plus
    the stamped subs the seam reads (the fixpoint's sweep tags every def
    with its before-env).  The bool reports a nonempty env set. *)
-let fixture_facts ~synth (subs : sub term list) :
+let fixture_facts ~synth ?(ssa = true) (subs : sub term list) :
     Hike.Kb.facts * sub term list * bool =
   let all_envs, stamped, ok, synth =
     Base.List.fold subs ~init:(Tid.Map.empty, [], true, synth)
       ~f:(fun (m, stamped, ok, synth) sub ->
         let envs, sub', _, synth =
-          solve_with_synth ~synth ~callee:(callee_of ~synth (Program.create ~subs:[ sub ] ()))
+          solve_with_synth ~synth ~ssa ~callee:(callee_of ~synth (Program.create ~subs:[ sub ] ()))
             (x86_target ()) sub
         in
         (Core.Map.merge m envs

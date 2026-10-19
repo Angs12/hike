@@ -46,8 +46,10 @@ type paused = {
   p_synth : Hike_synth.table;
 }
 
+type continuation = { canonical : sub term; seed : Vsa.vsa_sol }
+
 type outcome =
-  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table
+  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table * continuation
   | Paused of paused
 
 (* The callees the solution's reachable calls wait on, and the blocks
@@ -94,6 +96,27 @@ let blocked_callees ~(synth : Hike_synth.table) ~(lookup : lookup_fn)
               (Core.Set.add callees t, Core.Set.add blocks (Term.tid blk))
             | _ -> acc))
 
+(* Entries of renamed blocks are recomputed from their predecessors.
+   The entry keeps the ABI seed; unchanged blocks retain exact-version facts. *)
+let warm_seed ~abi ~sub ~woken sol =
+  let entry = Base.Option.map (Vsa.entry_block_of sub) ~f:Term.tid in
+  let initial = Vsa.init_sol ~abi sub in
+  let seed = Graphlib.Std.Solution.enum sol
+    |> Seq.filter ~f:(fun (b, _) ->
+        Option.is_some (Term.find blk_t sub b) && not (Core.Set.mem woken b))
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (b, v) -> Core.Map.set m ~key:b ~data:v) in
+  let seed = match entry with
+    | Some b when Core.Set.mem woken b ->
+      Core.Map.set seed ~key:b ~data:(Graphlib.Std.Solution.get initial b)
+    | _ -> seed in
+  let seed = Graphlib.Std.Solution.create seed (Graphlib.Std.Solution.default sol) in
+  let g = Sub.to_graph sub in
+  let wake = Core.Set.fold woken ~init:woken ~f:(fun acc b ->
+      Graphs.Tid.Node.preds b g |> Seq.fold ~init:acc ~f:(fun acc p ->
+          if Tid.equal p Graphs.Tid.start || Tid.equal p Graphs.Tid.exit then acc
+          else Core.Set.add acc p)) in
+  (seed, wake)
+
 (* The fused solve: each phase runs the engine over the resolved
    extra-edge set, then the resolver grows the edges and splits
    mid-block case entries — a resolution event — and the next phase
@@ -117,22 +140,23 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
      phases, the completion's rewrites, and the replay compute reads
      them through one bracket. *)
   let synth = ref synth in
+  let solve_once sub ~resolved ~init ~wake =
+    Vsa.static_graph_vsa ~abi ~synth
+      ~def_reads:(fun d -> Model.reads (`Def d))
+      ~def_writes:(fun d -> Model.writes (`Def d))
+      ~phi_reads:(fun p -> Model.reads (`Phi p))
+      ~phi_writes:(fun p -> Model.writes (`Phi p))
+      ~jmp_reads:(fun j ->
+          Core.Set.union (Model.reads (`Jmp j)) (Model.writes (`Jmp j)))
+      ~callee ~resolved ~sub_lookup:lookup ~wake
+      sub init
+  in
   Vsa.with_images images (fun () ->
       let rec phases (resolved : Tid.Set.t Tid.Map.t)
           (block_addrs : Tid.t Addr.Map.t)
           (init : Vsa.vsa_sol option) (wake : Tid.Set.t) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
-        let sol =
-          Vsa.static_graph_vsa ~abi ~synth
-            ~def_reads:(fun d -> Model.reads (`Def d))
-            ~def_writes:(fun d -> Model.writes (`Def d))
-            ~phi_reads:(fun p -> Model.reads (`Phi p))
-            ~phi_writes:(fun p -> Model.writes (`Phi p))
-            ~jmp_reads:(fun j ->
-                Core.Set.union (Model.reads (`Jmp j)) (Model.writes (`Jmp j)))
-            ~callee ~resolved ~sub_lookup:lookup ~wake
-            sub seed
-        in
+        let sol = solve_once sub ~resolved ~init:seed ~wake in
         let blocked, blocks = blocked_callees ~synth:!synth ~lookup ~callee sol sub in
         if not (Core.Set.is_empty blocked) then
           `Paused { p_sub = sub; p_resolved = resolved;
@@ -144,27 +168,51 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
               ~foreign_slots sub resolved
           in
           if events then phases resolved' block_addrs (Some sol) Tid.Set.empty
-          else `Drained (sol, block_addrs)
+          else `Drained (sol, block_addrs, resolved)
       in
       (* A sub without a converged solution has no sound summary or
          body; the lift stops. *)
+      try
       match phases resolved block_addrs seed wake with
-      | exception Vsa.Fixpoint_not_converged (n, _) ->
-        failwith
-          (Printf.sprintf "hike-vsa: sub %s: fixpoint not converged in %d iterations"
-             (Sub.name sub) n)
       | `Paused p -> Paused p
-      | `Drained (sol, block_addrs') ->
-        let sub' =
-          Hike_cfg_complete.materialize ~abi ~sol ~synth:!synth ~block_addrs:block_addrs'
-            ~foreign_slots sub
+      | `Drained (sol, block_addrs', resolved) ->
+        let continuation = { canonical = sub; seed = sol } in
+        let materialized =
+          Hike_cfg_complete.materialize ~abi ~sol ~synth:!synth
+            ~block_addrs:block_addrs' ~foreign_slots sub
+        in
+        (* The materialization changes the edge set; the SSA follows, and
+           the blocks it renamed are solved again from the warm solution
+           (the others keep their variables, so their states stand). *)
+        let sub', woken =
+          Hike_ssa.update_sub_woken ~synth:!synth ~target ~old:sub materialized
+        in
+        let sol =
+          if Core.Set.is_empty woken then sol
+          else begin
+            let seed, wake = warm_seed ~abi ~sub:sub' ~woken sol in
+            let own =
+              Core.Set.of_list (module Tid)
+                (Seq.to_list (Seq.map (Term.enum blk_t sub') ~f:Term.tid))
+            in
+            let resolved =
+              Core.Map.map resolved ~f:(fun ts -> Core.Set.inter ts own)
+            in
+            solve_once sub' ~resolved ~init:seed ~wake
+          end
         in
         (* The round-down normalization rides the returned sub: the
            attribution re-denotes from these rhs's, and the solve's
            materialization may reintroduce the shift pair. *)
         let sub' = Vsa.normalize_round_with_synth ~synth sub' in
         let envs, stamped = Vsa.stamp_envs_of_sol ~synth:!synth ~sol sub' in
-        Done (envs, stamped, block_addrs', !synth))
+        let continuation = { continuation with canonical =
+            Hike_ssa.retain_history ~from:stamped continuation.canonical } in
+        Done (envs, stamped, block_addrs', !synth, continuation)
+      with Vsa.Fixpoint_not_converged (n, _) ->
+        failwith
+          (Printf.sprintf "hike-vsa: sub %s: fixpoint not converged in %d iterations"
+             (Sub.name sub) n))
 
 let start (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)
@@ -174,6 +222,14 @@ let start (target : Theory.Target.t) ~(lookup : lookup_fn)
     (sub : sub term) : outcome =
   solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub
     ~resolved:Tid.Map.empty ~block_addrs ~synth ~seed:None ~wake:Tid.Set.empty
+
+let restart target ~lookup ~images ~callee ~block_addrs ~synth ~foreign_slots
+    ~previous ~woken sub =
+  let sol = previous.seed in
+  let abi = Hike_abi.of_target target in
+  let seed, wake = warm_seed ~abi ~sub ~woken sol in
+  solve_phases target ~lookup ~images ~callee ~foreign_slots ~sub
+    ~resolved:Tid.Map.empty ~block_addrs ~synth ~seed:(Some seed) ~wake
 
 let resume (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(images : Vsa.section_image list)

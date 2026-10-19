@@ -265,8 +265,10 @@ module Versions : sig
 end
 
 val versions_tag : Versions.t Value.Tag.t
-val ssa_tag : unit Value.Tag.t
-val is_ssa : sub term -> bool
+
+(** The version of base register [v] in effect after [blk]'s defs. *)
+val version_at_end : blk term -> var -> var
+
 val set_layout : sub_layout -> sub term -> sub term
 
 (* The emission signature rides the sub's own arg terms. *)
@@ -274,6 +276,7 @@ val set_sig : sub term -> Arg.t list -> sub term
 val is_ret : Arg.t -> bool
 val sig_args : sub term -> Arg.t list
 val sig_rets : sub term -> Arg.t list
+val return_lanes : target:Bap_core_theory.Theory.Target.t -> sub term -> Arg.t list
 
 (** Explicit operands and the implicit lanes carried by a BIR term. *)
 module Term_effects : sig

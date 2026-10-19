@@ -25,7 +25,7 @@ let eq_target ~synth (a : var) (b : var) (w : int64) j =
   match Jmp.cond j with
   | Bil.BinOp
       (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), face) ->
-    Var.equal a' a && Var.equal b' b
+    Var.same (Var.base a') a && Var.same (Var.base b') b
     && Base.Option.equal Int64.equal
          (Hike_synth_addr.address_of_exp synth face) (Some w)
   | _ -> false
@@ -264,7 +264,7 @@ let tests : unit Alcotest.test list =
            | [ j ] -> (
                match Jmp.kind j with
                | Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b))) ->
-                 Var.equal a j5_sel && Var.equal b j5_base
+                 Var.same (Var.base a) j5_sel && Var.same (Var.base b) j5_base
                | _ -> false)
            | _ -> false));
 
@@ -290,7 +290,7 @@ let tests : unit Alcotest.test list =
               [ j6_pivot ], [ (4, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let envs6, _, _ =
+        let envs6, solved6, _ =
           produce ~synth:Hike.Synth.empty (x86_target ())
             ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
             (Program.create ~subs:[ j6 ] ()) j6
@@ -300,7 +300,8 @@ let tests : unit Alcotest.test list =
           | Some (_, post) -> post
           | None -> Cbat_vsa.AI.top
         in
-        let head_sel = Cbat_vsa.AI.find_word 64 head_post j6_sel in
+        let head_sel = Cbat_vsa.AI.find_word 64 head_post
+            (Hike.Stack_model.version_at_end (Term.find_exn blk_t solved6 j6_tids.(1)) j6_sel) in
         let sel_card =
           match Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality head_sel) with
           | Ok c -> c
@@ -352,7 +353,7 @@ let tests : unit Alcotest.test list =
            | [ j ] -> (
                match Jmp.kind j with
                | Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b))) ->
-                 Var.equal a j7_sel && Var.equal b j7_base
+                 Var.same (Var.base a) j7_sel && Var.same (Var.base b) j7_base
                | _ -> false)
            | _ -> false));
 
@@ -389,7 +390,7 @@ let tests : unit Alcotest.test list =
            | [ j ] -> (
                match Jmp.kind j with
                | Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b))) ->
-                 Var.equal a j4_sel && Var.equal b j4_base
+                 Var.same (Var.base a) j4_sel && Var.same (Var.base b) j4_base
                | _ -> false)
            | _ -> false));
 
@@ -737,7 +738,7 @@ let tests : unit Alcotest.test list =
             method! visit_binop op a b () =
               (match op, a, b with
                | Bil.EQ, Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Var t), Bil.Int w
-                 when Var.equal r rax && Var.equal t tmp
+                 when Var.same (Var.base r) rax && Var.same (Var.base t) tmp
                       && Int64.equal (Word.to_int64_exn w) delta ->
                  found := true
                | _ -> ())

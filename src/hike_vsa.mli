@@ -42,8 +42,10 @@ open Bap_core_theory
 
   (** A solve's end: the per-block (pre, post) environments, the
       rewritten sub and the grown block-address map, or a pause. *)
+  type continuation = { canonical : sub term; seed : Cbat_vsa.vsa_sol }
+
   type outcome =
-    | Done of (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table
+    | Done of (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table * continuation
     | Paused of paused
 
   (** The fused solve under [callee]: phases of solve + resolution
@@ -58,6 +60,15 @@ open Bap_core_theory
     foreign_slots:Core.Int64.Set.t ->
     sub term ->
     outcome
+
+  (** Continues a completed solve after incremental SSA/decode growth. *)
+  val restart :
+    Theory.Target.t -> lookup:lookup_fn -> images:section_image list ->
+    callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
+    block_addrs:Tid.t Addr.Map.t -> synth:Hike_synth.table ->
+    foreign_slots:Core.Int64.Set.t ->
+    previous:continuation -> woken:Tid.Set.t ->
+    sub term -> outcome
 
   (** Continues a paused solve from its seed under the new [callee]. *)
   val resume :

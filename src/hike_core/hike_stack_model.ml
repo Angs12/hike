@@ -557,6 +557,43 @@ let has_call_push (sub : sub term) : bool =
   |> Seq.exists ~f:(fun blk ->
          Term.enum jmp_t blk |> Seq.exists ~f:call_pushes)
 
+(* The SSA pass's block stamp.  [args] holds the versions in effect
+   after the block's defs — BEFORE any call-ret minting, so a call
+   argument read resolves to the value the machine passes.  [rets]
+   holds the call-ret mints — the versions the call's own result
+   binds. *)
+module Versions = struct
+  open! Core
+
+  type t =
+    { args : (var * var) list
+    ; rets : (var * var) list
+    }
+  [@@deriving bin_io, compare, sexp]
+
+  let pp ppf { args; rets } =
+    let one ppf (a, b) =
+      Format.fprintf ppf "(%a, %a)" Var.pp a Var.pp b
+    in
+    Format.fprintf ppf "args=[%a] rets=[%a]"
+      (Format.pp_print_list one) args
+      (Format.pp_print_list one) rets
+end
+
+let versions_tag : Versions.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ssa-versions"
+    ~uuid:"1f0d4b8e-52a6-4c11-9f0a-3d7c2b1e8a44"
+    (module Versions)
+
+(* The version of base register [v] in effect after [blk]'s defs, before
+   any call result: the base itself when the sub never defines it. *)
+let version_at_end (blk : blk term) (v : var) : var =
+  match Term.get_attr blk versions_tag with
+  | Some vs ->
+    Base.Option.value ~default:v
+      (Base.List.Assoc.find vs.Versions.args v ~equal:Var.same)
+  | None -> v
+
 type call_arg_store = {
   sb_slot : int;
   sb_def : def term;
@@ -583,7 +620,7 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
       in
       if not has_call then sites
       else
-        match singleton_at ~blk (Bil.Var sp) with
+        match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
         | None -> Core.Map.set sites ~key:btid ~data:([], blk)
         | Some call_sp ->
           let bindings =
@@ -675,41 +712,6 @@ let layout_tag : Sub_layout.t Value.Tag.t =
     ~uuid:"3f5e1c2a-9b47-4d60-8a15-c4d9e07b2f11"
     (module Sub_layout)
 
-(* The SSA pass's block stamp.  [args] holds the versions in effect
-   after the block's defs — BEFORE any call-ret minting, so a call
-   argument read resolves to the value the machine passes.  [rets]
-   holds the call-ret mints — the versions the call's own result
-   binds. *)
-module Versions = struct
-  open! Core
-
-  type t =
-    { args : (var * var) list
-    ; rets : (var * var) list
-    }
-  [@@deriving bin_io, compare, sexp]
-
-  let pp ppf { args; rets } =
-    let one ppf (a, b) =
-      Format.fprintf ppf "(%a, %a)" Var.pp a Var.pp b
-    in
-    Format.fprintf ppf "args=[%a] rets=[%a]"
-      (Format.pp_print_list one) args
-      (Format.pp_print_list one) rets
-end
-
-let versions_tag : Versions.t Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-ssa-versions"
-    ~uuid:"1f0d4b8e-52a6-4c11-9f0a-3d7c2b1e8a44"
-    (module Versions)
-
-let ssa_tag : unit Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-ssa"
-    ~uuid:"2c1e5f9a-63b7-4d22-8a1b-4e8d3f2c9b55"
-    (module Core.Unit)
-
-let is_ssa (sub : sub term) : bool = Term.has_attr sub ssa_tag
-
 let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
   Term.set_attr sub layout_tag l
 
@@ -728,6 +730,17 @@ let sig_args (s : sub term) : Arg.t list =
 
 let sig_rets (s : sub term) : Arg.t list =
   Term.enum arg_t s |> Base.Sequence.to_list |> Base.List.filter ~f:is_ret
+
+(* The sub's return lanes: the ABI's return carriers, then any other
+   [Out] lane the sub already has. *)
+let return_lanes ~target sub =
+  let carriers =
+    if Abi.is_primary_target target then (Abi.of_target target).Abi.return_regs
+    else []
+  in
+  Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Bil.Var reg))
+  @ Base.List.filter (sig_rets sub) ~f:(fun arg ->
+      not (Base.List.exists carriers ~f:(Var.same (Arg.lhs arg))))
 
 let call_lanes ~abi ~callee target =
   match Hike_native_fp.native_fp_op (Tid.name target) with

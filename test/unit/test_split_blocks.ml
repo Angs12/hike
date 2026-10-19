@@ -241,6 +241,105 @@ let tests : unit Alcotest.test list =
         in
         check "SBLK-08"
           (Base.List.mem gotos (Tid.name tids.(1)) ~equal:String.equal));
+    pin "SBLK-09"
+      "splitting an SSA call-and-goto block keeps phis and stamps valid"
+      (fun () ->
+        let x = v64 "sb9_x" and g = v64 "sb9_g" in
+        let ret = int_ret 0 in
+        let callee, _ = sub_of "@sb9_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Term.append arg_t callee (Arg.create ~intent:Out ret (Var ret))
+        in
+        let word k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let caller, _ =
+          sub_of "sb9"
+            [ [ Def.create x (word 0); Def.create g (word 0) ],
+              [ (2, fun t -> mk_jmp_to t (guard g 1));
+                (2, fun t ->
+                    Jmp.create ~cond:(guard g 2)
+                      (Call
+                         (Call.create ~return:(Direct t)
+                            ~target:(Direct (Term.tid callee)) ())));
+                (1, mk_goto) ];
+              [ Def.create x (word 1) ], [ (2, mk_goto) ];
+              [ Def.create (v64 "sb9_y")
+                  (Bil.BinOp (Bil.PLUS, Bil.Var x, word 1)) ],
+              [ (0, mk_ret) ] ]
+        in
+        let prog = Program.create ~subs:[ callee; caller ] () in
+        let prog =
+          Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog
+          |> Hike.Types.sign_program ~synth:Hike.Synth.empty ~target:(x86_target ())
+        in
+        let find p = Term.enum sub_t p
+                     |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "sb9")
+                     |> Base.Option.value_exn in
+        let before = find prog in
+        let after = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty before in
+        let graph = Sub.to_graph after in
+        let preds tid =
+          Graphs.Tid.Node.preds tid graph |> Seq.to_list
+          |> Base.List.filter ~f:(fun t -> Option.is_some (Term.find blk_t after t))
+          |> Base.List.sort ~compare:Tid.compare
+        in
+        let phis_ok =
+          Seq.for_all (Term.enum blk_t after) ~f:(fun b ->
+              Seq.for_all (Term.enum phi_t b) ~f:(fun phi ->
+                  let srcs =
+                    Phi.values phi |> Seq.map ~f:fst |> Seq.to_list
+                    |> Base.List.sort ~compare:Tid.compare
+                  in
+                  srcs = preds (Term.tid b)))
+        in
+        let lhs =
+          Term.enum blk_t after
+          |> Seq.concat_map ~f:(fun b ->
+                 Seq.append (Term.enum phi_t b |> Seq.map ~f:Phi.lhs)
+                   (Term.enum def_t b |> Seq.map ~f:Def.lhs))
+          |> Seq.filter ~f:(fun v -> Var.index v > 0)
+          |> Seq.to_list
+        in
+        let call_blks =
+          Term.enum blk_t after
+          |> Seq.filter ~f:(fun b ->
+                 Seq.exists (Term.enum jmp_t b) ~f:(fun j ->
+                     match Jmp.kind j with
+                     | Call c -> Call.return c <> None
+                     | _ -> false))
+          |> Seq.to_list
+        in
+        let stamped_on_call =
+          match call_blks with
+          | [ b ] ->
+            (match Term.get_attr b Hike.Stack_model.versions_tag with
+             | Some vs ->
+               not (Base.List.is_empty vs.Hike.Stack_model.Versions.rets)
+               && Core.Set.equal
+                    (Hike.Stack_model.writes (`Jmp (Term.first jmp_t b |> Base.Option.value_exn)))
+                    (vs.Hike.Stack_model.Versions.rets |> Base.List.map ~f:snd
+                     |> Var.Set.of_list)
+             | None -> false)
+          | _ -> false
+        in
+        let stamps_elsewhere =
+          Term.enum blk_t after
+          |> Seq.filter ~f:(fun b ->
+                 Term.has_attr b Hike.Stack_model.versions_tag)
+          |> Seq.length
+        in
+        check "SBLK-09 split"
+          (Base.List.length (blocks_of after) > Base.List.length (blocks_of before));
+        check "SBLK-09 one incoming per predecessor" phis_ok;
+        check "SBLK-09 single definitions"
+          (Base.List.length lhs
+           = Base.List.length (Base.List.dedup_and_sort lhs ~compare:Var.compare));
+        check "SBLK-09 stamps on the call piece"
+          (stamped_on_call
+           && stamps_elsewhere
+              <= (Term.enum blk_t before
+                  |> Seq.filter ~f:(fun b ->
+                         Term.has_attr b Hike.Stack_model.versions_tag)
+                  |> Seq.length)));
   ]
 
 let () = run "split_blocks" tests

@@ -109,7 +109,7 @@ let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
 (* Per-sub def-chain map over the sub's defs in order. *)
 let defs_of (defs : def term list) : (def term * bool) Var.Map.t =
   List.fold defs ~init:Var.Map.empty ~f:begin fun m d ->
-    let key = Var.base (Def.lhs d) in
+    let key = Def.lhs d in
     match Core.Map.find m key with
     | None -> Core.Map.set m ~key ~data:(d, true)
     | Some _ -> Core.Map.set m ~key ~data:(d, false)
@@ -119,12 +119,12 @@ let defs_of (defs : def term list) : (def term * bool) Var.Map.t =
    the non-negativity oracle over the sub's defs and stores, and the run's
    sub-address lookup.  The fixpoint and the fixtures' seam build the same
    context through this one builder. *)
-let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
+let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes
     ~phi_writes ~jmp_reads ~(synth : Hike_synth.table ref) ?sub_lookup
     (s : sub term) :
     Cbat_runctx.refine_ctx =
   let rctx =
-    Cbat_runctx.mk_rctx ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+    Cbat_runctx.mk_rctx ~abi ~def_reads ~def_writes ~phi_writes
       ~jmp_reads ~synth ?sub_lookup s
   in
   let all_defs =
@@ -201,26 +201,33 @@ let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
 
 (* The widen cycle's need set: the block SCC's variable SCCs (a
    singleton variable SCC needs itself iff self-looping; every
-   multi-vertex variable SCC needs all its members). *)
-let compute_need ~def_reads
+   multi-vertex variable SCC needs all its members).  A phi reads its
+   operands; a cycle of phis alone only carries values defined outside
+   it, so it needs nothing. *)
+let compute_need ~def_reads ~phi_reads
     ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
     (blocks : Tid.Set.t) : Var.Set.t =
-  let defs =
+  let terms =
     Core.Set.to_list blocks
     |> List.concat_map ~f:(fun tid ->
         match Core.Map.find rc_blocks tid with
-        | Some bf -> Term.enum def_t bf.bf_term |> Seq.to_list
+        | Some bf ->
+          List.map (Term.enum phi_t bf.bf_term |> Seq.to_list)
+            ~f:(fun p -> (Phi.lhs p, phi_reads p, true))
+          @ List.map (Term.enum def_t bf.bf_term |> Seq.to_list)
+              ~f:(fun d -> (Def.lhs d, def_reads d, false))
         | None -> [])
   in
-  let cycle_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
+  let cycle_vars = Var.Set.of_list (List.map terms ~f:(fun (l, _, _) -> l)) in
+  let phi_only =
+    List.fold terms ~init:cycle_vars ~f:(fun acc (l, _, is_phi) ->
+        if is_phi then acc else Core.Set.remove acc l) in
   if Core.Set.is_empty cycle_vars then Var.Set.empty
   else begin
     let succ_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
     let pred_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
-    List.iter defs ~f:(fun d ->
-      let lhs = Var.base (Def.lhs d) in
-      let uses = def_reads d |> Core.Set.to_list |> List.map ~f:Var.base in
-      List.iter uses ~f:(fun u ->
+    List.iter terms ~f:(fun (lhs, reads, _) ->
+      Core.Set.iter reads ~f:(fun u ->
         if Core.Set.mem cycle_vars u then begin
           Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
           Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
@@ -229,14 +236,15 @@ let compute_need ~def_reads
     let comps =
       Var_scc.partition (Core.Set.to_list cycle_vars)
         (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
+    let needs vs = not (List.for_all vs ~f:(Core.Set.mem phi_only)) in
     List.fold comps ~init:Var.Set.empty ~f:(fun need comp ->
         match comp with
         | [v] ->
           let succs = Hashtbl.find_multi succ_tbl v in
-          if List.mem succs v ~equal:Var.equal then
+          if List.mem succs v ~equal:Var.equal && needs comp then
             Core.Set.add need v
           else need
-        | _ :: _ :: _ as vs ->
+        | _ :: _ :: _ as vs when needs vs ->
           List.fold vs ~init:need ~f:(fun need v ->
               Core.Set.add need v)
         | _ -> need)
@@ -448,7 +456,7 @@ let static_graph_vsa
     |> Graphs.Tid.Node.remove Graphs.Tid.start
     |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   let rctx =
-    mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+    mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_writes
       ~jmp_reads ~synth ~sub_lookup s
   in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
@@ -469,7 +477,7 @@ let static_graph_vsa
   let need_map : Core.Int.Set.t Tid.Map.t =
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
       ~f:(fun ~key:h ~data:blocks acc ->
-        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~def_reads ~rc_blocks:rctx.rc_blocks blocks)))
+        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~def_reads ~phi_reads ~rc_blocks:rctx.rc_blocks blocks)))
   in
   
   let sol_default = Solution.default init in
@@ -502,6 +510,13 @@ let static_graph_vsa
       Option.value_map (Core.Map.find rctx.rc_blocks v)
         ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
     in
+    (* The phis bind on the edge before the gc: the operands are dead
+       past it, and the keep-set holds every phi lhs. *)
+    let bind_phis p res =
+      match Core.Map.find rctx.rc_blocks v with
+      | Some bf -> Cbat_transfer.denote_phis ~synth:!synth ~source:p bf.bf_term res
+      | None -> res
+    in
     let out p =
       Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
         (Hashtbl.find block_to_head p) (fun () ->
@@ -510,6 +525,7 @@ let static_graph_vsa
               Cbat_forward.denote_block ~preserved ~callee ~plan_of
                 ~rctx
                 ~source:p p_entry ~target:v) in
+          let res = Stages.time `Denote (fun () -> bind_phis p res) in
           let res = Stages.time `Glue (fun () -> AI.gc ~synth:!synth res ~keep) in
 #ifdef VSA_DEBUG
           debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;

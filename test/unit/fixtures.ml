@@ -302,6 +302,41 @@ let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let _, sub = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub in
   static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
+(* The jump-compiled sub, as [run_anchored] runs it. *)
+let jump_compiled (sub : sub term) : sub term =
+  snd (Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub)
+
+(* Sub [name] of [subs] after SSA construction (the VSA's input form). *)
+let ssa_of_subs (subs : sub term list) (name : string) : sub term =
+  let prog = Program.create ~subs () in
+  let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+  Term.enum sub_t prog
+  |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
+  |> Base.Option.value_exn
+
+(* The VSA from the anchored entry on a sub already in SSA form. *)
+let run_ssa_anchored (sub : sub term) : Vsa.vsa_sol =
+  static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
+    (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+
+(* The SP's value at the end of block [tid]'s defs in an SSA solve: its
+   last version defined in the block, or the block's SP phi. *)
+let sp_after_block (sub : sub term) (sol : Vsa.vsa_sol) (tid : tid) : Ws.t =
+  let blk = Term.find blk_t sub tid |> Base.Option.value_exn in
+  let is_sp v = Var.same v sp in
+  let version =
+    match
+      Term.enum def_t blk |> Seq.map ~f:Def.lhs |> Seq.filter ~f:is_sp
+      |> Seq.to_list |> List.rev
+    with
+    | v :: _ -> v
+    | [] ->
+      Term.enum phi_t blk |> Seq.map ~f:Phi.lhs |> Seq.find ~f:is_sp
+      |> Base.Option.value_exn
+  in
+  let _, after = Vsa.fold_block_states ~synth:Hike.Synth.empty ~sol blk ~init:() ~f:(fun _ _ _ () -> ()) in
+  AI.find_word 64 after version
+
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
 
@@ -1020,7 +1055,7 @@ let empty_spec : B2l.section_spec =
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec ~synth ?(types = fun prog -> prog) (spec : B2l.section_spec)
+let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) (spec : B2l.section_spec)
     (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
@@ -1051,9 +1086,12 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) (spec : B2l.section_spec)
         Base.List.fold layout.Hike.Stack_model.regions ~init:(storage synth Hike.Synth.Window)
           ~f:(fun synth r -> storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id))) in
   let synth, prog = Hike.Fp.run_program ~synth prog in
-  let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
+  let prog =
+    if ssa then Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog
+    else prog
+  in
   let prog = Hike.Split_blocks.normalize ~synth prog in
-  let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
+  let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
   (* The types pass runs on the SSA program; a fixture stamps its own. *)
   let prog = types prog in
   B2l.emit_program llvm_ctx llvm_module
@@ -1064,8 +1102,8 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) (spec : B2l.section_spec)
   Llvm.dispose_context llvm_ctx;
   s
 
-let emit_ir ~synth ?types (subs : sub term list) : string =
-  emit_ir_spec ~synth ?types empty_spec subs
+let emit_ir ~synth ?types ?ssa (subs : sub term list) : string =
+  emit_ir_spec ~synth ?types ?ssa empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

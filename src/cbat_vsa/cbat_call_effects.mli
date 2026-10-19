@@ -15,9 +15,6 @@ type site = {
   (* The lanes read by the call, regardless of which block last set
      them.  A Stack value in any lane raises the sub's sticky escape bit. *)
   read_lanes : var list;
-  (* The call block writes SP: the retaddr push the callee's ret pops.
-     A trap pushes no retaddr and restores none. *)
-  pushed : bool;
 }
 
 (* What a call site reads about its callee: its published kill summary

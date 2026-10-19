@@ -759,19 +759,21 @@ let tests : unit Alcotest.test list =
     (* L-E1: the ON-path matched-pair RSP restore. *)
     pin "BK-44"
       "call-in-loop RSP stability — the ON-path matched-pair +8 (the callee's \
-       ret pops exactly the retaddr the caller pushed) keeps the header RSP at \
+       ret pops exactly the retaddr the caller pushed, the program's restore def) keeps the header RSP at \
        EXACTLY the pre-push {0x1000} (bounded, no drift)"
       (fun () ->
-        let sub, header_tid, rsp = mk_e1_loop_sub () in
-        let rsp_hdr = e1_rsp_at sub header_tid rsp in
+        let sub, header_tid, _ = mk_e1_loop_sub () in
+        let ssa = ssa_of_subs [ jump_compiled sub ] (Sub.name sub) in
+        let rsp_hdr = sp_after_block ssa (run_ssa_anchored ssa) header_tid in
         check "BK-44" (Ws.equal rsp_hdr (Ws.singleton (w64 0x1000))));
 
     pin "BK-45"
       "straight-line call RSP exactness — the continuation RSP is EXACTLY the \
        pre-call singleton {0x2000} (the exact truth, not truth−8 = {0x1ff8})"
       (fun () ->
-        let sub, post_tid, rsp = mk_e1_flat_sub () in
-        let rsp_post = e1_rsp_at sub post_tid rsp in
+        let sub, post_tid, _ = mk_e1_flat_sub () in
+        let ssa = ssa_of_subs [ jump_compiled sub ] (Sub.name sub) in
+        let rsp_post = sp_after_block ssa (run_ssa_anchored ssa) post_tid in
         check "BK-45" (Ws.equal rsp_post (Ws.singleton (w64 0x2000))));
 
     (* L-D6: the RBP-anchored gate-free loop. *)

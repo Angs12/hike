@@ -86,7 +86,7 @@ let tests : unit Alcotest.test list =
         let tag_dy = Vsa.env_tag dy' in
         check "ENV-07"
           (match (tag_dx, tag_dy) with
-          | Some e1, Some e2 -> AI.equal e2 (Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty dx e1)
+          | Some e1, Some e2 -> AI.equal e2 (Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty dx' e1)
           | _ -> false));
 
 

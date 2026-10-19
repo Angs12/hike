@@ -206,7 +206,6 @@ module Test_seam : sig
     abi:Hike_abi.t ->
     def_reads:(def term -> Var.Set.t) ->
     def_writes:(def term -> Var.Set.t) ->
-    phi_reads:(phi term -> Var.Set.t) ->
     phi_writes:(phi term -> Var.Set.t) ->
     jmp_reads:(jmp term -> Var.Set.t) ->
     synth:Hike_synth.table ref ->

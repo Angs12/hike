@@ -21,12 +21,19 @@ open Graphlib.Std
 module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
-(* Static per-block facts, one per sub block: the block's term, the
-   call-read lanes plus the SP-push marker, and the may-read set at block
-   entry (the GC keep-set). *)
+(* A block's static call facts: the lanes a machine call reads and the SP
+   version it reads. *)
+type call_facts = {
+  cf_lanes : var list;
+  cf_sp : var;
+}
+
+(* Static per-block facts, one per sub block: the block's term, its call
+   facts, and the may-read set at block entry plus its phi lhs's (the GC
+   keep-set). *)
 type block_facts = {
   bf_term : blk term;
-  bf_call_facts : var list * bool;
+  bf_call_facts : call_facts;
   bf_live_ids : Int.Set.t;
 }
 
@@ -59,13 +66,11 @@ type refine_ctx = {
   rc_sub_lookup : int64 -> Tid.t option;
 }
 
-(* Static per-block call facts: the lanes a machine call reads, and
-   whether the block's call pushes a return address
-   (a machine call with a return; an intrinsic is rendered inline and a
-   no-return transfer is a tail, so neither pushes). *)
+(* The block's call facts.  The program carries the SP restore of a
+   call's pushed word itself. *)
 let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
-    var list * bool =
-  let read_lanes =
+    call_facts =
+  let machine_reads =
     Term.enum jmp_t b
     |> Seq.filter_map ~f:(fun j ->
            match Jmp.kind j with
@@ -73,50 +78,68 @@ let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
              Some (Hike_stack_model.effects j).reads
            | _ -> None)
     |> Seq.concat_map ~f:Seq.of_list
-    |> Seq.filter ~f:(fun v -> not (Var.same v abi.Hike_abi.sp))
     |> Seq.to_list
+  in
+  let is_sp v = Var.same v abi.Hike_abi.sp in
+  let cf_lanes =
+    List.filter machine_reads ~f:(fun v -> not (is_sp v))
     |> Var.Set.of_list
     |> Core.Set.to_list
   in
-  let pushed =
-    Term.enum jmp_t b
-    |> Seq.exists ~f:(fun j ->
-           match Jmp.kind j with
-           | Call c -> (
-               Option.is_some (Call.return c)
-               && (match Call.target c with
-                   | Indirect _ -> true
-                   | Direct t -> not (Hike_abi.is_intrinsic_target t)))
-           | _ -> false)
-  in
-  (read_lanes, pushed)
+  let cf_sp =
+    Option.value (List.find machine_reads ~f:is_sp) ~default:abi.Hike_abi.sp in
+  { cf_lanes; cf_sp }
 
-(* Backward may-liveness over base-normalized vars. *)
-let base_vars vars =
-  Core.Set.fold vars ~init:Var.Set.empty ~f:(fun acc v ->
-      Core.Set.add acc (Var.base v))
-
-let live_in_of_sub ~def_reads ~def_writes ~phi_reads
-    ~phi_writes:_ ~jmp_reads (s : sub term) =
-  (* Only an immediate def kills; a memory def and every phi leave the
-     live set alone. *)
+(* Backward may-liveness over exact vars: a phi kills its lhs, and its
+   operands are live at the end of the predecessor they come from. *)
+let live_in_of_sub ~def_reads ~def_writes ~phi_writes ~jmp_reads
+    (s : sub term) =
+  (* Only an immediate def kills; a memory def leaves the live set
+     alone. *)
   let def d =
     let kill =
       match Var.typ (Def.lhs d) with
-      | Type.Imm _ -> base_vars (def_writes d)
+      | Type.Imm _ -> def_writes d
       | Type.Mem _ | Type.Unk -> Var.Set.empty
     in
-    (kill, base_vars (def_reads d))
+    (kill, def_reads d)
   in
-  let phi p = (Var.Set.empty, base_vars (phi_reads p)) in
-  let jmp j = (Var.Set.empty, base_vars (jmp_reads j)) in
+  let phi p = (phi_writes p, Var.Set.empty) in
+  let operands_of =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        Term.enum phi_t b
+        |> Seq.fold ~init:m ~f:(fun m p ->
+            Seq.fold (Phi.values p) ~init:m ~f:(fun m (src, e) ->
+                Core.Map.update m src ~f:(fun vs ->
+                    Core.Set.union
+                      (Option.value vs ~default:Var.Set.empty)
+                      (Exp.free_vars e)))))
+  in
+  (* A block's jumps end it, so they carry its outgoing phi operands. *)
+  let jmp_operands =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        match Core.Map.find operands_of (Term.tid b) with
+        | None -> m
+        | Some vs ->
+          Term.enum jmp_t b
+          |> Seq.fold ~init:m ~f:(fun m j ->
+              Core.Map.set m ~key:(Term.tid j) ~data:vs))
+  in
+  let jmp j =
+    ( Var.Set.empty,
+      Core.Set.union (jmp_reads j)
+        (Option.value (Core.Map.find jmp_operands (Term.tid j))
+           ~default:Var.Set.empty) )
+  in
   Hike_bir_flow.liveness ~graph:(Sub.to_graph s) ~sub:s
     ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
     ~def ~phi ~jmp
 
 (* The per-run analysis context: one fold over the sub's blocks builds
    the per-block fact records; the live-in fixpoint feeds them. *)
-let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
+let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes
     ~jmp_reads
     ~(synth : Hike_synth.table ref)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
@@ -130,8 +153,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
   rc_sub_lookup = sub_lookup;
   rc_blocks =
     let live =
-      live_in_of_sub ~def_reads ~def_writes ~phi_reads ~phi_writes
-        ~jmp_reads s
+      live_in_of_sub ~def_reads ~def_writes ~phi_writes ~jmp_reads s
     in
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
@@ -141,6 +163,9 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
             bf_call_facts = call_facts_of_block ~abi b;
             bf_live_ids =
               Cbat_var_id.intern_set
-                (Option.value ~default:Var.Set.empty
-                   (Core.Map.find live.before (Term.tid b))) });
+                (Core.Set.union
+                   (Option.value ~default:Var.Set.empty
+                      (Core.Map.find live.before (Term.tid b)))
+                   (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+                    |> Var.Set.of_list)) });
 }

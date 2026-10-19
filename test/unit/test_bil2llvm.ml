@@ -26,7 +26,7 @@ let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
             | Some t -> stamp_tag d (Some t)
             | None -> d))
   in
-  Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64
+  Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64 ~abi:Hike.Abi.x86_64_sysv
     (mk_facts ()) sub
 
 (* Phi lines with exactly two incomings. *)

@@ -63,7 +63,7 @@ type jump_plan = {
 
 type block_plan = {
   bp_term : blk term;
-  bp_call_facts : var list * bool;
+  bp_call_facts : Cbat_runctx.call_facts;
   bp_has_conds : bool;
   bp_jumps : jump_plan list;
 }
@@ -132,12 +132,13 @@ let denote_jump
           ~entry ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
-    let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
-      let read_lanes, _ = plan.bp_call_facts in
+    let call_site_transfer ~(summary : Int.Set.t option) =
+      let facts = plan.bp_call_facts in
+      (* The call reads the SP version the block ends with. *)
+      let abi = { rctx.Cbat_runctx.rc_abi with sp = facts.cf_sp } in
       let stack_args =
         Cbat_call_effects.stack_arg_ranges ~synth:!(rctx.rc_synth)
-          ~abi:rctx.Cbat_runctx.rc_abi
-          ~block:b ~entry env
+          ~abi ~block:b ~entry env
       in
       let kept =
         Option.map summary ~f:(fun ws ->
@@ -148,9 +149,8 @@ let denote_jump
                   ~abi:rctx.Cbat_runctx.rc_abi ~preserved ws in
               jp.jp_preserved <- Some (ws, p);
               p) in
-      Cbat_call_effects.transfer ?kept ~abi:rctx.Cbat_runctx.rc_abi ~preserved
-        ~stack_args
-        ~site:{ Cbat_call_effects.summary; read_lanes; pushed }
+      Cbat_call_effects.transfer ?kept ~abi ~preserved ~stack_args
+        ~site:{ Cbat_call_effects.summary; read_lanes = facts.cf_lanes }
         env
     in
     let inspect_call c =
@@ -171,8 +171,7 @@ let denote_jump
         match site_callee with
         | Cbat_call_effects.Blocked -> AI.bottom
         | Cbat_call_effects.Summary summary ->
-          let _, pushed = plan.bp_call_facts in
-          call_site_transfer ~summary ~pushed
+          call_site_transfer ~summary
     in
     let leads () = if env_leads ~target rel then env else AI.bottom in
     let env_res =
@@ -180,7 +179,7 @@ let denote_jump
       | Int _ ->
         (* Traps ride the same frame-keep rule as ABI calls; a trap
            pushes no retaddr. *)
-        call_site_transfer ~summary:None ~pushed:false
+        call_site_transfer ~summary:None
       | Call c ->
         if jp.jp_resolved then
           (* A resolved transfer is the intra-sub jump the concrete

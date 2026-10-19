@@ -8,14 +8,7 @@ open Bap.Std
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
-let return_lanes ~target sub =
-  let carriers =
-    if Abi.is_primary_target target then (Abi.of_target target).Abi.return_regs
-    else []
-  in
-  Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Bil.Var reg))
-  @ Base.List.filter (Model.sig_rets sub) ~f:(fun arg ->
-      not (Base.List.exists carriers ~f:(Var.same (Arg.lhs arg))))
+let return_lanes = Model.return_lanes
 
 (* A lane is a pointer when it is an address lane: a by-reference
    argument, a memory var (its storage), or the caller window. *)
@@ -28,14 +21,15 @@ let tag_lane ~(synth : Hike_synth.table) (a : Arg.t) : Arg.t =
   then Model.set_ptr_arg a
   else a
 
-(* The sub's entry reads: SSA index-0 reads, or pre-SSA liveness over
-   the BIR's explicit edges. *)
+(* The sub's entry reads: its SSA index-0 reads, without memory-sorted
+   values (pointer values take their lane after the type pass).  Signing
+   assumes an SSA program. *)
 let free_regs_of_sub ~(synth : Hike_synth.table)
     ~(target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : var list =
-  let abi = Abi.of_target target in
-  if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa ~synth ~abi sub
-  else Hike_split_blocks.free_regs ~synth ~abi sub
+  Hike_ssa.free_regs_ssa ~synth ~abi:(Abi.of_target target) sub
+  |> Base.List.filter ~f:(fun v ->
+         match Var.typ v with Type.Mem _ -> false | _ -> true)
 
 let compute_sub_sig ~(synth : Hike_synth.table) ~(free_vars : var list)
     (target : Bap_core_theory.Theory.Target.t)
@@ -70,7 +64,8 @@ let compute_sub_sig ~(synth : Hike_synth.table) ~(free_vars : var list)
         |> Seq.fold ~init:[] ~f:(fun acc blk ->
             Term.enum def_t blk
             |> Seq.fold ~init:acc ~f:(fun acc d ->
-                let v = Def.lhs d in
+                (* Its lane is the base variable: the versions are the body's. *)
+                let v = Var.base (Def.lhs d) in
                 let is_input =
                   Base.List.exists free_vars ~f:(fun fv -> Var.same fv v)
                 in
@@ -196,11 +191,46 @@ let sign_sub ~(synth : Hike_synth.table)
   Model.set_sig sub (rets @ args)
 
 (* The pipeline's pass, and any direct emitter caller (the fixtures),
-   run exactly this. *)
+   run exactly this: every sub signs on the SSA the drive built, whose
+   calls read the machine convention; then each call narrows to its
+   callee's signed lanes. *)
 let sign_program ~(synth : Hike_synth.table)
     ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
-  Term.map sub_t prog ~f:(sign_sub ~synth ~target)
+  let open Graphlib.Std in
+  let module G = Graphs.Callgraph in
+  let originals = Term.enum sub_t prog
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
+        Core.Map.set m ~key:(Term.tid sub) ~data:sub) in
+  let graph = Program.to_graph prog in
+  let graph = G.nodes graph |> Seq.fold ~init:graph ~f:(fun g tid ->
+      if Core.Map.mem originals tid then g else G.Node.remove tid g) in
+  let partition = Graphlib.strong_components (module G) graph in
+  let summaries = ref (Core.Map.map originals ~f:(sign_sub ~synth ~target)) in
+  let lanes sub = Term.enum arg_t sub |> Seq.to_list
+    |> Base.List.map ~f:(fun a -> (Arg.lhs a, Arg.intent a)) in
+  Graphlib.postorder_traverse (module G) graph
+  |> Seq.iter ~f:(fun tid ->
+      let group = Partition.group partition tid |> Base.Option.value_exn in
+      if Tid.equal tid (Group.top group) then begin
+        let members = Group.enum group |> Seq.to_list in
+        let changed = ref true in
+        while !changed do
+          changed := false;
+          Base.List.iter members ~f:(fun tid ->
+              let old = Core.Map.find_exn !summaries tid in
+              let sub = Hike_ssa.relane_sub ~synth ~target
+                  ~callee:(Core.Map.find !summaries) old in
+              let original = Core.Map.find_exn originals tid in
+              let sub = Model.set_sig sub (Term.enum arg_t original |> Seq.to_list)
+                |> sign_sub ~synth ~target in
+              if not (Base.List.equal
+                        (fun (a, i) (b, j) -> Var.same a b && i = j)
+                        (lanes old) (lanes sub)) then changed := true;
+              summaries := Core.Map.set !summaries ~key:tid ~data:sub)
+        done
+      end);
+  Term.map sub_t prog ~f:(fun sub -> Core.Map.find_exn !summaries (Term.tid sub))
 
 (* ---- The value kind (ptr vs int) ----
    A value is a pointer when it is a bounded stack address (the VSA
@@ -461,7 +491,7 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
           (match Hike_synth.classify synth (Var.base v) with
            | Some (Hike_synth.Module_addr _) -> true
            | _ -> false)
-          || (match facts.Hike_kb.denote ~blk ~def:d (Bil.Var (Var.base v)) with
+          || (match facts.Hike_kb.denote ~blk ~def:d (Bil.Var v) with
               | Ok ws -> (
                   match Vsa.WordSet.origin ws with
                   | Some (Hike_origin.Rip _) -> true
@@ -824,7 +854,7 @@ let type_program ~(facts : Hike_kb.facts) ~(mem_typ : Type.t)
   prog
 
 (* The signature pass: write every sub's lane list onto its own [arg]
-   terms.  It does not need the value types, so it runs BEFORE SSA. *)
+   terms.  It does not need the value types. *)
 let sign_run (proj : Project.t) : Project.t =
   let target = Project.target proj in
   let synth =
@@ -834,8 +864,7 @@ let sign_run (proj : Project.t) : Project.t =
   in
   Project.map_program proj ~f:(sign_program ~synth ~target)
 
-(* The type pass: [type_program] on the SSA program.  The emitter reads
-   [Var.typ]. *)
+(* The type pass: [type_program].  The emitter reads [Var.typ]. *)
 let run (proj : Project.t) : Project.t =
   let mem_typ = mem_type_of_target (Project.target proj) in
   Project.map_program proj ~f:(fun prog ->

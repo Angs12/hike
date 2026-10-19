@@ -89,25 +89,32 @@ let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
           | _ -> acc))
 
 (* The caller side: a resolved target becomes direct; the jmp keeps
-   its tid, guard, and tag. *)
-let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
-    (sub : sub term) : sub term =
+   its tid, guard, and tag.  The direct call's lanes are re-derived
+   ([Hike_ssa.refresh_calls]): each keeps the version the indirect call
+   had. *)
+let resolve_targets ~(synth : Hike_synth.table) ~(abi : Hike_abi.t)
+    ~(resolved : Tid.t option Tid.Map.t) (sub : sub term) : sub term =
+  let is_retargeted j =
+    match Core.Map.find resolved (Term.tid j), Jmp.kind j with
+    | Some (Some _), Call _ -> true
+    | _ -> false
+  in
   Term.map blk_t sub ~f:(fun blk ->
       Term.map jmp_t blk ~f:(fun j ->
-          match Core.Map.find resolved (Term.tid j) with
-          | Some (Some t) -> (
-              match Jmp.kind j with
-              | Call c -> Jmp.with_kind j (Call (Call.with_target c (Direct t)))
-              | _ -> j)
+          match Core.Map.find resolved (Term.tid j), Jmp.kind j with
+          | Some (Some t), Call c ->
+              Jmp.with_kind j (Call (Call.with_target c (Direct t)))
           | _ -> j))
+  |> Hike_ssa.refresh_calls ~synth ~abi ~callee:(fun _ -> None)
+       ~select:is_retargeted
 
 (* The promotion rewrite: the sub gains its promoted parameters as
    real BIR args, the sites' outgoing stores gain [hike_argN] defs,
    and singleton-resolved indirect targets become direct.
    Fixed-signature subs (the intrinsics, @main) get no callee-side
    rewrite; the caller side runs for every sub. *)
-let promote_sub ~(synth : Hike_synth.table ref) ~(addr_bits : int) (facts : facts)
-    (sub : sub term) : sub term =
+let promote_sub ~(synth : Hike_synth.table ref) ~(addr_bits : int)
+    ~(abi : Hike_abi.t) (facts : facts) (sub : sub term) : sub term =
   let with_signature sub =
     if Hike_stack_model.fixed_signature sub then sub
     else
@@ -123,7 +130,8 @@ let promote_sub ~(synth : Hike_synth.table ref) ~(addr_bits : int) (facts : fact
       in
       Model.set_sig sub slots
   in
-  resolve_targets ~resolved:facts.prom_resolved (with_signature sub)
+  resolve_targets ~synth:!synth ~abi ~resolved:facts.prom_resolved
+    (with_signature sub)
 
 
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
@@ -146,7 +154,7 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
   let arity = Sections.slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
-  let sub = promote_sub ~synth ~addr_bits facts sub in
+  let sub = promote_sub ~synth ~addr_bits ~abi facts sub in
   (* Keep the window-value stamp for denotations at/above entry. The
      layout decides whether an actual Args-space memory access needs an
      incoming window parameter. *)

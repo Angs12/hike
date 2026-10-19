@@ -56,12 +56,15 @@ let prepare_program ~synth ~addr_bits ~is_address program =
 let bind_program ~addr_bits ~synth ~regions ~slots ~named_only program =
   let cell = ref synth in
   let program =
-    (object
-       inherit Term.mapper
-       method! map_def d =
-         Hike_synth_addr.rewrite_def ~addr_bits ~synth:cell ~regions ~slots
-           ~named_only d
-     end)#run program
+    let bind =
+      object
+        inherit Term.mapper
+        method! map_def d =
+          Hike_synth_addr.rewrite_def ~addr_bits ~synth:cell ~regions ~slots
+            ~named_only d
+      end
+    in
+    Term.map sub_t program ~f:bind#map_sub
   in
   (!cell, program)
 

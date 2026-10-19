@@ -90,7 +90,8 @@ let protect ~(set : unit -> unit) ~(restore : unit -> unit) (f : unit -> unit) :
 (* A minimal x86-64 ELF over [code] at 0x400078 (its entry), with a .text
    section: binary fixtures need no compiler or external corpus.  [load]
    creates the project (default: BAP's, with its disassembly). *)
-let with_binary ?(load = fun file -> Project.create (Project.Input.load ~loader:"llvm" file))
+let with_binary ?(pie = false)
+    ?(load = fun file -> Project.create (Project.Input.load ~loader:"llvm" file))
     code f =
   let names = "\000.text\000.shstrtab\000" in
   let names_off = 120 + String.length code in
@@ -103,7 +104,7 @@ let with_binary ?(load = fun file -> Project.create (Project.Input.load ~loader:
           (Int64.shift_right_logical value (8 * i)) 255L)))
     done in
   Bytes.blit_string "\x7fELF\x02\x01\x01" 0 bytes 0 7;
-  put 16 2 2L; put 18 2 62L; put 20 4 1L;
+  put 16 2 (if pie then 3L else 2L); put 18 2 62L; put 20 4 1L;
   put 24 8 0x400078L; put 32 8 64L;
   put 40 8 (Int64.of_int sections_off); put 60 2 3L; put 62 2 2L;
   put 52 2 64L; put 54 2 56L; put 56 2 1L; put 58 2 64L;
@@ -128,6 +129,13 @@ let with_binary ?(load = fun file -> Project.create (Project.Input.load ~loader:
       let out = open_out_bin file in
       output_bytes out bytes;
       close_out out;
+      if pie then begin
+        let input = open_in_bin file in
+        seek_in input 16;
+        let low = input_byte input and high = input_byte input in
+        close_in input;
+        check "PIE fixture has an ET_DYN ELF header" (low = 3 && high = 0)
+      end;
       match load file with
       | Ok project -> f project
       | Error error -> failwith (Core.Error.to_string_hum error))

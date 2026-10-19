@@ -107,6 +107,26 @@ let tests = [
       let prog =
         lift "\x48\x8d\x05\x03\x00\x00\x00\xff\xd0\xc3\xb8\x2a\x00\x00\x00\xc3" in
       check "WL-08" (at prog 0x400082L <> None));
+  pin "WL-09" "successive decode growth keeps the warm SSA values"
+    (fun () ->
+      (* eax := 7; jump to add 1; jump to add 1; ret. Each indirect
+         transfer reveals the next body only after its own solve. *)
+      with_binary ~pie:true
+        "\xb8\x07\x00\x00\x00\x48\x8d\x0d\x02\x00\x00\x00\xff\xe1\x83\xc0\x01\
+         \x48\x8d\x0d\x02\x00\x00\x00\xff\xe1\x83\xc0\x01\xc3"
+        (fun project ->
+          let result = Hike.Drive.run project in
+          let sub = at result.program 0x400078L |> Base.Option.value_exn in
+          let block = Term.enum blk_t sub
+            |> Seq.find_exn ~f:(starts_at 0x400092L) in
+          let r = List.hd result.facts.Hike.Kb.abi.Hike.Abi.return_regs in
+          let r = Hike.Stack_model.version_at_end block r in
+          check "WL-09 exact value after both additions"
+            (match result.facts.Hike.Kb.denote ~blk:block (Bil.Var r) with
+             | Ok ws -> Cbat_vsa.WordSet.equal ws
+                 (Cbat_vsa.WordSet.singleton (Cbat_word.of_int ~width:64 9))
+             | Error _ -> false)));
+
 ]
 
 let () = run "worklist" tests

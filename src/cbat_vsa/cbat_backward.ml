@@ -36,7 +36,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     | Bil.Int n -> nonneg_word (Cbat_word.of_word n)
     | Bil.Var v ->
       let seen = Core.Set.mem vars e in
-      (match Core.Map.find defs (Var.base v) with
+      (match Core.Map.find defs v with
        | Some (d, true) when seen ->
          (* Loads may close the induction. *)
          (match Def.rhs d with
@@ -116,16 +116,16 @@ type cell = {
   pendian : endian;      (* the read's endianness *)
 }
 
-(* The word constraints still owed to their producers, by base var
+(* The word constraints still owed to their producers, by var
    (absent = unconstrained).  A def removes its var's entry; what no
    def consumes crosses the block boundary into the edge state. *)
 type word_env = (var * wordset) Var.Map.t
 
 let word_find (we : word_env) (v : var) : wordset option =
-  Option.map (Core.Map.find we (Var.base v)) ~f:snd
+  Option.map (Core.Map.find we v) ~f:snd
 
 let word_set (we : word_env) (v : var) (c : wordset) : word_env =
-  Core.Map.set we ~key:(Var.base v) ~data:(v, c)
+  Core.Map.set we ~key:v ~data:(v, c)
 
 module Cell_key = struct
   type t = Mem.Key.t * int * endian
@@ -155,7 +155,7 @@ let no_cells : cell_env = Var.Map.empty
 let cell_key (c : cell) : Cell_key.t = (c.prange, c.pbits, c.pendian)
 
 let cell_add (ce : cell_env) (c : cell) : cell_env =
-  let key = Var.base c.pm in
+  let key = c.pm in
   let sub =
     Option.value (Core.Map.find ce key)
       ~default:(Core.Map.empty (module Cell_key)) in
@@ -171,15 +171,15 @@ let cell_add (ce : cell_env) (c : cell) : cell_env =
 (* The entries of [mv] satisfying [f], and the rest. *)
 let cell_take (ce : cell_env) (mv : var) ~(f : cell -> bool)
     : cell list * cell_env =
-  match Core.Map.find ce (Var.base mv) with
+  match Core.Map.find ce mv with
   | None -> [], ce
   | Some sub ->
     let hit, rest = Core.Map.partition_tf sub ~f in
     if Core.Map.is_empty hit then [], ce
     else
       Core.Map.data hit,
-      if Core.Map.is_empty rest then Core.Map.remove ce (Var.base mv)
-      else Core.Map.set ce ~key:(Var.base mv) ~data:rest
+      if Core.Map.is_empty rest then Core.Map.remove ce mv
+      else Core.Map.set ce ~key:mv ~data:rest
 
 (* The entries [after] holds that [before] does not hold physically. *)
 let cells_pushed ~(before : cell_env) ~(after : cell_env) : cell list =
@@ -1268,7 +1268,7 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
       (match word_find !words v with
        | Some cstr ->
          (* The def consumes its var's constraint, whatever it says. *)
-         words := Core.Map.remove !words (Var.base v);
+         words := Core.Map.remove !words v;
          (match locus.at_def ~post:(fun () -> AI.find_word w post v) ~cstr with
           | None ->
             (* The produced value cannot satisfy the constraint: no
@@ -1300,7 +1300,7 @@ let cond_seeds ~(env : AI.t) (cond : exp) : Var.Set.t =
         if (not (WordSet.is_bottom after))
            && (not (WordSet.is_top after))
            && not (WordSet.is_infinite after)
-        then Core.Set.add acc (Var.base v)
+        then Core.Set.add acc v
         else acc
       | _ -> acc)
 

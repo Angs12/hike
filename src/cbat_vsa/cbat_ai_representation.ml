@@ -119,10 +119,8 @@ let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
 (* The owner's slices describe its previous value: a redefinition
    discards them, whether or not the word changed. *)
 let drop_slices (e : t) ~(owner : int) : t =
-  let base = Cbat_var_id.base_of owner in
   let slices =
-    SliceEnv.filter_keys e.slices ~f:(fun k ->
-        Cbat_var_id.base_of (slice_owner k) <> base) in
+    SliceEnv.filter_keys e.slices ~f:(fun k -> slice_owner k <> owner) in
   if phys_equal slices e.slices then e else { e with slices }
 
 (* A narrowed word is still described by its slices: they stay. *)
@@ -163,20 +161,21 @@ let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
   MemEnv.find i env.memories (Cbat_var_id.intern v)
 
-(* Drop dead virtual temps; machine regs are the ABI surface and stay.
-   Missing keys read top, so dropping only weakens. *)
+(* An SSA version is a single-definition value, never an ABI lane. *)
+let versioned (k : int) : bool = Var.index (Cbat_var_id.var_of k) > 0
+
+(* Drop dead virtual temps and dead SSA versions; unversioned machine
+   regs are the ABI surface and stay.  Missing keys read top, so
+   dropping only weakens. *)
 let gc ~(synth : Hike_synth.table) (e : t) ~(keep : Int.Set.t) : t =
-  let words =
-    WordEnv.filter_keys e.words ~f:(fun k ->
-        let v = Cbat_var_id.var_of k in
-        (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v))
-        || Core.Set.mem keep (Cbat_var_id.base_of k)) in
+  let kept k =
+    let v = Cbat_var_id.var_of k in
+    (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v
+          || versioned k))
+    || Core.Set.mem keep k in
+  let words = WordEnv.filter_keys e.words ~f:kept in
   let slices =
-    SliceEnv.filter_keys e.slices ~f:(fun k ->
-        let owner = slice_owner k in
-        let v = Cbat_var_id.var_of owner in
-        (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v))
-        || Core.Set.mem keep (Cbat_var_id.base_of owner)) in
+    SliceEnv.filter_keys e.slices ~f:(fun k -> kept (slice_owner k)) in
   if phys_equal words e.words && phys_equal slices e.slices then e
   else { e with words; slices }
 
@@ -292,7 +291,7 @@ let walk_landmarks ~(head : Tid.t)
         if WordSet.is_top data_new then acc
         else
           let data_res =
-            if not (Core.Set.mem need (Cbat_var_id.base_of (owner key))) then
+            if not (Core.Set.mem need (owner key)) then
               WordSet.join data_old data_new
             else
               consume_arm ~head ~landmarks
@@ -382,14 +381,13 @@ let precedes (e1 : t) (e2 : t) : bool =
   precedes_escape e1.escaped e2.escaped
 
 (* Top every word key not in [preserved]; the memories stay.  An absent
-   key reads top, so the others are dropped.  Both the set's elements
-   and the lane's keys are base vars, so membership is a direct set
-   lookup. *)
+   key reads top, so the others are dropped.  A versioned var keeps its
+   value: no call redefines it. *)
 let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
-  let words = WordEnv.filter_keys env.words ~f:(Core.Set.mem preserved) in
+  let kept k = Core.Set.mem preserved k || versioned k in
+  let words = WordEnv.filter_keys env.words ~f:kept in
   let slices =
-    SliceEnv.filter_keys env.slices ~f:(fun k ->
-        Core.Set.mem preserved (slice_owner k)) in
+    SliceEnv.filter_keys env.slices ~f:(fun k -> kept (slice_owner k)) in
   if phys_equal words env.words && phys_equal slices env.slices then env
   else { env with words; slices }
 

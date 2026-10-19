@@ -60,11 +60,11 @@ let ce_raw_env ?(lanes = []) () =
 (* The VSA C1 call shape: unknown callee, no escapes, no push. *)
 let ce_call env preserved =
   Ce.transfer ~abi:ce_abi ~preserved
-    ~site:{ Ce.summary = None; read_lanes = []; pushed = false } env
+    ~site:{ Ce.summary = None; read_lanes = [] } env
 
 let ce_call_reads ?(stack_args = []) env read_lanes =
   Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
-    ~site:{ Ce.summary = None; read_lanes; pushed = false } env
+    ~site:{ Ce.summary = None; read_lanes } env
 
 let ce_xy_env () =
   let x = v64 "c1_x" in
@@ -93,7 +93,7 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
-            ~site:{ Ce.summary = Some summary; read_lanes = []; pushed = false }
+            ~site:{ Ce.summary = Some summary; read_lanes = [] }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
         check "CE-01"
@@ -114,7 +114,7 @@ let tests : unit Alcotest.test list =
         in
         let killed =
           Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
-            ~site:{ Ce.summary = None; read_lanes = []; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [] }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
         check "CE-02"
@@ -128,7 +128,7 @@ let tests : unit Alcotest.test list =
         let e, m = ce_raw_env () in
         let kept_frame =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = []; pushed = false } e
+            ~site:{ Ce.summary = None; read_lanes = [] } e
         in
         check "CE-03"
           (Ws.equal (ce_reads m 0x2000L kept_frame) (Ws.singleton (w64 42))
@@ -142,23 +142,12 @@ let tests : unit Alcotest.test list =
         let e, m = ce_raw_env ~lanes:[ rdi ] () in
         let escaped =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false } e
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ] } e
         in
         check "CE-04"
           (Ws.is_top (ce_reads m 0x2000L escaped)
           && Ws.is_top (ce_reads m 0x3000L escaped)
           && AI.frame_escaped escaped));
-
-    (* A pushed site's SP gains one word — the popped retaddr. *)
-    pin "CE-05" "a pushed site's SP gains one word — the popped retaddr" (fun () ->
-        let restored =
-          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = []; pushed = true }
-            (AI.add_word AI.top ~key:ce_abi.Hike_abi.sp
-               ~data:(Ws.singleton (w64 0x1000)))
-        in
-        let rsp' = AI.find_word 64 restored ce_abi.Hike_abi.sp in
-        check "CE-05" (Ws.elem (w64 0x1000) rsp' && Ws.elem (w64 0x1008) rsp'));
 
     (* A trap restores no SP (it pops no retaddr). *)
     pin "CE-06" "a trap restores no SP (it pops no retaddr)" (fun () ->
@@ -166,7 +155,7 @@ let tests : unit Alcotest.test list =
         let trap =
           Ce.transfer ~abi:ce_abi
             ~preserved:(ids1 ce_abi.Hike_abi.sp)
-            ~site:{ Ce.summary = None; read_lanes = []; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [] }
             trap_env
         in
         check "CE-06"
@@ -274,7 +263,7 @@ let tests : unit Alcotest.test list =
         let env = AI.add_word e ~key:rdi ~data:(Ws.top 64) in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ] }
             env
         in
         check "CE-16"
@@ -290,7 +279,7 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ] }
             env
         in
         check "CE-17"
@@ -316,7 +305,7 @@ let tests : unit Alcotest.test list =
         in
         let kept =
           Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = [ rdi ]; pushed = false }
+            ~site:{ Ce.summary = None; read_lanes = [ rdi ] }
             env
         in
         check "CE-19"
@@ -418,7 +407,7 @@ let tests : unit Alcotest.test list =
         let stack_args = Ce.stack_arg_ranges ~synth:Hike.Synth.empty ~abi:ce_abi ~block ~entry:env env in
         let post =
           Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = []; pushed = false } env
+            ~site:{ Ce.summary = None; read_lanes = [] } env
         in
         check "CE-26"
           (stack_args = [ (w64 0x1008, w64 0x1017) ]

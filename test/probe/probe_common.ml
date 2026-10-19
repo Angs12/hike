@@ -27,13 +27,14 @@ let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.call
 
 (* The production solve of one sub with every callee summarized. *)
 let solve ~synth ~callee target (sub : sub term) =
+  let sub = Hike.Ssa.ssa_sub ~synth ~target sub in
   match
     Hike.Vsa.start target ~lookup:(fun _ -> None) ~images:[] ~callee
       ~block_addrs:Addr.Map.empty
       ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hike.Vsa.Done (envs, sub', block_addrs, synth) -> (envs, sub', block_addrs, synth)
+  | Hike.Vsa.Done (envs, sub', block_addrs, synth, _) -> (envs, sub', block_addrs, synth)
   | Hike.Vsa.Paused _ -> failwith "probe: a callee is blocked"
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.

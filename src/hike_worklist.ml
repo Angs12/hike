@@ -411,7 +411,7 @@ and close_cycle t (head : entry) ~publish : unit =
 
 (* ---- one function ---- *)
 
-and build t frame (e : entry) : final =
+and build ?previous t frame (e : entry) : final =
   let entry = Addr.of_int64 e.addr in
   let cfg =
     D.function_cfg ~file:t.file t.state ~entry ~is_entry:(fun a ->
@@ -422,7 +422,7 @@ and build t frame (e : entry) : final =
   | Some blk -> (
     match stub_symbol blk with
     | Some name -> Alias (symbol t name)
-    | None -> body t frame e cfg blk)
+    | None -> body ?previous t frame e cfg blk)
 
 (* A stub: an entry block whose one instruction transfers to exactly
    one external symbol (the loader binds it; decision 10). *)
@@ -436,15 +436,15 @@ and stub_symbol (blk : Block.t) : string option =
 
 (* The body's local closure: lift, solve, and while the solve resolves
    new dispatch destinations, decode them and lift again. *)
-and body t frame e cfg blk : final =
+and body ?previous t frame e cfg blk : final =
   let keep_fall = walk t frame cfg blk in
   let raw =
     D.trim cfg ~entry:blk ~keep_fall
     |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
     |> link t frame |> claim t e |> arm t
   in
-  let f = solve t frame raw in
-  if learn_dests t cfg f then build t frame e
+  let f, continuation = solve ?previous t frame raw in
+  if learn_dests t cfg f then build ~previous:continuation t frame e
   else begin
     frontier_add_found t.frontier (code_words t f);
     if t.refused then
@@ -579,10 +579,15 @@ and arm t (sub : sub term) : sub term =
   Hike_cfg_complete.arm_dispatches ~dests sub
 
 (* The solve, paused at each unsolved callee until it is solved. *)
-and solve t frame (raw : sub term) : func =
+and solve ?previous t frame (raw : sub term) : func * Hike_vsa.continuation =
   let ctx = t.context in
-  let sub, synth =
-    Hike_program_vsa.prepare_function ctx ~synth:t.synth ~is_entry:(is_entry t) raw
+  let sub, synth, woken = match previous with
+    | None ->
+      let sub, synth = Hike_program_vsa.prepare_function ctx
+          ~synth:t.synth ~is_entry:(is_entry t) raw in
+      (sub, synth, Tid.Set.empty)
+    | Some continuation -> Hike_program_vsa.update_function ctx ~synth:t.synth
+        ~is_entry:(is_entry t) ~old:continuation.Hike_vsa.canonical raw
   in
   t.synth <- synth;
   let block_addrs =
@@ -610,17 +615,20 @@ and solve t frame (raw : sub term) : func =
   in
   let images = ctx.images and foreign_slots = ctx.linker_slots in
   let rec run = function
-    | Hike_vsa.Done (envs, solved, block_addrs, synth) ->
+    | Hike_vsa.Done (envs, solved, block_addrs, synth, continuation) ->
       t.synth <- synth;
-      (envs, solved, block_addrs)
+      (envs, solved, block_addrs, continuation)
     | Paused p ->
       Core.Set.iter p.p_blocked ~f:(fun tid ->
           ignore (summary t frame (Core.Hashtbl.find_exn t.by_tid tid)));
       run (Hike_vsa.resume ctx.target ~lookup ~images ~callee ~foreign_slots p)
   in
-  let envs, solved, block_addrs =
-    run (Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs
-           ~foreign_slots ~synth:t.synth sub)
+  let envs, solved, block_addrs, continuation =
+    run (match previous with
+        | None -> Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs
+            ~foreign_slots ~synth:t.synth sub
+        | Some previous -> Hike_vsa.restart ctx.target ~lookup ~images ~callee ~block_addrs
+            ~foreign_slots ~synth:t.synth ~previous ~woken sub)
   in
   let summary =
     S.of_solved ~abi:t.abi ~synth:t.synth
@@ -634,7 +642,7 @@ and solve t frame (raw : sub term) : func =
               symbol_summary t (symbol t n)))
       ~lookup ~foreign_slots ~block_addrs ~envs solved
   in
-  { solved; envs; block_addrs; summary }
+  ({ solved; envs; block_addrs; summary }, continuation)
 
 (* ---- facts from a solved body ---- *)
 
@@ -661,27 +669,43 @@ and learn_dests t cfg (f : func) : bool =
     |> Seq.map ~f:(fun b -> Word.to_int64_exn (Block.addr b))
     |> Seq.to_list |> Core.Int64.Set.of_list
   in
+  let insns = Core.Int64.Set.of_list (Core.Map.data instruction) in
+  let call_insns =
+    Core.Set.fold calls ~init:Core.Int64.Set.empty ~f:(fun acc b ->
+        match Core.Map.find instruction b with
+        | Some i -> Core.Set.add acc i
+        | None -> acc)
+  in
+  (* The instruction an indirect transfer belongs to: its block's
+     terminator, or - for a call set apart in a block of its own - the
+     address the lift stamped on the jmp. *)
+  let site_of blk j =
+    match Term.get_attr blk address with
+    | Some site -> Core.Map.find instruction (Word.to_int64_exn site)
+    | None ->
+      Base.Option.bind (Term.get_attr j address) ~f:(fun a ->
+          let a = Word.to_int64_exn a in
+          Base.Option.some_if (Core.Set.mem insns a) a)
+  in
   let learned =
     Term.enum blk_t f.solved |> Seq.to_list
     |> Base.List.concat_map ~f:(fun blk ->
-        match Core.Map.find f.envs (Term.tid blk), Term.get_attr blk address with
-        | Some (pre, post), Some site -> (
-          match Core.Map.find instruction (Word.to_int64_exn site) with
-          | None -> []
-          | Some insn ->
-            let jump =
-              not (Core.Set.mem calls (Word.to_int64_exn site)) in
-            Term.enum jmp_t blk |> Seq.to_list
-            |> Base.List.filter_map ~f:indirect_target
-            |> Base.List.concat_map ~f:(fun e ->
+        match Core.Map.find f.envs (Term.tid blk) with
+        | Some (pre, post) ->
+          Term.enum jmp_t blk |> Seq.to_list
+          |> Base.List.concat_map ~f:(fun j ->
+              match indirect_target j, site_of blk j with
+              | Some e, Some insn -> (
+                let jump = not (Core.Set.mem call_insns insn) in
                 match Vsa.denote_exp_at ~synth:t.synth ~pre ~post ~blk e with
                 | Ok ws ->
                   Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
                     ~f:(fun w ->
                         if jump then frontier_add_jump t.frontier w;
                         (insn, w))
-                | Error _ -> []))
-        | _ -> [])
+                | Error _ -> [])
+              | _ -> [])
+        | None -> [])
     |> Base.List.filter ~f:(fun (site, w) ->
         match Core.Map.find t.dests site with
         | Some ws -> not (Core.Set.mem ws w)
@@ -718,7 +742,8 @@ and code_words t (f : func) : int64 list =
   let args = ints t.abi.Hike_abi.int_param_regs in
   let rets = ints t.abi.Hike_abi.return_regs in
   let text ~blk post v =
-    match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk (Bil.Var v) with
+    match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk
+            (Bil.Var (Hike_stack_model.version_at_end blk v)) with
     | Ok ws -> text_words ws
     | Error _ -> []
   in
@@ -853,7 +878,8 @@ let main_of t (f : func) : int64 option =
         in
         match Core.Map.find f.envs (Term.tid blk) with
         | Some (_, post) when calls -> (
-          match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk (Bil.Var arg0) with
+          match Vsa.denote_exp_at ~synth:t.synth ~pre:post ~post ~blk
+                  (Bil.Var (Hike_stack_model.version_at_end blk arg0)) with
           | Ok ws -> (match bounded_words ws with Some [ w ] -> Some w | _ -> None)
           | Error _ -> None)
         | _ -> None)
@@ -896,28 +922,6 @@ let unresolved_call t (f : func) : bool =
                 | Error _ -> true))
             | _ -> false)
       | _ -> false)
-
-(* One jump per block for the downstream passes: each non-goto jump
-   moves to a block of its own, entered under the jump's condition. *)
-let simplify_jmps (sub : sub term) : sub term =
-  Term.concat_map blk_t sub ~f:(fun blk ->
-      match Term.enum jmp_t blk |> Seq.to_list with
-      | [ _ ] -> [ blk ]
-      | jmps ->
-        let builder = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
-        let moved =
-          Base.List.filter_map jmps ~f:(fun j ->
-              match Jmp.kind j with
-              | Goto _ ->
-                Blk.Builder.add_jmp builder j;
-                None
-              | _ ->
-                let own = Blk.create ~jmps:[ Jmp.with_cond j Bil.(int (Word.one 1)) ] () in
-                Blk.Builder.add_jmp builder
-                  (Jmp.create_goto ~cond:(Jmp.cond j) (Direct (Term.tid own)));
-                Some own)
-        in
-        moved @ [ Term.with_attrs (Blk.Builder.result builder) (Term.attrs blk) ])
 
 type result = { program : program term; facts : Hike_kb.facts }
 
@@ -996,7 +1000,7 @@ let run (proj : Project.t) ~file ~state ~subroutines : result =
   end;
   let lifted =
     Base.List.map (functions t) ~f:(fun (a, f) ->
-        let sub = Term.set_attr (simplify_jmps f.solved) filename t.file in
+        let sub = Term.set_attr f.solved filename t.file in
         let sub =
           if Base.Option.is_some main && Base.Option.equal Int64.equal entry (Some a)
           then Term.set_attr sub Sub.entry_point () else sub

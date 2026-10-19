@@ -235,10 +235,15 @@ let tests : unit Alcotest.test list =
     pin "VSA-36" "T4-9: RSP is preserved across the call"
       (fun () ->
         let fx = mk_caller_alias () in
-        let sol = run_anchored fx.ca_sub in
-        let post_ai = in_state sol fx.ca_post_tid in
+        let callee =
+          Term.enum sub_t fx.ca_ctx
+          |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "t4_callee")
+          |> Base.Option.value_exn in
+        let ssa =
+          ssa_of_subs [ jump_compiled fx.ca_sub; jump_compiled callee ] (Sub.name fx.ca_sub) in
+        let sol = run_ssa_anchored ssa in
         check "VSA-36"
-          (Ws.equal (AI.find_word 64 post_ai fx.ca_rsp) (Ws.singleton (w64 0x2000))));
+          (Ws.equal (sp_after_block ssa sol fx.ca_post_tid) (Ws.singleton (w64 0x2000))));
 
     pin "VSA-37" "T4-10: RBP is preserved across the call"
       (fun () ->
@@ -429,14 +434,14 @@ let tests : unit Alcotest.test list =
               img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00";
               img_slots = Core.Int64.Set.empty } ]
         in
-        let envs, _, _ =
+        let envs, solved, _ =
           produce ~synth:Hike.Synth.empty ~images (x86_target ())
             (Program.create ~subs:[ sub ] ()) sub
         in
-        let blk = Term.first blk_t sub |> Base.Option.value_exn in
+        let blk = Term.first blk_t solved |> Base.Option.value_exn in
         let _, post = Core.Map.find_exn envs (Term.tid blk) in
         check "VSA-67"
-          (Ws.equal (AI.find_word 64 post r) (Ws.singleton (w64 0x2d))));
+          (Ws.equal (AI.find_word 64 post (Sm.version_at_end blk r)) (Ws.singleton (w64 0x2d))));
 
 
     pin "VSA-68"
@@ -454,6 +459,7 @@ let tests : unit Alcotest.test list =
               ([ Def.create rbx Bil.(var rsi + k 1L);
                  Def.create sp Bil.(var sp + k 8L) ],
                [ (0, mk_ret) ]) ] in
+        let sub = Hike.Ssa.ssa_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) sub in
         let writes_rcx =
           Vsa.Call_effects.Summary
             (Some (Cbat_var_id.intern_set (Var.Set.singleton rcx))) in
@@ -472,13 +478,15 @@ let tests : unit Alcotest.test list =
           check "VSA-68.seed"
             (AI.equal (Graphlib.Std.Solution.get p.p_seed tids.(2)) AI.bottom);
           match resume p ~callee:(fun _ -> writes_rcx), solve ~callee:(fun _ -> writes_rcx) with
-          | Hv.Done (warm, _, _, _), Hv.Done (cold, _, _, _) ->
+          | Hv.Done (warm, warm_sub, _, _, _), Hv.Done (cold, _, _, _, _) ->
             check "VSA-68.equal"
               (Core.Map.equal (fun (a, b) (c, d) -> AI.equal a c && AI.equal b d) warm cold);
             check "VSA-68.flowed"
               (match Core.Map.find warm tids.(2) with
                | Some (_, post) ->
-                 Ws.equal (AI.find_word 64 post rbx) (Ws.singleton (w64 6))
+                 Ws.equal (AI.find_word 64 post
+                     (Sm.version_at_end (Term.find_exn blk_t warm_sub tids.(2)) rbx))
+                   (Ws.singleton (w64 6))
                | None -> false)
           | _ -> check "VSA-68.done" false);
 
