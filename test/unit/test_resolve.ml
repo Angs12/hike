@@ -458,10 +458,11 @@ let tests : unit Alcotest.test list =
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
+            let retaddr = Hike.Cfg_complete.retaddr_defs
+                ~abi:Hike.Abi.x86_64_sysv ~synth:Hike.Synth.empty ~sol j5 in
             let resolved5', events5 =
-              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
-                ~synth:Hike.Synth.empty
-                                ~block_addrs:
+              Hike.Cfg_complete.resolve_phase ~sol ~synth:Hike.Synth.empty
+                ~retaddr ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
                 ~foreign_slots:Core.Int64.Set.empty
@@ -756,12 +757,8 @@ let tests : unit Alcotest.test list =
           (Base.List.exists jmps ~f:(fun j ->
                data_guard (-0x1000L) j || data_guard (-0xFF8L) j)));
 
-    (* The return-address set is computed once per phase: a sub that
-       reads the return-address cell (its return epilogue) and carries an
-       indirect dispatch candidate resolves and materializes the same
-       when the precomputed set is passed to both consumers as when each
-       computes it.  The two case words and the return both stay on
-       their original edges. *)
+    (* Both completion consumers share the phase's return-address set;
+       the dispatch cases and return keep their original edges. *)
     pin "RES-27"
       "RETADDR-ONCE: a shared retaddr set keeps dispatch and return edges"
       (fun () ->
@@ -815,19 +812,15 @@ let tests : unit Alcotest.test list =
         let retaddr =
           Hike.Cfg_complete.retaddr_defs ~abi ~synth:Hike.Synth.empty ~sol sub
         in
-        let resolve ?retaddr () =
-          Hike.Cfg_complete.resolve_phase ~abi ~sol ~synth:Hike.Synth.empty
-            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ?retaddr sub
+        let resolved, grew =
+          Hike.Cfg_complete.resolve_phase ~sol ~synth:Hike.Synth.empty
+            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ~retaddr sub
             Tid.Map.empty
         in
-        let resolved_a, grew_a = resolve () in
-        let resolved_b, grew_b = resolve ~retaddr () in
-        let materialize ?retaddr () =
-          Hike.Cfg_complete.materialize ~abi ~sol ~synth:Hike.Synth.empty
-            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ?retaddr sub
+        let materialized =
+          Hike.Cfg_complete.materialize ~sol ~synth:Hike.Synth.empty
+            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ~retaddr sub
         in
-        let materialized_a = materialize () in
-        let materialized_b = materialize ~retaddr () in
         let outcome (s : sub term) =
           let blk tid = Term.find blk_t s tid in
           let return_edge =
@@ -852,7 +845,7 @@ let tests : unit Alcotest.test list =
         in
         let dispatch_cases =
           match
-            Core.Map.find resolved_b (Term.tid (sub_jmp sub 4 0))
+            Core.Map.find resolved (Term.tid (sub_jmp sub 4 0))
           with
           | Some ts ->
             Core.Set.equal ts (Tid.Set.of_list [ tids.(3); tids.(5) ])
@@ -861,13 +854,9 @@ let tests : unit Alcotest.test list =
         check "RES-27a the fixture has both return-address cells"
           (Core.Set.mem retaddr (Term.tid ra_ld)
            && Core.Set.mem retaddr (Term.tid rar_ld));
-        check "RES-27b the shared set resolves the same edges"
-          (Bool.equal grew_a grew_b
-           && Core.Map.equal (fun a b -> Core.Set.equal a b) resolved_a
-                resolved_b);
-        check "RES-27c the dispatch keeps its two cases" dispatch_cases;
-        check "RES-27d materialization with the shared set is unchanged"
-          (outcome materialized_a && outcome materialized_b));
+        check "RES-27b the dispatch keeps its two cases" (grew && dispatch_cases);
+        check "RES-27c materialization keeps the return and dispatch"
+          (outcome materialized));
   ]
 
 let () = run "resolve" tests

@@ -533,20 +533,16 @@ let materialize_fallthroughs (sub : sub term) : sub term =
    dispatches contribute their target sets to the extra edges.  The
    words are the target denotations; the drive discovers the case
    bodies from the raw transfers' own denotations, so the completion
-   carries no fact channel.  A caller holding [retaddr_defs] for this
-   exact (sub, sol) pair passes it as [?retaddr]; otherwise it is
-   computed here. *)
-let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+   carries no fact channel.  The caller supplies [retaddr_defs] for
+   this exact (sub, sol) pair. *)
+let resolve_phase ~(sol : Vsa.vsa_sol)
     ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?retaddr
+    ~(retaddr : Tid.Set.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     Tid.Set.t Tid.Map.t * bool =
   let denote = denote_of_sol ~synth sol in
-  let retaddr = match retaddr with
-    | Some r -> r
-    | None -> retaddr_defs ~abi ~synth ~sol sub in
   let sub_tids = sub_tids sub in
   let index = Hike_transfer.index_of_sub sub in
   let resolved', grew =
@@ -580,18 +576,14 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
    once, then the unreachable-block rule runs on the edge set.  The
    bounded dispatches materialize later, in
    [Split_blocks.materialize].  The denotations read the images through
-   the caller's bracket.  A caller that already computed [retaddr_defs]
-   for this (sub, sol) pair — the resolution phases — passes it as
-   [?retaddr]; otherwise it is computed here. *)
-let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+   the caller's bracket.  The caller supplies the same [retaddr_defs]
+   set as the drained resolution phase. *)
+let materialize ~(sol : Vsa.vsa_sol)
     ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?retaddr
+    ~(retaddr : Tid.Set.t)
     (sub : sub term) : sub term =
-  let retaddr = match retaddr with
-    | Some r -> r
-    | None -> retaddr_defs ~abi ~synth ~sol sub in
   let sub = rewrite_jmps_once ~retaddr sub in
   prune_unreachable ~synth ~denote:(denote_of_sol ~synth sol) ~retaddr ~block_addrs
     ~foreign_slots sub

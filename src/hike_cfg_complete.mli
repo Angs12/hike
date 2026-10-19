@@ -58,17 +58,14 @@ open Bap.Std
       grown edge set and whether anything grew.  Runs under the
       caller's image bracket.
 
-      [?retaddr] is the sub's [retaddr_defs] for this exact
-      [(sub, sol)] pair; a caller that already computed it for a
-      consumer of the same phase passes it to avoid a second replay.
-      Omit it and the set is computed here. *)
+      [retaddr] is the sub's [retaddr_defs] for this exact
+      [(sub, sol)] pair, shared by the consumers of this phase. *)
   val resolve_phase :
-    abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     synth:Hike_synth.table ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
-    ?retaddr:Tid.Set.t ->
+    retaddr:Tid.Set.t ->
     sub term ->
     Tid.Set.t Tid.Map.t ->
     Tid.Set.t Tid.Map.t * bool
@@ -79,17 +76,15 @@ open Bap.Std
       ([foreign_slots] are the linker-owned slot addresses a transfer
       may read its target through — such a transfer leaves the
       program).  The bounded dispatches materialize later, in
-      [Split_blocks.materialize].  [retaddr_defs] for the drained
-      solution may be passed as [?retaddr] when the last resolution
-      phase already computed it; the sub and call facts must be
+      [Split_blocks.materialize].  [retaddr] is the set shared with
+      the drained resolution phase; the sub and call facts must be
       unchanged since. *)
   val materialize :
-    abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     synth:Hike_synth.table ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
-    ?retaddr:Tid.Set.t ->
+    retaddr:Tid.Set.t ->
     sub term -> sub term
 
   (** Names every block's successors: a conditional goto's implicit

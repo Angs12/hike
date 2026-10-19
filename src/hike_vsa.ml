@@ -171,7 +171,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
             Hike_cfg_complete.retaddr_defs ~abi ~synth:!synth ~sol sub
           in
           let resolved', events =
-            Hike_cfg_complete.resolve_phase ~abi ~sol ~synth:!synth ~block_addrs
+            Hike_cfg_complete.resolve_phase ~sol ~synth:!synth ~block_addrs
               ~foreign_slots ~retaddr sub resolved
           in
           if events then phases resolved' block_addrs (Some sol) Tid.Set.empty
@@ -185,7 +185,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
       | `Drained (sol, block_addrs', resolved, retaddr) ->
         let continuation = { canonical = sub; seed = sol } in
         let materialized =
-          Hike_cfg_complete.materialize ~abi ~sol ~synth:!synth ~retaddr
+          Hike_cfg_complete.materialize ~sol ~synth:!synth ~retaddr
             ~block_addrs:block_addrs' ~foreign_slots sub
         in
         (* The materialization changes the edge set; the SSA follows, and
