@@ -56,9 +56,26 @@ end
 module MemEnv = MapLattice.Make_indexed_val(SlotKey)(Mem)
 module WordEnv = MapLattice.Make_indexed_val(SlotKey)(WordSet)
 
+(* A slice is a fact about the bit range [lo..hi] of a variable's current
+   value.  Its key packs the owner's id above the range; a missing key
+   reads top.  Redefining the owner discards its slices. *)
+module SliceEnv = MapLattice.Make_indexed_val(SlotKey)(WordSet)
+
+let slice_limit = 256
+
+let slice_valid ~hi ~lo = lo >= 0 && lo <= hi && hi < slice_limit
+
+let slice_key (owner : int) ~(hi : int) ~(lo : int) : int =
+  (owner lsl 16) lor (hi lsl 8) lor lo
+
+let slice_owner (k : int) : int = k lsr 16
+let slice_hi (k : int) : int = (k lsr 8) land 0xff
+let slice_lo (k : int) : int = k land 0xff
+
 type t = {
   memories : MemEnv.t;
   words : WordEnv.t;
+  slices : SliceEnv.t;
   escaped : escape;
 } [@@deriving bin_io, sexp, compare]
 
@@ -67,18 +84,23 @@ type t = {
 let top : t =
   { memories = MemEnv.top;
     words = WordEnv.top;
+    slices = SliceEnv.top;
     escaped = Contained;
   }
 let bottom : t =
   { memories = MemEnv.bottom;
     words = WordEnv.bottom;
+    slices = SliceEnv.bottom;
     escaped = Contained;
   }
 
 let equal (e1 : t) e2 : bool =
   MemEnv.equal e1.memories e2.memories &&
   WordEnv.equal e1.words e2.words &&
+  SliceEnv.equal e1.slices e2.slices &&
   compare_escape e1.escaped e2.escaped = 0
+
+let equal_slices_top (s : SliceEnv.t) : bool = SliceEnv.equal s SliceEnv.top
 
 let frame_escaped (e : t) : bool =
   match e.escaped with Contained -> false | Whole_frame -> true
@@ -94,9 +116,46 @@ let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
   let memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data in
   if phys_equal memories e.memories then e else { e with memories }
 
-let add_word (e : t) ~(key : var) ~(data : wordset) : t =
+(* The owner's slices describe its previous value: a redefinition
+   discards them, whether or not the word changed. *)
+let drop_slices (e : t) ~(owner : int) : t =
+  let base = Cbat_var_id.base_of owner in
+  let slices =
+    SliceEnv.filter_keys e.slices ~f:(fun k ->
+        Cbat_var_id.base_of (slice_owner k) <> base) in
+  if phys_equal slices e.slices then e else { e with slices }
+
+(* A narrowed word is still described by its slices: they stay. *)
+let refine_word (e : t) ~(key : var) ~(data : wordset) : t =
   let words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data in
   if phys_equal words e.words then e else { e with words }
+
+let add_word (e : t) ~(key : var) ~(data : wordset) : t =
+  refine_word (drop_slices e ~owner:(Cbat_var_id.intern key)) ~key ~data
+
+let find_slice (env : t) (v : var) ~(hi : int) ~(lo : int) : wordset =
+  if not (slice_valid ~hi ~lo) then WordSet.top 1
+  else
+    SliceEnv.find (hi - lo + 1) env.slices
+      (slice_key (Cbat_var_id.intern v) ~hi ~lo)
+
+let add_slice (e : t) (v : var) ~(hi : int) ~(lo : int) ~(data : wordset) : t =
+  if not (slice_valid ~hi ~lo && WordSet.bitwidth data = hi - lo + 1) then e
+  else
+    let slices =
+      SliceEnv.add e.slices
+        ~key:(slice_key (Cbat_var_id.intern v) ~hi ~lo) ~data in
+    if phys_equal slices e.slices then e else { e with slices }
+
+(* The slices of [from] met into [e]'s: a conflicting pair is kept
+   apart rather than read as an unreachable state. *)
+let carry_slices ~(from : t) (e : t) : t =
+  if equal_slices_top from.slices || phys_equal from.slices e.slices then e
+  else
+    let slices = SliceEnv.meet e.slices from.slices in
+    if SliceEnv.equal slices SliceEnv.bottom then e
+    else if phys_equal slices e.slices then e
+    else { e with slices }
 
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
   WordEnv.find i env.words (Cbat_var_id.intern v)
@@ -112,7 +171,14 @@ let gc ~(synth : Hike_synth.table) (e : t) ~(keep : Int.Set.t) : t =
         let v = Cbat_var_id.var_of k in
         (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v))
         || Core.Set.mem keep (Cbat_var_id.base_of k)) in
-  if phys_equal words e.words then e else { e with words }
+  let slices =
+    SliceEnv.filter_keys e.slices ~f:(fun k ->
+        let owner = slice_owner k in
+        let v = Cbat_var_id.var_of owner in
+        (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v))
+        || Core.Set.mem keep (Cbat_var_id.base_of owner)) in
+  if phys_equal words e.words && phys_equal slices e.slices then e
+  else { e with words; slices }
 
 
 
@@ -142,20 +208,23 @@ let pp ppf (e : t) =
 
 (* The join's result record is the first operand itself when both
    component maps come back physically unchanged. *)
-let rebuilt (e1 : t) ~(escaped : escape) memories words : t =
+let rebuilt (e1 : t) ~(escaped : escape) memories words slices : t =
   if phys_equal memories e1.memories && phys_equal words e1.words
+     && phys_equal slices e1.slices
      && compare_escape escaped e1.escaped = 0 then e1
-  else { memories; words; escaped }
+  else { memories; words; slices; escaped }
 
 let join (e1 : t) (e2 : t) : t =
   rebuilt e1 ~escaped:(join_escape e1.escaped e2.escaped)
     (MemEnv.join e1.memories e2.memories)
     (WordEnv.join e1.words e2.words)
+    (SliceEnv.join e1.slices e2.slices)
 
 let widen_join (e1 : t) (e2 : t) : t =
   rebuilt e1 ~escaped:(join_escape e1.escaped e2.escaped)
     (MemEnv.widen_join e1.memories e2.memories)
     (WordEnv.widen_join e1.words e2.words)
+    (SliceEnv.widen_join e1.slices e2.slices)
 
 
 
@@ -216,28 +285,40 @@ let walk_landmarks ~(head : Tid.t)
     join e1 e2
   end
   else
-    let words =
-      WordEnv.fold e1.words ~init:WordEnv.top ~f:(fun ~key ~data:data_old acc ->
+    let consume_env ~fold ~find ~add ~top ~owner ~lkey env1 env2 =
+      fold env1 ~init:top ~f:(fun ~key ~data:data_old acc ->
         let idx = WordSet.bitwidth data_old in
-        let data_new = WordEnv.find idx e2.words key in
+        let data_new = find idx env2 key in
         if WordSet.is_top data_new then acc
         else
           let data_res =
-            if not (Core.Set.mem need (Cbat_var_id.base_of key)) then
+            if not (Core.Set.mem need (Cbat_var_id.base_of (owner key))) then
               WordSet.join data_old data_new
             else
               consume_arm ~head ~landmarks
-                ~key:(Cbat_landmarks.Word (Cbat_var_id.var_of key))
+                ~key:(lkey key)
                 ~head_arm:arm
                 ~extrapolate:(fun ~steps ->
                     extrapolate_or_widen ~landmarks ~head
-                      ~key:(Cbat_landmarks.Word (Cbat_var_id.var_of key))
+                      ~key:(lkey key)
                       ~old:data_old ~new_:data_new ~steps)
                 ~zero_action:(fun () -> WordSet.join data_old data_new)
                 ~widen:(fun () -> WordSet.widen_join data_old data_new)
           in
           if WordSet.is_top data_res then acc
-          else WordEnv.add acc ~key ~data:data_res)
+          else add acc ~key ~data:data_res)
+    in
+    let words =
+      consume_env e1.words e2.words ~fold:WordEnv.fold ~find:WordEnv.find
+        ~add:WordEnv.add ~top:WordEnv.top ~owner:Fun.id
+        ~lkey:(fun key -> Cbat_landmarks.Word (Cbat_var_id.var_of key))
+    in
+    let slices =
+      consume_env e1.slices e2.slices ~fold:SliceEnv.fold ~find:SliceEnv.find
+        ~add:SliceEnv.add ~top:SliceEnv.top ~owner:slice_owner
+        ~lkey:(fun key ->
+            Cbat_landmarks.Slice
+              (Cbat_var_id.var_of (slice_owner key), slice_hi key, slice_lo key))
     in
     let memories =
       MemEnv.fold e1.memories ~init:MemEnv.top
@@ -268,7 +349,7 @@ let walk_landmarks ~(head : Tid.t)
                 ~data:(Mem.widen_join_op extr old nw)
             end)
     in
-    { memories; words; escaped = join_escape e1.escaped e2.escaped }
+    { memories; words; slices; escaped = join_escape e1.escaped e2.escaped }
 
 (* Extrapolate [need]'s keys by [steps]; each key still reads its own
    row first. *)
@@ -286,12 +367,18 @@ let advance_join_landmarks ~head ~landmarks ~need e1 e2 =
 let meet (e1 : t) (e2 : t) : t =
   let memories = MemEnv.meet e1.memories e2.memories in
   let words = WordEnv.meet e1.words e2.words in
+  let slices = SliceEnv.meet e1.slices e2.slices in
   if MemEnv.equal memories MemEnv.bottom || WordEnv.equal words WordEnv.bottom then bottom
-  else { memories; words; escaped = join_escape e1.escaped e2.escaped }
+  else
+    (* Conflicting slices are dropped, not read as unreachable. *)
+    let slices =
+      if SliceEnv.equal slices SliceEnv.bottom then SliceEnv.top else slices in
+    { memories; words; slices; escaped = join_escape e1.escaped e2.escaped }
 
 let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
   WordEnv.precedes e1.words e2.words &&
+  SliceEnv.precedes e1.slices e2.slices &&
   precedes_escape e1.escaped e2.escaped
 
 (* Top every word key not in [preserved]; the memories stay.  An absent
@@ -300,7 +387,11 @@ let precedes (e1 : t) (e2 : t) : bool =
    lookup. *)
 let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
   let words = WordEnv.filter_keys env.words ~f:(Core.Set.mem preserved) in
-  if phys_equal words env.words then env else { env with words }
+  let slices =
+    SliceEnv.filter_keys env.slices ~f:(fun k ->
+        Core.Set.mem preserved (slice_owner k)) in
+  if phys_equal words env.words && phys_equal slices env.slices then env
+  else { env with words; slices }
 
 (* Apply [f] to every memory cell; the words stay. *)
 let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =

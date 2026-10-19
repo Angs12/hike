@@ -49,23 +49,27 @@ let equal_cell (a : cell_desc) (b : cell_desc) : bool =
   && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
   && Int.equal a.stride b.stride
 
-(* What a landmark is about: a variable at the head, or a memory cell at
-   the head.  The head is the table's outer key (the cycle owns its
-   rows); the key is the base variable — a versioned var names the same
-   abstract value. *)
-type key = Word of var | Cell of cell_desc
+(* What a landmark is about: a variable at the head, a bit range of a
+   variable at the head, or a memory cell at the head.  The head is the
+   table's outer key (the cycle owns its rows); the key is the base
+   variable — a versioned var names the same abstract value. *)
+type key = Word of var | Cell of cell_desc | Slice of var * int * int
 
 let norm_key (k : key) : key =
-  match k with Word v -> Word (Var.base v) | Cell _ -> k
+  match k with
+  | Word v -> Word (Var.base v)
+  | Slice (v, hi, lo) -> Slice (Var.base v, hi, lo)
+  | Cell _ -> k
 
 let equal_key (a : key) (b : key) : bool =
   match norm_key a, norm_key b with
   | Word x, Word y -> Var.same x y
   | Cell x, Cell y -> equal_cell x y
-  | Word _, Cell _ | Cell _, Word _ -> false
+  | Slice (x, h, l), Slice (y, h', l') -> Var.same x y && Int.equal h h' && Int.equal l l'
+  | (Word _ | Cell _ | Slice _), _ -> false
 
 let kind_of_key (k : key) : string =
-  match k with Word _ -> "word" | Cell _ -> "cell"
+  match k with Word _ -> "word" | Cell _ -> "cell" | Slice _ -> "slice"
 
 #ifdef VSA_DEBUG
 let steps_census : int String.Map.t ref = ref String.Map.empty
@@ -332,7 +336,7 @@ let steps (t : t) (h : Tid.t) (key : key) : arm =
 let head_arm (t : t) (h : Tid.t) : arm =
   let lst =
     List.concat_map (keys_at t h) ~f:(fun k ->
-        match k with Word _ -> entries t h k | Cell _ -> [])
+        match k with Word _ -> entries t h k | Cell _ | Slice _ -> [])
   in
   let answer = steps_of_entries lst in
 #ifdef VSA_DEBUG

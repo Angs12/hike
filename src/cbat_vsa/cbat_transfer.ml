@@ -487,6 +487,29 @@ let in_own_frame (addr : wordset) : bool =
    callee may reach it: the data has a stack leaf and the address is not
    in the sub's own frame below entry.  [denote_exp] discards it;
    [denote_def] folds it into the state. *)
+(* The bit range a narrowing cast keeps; other casts keep none. *)
+let narrowing_range (ct : Bil.cast) ~(sz : int) ~(width : int) : (int * int) option =
+  if sz <= 0 || sz >= width then None
+  else
+    match ct with
+    | Bil.LOW -> Some (sz - 1, 0)
+    | Bil.HIGH -> Some (width - 1, width - sz)
+    | Bil.UNSIGNED | Bil.SIGNED -> None
+
+(* A read of bits [lo..hi] of a variable: the extract of its set met with
+   the slice recorded for that range.  Both over-approximate the same
+   bits; an empty meet is not read as an unreachable state. *)
+let slice_read (env : AI.t) (e : exp) ~(hi : int) ~(lo : int) (r : WordSet.t) :
+    WordSet.t =
+  match e with
+  | Bil.Var x ->
+    let s = AI.find_slice env x ~hi ~lo in
+    if WordSet.is_top s || WordSet.bitwidth s <> WordSet.bitwidth r then r
+    else
+      let m = WordSet.meet r s in
+      if Cbat_word.is_zero (WordSet.cardinality m) then r else m
+  | _ -> r
+
 let rec denote_exp_escaping ~(synth : Hike_synth.table)
     ~(escaped : bool ref) (e : exp) (env : AI.t) :
     val_t or_type_error =
@@ -569,7 +592,7 @@ let rec denote_exp_escaping ~(synth : Hike_synth.table)
       val_join yesv nov
   | Bil.Extract (hi, lo, e) ->
     denote_exp e env >>= val_as_imm >>= fun v ->
-    return_imm @@ WordSet.extract ~hi ~lo v
+    return_imm @@ slice_read env e ~hi ~lo (WordSet.extract ~hi ~lo v)
   | Bil.Concat (e1, e2) ->
     denote_exp e1 env >>= val_as_imm >>= fun v1 ->
     denote_exp e2 env >>= val_as_imm >>= fun v2 ->
@@ -579,7 +602,12 @@ let rec denote_exp_escaping ~(synth : Hike_synth.table)
   | Bil.UnOp (Bil.NEG, e) ->
     denote_exp e env >>= val_as_imm >>| WordSet.neg >>= return_imm
   | Bil.Cast (ct, sz, e) ->
-    denote_exp e env >>= val_as_imm >>| WordSet.cast ct sz >>= return_imm
+    denote_exp e env >>= val_as_imm >>= fun v ->
+    let r = WordSet.cast ct sz v in
+    return_imm @@
+    (match narrowing_range ct ~sz ~width:(WordSet.bitwidth v) with
+     | Some (hi, lo) -> slice_read env e ~hi ~lo r
+     | None -> r)
   | Bil.Let (var, value, body) ->
     denote_exp value env >>= fun v ->
     let env' = match v with

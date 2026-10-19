@@ -235,7 +235,7 @@ let meet_var ~(landmarks : Cbat_landmarks.t)
              (Var.name v) WordSet.pp cur WordSet.pp refined WordSet.pp m
          | _ -> ());
 #endif
-        AI.add_word env ~key:v ~data:m)
+        AI.refine_word env ~key:v ~data:m)
       refined env
   | Type.Mem _ | Type.Unk -> env
 
@@ -720,6 +720,34 @@ let rec reads_memory (e : exp) : bool =
   | Bil.Ite (c, t, f) -> reads_memory c || reads_memory t || reads_memory f
   | Bil.Let (_, a, b) -> reads_memory a || reads_memory b
 
+(* The variable and bit range an extract or narrowing cast of a variable
+   keeps, for an operand of [width] bits. *)
+let narrowed_bits (e : exp) ~(width : int) : (var * int * int) option =
+  match e with
+  | Bil.Extract (hi, lo, Bil.Var v) when lo >= 0 && hi >= lo && hi - lo + 1 < width ->
+    Some (v, hi, lo)
+  | Bil.Cast (ct, sz, Bil.Var v) ->
+    Option.map (narrowing_range ct ~sz ~width) ~f:(fun (hi, lo) -> (v, hi, lo))
+  | _ -> None
+
+(* A guard on the bits [lo..hi] of a variable is a fact about those bits
+   that the variable's own word cannot hold: it is met into the slice,
+   written only when strictly tighter than the extract of the word.  The
+   variable itself is refined by the caller as before. *)
+let refine_slice ~(landmarks : Cbat_landmarks.t) (env : AI.t) (v : var)
+    ~(hi : int) ~(lo : int) (produced : wordset) : AI.t =
+  if AI.equal env AI.bottom then env
+  else
+    match Var.typ v with
+    | Type.Imm w ->
+      let word = WordSet.extract ~hi ~lo (AI.find_word w env v) in
+      let cur = WordSet.meet word (AI.find_slice env v ~hi ~lo) in
+      leaf_meet ~landmarks ~key:(Cbat_landmarks.Slice (v, hi, lo)) ~cur
+        ~meet:WordSet.meet
+        ~write:(fun m env -> AI.add_slice env v ~hi ~lo ~data:m)
+        produced env
+    | Type.Mem _ | Type.Unk -> env
+
 let rec constrain_operands ~(synth : Hike_synth.table) ~(env : AI.t) ?(seed = false)
     ?(cells : cell_env ref = ref no_cells)
     ?(nonneg : exp -> bool = fun _ -> false)
@@ -763,7 +791,10 @@ let rec constrain_operands ~(synth : Hike_synth.table) ~(env : AI.t) ?(seed = fa
        let c = if WordSet.is_bottom c then
            WordSet.backward1 op ~arg:(WordSet.top (WordSet.bitwidth arg)) ~result:produced
          else c in
-       recur a c
+       let env' = recur a c in
+       (match narrowed_bits e ~width:(WordSet.bitwidth arg) with
+        | Some (v, hi, lo) -> refine_slice ~landmarks env' v ~hi ~lo produced
+        | None -> env')
      | Error _ -> env)
   | Bil.Concat (a,b) ->
     constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks Cbat_preimage.Concat a b produced
@@ -1057,7 +1088,7 @@ let meet_word ~(on_write : unit -> unit) (st : AI.t) (v : var) (c : wordset) :
     let m = WordSet.meet cur c in
     if (not (Cbat_word.is_zero (WordSet.cardinality m)))
        && strictly_precedes m cur
-    then begin on_write (); AI.add_word st ~key:v ~data:m end
+    then begin on_write (); AI.refine_word st ~key:v ~data:m end
     else st
   | _ -> st
 
@@ -1344,6 +1375,9 @@ let refine_edge_inline
     let seeds = cond_seeds ~env acc_cond in
     if Core.Set.is_empty seeds then env
     else
-      Stages.time `Walk (fun () ->
-          rooted ~landmarks acc_cond (fun () ->
-              refine_edge ~entry ~rctx ~seeds env b))
+      (* The walk rebuilds the block-end state forward from the entry; the
+         guard's slices describe that state and are carried across. *)
+      AI.carry_slices ~from:env
+        (Stages.time `Walk (fun () ->
+             rooted ~landmarks acc_cond (fun () ->
+                 refine_edge ~entry ~rctx ~seeds env b)))

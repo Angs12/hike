@@ -22,11 +22,28 @@ include Cbat_lattice_intf.S_val with type t := t
 (* Stack provenance is the WORD value itself: the entry RSP's word
    carries the symbolic segment base. *)
 
+(* A redefinition: the word is overwritten and the owner's slices, which
+   describe its previous value, are discarded. *)
 val add_word : t -> key:var -> data:WordSet.t -> t
+
+(* A narrowing of the word's current value: its slices stay valid. *)
+val refine_word : t -> key:var -> data:WordSet.t -> t
 val add_memory : t -> key:var -> data:Cbat_ai_memmap.t -> t
 
 val find_word : WordSet.idx -> t -> var -> WordSet.t
 val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
+
+(* The fact about bits [lo..hi] of the variable's current value, of width
+   [hi - lo + 1]; top when none is recorded. *)
+val find_slice : t -> var -> hi:int -> lo:int -> WordSet.t
+
+(* Overwrite the slice; callers meet with what is known.  A range that is
+   out of bounds or a set of another width is ignored. *)
+val add_slice : t -> var -> hi:int -> lo:int -> data:WordSet.t -> t
+
+(* The slices of [from] met into the state: the edge refinement rebuilds
+   the block-end state forward and carries the guard's slices across. *)
+val carry_slices : from:t -> t -> t
 
 (* The frame has escaped: a stack address may be held where a callee
    reaches it, so a call keeps no stack cell.  A path fact that joins by

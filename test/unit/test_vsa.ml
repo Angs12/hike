@@ -26,6 +26,46 @@ let in_state (sol : Vsa.vsa_sol) (tid : tid) : AI.t =
 let entry_tid_of (sub : sub term) : tid =
   match Term.first blk_t sub with Some b -> Term.tid b | None -> assert false
 
+(* Slice fixtures: a guard bounds some bits of [x]; the fallthrough runs
+   [between], then reads the same bits into [y] (read block, then an exit
+   whose IN-state shows [y]); the taken edge goes to a second exit.  The
+   shape is a switch's byte bound: [lea eax,[rdi-K]; cmp al,N; ja default]. *)
+type slice_fixture = {
+  sf_sub : sub term;
+  sf_read_exit : tid;
+  sf_y : var;
+}
+
+let byte_const (n : int) : exp = Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 n))
+
+let low8 (e : exp) : exp = Bil.Cast (Bil.LOW, 8, e)
+
+let mk_slice_sub ~(x : var) ?(between = []) ?(call = false)
+    ?(narrow = low8) ?(bound = 0x25) () : slice_fixture =
+  let y = Var.create ~is_virtual:false ~fresh:false "sl_y" (Type.Imm 32) in
+  let guard = Bil.BinOp (Bil.LT, byte_const bound, narrow (Bil.Var x)) in
+  let read = Def.create y (Bil.Cast (Bil.UNSIGNED, 32, narrow (Bil.Var x))) in
+  let callee_tid = Term.tid (mk_selfloop_callee "sl_callee") in
+  let mid = if call then (2, fun t -> mk_call_jmp t callee_tid) else (2, mk_goto) in
+  let sub, tids =
+    sub_of "slice"
+      [ [], [ (4, fun t -> mk_jmp_to t guard); (1, mk_goto) ];
+        between, [ mid ];
+        [ read ], [ (3, mk_goto) ];
+        [], [ (3, mk_ret) ];
+        [], [ (5, mk_goto) ];
+        [], [ (5, mk_ret) ] ]
+  in
+  { sf_sub = sub; sf_read_exit = tids.(3); sf_y = y }
+
+let slice_y (fx : slice_fixture) : Ws.t =
+  let sol = run_anchored fx.sf_sub in
+  AI.find_word 32 (in_state sol fx.sf_read_exit) fx.sf_y
+
+let slice_x () : var = Var.create ~is_virtual:false ~fresh:false "sl_x" (Type.Imm 32)
+
+let slice_bounded (ws : Ws.t) (n : int) : bool = bounded_above ws (w32 n)
+
 let tests : unit Alcotest.test list =
   [
     (* D4: branch-assume refinement — gate-free, every guard shape. *)
@@ -441,6 +481,100 @@ let tests : unit Alcotest.test list =
                  Ws.equal (AI.find_word 64 post rbx) (Ws.singleton (w64 6))
                | None -> false)
           | _ -> check "VSA-68.done" false);
+
+    (* Slices: a guard on bits of a variable survives to the next read of
+       the same bits; the variable's own word keeps today's hull. *)
+    pin "VSA-69"
+      "slice: a guard on low:8[x] bounds the later read of low:8[x], though x stays wide"
+      (fun () ->
+        let x = slice_x () in
+        let fx = mk_slice_sub ~x () in
+        let sol = run_anchored fx.sf_sub in
+        let st = in_state sol fx.sf_read_exit in
+        check "VSA-69.read" (slice_bounded (AI.find_word 32 st fx.sf_y) 0x25);
+        check "VSA-69.owner" (not (slice_bounded (AI.find_word 32 st x) 0xff)));
+
+    pin "VSA-70" "slice: the extract form (bits 15..8) is bounded the same way"
+      (fun () ->
+        let x = slice_x () in
+        let narrow e = Bil.Extract (15, 8, e) in
+        let fx = mk_slice_sub ~x ~narrow () in
+        check "VSA-70" (slice_bounded (slice_y fx) 0x25));
+
+    pin "VSA-72" "slice: a redefinition of the owner discards the fact"
+      (fun () ->
+        let x = slice_x () in
+        let fx = mk_slice_sub ~x ~between:[ Def.create x (Bil.Var x) ] () in
+        check "VSA-72" (not (slice_bounded (slice_y fx) 0x25)));
+
+    pin "VSA-73" "slice: a call that clobbers the owner discards the fact"
+      (fun () ->
+        let x = int_param 0 in
+        let fx = mk_slice_sub ~x ~call:true () in
+        check "VSA-73" (not (slice_bounded (slice_y fx) 0x25)));
+
+    pin "VSA-74" "slice: a second guard on the whole register keeps the byte fact"
+      (fun () ->
+        let x = slice_x () in
+        let y = Var.create ~is_virtual:false ~fresh:false "sl_y" (Type.Imm 32) in
+        let g1 = Bil.BinOp (Bil.LT, byte_const 0x25, low8 (Bil.Var x)) in
+        let g2 = Bil.BinOp (Bil.LT, Bil.Int (Cbat_word.to_word (w32 0x1000)), Bil.Var x) in
+        let read = Def.create y (Bil.Cast (Bil.UNSIGNED, 32, low8 (Bil.Var x))) in
+        let sub, tids =
+          sub_of "slice2"
+            [ [], [ (4, fun t -> mk_jmp_to t g1); (1, mk_goto) ];
+              [], [ (4, fun t -> mk_jmp_to t g2); (2, mk_goto) ];
+              [ read ], [ (3, mk_goto) ];
+              [], [ (0, mk_ret) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let st = in_state (run_anchored sub) tids.(3) in
+        check "VSA-74" (slice_bounded (AI.find_word 32 st y) 0x25));
+
+    pin "VSA-75"
+      "slice: after a merge the fact is kept only when both paths carry it, as the join of both"
+      (fun () ->
+        let x = slice_x () in
+        let y = Var.create ~is_virtual:false ~fresh:false "sl_y" (Type.Imm 32) in
+        let g = v1 "sl_g" in
+        let guard n = Bil.BinOp (Bil.LT, byte_const n, low8 (Bil.Var x)) in
+        let read = Def.create y (Bil.Cast (Bil.UNSIGNED, 32, low8 (Bil.Var x))) in
+        let y_after ~second_guarded =
+          let path_b =
+            if second_guarded then [ (5, fun t -> mk_jmp_to t (guard 0x30)); (3, mk_goto) ]
+            else [ (3, mk_goto) ] in
+          let sub, tids =
+            sub_of "slice_merge"
+              [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var g)); (2, mk_goto) ];
+                [], [ (5, fun t -> mk_jmp_to t (guard 0x25)); (3, mk_goto) ];
+                [], path_b;
+                [ read ], [ (4, mk_goto) ];
+                [], [ (0, mk_ret) ];
+                [], [ (0, mk_ret) ] ]
+          in
+          AI.find_word 32 (in_state (run_anchored sub) tids.(4)) y in
+        check "VSA-75.both" (slice_bounded (y_after ~second_guarded:true) 0x30);
+        check "VSA-75.join" (not (slice_bounded (y_after ~second_guarded:true) 0x25));
+        check "VSA-75.one" (not (slice_bounded (y_after ~second_guarded:false) 0x30)));
+
+    pin "VSA-76" "slice: a loop guarded by a byte converges with the byte bounded in the body"
+      (fun () ->
+        let x = slice_x () in
+        let y = Var.create ~is_virtual:false ~fresh:false "sl_y" (Type.Imm 32) in
+        let guard = Bil.BinOp (Bil.LT, byte_const 0x25, low8 (Bil.Var x)) in
+        let read = Def.create y (Bil.Cast (Bil.UNSIGNED, 32, low8 (Bil.Var x))) in
+        let step =
+          Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 1)))) in
+        let sub, tids =
+          sub_of "slice_loop"
+            [ [], [ (1, mk_goto) ];
+              [], [ (4, fun t -> mk_jmp_to t guard); (2, mk_goto) ];
+              [ read ], [ (3, mk_goto) ];
+              [ step ], [ (1, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let st = in_state (run_anchored sub) tids.(3) in
+        check "VSA-76" (slice_bounded (AI.find_word 32 st y) 0x25));
   ]
 
 let () = run "vsa" tests

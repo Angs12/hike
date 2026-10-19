@@ -25,10 +25,11 @@ type cell_desc = {
   stride : int;
 }
 
-(* What a landmark is about: a variable at the head, or a memory cell at
-   the head.  The head is the table's outer key; a word key is the base
-   variable (a versioned var names the same abstract value). *)
-type key = Word of var | Cell of cell_desc
+(* What a landmark is about: a variable at the head, a bit range of a
+   variable (a slice), or a memory cell at the head.  The head is the
+   table's outer key; a word or slice key is the base variable (a
+   versioned var names the same abstract value). *)
+type key = Word of var | Cell of cell_desc | Slice of var * int * int
 
 (* The key's equality: a versioned word var names the same abstract
    value as its base; cells compare by their descriptor. *)
