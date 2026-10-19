@@ -64,8 +64,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
             llvm_builder)
   in
   Base.List.map args ~f:(fun arg ->
-      (* Every lane read resolves through the block's version stamp —
-         including the fp-lowered extern lanes. *)
+      (* Resolve each lane from the block's versioned reads, including
+         fp-lowered extern lanes. *)
       let exp = lane_exp scope blk_tid (Arg.rhs arg) in
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)

@@ -43,20 +43,16 @@ open Bap_core_theory
   val free_regs_ssa :
     synth:Hike_synth.table -> abi:Hike_abi.t -> sub term -> var list
 
-  (** [update_sub ~old sub] brings an SSA sub up to date after blocks
-      and edges were added.  [old] is the previous SSA sub; [sub] is
-      [old] with the new blocks (pre-SSA), new edges, and any replaced
-      terms (fresh tids) applied.  Only the blocks that are new,
-      changed, need different phis or are reachable from those are
-      renamed, with versions above every earlier index; every other
-      block is returned untouched.  The result is [equivalent] to
-      constructing SSA from scratch on [sub]. *)
+  (** [update_sub ~old sub] updates SSA after CFG discovery. New blocks
+      and genuinely new local definitions receive fresh names above the
+      retained high-water history. Existing phi lhs values and local
+      definition identities stay stable; incoming phi operands are
+      rewired for the current predecessors. *)
   val update_sub :
     synth:Hike_synth.table -> target:Theory.Target.t -> old:sub term ->
     sub term -> sub term
 
-  (** [update_sub] with the blocks it renamed (new, changed, or reached
-      from those): the blocks a warm solve must recompute. *)
+  (** [update_sub] with the conservative VSA invalidation region. *)
   val update_sub_woken :
     synth:Hike_synth.table -> target:Theory.Target.t -> old:sub term ->
     sub term -> sub term * Tid.Set.t

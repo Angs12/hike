@@ -92,7 +92,7 @@ let scalar_ssa ~synth s =
           (Term.enum phi_t b |> Seq.map ~f:Phi.lhs))
     |> Seq.filter ~f:word |> Seq.to_list in
   let result = Term.enum blk_t s |> Seq.for_all ~f:(fun b ->
-      Term.has_attr b Hike_stack_model.versions_tag)
+      Term.has_attr b Hike_stack_model.ssa_tag)
   && List.exists definitions ~f:(fun v -> Var.index v > 0)
   && List.for_all definitions ~f:(fun v ->
       Var.index v > 0 || Hike_synth.is_temporary ~table:synth v)

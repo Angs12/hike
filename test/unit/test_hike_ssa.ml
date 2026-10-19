@@ -50,22 +50,20 @@ let updated ~old_pre ~full =
           Term.append blk_t m pb
         else m)
   in
-  let upd =
-    Hike.Ssa.update_sub ~synth:Hike.Synth.empty ~target:(x86_target ())
+  let upd, woken =
+    Hike.Ssa.update_sub_woken ~synth:Hike.Synth.empty ~target:(x86_target ())
       ~old:old_ssa mixed
   in
-  (old_ssa, upd, ssa_of full)
+  (old_ssa, upd, ssa_of full, woken)
 
 let blk_in sub b = Term.find blk_t sub (Term.tid b) |> Base.Option.value_exn
 
-(* A block the update left alone: same terms and same version stamp. *)
+(* A block the update left alone keeps its terms and SSA marker. *)
 let kept old_ssa upd b =
   let o = blk_in old_ssa b and u = blk_in upd b in
   String.equal (Blk.to_string o) (Blk.to_string u)
-  && Base.Option.equal
-       (fun x y -> Hike.Stack_model.Versions.compare x y = 0)
-       (Term.get_attr o Hike.Stack_model.versions_tag)
-       (Term.get_attr u Hike.Stack_model.versions_tag)
+  && Bool.equal (Term.has_attr o Hike.Stack_model.ssa_tag)
+       (Term.has_attr u Hike.Stack_model.ssa_tag)
 
 let phi_arity sub b base =
   Term.enum phi_t (blk_in sub b)
@@ -103,11 +101,41 @@ let ssa_matches (subs : sub term list) (name : string) : bool =
          | Some ws' -> Ws.equal ws ws'
          | None -> false)
 
+let solve_ssa ?(wake = Tid.Set.empty) sub init =
+  let abi = Hike.Abi.of_target (x86_target ()) in
+  Vsa.static_graph_vsa ~abi ~synth:(ref Hike.Synth.empty) ~wake
+    ~def_reads:(fun d -> Hike.Stack_model.reads (`Def d))
+    ~def_writes:(fun d -> Hike.Stack_model.writes (`Def d))
+    ~phi_reads:(fun p -> Hike.Stack_model.reads (`Phi p))
+    ~phi_writes:(fun p -> Hike.Stack_model.writes (`Phi p))
+    ~jmp_reads:(fun j -> Core.Set.union (Hike.Stack_model.reads (`Jmp j))
+        (Hike.Stack_model.writes (`Jmp j)))
+    sub init
+
+let warm_seed ~abi ~sub ~woken sol =
+  let entry = Base.Option.map (Vsa.entry_block_of sub) ~f:Term.tid in
+  let initial = Vsa.init_sol ~abi sub in
+  let seed = Graphlib.Std.Solution.enum sol
+    |> Seq.filter ~f:(fun (b, _) ->
+         Option.is_some (Term.find blk_t sub b) && not (Core.Set.mem woken b))
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (b, v) -> Core.Map.set m ~key:b ~data:v) in
+  let seed = match entry with
+    | Some b when Core.Set.mem woken b ->
+        Core.Map.set seed ~key:b ~data:(Graphlib.Std.Solution.get initial b)
+    | _ -> seed in
+  let seed = Graphlib.Std.Solution.create seed (Graphlib.Std.Solution.default sol) in
+  let g = Sub.to_graph sub in
+  let wake = Core.Set.fold woken ~init:woken ~f:(fun acc b ->
+      Graphs.Tid.Node.preds b g |> Seq.fold ~init:acc ~f:(fun acc p ->
+          if Tid.equal p Graphs.Tid.start || Tid.equal p Graphs.Tid.exit then acc
+          else Core.Set.add acc p)) in
+  (seed, wake)
+
 let guard_lt v k = Bil.BinOp (Bil.LT, Bil.Var v, c64 k)
 
 let tests : unit Alcotest.test list =
   [
-    pin "SSA-01" "a call site's ret lanes mint versions stamped on its block"
+    pin "SSA-01" "a call site's return lanes mint versions on its jump"
       (fun () ->
         let callee, _ = sub_of "@retcallee" [ [], [ (0, mk_ret) ] ] in
         let callee =
@@ -138,26 +166,20 @@ let tests : unit Alcotest.test list =
           |> Base.Option.value_exn
         in
         let call_blk = Term.first blk_t caller' |> Base.Option.value_exn in
-        let stamp =
-          Term.get_attr call_blk Hike.Stack_model.versions_tag
-          |> Base.Option.value_exn
-        in
-        let stamped =
-          Base.List.Assoc.find stamp.Hike.Stack_model.Versions.rets ret_reg
-            ~equal:Var.same
+        let minted =
+          Hike.Stack_model.boundary_write call_blk ret_reg
         in
         let call = Term.first jmp_t call_blk |> Base.Option.value_exn in
-        check "SSA-01 term writes are the stamped results"
-          (Core.Set.equal (Hike.Stack_model.writes (`Jmp call))
-             (stamp.Hike.Stack_model.Versions.rets
-              |> Base.List.map ~f:snd |> Var.Set.of_list));
+        check "SSA-01 term writes include the result"
+          (Base.Option.value_map minted ~default:false
+             ~f:(fun v -> Core.Set.mem (Hike.Stack_model.writes (`Jmp call)) v));
         check "SSA-01"
-          (Base.Option.is_some stamped
+          (Base.Option.is_some minted
           && Base.Option.is_some
-               (Base.Option.filter stamped ~f:(fun v ->
+               (Base.Option.filter minted ~f:(fun v ->
                     Var.index v > 0
                     && Var.same (Var.base v) (int_ret 0))));
-        (* The continuation reads its own phi of the stamped result. *)
+        (* The continuation reads its own phi of the call result. *)
         let cont =
           Term.enum blk_t caller'
           |> Seq.find ~f:(fun b ->
@@ -172,7 +194,7 @@ let tests : unit Alcotest.test list =
         check "SSA-01 incoming result"
           (Phi.values result_phi |> Seq.exists ~f:(fun (_, e) ->
               match e with
-              | Bil.Var v -> Base.Option.equal Var.equal stamped (Some v)
+              | Bil.Var v -> Base.Option.equal Var.equal minted (Some v)
               | _ -> false));
         let reads_version =
           Term.enum def_t cont
@@ -324,13 +346,8 @@ let tests : unit Alcotest.test list =
           |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) ret_reg)
           |> Base.Option.value_exn
         in
-        let versions =
-          Term.get_attr call' Hike.Stack_model.versions_tag
-          |> Base.Option.value_exn
-        in
         let call_version =
-          Base.List.Assoc.find versions.Hike.Stack_model.Versions.rets ret_reg
-            ~equal:Var.same
+          Hike.Stack_model.boundary_write call' ret_reg
           |> Base.Option.value_exn
         in
         let incoming = Phi.values phi |> Seq.to_list in
@@ -503,7 +520,7 @@ let tests : unit Alcotest.test list =
 
     pin "SSA-07" "a new predecessor of a merge widens its phi and equals fresh SSA"
       (fun () ->
-        let v = v64 "u7_v" and c = v1 "u7_c" in
+        let v = v64 "u7_v" and c = v64 "u7_c" in
         let j =
           with_jmps
             (blk_of_defs [ Def.create (v64 "u7_x") (Bil.Var v) ])
@@ -524,12 +541,46 @@ let tests : unit Alcotest.test list =
               mk_jmp_to (Term.tid p3) (guard c 1);
               mk_goto (Term.tid p2) ]
         in
-        let old_ssa, upd, fresh =
+        let old_ssa, upd, fresh, woken =
           updated ~old_pre:(sub_named "u7" [ e_old; p1; p2; j ])
             ~full:(sub_named "u7" [ e_new; p1; p2; j; p3 ])
         in
+        let phi_lhs sub =
+          Term.enum phi_t (blk_in sub j)
+          |> Seq.find_exn ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) v)
+          |> Phi.lhs in
+        let local_lhs sub =
+          Term.enum def_t (blk_in sub j)
+          |> Seq.find_exn ~f:(fun d -> Var.same (Var.base (Def.lhs d)) (v64 "u7_x"))
+          |> Def.lhs in
+        let merge_phi =
+          Term.enum phi_t (blk_in upd j)
+          |> Seq.find_exn ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) v) in
+        let p3_lhs =
+          Term.enum def_t (blk_in upd p3)
+          |> Seq.find_exn ~f:(fun d -> Var.same (Var.base (Def.lhs d)) v)
+          |> Def.lhs in
+        let new_input =
+          Base.List.Assoc.find (Phi.values merge_phi |> Seq.to_list) (Term.tid p3)
+            ~equal:Tid.equal in
         check "SSA-07 equals fresh" (Hike.Ssa.equivalent upd fresh);
         check "SSA-07 phi" (phi_arity upd j v = Some 3);
+        check "SSA-07 new predecessor wired"
+          (Option.equal Exp.equal new_input (Some (Bil.Var p3_lhs)));
+        check "SSA-07 existing phi identity" (Var.equal (phi_lhs old_ssa) (phi_lhs upd));
+        check "SSA-07 existing local identity"
+          (Var.equal (local_lhs old_ssa) (local_lhs upd));
+        let abi = Hike.Abi.of_target (x86_target ()) in
+        let old_sol = solve_ssa old_ssa (Vsa.init_sol ~abi old_ssa) in
+        let seed, wake = warm_seed ~abi ~sub:upd ~woken old_sol in
+        let warm = solve_ssa ~wake upd seed in
+        let cold = solve_ssa fresh (Vsa.init_sol ~abi fresh) in
+        let warm_values = def_values upd warm and cold_values = def_values fresh cold in
+        check "SSA-07 VSA matches cold solve"
+          (Base.List.for_all warm_values ~f:(fun (tid, ws) ->
+               match Base.List.Assoc.find cold_values tid ~equal:Tid.equal with
+               | Some cold -> Ws.equal ws cold
+               | None -> false));
         check "SSA-07 untouched" (kept old_ssa upd p1 && kept old_ssa upd p2));
 
     pin "SSA-08" "a new definition on a path renames downstream with fresh versions"
@@ -549,7 +600,7 @@ let tests : unit Alcotest.test list =
           Def.create v (Bil.BinOp (Bil.PLUS, Bil.Var v, int_exp 1))
         in
         let m' = Term.append def_t m bump in
-        let old_ssa, upd, fresh =
+        let old_ssa, upd, fresh, _woken =
           updated ~old_pre:(sub_named "u8" [ e; m; j ])
             ~full:(sub_named "u8" [ e; m'; j ])
         in
@@ -593,7 +644,7 @@ let tests : unit Alcotest.test list =
           with_jmps e0
             [ mk_jmp_to (Term.tid case) (guard cond 7); mk_goto (Term.tid h) ]
         in
-        let old_ssa, upd, fresh =
+        let old_ssa, upd, fresh, _woken =
           updated ~old_pre:(sub_named "u9" [ e_old; h; body; exit_b ])
             ~full:(sub_named "u9" [ e_new; h; body; exit_b; case ])
         in
@@ -893,13 +944,13 @@ let tests : unit Alcotest.test list =
         check "SSA-23 equals fresh" (Hike.Ssa.equivalent upd (ssa_of full));
         check "SSA-23 unrelated block kept"
           (kept old upd (Term.find_exn blk_t old tids.(0)));
-        check "SSA-23 entry stamped"
+        check "SSA-23 entry marked processed"
           (match Term.first blk_t upd with
            | Some b ->
              Term.has_attr b Hike.Ssa.entry_tag
-             && Term.has_attr b Hike.Stack_model.versions_tag
+             && Term.has_attr b Hike.Stack_model.ssa_tag
            | None -> false));
-    pin "SSA-24" "relane narrowing drops dead input phis and their stamp lanes"
+    pin "SSA-24" "relane narrowing drops dead input phis and reads"
       (fun () ->
         let kept = int_param 0 and dropped = int_param 1 and ret = int_ret 0 in
         let abi = Hike.Abi.of_target (x86_target ()) in
@@ -930,10 +981,6 @@ let tests : unit Alcotest.test list =
                    (Phi.lhs p)) in
         let call = Term.find_exn blk_t old tids.(1) in
         let call' = Term.find_exn blk_t result tids.(1) in
-        let stamp =
-          Term.get_attr call' Hike.Stack_model.versions_tag
-          |> Base.Option.value_exn in
-        let mentions v l = Base.List.exists l ~f:(fun (a, _) -> Var.same a v) in
         check "SSA-24 fixture" (has_phi call kept && has_phi call dropped);
         check "SSA-24 kept input phi keeps its version"
           (match phi_lhs call kept, phi_lhs call' kept with
@@ -941,9 +988,9 @@ let tests : unit Alcotest.test list =
            | _ -> false);
         check "SSA-24 kept input phi" (has_phi call' kept);
         check "SSA-24 dead input phi removed" (not (has_phi call' dropped));
-        check "SSA-24 dead stamp lane removed"
-          (not (mentions dropped stamp.Hike.Stack_model.Versions.args)
-           && not (mentions dropped stamp.Hike.Stack_model.Versions.rets)));
+        check "SSA-24 dead input lane removed"
+          (Base.Option.is_none (Hike.Stack_model.boundary_read call' dropped)
+           && Base.Option.is_none (Hike.Stack_model.local_output call' dropped)));
     pin "SSA-25"
       "a multi-predecessor loop header with a call wires phis from its preds"
       (fun () ->
@@ -1003,13 +1050,9 @@ let tests : unit Alcotest.test list =
         let back_ctr = Phi.lhs (phi_of b' ctr) in
         let h_arg = Term.first def_t h' |> Base.Option.value_exn |> Def.lhs in
         let call = Term.first jmp_t h' |> Base.Option.value_exn in
-        let stamp =
-          Term.get_attr h' Hike.Stack_model.versions_tag
-          |> Base.Option.value_exn
-        in
         let ret_v =
-          Base.List.Assoc.find_exn stamp.Hike.Stack_model.Versions.rets ret_reg
-            ~equal:Var.same
+          Hike.Stack_model.boundary_write h' ret_reg
+          |> Base.Option.value_exn
         in
         let ret_phi = phi_of a' ret_reg in
         let cont_ctr = phi_of a' ctr in
@@ -1029,9 +1072,7 @@ let tests : unit Alcotest.test list =
         check "SSA-25 call argument reads the def before the ret mint"
           (Core.Set.mem (Hike.Stack_model.reads (`Jmp call)) h_arg
           && Option.equal Var.equal
-               (Base.List.Assoc.find stamp.Hike.Stack_model.Versions.args arg
-                  ~equal:Var.same)
-               (Some h_arg)
+               (Hike.Stack_model.boundary_read h' arg) (Some h_arg)
           && not (Var.equal h_arg ret_v));
         check "SSA-25 call result reaches the continuation phi"
           (Option.equal Exp.equal (incoming ret_phi (Term.tid h'))
@@ -1048,7 +1089,7 @@ let tests : unit Alcotest.test list =
                      (Bil.BinOp (Bil.PLUS, Bil.Var ctr, int_exp 1)))
               else blk)
         in
-        let old_ssa, upd, fresh = updated ~old_pre:sub ~full in
+        let old_ssa, upd, fresh, _woken = updated ~old_pre:sub ~full in
         let h_upd = blk_in upd h and b_upd = blk_in upd b in
         let a_upd = blk_in upd a in
         let b_def =
@@ -1056,16 +1097,14 @@ let tests : unit Alcotest.test list =
           |> Def.lhs
         in
         let h_ctr_upd = phi_of h_upd ctr in
-        let stamp_upd =
-          Term.get_attr h_upd Hike.Stack_model.versions_tag
-          |> Base.Option.value_exn
-        in
         let ret_upd =
-          Base.List.Assoc.find_exn stamp_upd.Hike.Stack_model.Versions.rets
-            ret_reg ~equal:Var.same
+          Hike.Stack_model.boundary_write h_upd ret_reg
+          |> Base.Option.value_exn
         in
         check "SSA-25 update equals fresh" (Hike.Ssa.equivalent upd fresh);
         check "SSA-25 update keeps the untouched entry" (kept old_ssa upd e);
+        check "SSA-25 existing call result identity is stable"
+          (Var.equal ret_v ret_upd);
         check "SSA-25 back edge reads the new local def"
           (Var.index b_def > 0
           && Option.equal Exp.equal (incoming h_ctr_upd (Term.tid b_upd))
@@ -1074,6 +1113,44 @@ let tests : unit Alcotest.test list =
           (Option.equal Exp.equal
              (incoming (phi_of a_upd ret_reg) (Term.tid h_upd))
              (Some (Bil.Var ret_upd))));
+
+    pin "SSA-26"
+      "boundary lanes use their actual versions without an SSA stamp"
+      (fun () ->
+        let unused = v64 "stamp_unused" and arg = int_param 0 in
+        let out = callee_saved 0 and target = Tid.create () in
+        let sub, tids = sub_of "stamp_local"
+            [ [ Def.create unused (int_exp 7); Def.create arg (int_exp 10) ],
+              [ (1, mk_goto) ];
+              [ Def.create arg (Bil.BinOp (Bil.PLUS, Bil.Var arg, int_exp 1));
+                Def.create ret_reg (int_exp 3) ],
+              [ (2, fun t -> mk_call_jmp t target) ];
+              [ Def.create out (Bil.Var ret_reg) ], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of sub in
+        let call_blk = Term.find_exn blk_t ssa tids.(1) in
+        check "SSA-26 unused dominating temporary omitted"
+          (Base.Option.is_none (Hike.Stack_model.passed_version call_blk unused)
+           && Base.Option.is_none (Hike.Stack_model.boundary_write call_blk unused));
+        let read_arg =
+          (Hike.Stack_model.effects (Term.first jmp_t call_blk
+                                    |> Base.Option.value_exn)).reads
+          |> Base.List.find_exn ~f:(fun v -> Var.same v arg) in
+        let local_arg = Term.first def_t call_blk
+          |> Base.Option.value_exn |> Def.lhs in
+        check "SSA-26 same matches the base and preserves the actual version"
+          (Var.index read_arg > 0 && Var.equal read_arg local_arg);
+        Term.enum blk_t ssa |> Seq.iter ~f:(fun b ->
+            check "SSA-26 block marked processed"
+              (Term.has_attr b Hike.Stack_model.ssa_tag);
+            Term.enum jmp_t b |> Seq.iter ~f:(fun j ->
+                Base.List.iter (Hike.Stack_model.effects j).reads ~f:(fun v ->
+                    check "SSA-26 boundary reads retain their version"
+                      (Option.equal Var.equal
+                         (Hike.Stack_model.boundary_read b v) (Some v)));
+                Base.List.iter (Hike.Stack_model.effects j).writes ~f:(fun v ->
+                    check "SSA-26 boundary writes retain their version"
+                      (Option.equal Var.equal
+                         (Hike.Stack_model.boundary_write b v) (Some v))))));
   ]
 
 let () = run "hike_ssa" tests

@@ -155,9 +155,9 @@ let update_function context ~synth ~is_entry ~old raw =
             |> fun b -> Term.filter jmp_t b ~f:(Fun.const false) in
           let kept = Seq.fold (Term.enum jmp_t blk) ~init:kept
               ~f:(Term.append jmp_t) in
-          let stamp = Term.get_attr previous Hike_stack_model.versions_tag
-            |> Base.Option.value_exn ~message:"hike: normalized block has no SSA stamp" in
-          Term.set_attr kept Hike_stack_model.versions_tag stamp
+          if Term.has_attr previous Hike_stack_model.ssa_tag then
+            Term.set_attr kept Hike_stack_model.ssa_tag ()
+          else kept
         else blk
       | None -> blk) in
   let sub, woken = Hike_ssa.update_sub_woken ~synth ~target:context.target ~old sub in

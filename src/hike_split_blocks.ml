@@ -243,16 +243,9 @@ let pieces ~synth (blk : blk term) : blk term list * (Tid.t * Tid.t) list =
                   Blk.create ~defs:bindings
                     ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
                 in
-                (* The call's argument and result versions sit with the call. *)
-                match Term.get_attr blk Model.versions_tag with
-                | None -> action
-                | Some vs ->
-                  let written = Model.writes (`Jmp j) in
-                  Term.set_attr action Model.versions_tag
-                    { vs with
-                      Model.Versions.rets =
-                        Base.List.filter vs.Model.Versions.rets
-                          ~f:(fun (_, v) -> Core.Set.mem written v) }
+                if Term.has_attr blk Model.ssa_tag then
+                  Term.set_attr action Model.ssa_tag ()
+                else action
               in
               (Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action))),
                Some action)
@@ -273,10 +266,11 @@ let pieces ~synth (blk : blk term) : blk term list * (Tid.t * Tid.t) list =
                 |> Term.filter def_t ~f:(fun d ->
                      Base.List.is_empty actions || not (Model.is_call_arg synth (Def.lhs d)))
                 |> fun b -> Term.append jmp_t b j
-                |> fun b ->
-                (if Base.List.is_empty actions then b
-                 else Term.del_attr b Model.versions_tag)
-              else Blk.create ~tid ~jmps:[ j ] ()
+              else
+                let b = Blk.create ~tid ~jmps:[ j ] () in
+                if Term.has_attr blk Model.ssa_tag then
+                  Term.set_attr b Model.ssa_tag ()
+                else b
             in
             match next with
             | Some next_tid ->

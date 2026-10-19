@@ -252,14 +252,8 @@ let is_address_reg ~(facts : Hike_kb.facts) (v : var) : bool =
   Var.same v facts.Hike_kb.abi.Hike_abi.sp
   || Model.is_window_var facts.Hike_kb.synth v
 
-(* A block's SSA versions of base register [r]: after its defs (what a
-   call passes), and its call's minted result. *)
-let blk_version field (blk : blk term) (r : var) : var option =
-  Base.Option.bind (Term.get_attr blk Model.versions_tag) ~f:(fun vs ->
-      Base.List.Assoc.find (field vs) r ~equal:Var.same)
-
-let passed_at = blk_version (fun vs -> vs.Model.Versions.args)
-let minted_at = blk_version (fun vs -> vs.Model.Versions.rets)
+let passed_at = Model.passed_version
+let minted_at = Model.boundary_write
 
 (* A block that leaves the sub: a return, a tail call, or no transfer. *)
 let is_exit_blk (blk : blk term) : bool =

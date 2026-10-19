@@ -250,21 +250,14 @@ type sub_layout = Sub_layout.t = {
 
 val layout_tag : Sub_layout.t Value.Tag.t
 
-(* The SSA pass's block stamp. *)
-module Versions : sig
-  type t = {
-    args : (var * var) list;
-    rets : (var * var) list;
-  }
+(** Marks a block whose scalar terms were processed by SSA, including an
+    empty block with no versioned definitions. *)
+val ssa_tag : unit Value.Tag.t
 
-  val compare : t -> t -> int
-  val sexp_of_t : t -> Base.Sexp.t
-  val t_of_sexp : Base.Sexp.t -> t
-
-  val pp : Format.formatter -> t -> unit
-end
-
-val versions_tag : Versions.t Value.Tag.t
+val boundary_read : blk term -> var -> var option
+val boundary_write : blk term -> var -> var option
+val local_output : blk term -> var -> var option
+val passed_version : blk term -> var -> var option
 
 (** The version of base register [v] in effect after [blk]'s defs. *)
 val version_at_end : blk term -> var -> var

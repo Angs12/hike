@@ -242,18 +242,22 @@ let tests : unit Alcotest.test list =
         check "SBLK-08"
           (Base.List.mem gotos (Tid.name tids.(1)) ~equal:String.equal));
     pin "SBLK-09"
-      "splitting an SSA call-and-goto block keeps phis and stamps valid"
+      "splitting an SSA call-and-goto block keeps boundary versions and emission valid"
       (fun () ->
         let x = v64 "sb9_x" and g = v64 "sb9_g" in
-        let ret = int_ret 0 in
+        let input = int_param 1 in
+        let ret = int_ret 0 and arg = int_param 0 in
         let callee, _ = sub_of "@sb9_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee (Arg.create ~intent:Out ret (Var ret))
+          |> fun s -> Term.append arg_t s
+               (Arg.create ~intent:In arg (Var arg))
         in
         let word k = Bil.Int (Cbat_word.to_word (w64 k)) in
         let caller, _ =
           sub_of "sb9"
-            [ [ Def.create x (word 0); Def.create g (word 0) ],
+            [ [ Def.create x (word 0); Def.create g (word 0);
+                Def.create arg (Bil.Var input) ],
               [ (2, fun t -> mk_jmp_to t (guard g 1));
                 (2, fun t ->
                     Jmp.create ~cond:(guard g 2)
@@ -308,24 +312,20 @@ let tests : unit Alcotest.test list =
                      | _ -> false))
           |> Seq.to_list
         in
-        let stamped_on_call =
+        let versions_on_call =
           match call_blks with
           | [ b ] ->
-            (match Term.get_attr b Hike.Stack_model.versions_tag with
-             | Some vs ->
-               not (Base.List.is_empty vs.Hike.Stack_model.Versions.rets)
-               && Core.Set.equal
-                    (Hike.Stack_model.writes (`Jmp (Term.first jmp_t b |> Base.Option.value_exn)))
-                    (vs.Hike.Stack_model.Versions.rets |> Base.List.map ~f:snd
-                     |> Var.Set.of_list)
-             | None -> false)
+            let j = Term.first jmp_t b |> Base.Option.value_exn in
+            let effects = Hike.Stack_model.effects j in
+            Term.has_attr b Hike.Stack_model.ssa_tag
+            && not (Base.List.is_empty effects.writes)
+            && Base.List.for_all effects.reads ~f:(fun v ->
+                 Option.equal Var.equal
+                   (Hike.Stack_model.boundary_read b v) (Some v))
+            && Base.List.for_all effects.writes ~f:(fun v ->
+                 Option.equal Var.equal
+                   (Hike.Stack_model.boundary_write b v) (Some v))
           | _ -> false
-        in
-        let stamps_elsewhere =
-          Term.enum blk_t after
-          |> Seq.filter ~f:(fun b ->
-                 Term.has_attr b Hike.Stack_model.versions_tag)
-          |> Seq.length
         in
         check "SBLK-09 split"
           (Base.List.length (blocks_of after) > Base.List.length (blocks_of before));
@@ -333,13 +333,35 @@ let tests : unit Alcotest.test list =
         check "SBLK-09 single definitions"
           (Base.List.length lhs
            = Base.List.length (Base.List.dedup_and_sort lhs ~compare:Var.compare));
-        check "SBLK-09 stamps on the call piece"
-          (stamped_on_call
-           && stamps_elsewhere
-              <= (Term.enum blk_t before
-                  |> Seq.filter ~f:(fun b ->
-                         Term.has_attr b Hike.Stack_model.versions_tag)
-                  |> Seq.length)));
+        check "SBLK-09 versions travel with the call" versions_on_call;
+        let ir =
+          emit_ir_spec ~synth:Hike.Synth.empty ~ssa:false ~verify:true
+            empty_spec [ callee; after ]
+        in
+        let passed =
+          Core.String.split_lines ir
+          |> Base.List.find_map ~f:(fun line ->
+                 if contains_substring line
+                      (" = phi i64 [ %" ^ Var.name input ^ ",") then
+                   Some (Core.String.lsplit2_exn line ~on:'=' |> fst
+                         |> Core.String.strip)
+                 else None)
+        in
+        let at_call =
+          Base.Option.bind passed ~f:(fun v ->
+              Core.String.split_lines ir
+              |> Base.List.find_map ~f:(fun line ->
+                     if contains_substring line (" = phi i64 [ " ^ v ^ ",")
+                     then Some (Core.String.lsplit2_exn line ~on:'=' |> fst
+                                |> Core.String.strip)
+                     else None))
+        in
+        check "SBLK-09 emitted call reads the pre-call definition"
+          (Base.Option.value_map at_call ~default:false ~f:(fun v ->
+               Core.String.split_lines ir
+               |> Base.List.exists ~f:(fun line ->
+                      contains_substring line " = call "
+                      && contains_substring line ("i64 " ^ v ^ ")")))));
   ]
 
 let () = run "split_blocks" tests

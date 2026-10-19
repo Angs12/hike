@@ -169,7 +169,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
         Llvm.build_bitcast d lane_ty "" llvm_builder
     | FHLT -> assert false
   in
-  (* Ret temps bind their stamped version at the call block: the SSA
+  (* Ret temps bind the call's written version: the SSA
      pass minted one per call, so every read downstream resolves. *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
       let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in

@@ -258,7 +258,7 @@ let create_sub ctx scope sub =
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
     create_blocks ctx scope llvm_ctx blks fn sub;
-    load_ssa_versions scope blks;
+    load_ssa_blocks scope blks;
     (* The lock-marker brackets' plan, before any body emits. *)
     scope.atomic_plan := Bil2llvm_access.plan_atomics sub;
     let layout =

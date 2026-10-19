@@ -1073,41 +1073,39 @@ let tests : unit Alcotest.test list =
     ;
 
     (* PR-40: an SSA indirect call resolved to an ordinary sub keeps its
-       lanes at the versions the block stamps. *)
-    pin "PR-40" "retargeting an SSA call keeps its lanes at the stamped versions"
+       boundary lane versions. *)
+    pin "PR-40" "retargeting an SSA call keeps its boundary lane versions"
       (fun () ->
         let callee, ssa, call_blk = pr_ssa_caller () in
         let before, after = pr_ssa_retarget ssa call_blk (Term.tid callee) in
         let call = Term.first jmp_t after |> Base.Option.value_exn in
-        let stamp = Term.get_attr after Hike.Stack_model.versions_tag in
         let eff = Hike.Stack_model.effects call in
+        let previous =
+          Term.first jmp_t before |> Base.Option.value_exn
+          |> Hike.Stack_model.effects in
+        let retained old_lanes new_lanes =
+          Base.List.for_all new_lanes ~f:(fun v ->
+              match Base.List.find old_lanes ~f:(Var.same v) with
+              | Some old -> Var.equal old v
+              | None -> true)
+        in
         check "PR-40 direct"
           (match Jmp.kind call with
            | Call c -> (match Call.target c with
                | Direct t -> Tid.equal t (Term.tid callee)
                | Indirect _ -> false)
            | _ -> false);
-        check "PR-40 stamp unchanged"
-          (Base.Option.equal
-             (fun a b -> Hike.Stack_model.Versions.compare a b = 0)
-             stamp (Term.get_attr before Hike.Stack_model.versions_tag));
-        check "PR-40 results are the stamped rets"
-          (match stamp with
-           | Some vs ->
-               Core.Set.equal (Hike.Stack_model.writes (`Jmp call))
-                 (Var.Set.of_list (Base.List.map vs.Hike.Stack_model.Versions.rets ~f:snd))
-           | None -> false);
-        check "PR-40 arguments are the stamped args"
-          (match stamp with
-           | Some vs ->
-               Base.List.for_all eff.Hike.Stack_model.Term_effects.reads ~f:(fun r ->
-                   Base.List.Assoc.find vs.Hike.Stack_model.Versions.args (Var.base r)
-                     ~equal:Var.same
-                   |> Base.Option.value_map ~default:true ~f:(Var.equal r))
-           | None -> false));
+        check "PR-40 SSA marker unchanged"
+          (Bool.equal (Term.has_attr after Hike.Stack_model.ssa_tag)
+             (Term.has_attr before Hike.Stack_model.ssa_tag));
+        check "PR-40 surviving result identities"
+          (not (Base.List.is_empty eff.writes)
+           && retained previous.writes eff.writes);
+        check "PR-40 surviving argument identities"
+          (not (Base.List.is_empty eff.reads)
+           && retained previous.reads eff.reads));
 
-    (* PR-41: a target with fewer lanes drops them from the call and from
-       the block's result stamp. *)
+    (* PR-41: a target with fewer lanes drops them from the call. *)
     pin "PR-41" "retargeting to a lane-free target drops the call's lanes and rets"
       (fun () ->
         let _, ssa, call_blk = pr_ssa_caller () in
@@ -1117,9 +1115,7 @@ let tests : unit Alcotest.test list =
         let call = Term.first jmp_t after |> Base.Option.value_exn in
         check "PR-41"
           (Core.Set.is_empty (Hike.Stack_model.writes (`Jmp call))
-          && (match Term.get_attr after Hike.Stack_model.versions_tag with
-              | Some vs -> Base.List.is_empty vs.Hike.Stack_model.Versions.rets
-              | None -> false)));
+          && Base.List.is_empty (Hike.Stack_model.effects call).writes));
 
     (* PR-42: the promoted parameters of an SSA callee enter at version 0. *)
     pin "PR-42" "promotion keeps an SSA sub SSA and its slot lanes at entry version"

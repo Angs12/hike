@@ -557,42 +557,9 @@ let has_call_push (sub : sub term) : bool =
   |> Seq.exists ~f:(fun blk ->
          Term.enum jmp_t blk |> Seq.exists ~f:call_pushes)
 
-(* The SSA pass's block stamp.  [args] holds the versions in effect
-   after the block's defs — BEFORE any call-ret minting, so a call
-   argument read resolves to the value the machine passes.  [rets]
-   holds the call-ret mints — the versions the call's own result
-   binds. *)
-module Versions = struct
-  open! Core
-
-  type t =
-    { args : (var * var) list
-    ; rets : (var * var) list
-    }
-  [@@deriving bin_io, compare, sexp]
-
-  let pp ppf { args; rets } =
-    let one ppf (a, b) =
-      Format.fprintf ppf "(%a, %a)" Var.pp a Var.pp b
-    in
-    Format.fprintf ppf "args=[%a] rets=[%a]"
-      (Format.pp_print_list one) args
-      (Format.pp_print_list one) rets
-end
-
-let versions_tag : Versions.t Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-ssa-versions"
-    ~uuid:"1f0d4b8e-52a6-4c11-9f0a-3d7c2b1e8a44"
-    (module Versions)
-
-(* The version of base register [v] in effect after [blk]'s defs, before
-   any call result: the base itself when the sub never defines it. *)
-let version_at_end (blk : blk term) (v : var) : var =
-  match Term.get_attr blk versions_tag with
-  | Some vs ->
-    Base.Option.value ~default:v
-      (Base.List.Assoc.find vs.Versions.args v ~equal:Var.same)
-  | None -> v
+let ssa_tag : unit Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ssa-processed"
+    ~uuid:"d534478d-b5b4-4ca8-b2b9-f28c22da568d" (module Core.Unit)
 
 type call_arg_store = {
   sb_slot : int;
@@ -602,44 +569,6 @@ type call_arg_store = {
 (* The call-site correspondence shared by attribution and promotion: a
    store's singleton aligned start [a] against the block's call-time SP
    [d_sp] is slot [(a - d_sp - word) / word]. *)
-let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Cbat_clp_set_composite.t, Type.error) Result.t)
-    (sub : sub term) : (call_arg_store list * blk term) Tid.Map.t =
-  let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
-      int64 option =
-    match denote ~blk ?def e with
-    | Error _ -> None
-    | Ok ws -> singleton_stack_position ws
-  in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun sites blk ->
-      let btid = Term.tid blk in
-      let has_call =
-        Term.enum jmp_t blk |> Seq.exists ~f:machine_call
-      in
-      if not has_call then sites
-      else
-        match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
-        | None -> Core.Map.set sites ~key:btid ~data:([], blk)
-        | Some call_sp ->
-          let bindings =
-            Term.enum def_t blk
-            |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
-                match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
-                | Some (addr, _), Some _ ->
-                  (match singleton_at ~def:d ~blk addr with
-                   | Some start ->
-                     (match call_arg_slot ~word ~call_sp ~start with
-                      | Some slot ->
-                        Core.Map.set acc ~key:slot
-                          ~data:{ sb_slot = slot; sb_def = d }
-                      | None -> acc)
-                   | None -> acc)
-                | _ -> acc)
-          in
-          Core.Map.set sites ~key:btid ~data:(Core.Map.data bindings, blk))
-
 (* The emitter's per-sub inputs are structure (BIR args, direct targets,
    def tags) plus this layout fact: the alloca-construction inputs alone. *)
 
@@ -799,6 +728,79 @@ let effects j =
     else match Jmp.kind j with
       | Ret _ -> { Term_effects.reads = abi.return_regs @ [ abi.sp ]; writes = [] }
       | _ -> call_effects ~abi ~callee:(fun _ -> None) j
+
+(* A boundary's reads precede its writes.  The reads remain on a call
+   even when splitting moves it away from its defining block. *)
+let boundary_read (blk : blk term) (v : var) : var option =
+  Term.enum jmp_t blk
+  |> Seq.find_map ~f:(fun j ->
+         Base.List.find (effects j).Term_effects.reads ~f:(Var.same v))
+
+let boundary_write (blk : blk term) (v : var) : var option =
+  Term.enum jmp_t blk
+  |> Seq.fold ~init:None ~f:(fun found j ->
+         Base.Option.first_some
+           (Base.List.find (effects j).Term_effects.writes ~f:(Var.same v))
+           found)
+
+(* Phi outputs precede def outputs; the last local definition wins. *)
+let local_output (blk : blk term) (v : var) : var option =
+  let phi =
+    Term.enum phi_t blk
+    |> Seq.find_map ~f:(fun p ->
+           let lhs = Phi.lhs p in
+           Base.Option.some_if (Var.same lhs v) lhs)
+  in
+  Term.enum def_t blk
+  |> Seq.fold ~init:phi ~f:(fun found d ->
+         let lhs = Def.lhs d in
+         if Var.same lhs v then Some lhs else found)
+
+let passed_version (blk : blk term) (v : var) : var option =
+  if Term.has_attr blk ssa_tag then
+    Base.Option.first_some (boundary_read blk v) (local_output blk v)
+  else Base.Option.first_some (local_output blk v) (boundary_read blk v)
+
+let version_at_end (blk : blk term) (v : var) : var =
+  Base.Option.value (passed_version blk v) ~default:v
+
+let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
+    ~(denote : blk:blk term -> ?def:def term -> exp ->
+                (Cbat_clp_set_composite.t, Type.error) Result.t)
+    (sub : sub term) : (call_arg_store list * blk term) Tid.Map.t =
+  let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
+      int64 option =
+    match denote ~blk ?def e with
+    | Error _ -> None
+    | Ok ws -> singleton_stack_position ws
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun sites blk ->
+      let btid = Term.tid blk in
+      let has_call =
+        Term.enum jmp_t blk |> Seq.exists ~f:machine_call
+      in
+      if not has_call then sites
+      else
+        match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
+        | None -> Core.Map.set sites ~key:btid ~data:([], blk)
+        | Some call_sp ->
+          let bindings =
+            Term.enum def_t blk
+            |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
+                match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
+                | Some (addr, _), Some _ ->
+                  (match singleton_at ~def:d ~blk addr with
+                   | Some start ->
+                     (match call_arg_slot ~word ~call_sp ~start with
+                      | Some slot ->
+                        Core.Map.set acc ~key:slot
+                          ~data:{ sb_slot = slot; sb_def = d }
+                      | None -> acc)
+                   | None -> acc)
+                | _ -> acc)
+          in
+          Core.Map.set sites ~key:btid ~data:(Core.Map.data bindings, blk))
 
 let reads = function
   | `Def d -> def_reads d

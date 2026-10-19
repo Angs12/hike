@@ -8,15 +8,11 @@ open Bap_core_theory
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
-(* The block's end-of-board version map lives in the stack model (the
-   producer/emitter contract home). *)
-let versions_tag = Model.versions_tag
+let ssa_tag = Model.ssa_tag
 
 let entry_tag : unit Value.Tag.t =
   Value.Tag.register ~package:"hike" ~name:"hike-ssa-entry"
     ~uuid:"1072b3e1-a039-4a5b-b340-d052dded07cd" (module Core.Unit)
-
-module Versions = Model.Versions
 
 module High_water = struct
   open! Core
@@ -94,10 +90,9 @@ let place_phis ~preds_of ~only (needs : Var.Set.t Tid.Map.t) (sub : sub term) :
               (Core.Set.fold vs ~init:blk
                  ~f:(insert_phi ~preds:(preds_of tid))))
 
-(* How the rename walk treats a block: [Full] renames it, [Reread] keeps
-   its names and resolves only the reads of its new jmps, [Fixed] leaves
-   it alone.  The latter two still put their names in scope. *)
-type mode = Fixed | Reread | Full
+(* [Full] names a new block. [Stable] keeps old term outputs and names
+   only newly added outputs; [Reread] resolves changed jump reads. *)
+type mode = Fixed | Reread | Stable | Full
 
 (* Block-local renaming.  A block's incoming names are its phi lhs
    values; its defs and call results take fresh versions.  A second pass
@@ -105,8 +100,11 @@ type mode = Fixed | Reread | Full
    No dominator order is needed: a value crossing a block boundary is a
    phi (or an index-0 boundary input), so a block's local names cover
    every renamable read. *)
-let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
-    ~renamable ~machine_blk_tids (sub : sub term) : sub term =
+let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
+    ?preds_of ?(preserve_phi = fun _ _ -> false)
+    ?(preserve_def = fun _ _ -> false)
+    ?(preserve_write = fun _ _ _ -> false)
+    ~abi ~sp ~renamable ~machine_blk_tids (sub : sub term) : sub term =
   let nums : int Var.Table.t = Core.Hashtbl.create (module Var) in
   Base.List.iter (high_water sub) ~f:(fun (key, data) ->
       Core.Hashtbl.set nums ~key ~data);
@@ -136,7 +134,6 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
   in
   let outputs : var Var.Map.t Tid.Map.t ref = ref Tid.Map.empty in
   let record tid = outputs := Core.Map.set !outputs ~key:tid ~data:!names in
-  let stamps : Versions.t Tid.Map.t ref = ref Tid.Map.empty in
   let kept_blk blk =
     names := Var.Map.empty;
     Term.enum phi_t blk |> Seq.iter ~f:(fun p -> set_name (Phi.lhs p));
@@ -144,9 +141,8 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
     |> Seq.iter ~f:(fun d ->
            let v = Def.lhs d in
            if Var.index v > 0 then set_name v);
-    Base.Option.iter (Term.get_attr blk versions_tag) ~f:(fun st ->
-        Base.List.iter st.Versions.rets ~f:(fun (_, version) ->
-            set_name version));
+    Term.enum jmp_t blk |> Seq.iter ~f:(fun j ->
+        Base.List.iter (Model.effects j).Model.Term_effects.writes ~f:set_name);
     blk
   in
   let full_blk blk =
@@ -174,27 +170,14 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
           Jmp.map_exp ~f:substitute j
           |> Model.map_effects ~read:lookup ~write:Fun.id)
     in
-    (* The argument map reads BEFORE the call's ret mints: an argument
-       lane passes the machine's current value, not the callee's future
-       result. *)
-    let args =
-      Core.Map.to_alist !names
-      |> Base.List.filter_map ~f:(fun (k, v) ->
-             if Var.index v > 0 then Some (k, v) else None)
-    in
-    let minted = ref [] in
     let blk =
       Term.map jmp_t blk ~f:(fun j ->
           Model.map_effects ~read:Fun.id ~write:(fun v ->
               let version = new_name v in
-              minted := (v, version) :: !minted;
               set_name version;
               version) j)
     in
-    stamps :=
-      Core.Map.set !stamps ~key:(Term.tid blk)
-        ~data:{ Versions.args = args; rets = !minted };
-    blk
+    Term.set_attr blk ssa_tag ()
   in
   let sub =
     Term.map blk_t sub ~f:(fun blk ->
@@ -208,6 +191,38 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
               Term.map jmp_t blk ~f:(fun j ->
                   Jmp.map_exp ~f:substitute j
                   |> Model.map_effects ~read:lookup ~write:Fun.id)
+          | Stable ->
+              names := Var.Map.empty;
+              let blk = Term.map phi_t blk ~f:(fun p ->
+                  let v = Phi.lhs p in
+                  if Var.index v = 0 && renamable v
+                     && not (preserve_phi tid (Term.tid p)) then begin
+                    let v = new_name v in
+                    set_name v;
+                    Phi.with_lhs p v
+                  end else (set_name v; p)) in
+              let blk = Term.map def_t blk ~f:(fun d ->
+                  let d = Def.with_rhs d (substitute (Def.rhs d)) in
+                  let v = Def.lhs d in
+                  if Var.index v = 0 && renamable v
+                     && not (preserve_def tid (Term.tid d)) then begin
+                    let lhs = new_name v in
+                    set_name lhs;
+                    Def.with_lhs d lhs
+                  end else (
+                    if Var.index v > 0 || preserve_def tid (Term.tid d)
+                    then set_name v;
+                    d)) in
+              let blk = Term.map jmp_t blk ~f:(fun j ->
+                  Jmp.map_exp ~f:substitute j
+                  |> Model.map_effects ~read:lookup ~write:Fun.id) in
+              let blk = Term.map jmp_t blk ~f:(fun j ->
+                  Model.map_effects ~read:Fun.id ~write:(fun v ->
+                      if Var.index v = 0 && renamable v
+                         && not (preserve_write tid (Term.tid j) v) then begin
+                        let v = new_name v in set_name v; v
+                      end else (set_name v; v)) j) in
+              Term.set_attr blk ssa_tag ()
         in
         record tid;
         blk)
@@ -216,13 +231,13 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
      for that base, base itself when the predecessor does not name it.
      The SP incoming from a call block carries the pushed word. *)
   let wired_blk blk =
-    if mode (Term.tid blk) <> Full then blk
-    else
       Term.map phi_t blk ~f:(fun phi ->
           let base = Var.base (Phi.lhs phi) in
           let values =
-            Phi.values phi
-            |> Seq.map ~f:(fun (src, _) ->
+            let sources = match preds_of with
+              | None -> Phi.values phi |> Seq.to_list |> Base.List.map ~f:fst
+              | Some preds -> preds (Term.tid blk) in
+            Base.List.map sources ~f:(fun src ->
                    let name =
                      match Core.Map.find !outputs src with
                      | Some names ->
@@ -240,18 +255,16 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
                      else Bil.Var name
                    in
                    (src, exp))
-            |> Seq.to_list
           in
-          Phi.of_list (Phi.lhs phi) values)
+          let old_values = Phi.values phi |> Seq.to_list in
+          if Base.List.equal (fun (a, x) (b, y) ->
+                 Tid.equal a b && Exp.equal x y) old_values values
+          then phi
+          else Phi.of_list (Phi.lhs phi) values)
   in
   let sub = Term.map blk_t sub ~f:wired_blk in
   let sub = Term.set_attr sub high_water_tag (Core.Hashtbl.to_alist nums) in
-  !stamps
-  |> Core.Map.fold ~init:sub ~f:(fun ~key ~data sub ->
-           match Term.find blk_t sub key with
-           | None -> sub
-           | Some blk ->
-               Term.update blk_t sub (Term.set_attr blk versions_tag data))
+  sub
 
 let is_real tid =
   not (Tid.equal tid Graphs.Tid.start) && not (Tid.equal tid Graphs.Tid.exit)
@@ -387,7 +400,7 @@ let construct ~(synth : Hike_synth.table)
     in
     sub
 
-(* The block back in its pre-SSA form: base names, no phis or stamps. *)
+(* The block back in its pre-SSA form: base names and no phis. *)
 let unssa_blk (blk : blk term) : blk term =
   let base_exp =
     (object
@@ -403,7 +416,7 @@ let unssa_blk (blk : blk term) : blk term =
   |> Term.map jmp_t ~f:(fun j ->
          Jmp.map_exp ~f:base_exp j
          |> Model.map_effects ~read:Var.base ~write:Var.base)
-  |> fun b -> Term.del_attr b versions_tag
+  |> fun b -> Term.del_attr b ssa_tag
 
 let unssa_sub (sub : sub term) : sub term =
   Term.map blk_t sub ~f:unssa_blk
@@ -479,28 +492,15 @@ let canonical (sub : sub term) : string =
                 let eff = Model.effects j in
                 line "jmp when %s %s r[%s] w[%s]" (Exp.to_string cond) kind
                   (vars eff.Model.Term_effects.reads)
-                  (vars eff.Model.Term_effects.writes));
-         match Term.get_attr blk versions_tag with
-         | None -> ()
-         | Some st ->
-             let pairs l =
-               String.concat ","
-                 (Base.List.sort l ~compare:(fun (a, _) (b, _) -> Var.compare a b)
-                 |> Base.List.map ~f:(fun (a, b) ->
-                      Var.to_string (name a) ^ "=" ^ Var.to_string (name b)))
-             in
-             line "stamp a[%s] r[%s]" (pairs st.Versions.args)
-               (pairs st.Versions.rets));
+                  (vars eff.Model.Term_effects.writes)));
   Buffer.contents buf
 
 let equivalent (a : sub term) (b : sub term) : bool =
   String.equal (canonical a) (canonical b)
 
-(* The affected region is every block that is new, has changed defs or
-   predecessors, needs a different phi set, or is reachable from one:
-   the other blocks keep their reaching definitions, so they keep their
-   variables.  A block that only gained or lost pure jmps keeps them too,
-   resolving the new jmps' reads in place. *)
+(* CFG changes affect VSA facts independently of SSA identity. New blocks
+   are named once; existing blocks retain names while their phi operands
+   are rewired and their reachable dependents are woken. *)
 let update_sub_woken_analyzed ~(synth : Hike_synth.table)
     ~(target : Bap_core_theory.Theory.Target.t) ~(old : sub term) ~(c : ctx)
     (sub : sub term) : sub term * Tid.Set.t =
@@ -526,7 +526,8 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
       in
       match Term.find blk_t old tid with
       | None -> Full
-      | Some _ when not (Term.has_attr b versions_tag) -> Full
+      | Some ob when not (Term.has_attr ob ssa_tag) ->
+          failwith "Hike_ssa.update_sub: existing block lacks SSA marker"
       | Some ob ->
           let changed_jmps = tids (Term.enum jmp_t) ob <> tids (Term.enum jmp_t) b in
           let pure j =
@@ -539,9 +540,10 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
           in
           if
             not (Core.Set.equal (old_preds tid) (Tid.Set.of_list (c.preds_of tid)))
-            || not (Base.List.equal (fun a b -> Tid.equal (Term.tid a) (Term.tid b)
-                            && Var.equal (Def.lhs a) (Def.lhs b)
-                            && Exp.equal (Def.rhs a) (Def.rhs b))
+            || not (Base.List.equal (fun a b ->
+                      Tid.equal (Term.tid a) (Term.tid b)
+                      && Var.equal (Def.lhs a) (Def.lhs b)
+                      && Exp.equal (Def.rhs a) (Def.rhs b))
                       (Term.enum def_t ob |> Seq.to_list)
                       (Term.enum def_t b |> Seq.to_list))
             || Seq.exists (Term.enum jmp_t b) ~f:(fun j ->
@@ -553,12 +555,12 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
                    || not (Exp.equal (Jmp.cond oj) (Jmp.cond j))
                    || Jmp.kind oj <> Jmp.kind j)
             || not (Core.Set.equal needed (phi_bases b))
-          then Full
+          then Stable
           else if changed_jmps then
             if Seq.for_all (differing b ob) ~f:pure
                && Seq.for_all (differing ob b) ~f:pure
             then Reread
-            else Full
+            else Stable
           else Fixed
     in
     let kinds =
@@ -568,7 +570,7 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
     in
     let roots =
       Core.Map.fold kinds ~init:[] ~f:(fun ~key ~data acc ->
-          if data = Full then key :: acc else acc)
+          if data <> Fixed then key :: acc else acc)
     in
     let rec close seen = function
       | [] -> seen
@@ -577,10 +579,10 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
           else close (Core.Set.add seen t) (c.succs_of t @ rest)
     in
     let affected = close Tid.Set.empty roots in
-    let is_affected tid = Core.Set.mem affected tid in
     let mode tid =
-      if is_affected tid then Full
-      else Base.Option.value (Core.Map.find kinds tid) ~default:Fixed
+      match Term.find blk_t old tid with
+      | None -> Full
+      | Some _ -> Base.Option.value (Core.Map.find kinds tid) ~default:Fixed
     in
     (* Fresh versions continue above every index ever used. *)
     let floor =
@@ -594,19 +596,12 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
       let scan acc s =
         Term.enum blk_t s
         |> Seq.fold ~init:acc ~f:(fun acc blk ->
-               let acc =
-                 Blk.elts blk
-                 |> Seq.fold ~init:acc ~f:(fun acc t ->
-                        Core.Set.fold (Model.writes t)
-                          ~init:
-                            (Core.Set.fold (Model.reads t) ~init:acc ~f:note)
-                          ~f:note)
-               in
-               match Term.get_attr blk versions_tag with
-               | None -> acc
-               | Some st ->
-                   Base.List.fold (st.Versions.args @ st.Versions.rets)
-                     ~init:acc ~f:(fun acc (a, b) -> note (note acc a) b))
+               Blk.elts blk
+               |> Seq.fold ~init:acc ~f:(fun acc t ->
+                      Core.Set.fold (Model.writes t)
+                        ~init:
+                          (Core.Set.fold (Model.reads t) ~init:acc ~f:note)
+                        ~f:note))
       in
       let history = Core.Map.of_alist_exn (module Var) (high_water old) in
       let current = scan (scan Var.Map.empty old) sub in
@@ -616,15 +611,59 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
     in
     let base =
       Term.map blk_t sub ~f:(fun b ->
-          if is_affected (Term.tid b) then
-            Base.Option.value (Term.find blk_t c.sub (Term.tid b)) ~default:b
-          else b)
+          match Term.find blk_t old (Term.tid b) with
+          | None -> Base.Option.value (Term.find blk_t c.sub (Term.tid b)) ~default:b
+          | Some ob when Base.Option.value (Core.Map.find kinds (Term.tid b))
+                            ~default:Fixed = Fixed -> ob
+          | Some ob ->
+              let b = Term.filter phi_t b ~f:(Fun.const false) in
+              let needed = Base.Option.value (Core.Map.find c.needs (Term.tid b))
+                  ~default:Var.Set.empty in
+              let b = Term.enum phi_t ob
+                  |> Seq.filter ~f:(fun p ->
+                         Core.Set.mem needed (Var.base (Phi.lhs p)))
+                  |> Seq.fold ~init:b ~f:(Term.append phi_t) in
+              let b = Term.map def_t b ~f:(fun d ->
+                  match Term.find def_t ob (Term.tid d) with
+                  | None -> d
+                  | Some previous -> Def.with_lhs d (Def.lhs previous)) in
+              let b = Term.map jmp_t b ~f:(fun j ->
+                  match Term.find jmp_t ob (Term.tid j) with
+                  | None -> j
+                  | Some previous ->
+                      let writes = (Model.effects previous).Model.Term_effects.writes in
+                      Model.map_effects ~read:Fun.id ~write:(fun v ->
+                          Base.Option.value
+                            (Base.List.find writes ~f:(Var.same v)) ~default:v) j) in
+              Term.set_attr b ssa_tag ())
     in
     let base =
-      place_phis ~preds_of:c.preds_of ~only:is_affected c.needs base
+      place_phis ~preds_of:c.preds_of ~only:(Fun.const true) c.needs base
     in
     let result =
-      rename_versions ~mode ~floor ~abi:c.abi
+      let preserve_phi block phi =
+        match Term.find blk_t old block with
+        | None -> false
+        | Some previous -> Option.is_some (Term.find phi_t previous phi)
+      in
+      let preserve_def block def =
+        match Term.find blk_t old block with
+        | None -> false
+        | Some previous -> Option.is_some (Term.find def_t previous def)
+      in
+      let preserve_write block jmp v =
+        match Term.find blk_t old block with
+        | None -> false
+        | Some previous ->
+            (match Term.find jmp_t previous jmp with
+             | None -> false
+             | Some j ->
+                 Base.List.exists
+                   (Model.effects j).Model.Term_effects.writes
+                   ~f:(Var.equal v))
+      in
+      rename_versions ~mode ~floor ~preds_of:c.preds_of ~abi:c.abi
+        ~preserve_phi ~preserve_def ~preserve_write
         ~sp:c.sp ~renamable:c.renamable
         ~machine_blk_tids:c.machine_blk_tids base
     in
@@ -633,8 +672,7 @@ let update_sub_woken_analyzed ~(synth : Hike_synth.table)
     if not (equivalent result fresh) then
       failwith "Hike_ssa.update_sub: differs from fresh construction";
 #endif
-    let woken = Core.Map.fold kinds ~init:affected ~f:(fun ~key ~data acc ->
-        if data = Reread then Core.Set.add acc key else acc) in
+    let woken = affected in
     (result, woken)
 
 let update_sub_woken ~(synth : Hike_synth.table)
@@ -675,17 +713,10 @@ let version_ceiling (sub : sub term) : int Var.Map.t =
   in
   Term.enum blk_t sub
   |> Seq.fold ~init:(Core.Map.of_alist_exn (module Var) (high_water sub)) ~f:(fun acc blk ->
-      let acc =
-        Blk.elts blk
-        |> Seq.fold ~init:acc ~f:(fun acc t ->
-            Core.Set.fold (Model.writes t) ~f:note
-              ~init:(Core.Set.fold (Model.reads t) ~f:note ~init:acc))
-      in
-      match Term.get_attr blk versions_tag with
-      | None -> acc
-      | Some vs ->
-          Base.List.fold (vs.Versions.args @ vs.Versions.rets)
-            ~init:acc ~f:(fun acc (a, b) -> note (note acc a) b))
+      Blk.elts blk
+      |> Seq.fold ~init:acc ~f:(fun acc t ->
+          Core.Set.fold (Model.writes t) ~f:note
+            ~init:(Core.Set.fold (Model.reads t) ~f:note ~init:acc)))
 
 (* Derived views may mint versions too; the canonical body reserves them
    even though its claims and matching warm solution stay unchanged. *)
@@ -701,11 +732,8 @@ let is_call_jmp (j : jmp term) : bool =
   | Call _ -> not (Hike_return.is_jmp j)
   | _ -> false
 
-(* The lanes of the call jmps [select] accepts are re-derived under
-   [callee].  Each lane keeps the version the call had; a lane the call
-   gains reads the block's live version, or the base, and mints a fresh
-   version above the sub's highest; a lane it loses leaves the block's
-   result stamp. *)
+(* Refresh selected call effects. Existing reads and writes retain their
+   exact versions; a gained read comes from the block's local outputs. *)
 let refresh_calls ~(synth : Hike_synth.table) ~(abi : Abi.t)
     ~(callee : Tid.t -> sub term option) ~(select : jmp term -> bool)
     (sub : sub term) : sub term =
@@ -723,22 +751,12 @@ let refresh_calls ~(synth : Hike_synth.table) ~(abi : Abi.t)
       ceiling := Core.Map.set !ceiling ~key:b ~data:k;
       Var.with_index b k
     in
-    let assoc_base lanes v =
-      Base.List.find lanes ~f:(fun l -> Var.same (Var.base l) (Var.base v))
-    in
+    let assoc_base lanes v = Base.List.find lanes ~f:(Var.same v) in
     Term.map blk_t sub ~f:(fun blk ->
         if not (Term.enum jmp_t blk |> Seq.exists ~f:select) then blk
         else
-        let vs =
-          Base.Option.value_exn (Term.get_attr blk versions_tag)
-            ~message:
-              ("Hike_ssa.refresh_calls: block " ^ Tid.name (Term.tid blk)
-               ^ " has no version stamp")
-        in
-        let minted = ref [] in
         let prepared = Term.find_exn blk_t derived (Term.tid blk) in
-        let blk =
-          Term.map jmp_t blk ~f:(fun j ->
+        Term.map jmp_t blk ~f:(fun j ->
               if not (select j) then j
               else
                 let old = Model.effects j in
@@ -746,8 +764,7 @@ let refresh_calls ~(synth : Hike_synth.table) ~(abi : Abi.t)
                   match assoc_base old.Model.Term_effects.reads r with
                   | Some v -> v
                   | None ->
-                      Base.List.Assoc.find vs.Versions.args r ~equal:Var.same
-                      |> Core.Option.value ~default:r
+                      Base.Option.value (Model.local_output blk r) ~default:r
                 in
                 let write w =
                   let v =
@@ -755,26 +772,10 @@ let refresh_calls ~(synth : Hike_synth.table) ~(abi : Abi.t)
                     | Some v -> v
                     | None -> fresh w
                   in
-                  minted := (w, v) :: !minted;
                   v
                 in
                 Term.find_exn jmp_t prepared (Term.tid j)
-                |> Model.map_effects ~read ~write)
-        in
-        let written =
-          Term.enum jmp_t blk
-          |> Seq.fold ~init:Var.Set.empty ~f:(fun acc j ->
-              Core.Set.union acc (Model.writes (`Jmp j)))
-        in
-        let kept =
-          Base.List.filter vs.Versions.rets ~f:(fun (_, v) ->
-              Core.Set.mem written v)
-        in
-        let added =
-          Base.List.filter !minted ~f:(fun (w, _) ->
-              not (Base.List.Assoc.mem kept w ~equal:Var.same))
-        in
-        Term.set_attr blk versions_tag { vs with Versions.rets = kept @ added })
+                |> Model.map_effects ~read ~write))
 
 (* Read-only lane narrowing leaves register definitions and their VSA facts
    intact. A gained live merge or changed result needs a real SSA update. *)
@@ -798,20 +799,9 @@ let relane_sub ~synth ~target ~callee sub =
   if changed_writes || missing then
     fst (update_sub_woken_analyzed ~synth ~target ~old:sub ~c sub')
   else
-    let dead = ref Var.Set.empty in
-    let result = Term.map blk_t refreshed ~f:(fun b ->
+    Term.map blk_t refreshed ~f:(fun b ->
         Term.filter phi_t b ~f:(fun p ->
-            let keep = Core.Set.mem (needed b) (Var.base (Phi.lhs p)) in
-            if not keep then dead := Core.Set.add !dead (Phi.lhs p);
-            keep)) in
-    Term.map blk_t result ~f:(fun b ->
-        match Term.get_attr b versions_tag with
-        | None -> b
-        | Some vs ->
-          let live (_, v) = not (Core.Set.mem !dead v) in
-          Term.set_attr b versions_tag
-            { Versions.args = Base.List.filter vs.Versions.args ~f:live;
-              rets = Base.List.filter vs.Versions.rets ~f:live })
+            Core.Set.mem (needed b) (Var.base (Phi.lhs p))))
 
 (* The SSA of a lifted sub: its calls read and write the machine
    convention and its returns the ABI's return lanes. *)

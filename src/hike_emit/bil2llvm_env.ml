@@ -167,14 +167,13 @@ type sub_scope = {
   (* The lock-marker brackets' per-def plans, computed once per sub
      before any body emits.  Key: the def's tid. *)
   atomic_plan : atomic_action Tid.Map.t ref;
-  (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
-     call ret — one var, one value, valid wherever the def dominates. *)
+  (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a call result —
+     one var, one value, valid wherever the def dominates. *)
   ssavals : value_map ref;
   (* The BIR phi terms' own llvalues, per block. *)
   bir_phis : llvalue_map ref Tid.Map.t ref;
-  (* The SSA version maps, read off the blocks' [hike-ssa-versions]
-     stamps before any body emits. *)
-  ssa_versions : Hike_stack_model.Versions.t Tid.Map.t ref;
+  (* Original BIR blocks for boundary lane lookup during emission. *)
+  ssa_blocks : blk term Tid.Map.t ref;
   (* Each ptr value's entry-line offset (i64), where it is structurally
      known; a load / parameter / phi has none (the value is a real
      pointer and arithmetic GEPs it). *)
@@ -194,7 +193,7 @@ let fresh_scope () : sub_scope =
     atomic_plan = ref Tid.Map.empty;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
-    ssa_versions = ref Tid.Map.empty;
+    ssa_blocks = ref Tid.Map.empty;
     ptr_offsets = ref WVarMap.empty;
     storages = ref WVarMap.empty }
 
@@ -421,36 +420,29 @@ let get_local scope blk_tid var =
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
 
 (* The sub-wide SSA binding: one var one value (a phi lhs, a
-   versioned def, a stamped call ret, or a parameter). *)
+   versioned def, a call result, or a parameter). *)
 let bind_ssaval scope var value =
   scope.ssavals := WVarMap.add (wvar_of var) value !(scope.ssavals)
 
 let get_ssaval scope var =
   WVarMap.find_opt (wvar_of var) !(scope.ssavals)
 
-(* The SSA stamps: one read per sub, before any body emits. *)
-let load_ssa_versions scope blks =
+let load_ssa_blocks scope blks =
   Seq.iter blks ~f:(fun blk ->
-      match Term.get_attr blk Hike_stack_model.versions_tag with
-      | Some vs ->
-          scope.ssa_versions :=
-            Core.Map.set !(scope.ssa_versions) ~key:(Term.tid blk) ~data:vs
-      | None -> ())
+      scope.ssa_blocks :=
+        Core.Map.set !(scope.ssa_blocks) ~key:(Term.tid blk) ~data:blk)
 
-(* A base lane's live version at a block, when it has one: the
-   end-of-defs map (pre-mint). *)
+(* A base lane's pre-call value, carried by the boundary read or local
+   phi/def output. *)
 let lane_version scope blk_tid v =
-  Core.Map.find !(scope.ssa_versions) blk_tid
-  |> Base.Option.bind ~f:(fun vs ->
-         Base.List.Assoc.find vs.Hike_stack_model.Versions.args v
-           ~equal:Var.same)
+  Core.Map.find !(scope.ssa_blocks) blk_tid
+  |> Base.Option.bind ~f:(fun blk ->
+         Hike_stack_model.passed_version blk v)
 
-(* The block's call-ret mints. *)
 let mint_version scope blk_tid v =
-  Core.Map.find !(scope.ssa_versions) blk_tid
-  |> Base.Option.bind ~f:(fun vs ->
-         Base.List.Assoc.find vs.Hike_stack_model.Versions.rets v
-           ~equal:Var.same)
+  Core.Map.find !(scope.ssa_blocks) blk_tid
+  |> Base.Option.bind ~f:(fun blk ->
+         Hike_stack_model.boundary_write blk v)
 
 
 
@@ -525,8 +517,7 @@ let lane_exp scope blk_tid (e : exp) : exp =
   end)#map_exp e
 
 
-(* Binds one call-ret lane: the stamped version when the SSA pass
-   minted one, else the base lane. *)
+(* Binds a call result to the version written by its jump. *)
 let bind_call_ret ctx scope blk_tid (ret : Arg.t) value =
   match mint_version scope blk_tid (Arg.lhs ret) with
   | Some v ->
