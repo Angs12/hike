@@ -157,7 +157,7 @@ let tests : unit Alcotest.test list =
                (Base.Option.filter stamped ~f:(fun v ->
                     Var.index v > 0
                     && Var.same (Var.base v) (int_ret 0))));
-        (* The continuation reads the stamped version. *)
+        (* The continuation reads its own phi of the stamped result. *)
         let cont =
           Term.enum blk_t caller'
           |> Seq.find ~f:(fun b ->
@@ -166,12 +166,20 @@ let tests : unit Alcotest.test list =
                         Var.equal (Var.base (Def.lhs d)) (v64 "rc_use")))
           |> Base.Option.value_exn
         in
+        let result_phi = Term.enum phi_t cont
+          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) ret_reg)
+          |> Base.Option.value_exn in
+        check "SSA-01 incoming result"
+          (Phi.values result_phi |> Seq.exists ~f:(fun (_, e) ->
+              match e with
+              | Bil.Var v -> Base.Option.equal Var.equal stamped (Some v)
+              | _ -> false));
         let reads_version =
           Term.enum def_t cont
           |> Seq.exists ~f:(fun d ->
                  match Def.rhs d with
                  | Bil.BinOp (Bil.PLUS, Bil.Var v, Bil.Int _) ->
-                     Base.Option.equal Var.equal stamped (Some v)
+                     Var.equal (Phi.lhs result_phi) v
                  | _ -> false)
         in
         check "SSA-01" reads_version);
@@ -218,11 +226,7 @@ let tests : unit Alcotest.test list =
         let sub =
           Term.enum sub_t prog |> Seq.hd_exn
         in
-        let join =
-          Term.enum blk_t sub
-          |> Seq.find ~f:(fun b -> not (Seq.is_empty (Term.enum phi_t b)))
-          |> Base.Option.value_exn
-        in
+        let join = blk_in sub j in
         let phis = Term.enum phi_t join |> Seq.to_list in
         let sj_phi =
           Base.List.find phis ~f:(fun p ->
@@ -735,7 +739,7 @@ let tests : unit Alcotest.test list =
           (Ws.equal (value d_out) (Ws.singleton (w64 6))
            && Ws.equal (value d_sp) (Ws.stack_word_i64 0L)));
 
-    pin "SSA-13" "dead register versions leave the VSA state"
+    pin "SSA-13" "SSA definitions keep their values after later versions are defined"
       (fun () ->
         let r = int_ret 0 and out = callee_saved 0 in
         let n = 12 in
@@ -758,11 +762,188 @@ let tests : unit Alcotest.test list =
           |> Seq.to_list
         in
         let last = Graphlib.Std.Solution.get sol tids.(n + 1) in
-        let held =
-          Base.List.count versions ~f:(fun v ->
-              not (Ws.is_top (AI.find_word 64 last v)))
+        check "SSA-13" (Base.List.length versions > n
+          && Base.List.for_alli versions ~f:(fun i v ->
+              Ws.equal (AI.find_word 64 last v) (Ws.singleton (w64 i)))));
+
+    pin "SSA-19" "single-predecessor inputs retain edge bounds without narrowing the other branch"
+      (fun () ->
+        let x = int_param 0 and y = callee_saved 0 and z = callee_saved 1 in
+        let sub, tids = sub_of "edge_parameter"
+            [ [], [ (1, fun t -> mk_jmp_to t (guard_lt x 5)); (3, mk_goto) ];
+              [ Def.create y Bil.(var x + c64 1) ], [ (2, mk_goto) ];
+              [], [ (0, mk_ret) ];
+              [ Def.create z (Bil.Var x) ], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "edge_parameter" in
+        let sol = run_ssa_anchored ssa in
+        let taken = Graphlib.Std.Solution.get sol tids.(2) in
+        let other = Graphlib.Std.Solution.get sol tids.(3) in
+        let input = Term.find_exn blk_t ssa tids.(3) |> Term.enum phi_t
+          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) x)
+          |> Base.Option.value_exn |> Phi.lhs in
+        check "SSA-19 single predecessor phi"
+          (phi_arity ssa (Term.find_exn blk_t ssa tids.(1)) x = Some 1
+           && phi_arity ssa (Term.find_exn blk_t ssa tids.(3)) x = Some 1);
+        let d = Term.find_exn blk_t ssa tids.(1) |> Term.first def_t
+          |> Base.Option.value_exn in
+        check "SSA-19 taken value"
+          (Ws.min_elem (AI.find_word 64 taken (Def.lhs d)) = Some (w64 1)
+           && Ws.max_elem (AI.find_word 64 taken (Def.lhs d)) = Some (w64 5));
+        check "SSA-19 other edge"
+          (Ws.elem (w64 9) (AI.find_word 64 other input)
+           && not (Ws.elem (w64 2) (AI.find_word 64 other input))));
+    pin "SSA-20" "byte refinements follow phi identities across single-predecessor blocks"
+      (fun () ->
+        let x = int_param 0 and y = callee_saved 0 in
+        let low = Bil.Cast (Bil.LOW, 8, Bil.Var x) in
+        let bound = Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 0x25)) in
+        let sub, tids = sub_of "phi_slice"
+            [ [], [ (4, fun t -> mk_jmp_to t (Bil.BinOp (Bil.LT, bound, low))); (1, mk_goto) ];
+              [], [ (2, mk_goto) ];
+              [ Def.create y (Bil.Cast (Bil.UNSIGNED, 64, low)) ], [ (3, mk_goto) ];
+              [], [ (0, mk_ret) ];
+              [], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "phi_slice" in
+        let sol = run_ssa_anchored ssa in
+        let d = Term.find_exn blk_t ssa tids.(2) |> Term.first def_t
+          |> Base.Option.value_exn in
+        let last = Graphlib.Std.Solution.get sol tids.(3) in
+        check "SSA-20 bounded byte"
+          (bounded_above (AI.find_word 64 last (Def.lhs d)) (w64 0x25));
+        check "SSA-20 original word stays wide"
+          (not (bounded_above (AI.find_word 64 last x) (w64 0xff))));
+    pin "SSA-21" "a transfer through incoming phis still names its linker slot"
+      (fun () ->
+        let x = int_ret 0 and mem = memv "phi_slot_mem" in
+        let load addr = Def.create x (Bil.Load
+            (Bil.Var mem, c64 addr, LittleEndian, `r64)) in
+        let sub, _ = sub_of "phi_slot"
+            [ [load 0x1000], [(1, mk_goto)];
+              [], [(0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var x))))] ] in
+        let ssa = ssa_of sub in
+        let dest = Term.enum blk_t ssa |> Seq.to_list |> Base.List.last_exn in
+        let target = Term.first jmp_t dest |> Base.Option.value_exn
+          |> Jmp.kind |> function Goto (Indirect e) -> e | _ -> assert false in
+        check "SSA-21 singleton phi"
+          (Hike_transfer.slot_of_target ~synth:Hike.Synth.empty ~sub:ssa target = Some 0x1000L);
+        let merged addr =
+          let sub, tids = sub_of "phi_slots"
+              [ [], [(1, fun t -> mk_jmp_to t (guard (int_param 0) 0)); (2, mk_goto)];
+                [load 0x1000], [(3, mk_goto)];
+                [load addr], [(3, mk_goto)];
+                [], [(0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var x))))] ] in
+          let ssa = ssa_of sub in
+          let blk = Term.find_exn blk_t ssa tids.(3) in
+          let phi = Term.enum phi_t blk
+            |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) x)
+            |> Base.Option.value_exn in
+          Hike_transfer.slot_of_target ~synth:Hike.Synth.empty ~sub:ssa (Bil.Var (Phi.lhs phi)) in
+        check "SSA-21 common slot" (merged 0x1000 = Some 0x1000L);
+        check "SSA-21 different slots" (merged 0x2000 = None));
+    pin "SSA-22" "an entry backedge has separate initial and loop phi operands"
+      (fun () ->
+        let x = int_param 0 and y = callee_saved 0 in
+        let sub, tids = sub_of "entry_loop"
+            [ [Def.create x Bil.(var x + c64 1)],
+              [(0, fun t -> mk_jmp_to t (guard_lt x 3)); (1, mk_goto)];
+              [Def.create y (Bil.Var x)], [(0, mk_ret)] ] in
+        let ssa = ssa_of sub in
+        let entry = Term.first blk_t ssa |> Base.Option.value_exn in
+        check "SSA-22 entry is separate" (not (Tid.equal (Term.tid entry) tids.(0)));
+        check "SSA-22 both operands"
+          (phi_arity ssa (Term.find_exn blk_t ssa tids.(0)) x = Some 2);
+        let initial = AI.add_word (anchored_entry ()) ~key:x ~data:(Ws.singleton (w64 0)) in
+        let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv ssa
+            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:initial ssa) in
+        let exit = Term.find_exn blk_t ssa tids.(1) in
+        let def_tid = Term.first def_t exit |> Base.Option.value_exn |> Term.tid in
+        let value = Base.List.Assoc.find (def_values ssa sol) def_tid ~equal:Tid.equal
+          |> Base.Option.value_exn in
+        check "SSA-22 initial value reaches the loop" (Ws.equal value (Ws.singleton (w64 3))));
+    pin "SSA-23" "an entry backedge update keeps unrelated blocks' versions"
+      (fun () ->
+        let x = int_param 0 and y = callee_saved 0 and z = callee_saved 1 in
+        let sub, tids = sub_of "entry_update"
+            [ [ Def.create x Bil.(var x + c64 1) ],
+              [ (0, fun t -> mk_jmp_to t (guard_lt x 3)); (1, mk_goto) ];
+              [ Def.create y (Bil.Var x) ], [ (0, mk_ret) ] ] in
+        let old = ssa_of sub in
+        let full = Term.map blk_t sub ~f:(fun b ->
+            if Tid.equal (Term.tid b) tids.(1) then
+              Term.append def_t b (Def.create z (Bil.Var x))
+            else b) in
+        let prepared = Hike.Ssa.prepare_sub ~synth:Hike.Synth.empty
+            ~target:(x86_target ()) full in
+        (* The decode update drops the old synthetic entry and re-adds it;
+           the changed exit block alone is the local update. *)
+        let old_base = Hike.Ssa.unssa_sub old in
+        let mixed =
+          Term.filter_map blk_t old ~f:(fun b ->
+              if Term.has_attr b Hike.Ssa.entry_tag then None
+              else
+                match Term.find blk_t prepared (Term.tid b) with
+                | Some pb when
+                    not (Blk.equal
+                           (Term.find_exn blk_t old_base (Term.tid b)) pb) ->
+                  Some pb
+                | _ -> Some b)
         in
-        check "SSA-13" (Base.List.length versions > n && held <= 1));
+        let upd = Hike.Ssa.update_sub ~synth:Hike.Synth.empty
+            ~target:(x86_target ()) ~old mixed in
+        check "SSA-23 equals fresh" (Hike.Ssa.equivalent upd (ssa_of full));
+        check "SSA-23 unrelated block kept"
+          (kept old upd (Term.find_exn blk_t old tids.(0)));
+        check "SSA-23 entry stamped"
+          (match Term.first blk_t upd with
+           | Some b ->
+             Term.has_attr b Hike.Ssa.entry_tag
+             && Term.has_attr b Hike.Stack_model.versions_tag
+           | None -> false));
+    pin "SSA-24" "relane narrowing drops dead input phis and their stamp lanes"
+      (fun () ->
+        let kept = int_param 0 and dropped = int_param 1 and ret = int_ret 0 in
+        let abi = Hike.Abi.of_target (x86_target ()) in
+        let callee, _ = sub_of "relane_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Base.List.fold
+            (Arg.create ~intent:In kept (Bil.Var kept)
+             :: Base.List.map abi.Hike.Abi.return_regs ~f:(fun r ->
+                    Arg.create ~intent:Out r (Bil.Var r)))
+            ~init:callee ~f:(fun s a -> Term.append arg_t s a) in
+        let caller, tids = sub_of "relane_caller"
+            [ [], [ (1, mk_goto) ];
+              [], [ (2, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [ Def.create (v64 "relane_use") (Bil.Var ret) ], [ (0, mk_ret) ] ] in
+        let old = ssa_of caller in
+        let result = Hike.Ssa.relane_sub ~synth:Hike.Synth.empty
+            ~target:(x86_target ())
+            ~callee:(fun t ->
+              if Tid.equal t (Term.tid callee) then Some callee else None)
+            old in
+        let has_phi b v =
+          Term.enum phi_t b
+          |> Seq.exists ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) v) in
+        let phi_lhs b v =
+          Term.enum phi_t b
+          |> Seq.find_map ~f:(fun p ->
+                 Base.Option.some_if (Var.same (Var.base (Phi.lhs p)) v)
+                   (Phi.lhs p)) in
+        let call = Term.find_exn blk_t old tids.(1) in
+        let call' = Term.find_exn blk_t result tids.(1) in
+        let stamp =
+          Term.get_attr call' Hike.Stack_model.versions_tag
+          |> Base.Option.value_exn in
+        let mentions v l = Base.List.exists l ~f:(fun (a, _) -> Var.same a v) in
+        check "SSA-24 fixture" (has_phi call kept && has_phi call dropped);
+        check "SSA-24 kept input phi keeps its version"
+          (match phi_lhs call kept, phi_lhs call' kept with
+           | Some a, Some b -> Var.equal a b
+           | _ -> false);
+        check "SSA-24 kept input phi" (has_phi call' kept);
+        check "SSA-24 dead input phi removed" (not (has_phi call' dropped));
+        check "SSA-24 dead stamp lane removed"
+          (not (mentions dropped stamp.Hike.Stack_model.Versions.args)
+           && not (mentions dropped stamp.Hike.Stack_model.Versions.rets)));
   ]
 
 let () = run "hike_ssa" tests

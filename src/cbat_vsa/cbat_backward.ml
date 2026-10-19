@@ -1167,7 +1167,7 @@ let writer_locus ~(synth : Hike_synth.table)
 #endif
           meet_cell ~landmarks:(Some st.landmarks) acc p)
     in
-    (* A def entered in its cached pre-state keeps the cached post; the
+    (* A def entered in its recorded pre-state keeps the recorded post; the
        first state a meet changes is denoted afresh from there on. *)
     List.fold_right prefix ~init:inputs ~f:(fun (d, pre, post) acc ->
         let acc =
@@ -1190,43 +1190,17 @@ let observer_locus : locus =
     harvest = (fun _ ~base:_ ~env:_ ~rhs:_ -> ());
     replay = (fun _ ~entry:_ ~prefix:_ edge -> edge) }
 
-(* A block's def chain with its pre/post states, positionally, in
-   reverse def order.  It depends only on (block, entry state): the
-   solve ctx caches the last denotation physically. *)
-let cached_prefix
-    ~(synth : Hike_synth.table)
-    (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
-    (blk : blk term) (entry : AI.t) : (def term * AI.t * AI.t) list =
-  let compute () =
-    Term.enum def_t blk
-    |> Seq.fold ~init:(entry, [])
-      ~f:(fun (st, acc) d ->
-          let post = denote_def ~synth d st in
-          (post, (d, st, post) :: acc))
-    |> snd
-  in
-  match cache with
-  | Some c ->
-    (match Core.Map.find !c (Term.tid blk) with
-     | Some (e0, pref) when phys_equal e0 entry -> pref
-     | _ ->
-       let pref = compute () in
-       c := Core.Map.set !c ~key:(Term.tid blk) ~data:(entry, pref);
-       pref)
-  | None -> compute ()
-
-(* The block's postcondition from the same fold that fills the prefix
-   cache, so the guard walk does not denote the chain again. *)
-let denote_defs_cached
-    ~(synth : Hike_synth.table)
-    (cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
-    (blk : blk term) (entry : AI.t) : AI.t =
-  match cached_prefix ~synth (Some cache) blk entry with
-  | [] -> entry
-  | (_, _, post) :: _ -> post
+(* The transient memory trace for one backward walk. Scalar values are
+   read from their SSA cells; no trace survives the walk. *)
+let definition_trace ~synth blk entry =
+  Term.enum def_t blk
+  |> Seq.fold ~init:(entry, []) ~f:(fun (before, trace) d ->
+      let after = denote_known_def ~synth d before in
+      let after = if phys_equal before after then after else AI.scalar_snapshot after in
+      (after, (d, before, after) :: trace))
+  |> snd
 
 let walk ~(synth : Hike_synth.table) ~(locus : locus)
-    ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
@@ -1235,7 +1209,7 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
   (* The walked block's IN state, handed in by the caller — no
      solution lookup, no snapshot copy. *)
   let blk_state = entry in
-  let prefixed = cached_prefix ~synth cache blk blk_state in
+  let prefixed = definition_trace ~synth blk blk_state in
   (* The seeds are the word env's entries (each seed's constraint is
      the edge state's own value for the var); the loads push the cells. *)
   let words =
@@ -1318,7 +1292,7 @@ let walk_block ?(on_write : write_site -> unit = ignore)
     ~seeds env blk =
   walk ~synth:!(rctx.Cbat_runctx.rc_synth)
     ~locus:(writer_locus ~synth:!(rctx.Cbat_runctx.rc_synth) ~on_write)
-    ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
+    ~entry ~landmarks
     ~witness ~seeds env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
@@ -1338,7 +1312,6 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
    memory cells alike). *)
 let acquire_unsat ~(synth : Hike_synth.table)
     ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
-    ~(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
   (* Outside a cycle no observation records, so the walk has no effect. *)
@@ -1353,7 +1326,7 @@ let acquire_unsat ~(synth : Hike_synth.table)
          reaches no leaf meet: skip the walk and its prefix replay. *)
       if not (Core.Set.is_empty seeds) then
         ignore
-          (walk ~synth ~locus:observer_locus ~cache ~entry ~landmarks ~witness ~seeds
+          (walk ~synth ~locus:observer_locus ~entry ~landmarks ~witness ~seeds
              constrained blk)
     end
   end)

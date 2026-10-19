@@ -28,9 +28,7 @@ type call_facts = {
   cf_sp : var;
 }
 
-(* Static per-block facts, one per sub block: the block's term, its call
-   facts, and the may-read set at block entry plus its phi lhs's (the GC
-   keep-set). *)
+(* Static block facts: the term, call lanes, and scalar input names. *)
 type block_facts = {
   bf_term : blk term;
   bf_call_facts : call_facts;
@@ -38,15 +36,7 @@ type block_facts = {
 }
 
 type refine_ctx = {
-  (* The last postcondition per source block, keyed physically by the
-     entry state it was computed from: a k-successor pred denotes once
-     per visit instead of once per edge. *)
-  rc_post : (AI.t * AI.t) Tid.Map.t ref;
-  (* The walked block's def chain with its pre/post states, keyed
-     physically by the entry state the chain was denoted from: the
-     postcondition fold, the writer and the observer all enter with the
-     block's IN state, so one chain serves them. *)
-  rc_prefix : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref;
+  rc_ssa : bool;
   (* The run's convention facts (Hike_abi is the one home): the sp var
      the walk anchors on, the call-read lanes, and the
      word size behind every word lookup. *)
@@ -90,82 +80,60 @@ let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
     Option.value (List.find machine_reads ~f:is_sp) ~default:abi.Hike_abi.sp in
   { cf_lanes; cf_sp }
 
-(* Backward may-liveness over exact vars: a phi kills its lhs, and its
-   operands are live at the end of the predecessor they come from. *)
-let live_in_of_sub ~def_reads ~def_writes ~phi_writes ~jmp_reads
-    (s : sub term) =
-  (* Only an immediate def kills; a memory def leaves the live set
-     alone. *)
-  let def d =
-    let kill =
-      match Var.typ (Def.lhs d) with
-      | Type.Imm _ -> def_writes d
-      | Type.Mem _ | Type.Unk -> Var.Set.empty
-    in
-    (kill, def_reads d)
-  in
-  let phi p = (phi_writes p, Var.Set.empty) in
-  let operands_of =
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        Term.enum phi_t b
-        |> Seq.fold ~init:m ~f:(fun m p ->
-            Seq.fold (Phi.values p) ~init:m ~f:(fun m (src, e) ->
-                Core.Map.update m src ~f:(fun vs ->
-                    Core.Set.union
-                      (Option.value vs ~default:Var.Set.empty)
-                      (Exp.free_vars e)))))
-  in
-  (* A block's jumps end it, so they carry its outgoing phi operands. *)
-  let jmp_operands =
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        match Core.Map.find operands_of (Term.tid b) with
-        | None -> m
-        | Some vs ->
-          Term.enum jmp_t b
-          |> Seq.fold ~init:m ~f:(fun m j ->
-              Core.Map.set m ~key:(Term.tid j) ~data:vs))
-  in
-  let jmp j =
-    ( Var.Set.empty,
-      Core.Set.union (jmp_reads j)
-        (Option.value (Core.Map.find jmp_operands (Term.tid j))
-           ~default:Var.Set.empty) )
-  in
-  Hike_bir_flow.liveness ~graph:(Sub.to_graph s) ~sub:s
-    ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
-    ~def ~phi ~jmp
+(* SSA construction gives every cross-block scalar its own phi. *)
+let scalar_ssa ~synth s =
+  let word v = match Var.typ v with Type.Imm _ -> true | _ -> false in
+  let definitions = Term.enum blk_t s
+    |> Seq.concat_map ~f:(fun b ->
+        Seq.append (Term.enum def_t b |> Seq.map ~f:Def.lhs)
+          (Term.enum phi_t b |> Seq.map ~f:Phi.lhs))
+    |> Seq.filter ~f:word |> Seq.to_list in
+  let result = Term.enum blk_t s |> Seq.for_all ~f:(fun b ->
+      Term.has_attr b Hike_stack_model.versions_tag)
+  && List.exists definitions ~f:(fun v -> Var.index v > 0)
+  && List.for_all definitions ~f:(fun v ->
+      Var.index v > 0 || Hike_synth.is_temporary ~table:synth v)
+  && List.length definitions = Set.length (Var.Set.of_list definitions) in
+  result
 
-(* The per-run analysis context: one fold over the sub's blocks builds
-   the per-block fact records; the live-in fixpoint feeds them. *)
-let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes
+(* Free reads within the block supply its entry arguments. All other
+   incoming scalars are named by phis, so SSA needs no liveness solve. *)
+let local_inputs ~def_reads ~def_writes ~jmp_reads b =
+  let phis = Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+    |> Var.Set.of_list in
+  let written, needed = Term.enum def_t b
+    |> Seq.fold ~init:(phis, Var.Set.empty) ~f:(fun (written, needed) d ->
+        (Set.union written (def_writes d),
+         Set.union needed (Set.diff (def_reads d) written))) in
+  Term.enum jmp_t b |> Seq.fold ~init:needed ~f:(fun needed j ->
+      Set.union needed (Set.diff (jmp_reads j)
+          (Set.union written (Hike_stack_model.writes (`Jmp j)))))
+
+(* Only SSA block inputs participate in scalar fixpoint delivery. *)
+let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     ~jmp_reads
     ~(synth : Hike_synth.table ref)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
-    (s : sub term) : refine_ctx = {
-  rc_nonneg = (fun ~env:_ _ -> false);
-  rc_landmarks = Cbat_landmarks.create ();
-  rc_post = ref Tid.Map.empty;
-  rc_prefix = ref Tid.Map.empty;
-  rc_abi = abi;
-  rc_synth = synth;
-  rc_sub_lookup = sub_lookup;
-  rc_blocks =
-    let live =
-      live_in_of_sub ~def_reads ~def_writes ~phi_writes ~jmp_reads s
-    in
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        Core.Map.set m ~key:(Term.tid b)
-          ~data:{
-            bf_term = b;
-            bf_call_facts = call_facts_of_block ~abi b;
-            bf_live_ids =
-              Cbat_var_id.intern_set
-                (Core.Set.union
-                   (Option.value ~default:Var.Set.empty
-                      (Core.Map.find live.before (Term.tid b)))
-                   (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
-                    |> Var.Set.of_list)) });
-}
+    (s : sub term) : refine_ctx =
+  let ssa = scalar_ssa ~synth:!synth s in
+  {
+    rc_ssa = ssa;
+    rc_nonneg = (fun ~env:_ _ -> false);
+    rc_landmarks = Cbat_landmarks.create ();
+    rc_abi = abi;
+    rc_synth = synth;
+    rc_sub_lookup = sub_lookup;
+    rc_blocks =
+      Term.enum blk_t s
+      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+          let inputs = if ssa then local_inputs ~def_reads ~def_writes ~jmp_reads b
+            else Var.Set.empty in
+          Core.Map.set m ~key:(Term.tid b)
+            ~data:{
+              bf_term = b;
+              bf_call_facts = call_facts_of_block ~abi b;
+              bf_live_ids = Cbat_var_id.intern_set
+                  (Set.union inputs
+                     (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+                      |> Var.Set.of_list)) });
+  }

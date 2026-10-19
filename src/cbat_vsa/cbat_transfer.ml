@@ -670,10 +670,23 @@ let denote_def ~(synth : Hike_synth.table) (df : def term) (env : AI.t) : AI.t =
   let env' = denote_def_escaping ~synth ~escaped df env in
   if !escaped then AI.escape_frame env' else env'
 
+(* A scalar definition binds its cell, and the cell is the sub's current
+   value of that variable, so the block's replay computes it.  Memory
+   operations replay in order; no before-state cache is needed. *)
+let denote_known_def ~synth df env = denote_def ~synth df env
+
+(* The one def replay: a no-op def keeps the state physically and skips
+   the snapshot; otherwise the snapshot drops caller-supplied locals. *)
+let replay_def ~synth env d =
+  let after = denote_known_def ~synth d env in
+  if phys_equal after env then after else AI.scalar_snapshot after
+
 let denote_defs ~(synth : Hike_synth.table) (b : blk term) : AI.t -> AI.t =
-  fun env0 ->
-    Term.enum def_t b
-    |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def ~synth df env)
+  fun env ->
+    Term.enum def_t b |> Seq.fold ~init:env ~f:(replay_def ~synth)
+
+(* The edge replay and the solution's save share the same fold. *)
+let denote_block_values = denote_defs
 
 (* The phis of [blk] along the edge from [source]: each reads its
    operand in the state the edge delivers, then all bind together.  A
@@ -697,11 +710,17 @@ let denote_phis ~(synth : Hike_synth.table) ~(source : tid) (blk : blk term)
           match denote_exp ~synth e env with
           | Ok ev -> Some (e, ev)
           | Error _ -> top ()) in
+    let from = env in
     Term.enum phi_t blk |> Seq.to_list
     |> List.map ~f:(fun p -> (Phi.lhs p, value p))
     |> List.fold ~init:env ~f:(fun env (lhs, v) ->
         match v with
-        | Some (e, ev) -> bind_value lhs e ev env
+        | Some (e, ev) ->
+          let env = bind_value lhs e ev env in
+          (match e with
+           | Bil.Var source when Type.equal (Var.typ source) (Var.typ lhs) ->
+             AI.copy_slices ~from ~source ~target:lhs env
+           | _ -> env)
         | None -> env)
 
 (* One per-block state replay: the block's defs fold [denote_def]
@@ -715,7 +734,7 @@ let fold_block_states ~(synth : Hike_synth.table)
     Term.enum def_t blk
     |> Seq.fold ~init:(Solution.get sol (Term.tid blk), init)
          ~f:(fun (st_before, acc) d ->
-             let st_after = denote_def ~synth d st_before in
+             let st_after = replay_def ~synth st_before d in
              (st_after, f st_before st_after d acc))
   in
   (acc, st_end)

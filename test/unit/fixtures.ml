@@ -1055,7 +1055,7 @@ let empty_spec : B2l.section_spec =
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) (spec : B2l.section_spec)
+let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) ?(verify = false) (spec : B2l.section_spec)
     (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
@@ -1097,6 +1097,7 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) (spec : B2l.se
   B2l.emit_program llvm_ctx llvm_module
     ~target:(x86_target ()) ~addr_bits:64
     ~symtab:None ~synth:synth spec prog;
+  if verify then Base.Option.iter (Llvm_analysis.verify_module llvm_module) ~f:failwith;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx;

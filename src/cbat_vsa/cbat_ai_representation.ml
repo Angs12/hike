@@ -18,14 +18,13 @@ include Cbat_vsa_utils
 module MapLattice = Cbat_map_lattice
 module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
-module Clp = Cbat_clp
 
 (* Abstract state: words, memories.  Stack provenance is the WORD value
    itself — the entry RSP's word is seeded with the symbolic segment
    base and SP-derived addresses stay [StackOff] through arithmetic,
    memory round-trips, and refinement. *)
 
-type wordset = WordSet.t
+type wordset = WordSet.t [@@deriving bin_io, sexp, compare]
 
 (* The frame's escape set: the carried set K of the call-escape design
    (T36 D5/D6) in its first form.  [Whole_frame] says a stack address
@@ -72,11 +71,26 @@ let slice_owner (k : int) : int = k lsr 16
 let slice_hi (k : int) : int = (k lsr 8) land 0xff
 let slice_lo (k : int) : int = k land 0xff
 
+(* Each SSA value has one cell in the sub.  A block's env holds its
+   incoming phi values and its own memory; the definitions' values live
+   in the cells.  Edge refinements are transient overrides. *)
+type scalar_store = {
+  definitions : int Int.Map.t;
+  scopes : Int.Set.t Tid.Map.t;
+  values : wordset array;
+} [@@deriving bin_io, sexp, compare]
+
+type scalar_view = {
+  store : scalar_store;
+  block : tid;
+} [@@deriving bin_io, sexp, compare]
+
 type t = {
   memories : MemEnv.t;
   words : WordEnv.t;
   slices : SliceEnv.t;
   escaped : escape;
+  scalar : scalar_view option;
 } [@@deriving bin_io, sexp, compare]
 
 (* The escape set is a path fact that only a call or a store raises, so
@@ -86,19 +100,44 @@ let top : t =
     words = WordEnv.top;
     slices = SliceEnv.top;
     escaped = Contained;
+    scalar = None;
   }
 let bottom : t =
   { memories = MemEnv.bottom;
     words = WordEnv.bottom;
     slices = SliceEnv.bottom;
     escaped = Contained;
+    scalar = None;
   }
 
+let scalar_slot v k =
+  Map.find v.store.definitions k
+
+(* The cell's value: the definition's own fact, shared by every state of
+   the sub.  A var with no cell has none. *)
+let cell_word v k =
+  match scalar_slot v k with
+  | None -> None
+  | Some slot -> Some (Array.get v.store.values slot)
+
+(* The value of a var in this state: the env's own binding (an incoming
+   phi value) when it has one, else the definition's cell. *)
+let effective_word (width : int) (e : t) (key : int) : wordset =
+  match e.scalar with
+  | None -> WordEnv.find width e.words key
+  | Some view ->
+    (match WordEnv.find_opt width e.words key with
+     | Some value -> value
+     | None ->
+       (match cell_word view key with
+        | Some value -> value
+        | None -> WordSet.top width))
+
 let equal (e1 : t) e2 : bool =
-  MemEnv.equal e1.memories e2.memories &&
-  WordEnv.equal e1.words e2.words &&
-  SliceEnv.equal e1.slices e2.slices &&
-  compare_escape e1.escaped e2.escaped = 0
+  phys_equal e1 e2 ||
+  (MemEnv.equal e1.memories e2.memories &&
+   compare_escape e1.escaped e2.escaped = 0 &&
+   WordEnv.equal e1.words e2.words && SliceEnv.equal e1.slices e2.slices)
 
 let equal_slices_top (s : SliceEnv.t) : bool = SliceEnv.equal s SliceEnv.top
 
@@ -110,8 +149,7 @@ let escape_frame (e : t) : t =
   | Whole_frame -> e
   | Contained -> { e with escaped = Whole_frame }
 
-(* A write that leaves the maps physically unchanged keeps the record,
-   so physically keyed caches still hit. *)
+(* Unchanged memory keeps its state record physically shared. *)
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
   let memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data in
   if phys_equal memories e.memories then e else { e with memories }
@@ -125,11 +163,26 @@ let drop_slices (e : t) ~(owner : int) : t =
 
 (* A narrowed word is still described by its slices: they stay. *)
 let refine_word (e : t) ~(key : var) ~(data : wordset) : t =
-  let words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data in
-  if phys_equal words e.words then e else { e with words }
+  let key = Cbat_var_id.intern key in
+  let width = WordSet.bitwidth data in
+  if WordSet.equal (effective_word width e key) data then e
+  else
+    let words = WordEnv.add e.words ~key ~data in
+    if phys_equal words e.words then e else { e with words }
 
+(* The env holds its incoming phi values; a definition of this block
+   binds its cell, not the env.  The cell is the sub's current value of
+   that variable, exactly as a register is. *)
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
-  refine_word (drop_slices e ~owner:(Cbat_var_id.intern key)) ~key ~data
+  let owner = Cbat_var_id.intern key in
+  match e.scalar with
+  | Some v when Set.mem (Map.find_exn v.store.scopes v.block) owner ->
+    let e = drop_slices e ~owner in
+    (match Map.find v.store.definitions owner with
+     | Some slot -> v.store.values.(slot) <- data
+     | None -> ());
+    e
+  | _ -> refine_word (drop_slices e ~owner) ~key ~data
 
 let find_slice (env : t) (v : var) ~(hi : int) ~(lo : int) : wordset =
   if not (slice_valid ~hi ~lo) then WordSet.top 1
@@ -145,42 +198,107 @@ let add_slice (e : t) (v : var) ~(hi : int) ~(lo : int) ~(data : wordset) : t =
         ~key:(slice_key (Cbat_var_id.intern v) ~hi ~lo) ~data in
     if phys_equal slices e.slices then e else { e with slices }
 
+(* Identity phi operands carry the same bit-range facts under a new name.
+   Read them from the incoming state before any phi lhs is overwritten. *)
+let copy_slices ~from ~source ~target e =
+  let owner = Cbat_var_id.intern source in
+  SliceEnv.fold from.slices ~init:e ~f:(fun ~key ~data e ->
+      if slice_owner key = owner then
+        add_slice e target ~hi:(slice_hi key) ~lo:(slice_lo key) ~data
+      else e)
+
 (* The slices of [from] met into [e]'s: a conflicting pair is kept
    apart rather than read as an unreachable state. *)
 let carry_slices ~(from : t) (e : t) : t =
-  if equal_slices_top from.slices || phys_equal from.slices e.slices then e
+  let slices = from.slices in
+  if equal_slices_top slices || SliceEnv.equal slices SliceEnv.bottom then e
   else
-    let slices = SliceEnv.meet e.slices from.slices in
-    if SliceEnv.equal slices SliceEnv.bottom then e
-    else if phys_equal slices e.slices then e
-    else { e with slices }
+    let result = SliceEnv.fold slices ~init:(Some e) ~f:(fun ~key ~data acc ->
+        Option.bind acc ~f:(fun e ->
+            let v = Cbat_var_id.var_of (slice_owner key) in
+            let hi = slice_hi key and lo = slice_lo key in
+            let old = find_slice e v ~hi ~lo in
+            let data = WordSet.meet old data in
+            if WordSet.is_bottom data then None
+            else Some (if WordSet.equal old data then e else add_slice e v ~hi ~lo ~data))) in
+    Option.value result ~default:e
 
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
-  WordEnv.find i env.words (Cbat_var_id.intern v)
+  effective_word i env (Cbat_var_id.intern v)
 
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
   MemEnv.find i env.memories (Cbat_var_id.intern v)
 
+let create_scalars ~variables ~blocks ~seed =
+  let next = ref 0 and values = ref [] in
+  let allocate value =
+    let slot = !next in
+    incr next;
+    values := value :: !values;
+    slot in
+  let width v = match Var.typ v with Type.Imm w -> w | _ -> assert false in
+  let initial v =
+    match seed.scalar with
+    | None -> find_word (width v) seed v
+    | Some view ->
+      Option.value_map (Map.find view.store.definitions (Cbat_var_id.intern v))
+        ~default:(WordSet.top (width v)) ~f:(Array.get view.store.values) in
+  let definitions = List.fold variables ~init:Int.Map.empty ~f:(fun slots v ->
+      Map.set slots ~key:(Cbat_var_id.intern v) ~data:(allocate (initial v))) in
+  let scopes = List.fold blocks ~init:Tid.Map.empty
+      ~f:(fun scopes (block, locals) ->
+          Map.set scopes ~key:block ~data:(Cbat_var_id.intern_set locals)) in
+  { definitions; scopes; values = Array.of_list (List.rev !values) }
+
+(* The edge's own bindings: the destination's incoming phi values, read
+   from this state's own bindings or from the definitions' cells.  No
+   dead scalar binding enters the destination's env.  Existing bindings
+   are filtered first; only a kept key with no surviving binding falls
+   back to its cell. *)
+let project ~keep ~block e =
+  if equal e bottom then bottom else
+  let words = WordEnv.filter_keys e.words ~f:(fun k -> Set.mem keep k) in
+  let words = Set.fold keep ~init:words ~f:(fun words key ->
+      match WordEnv.find_opt 0 words key with
+      | Some data ->
+        (* Re-add through the lattice so a stored top is dropped. *)
+        WordEnv.add words ~key ~data
+      | None ->
+        let v = Cbat_var_id.var_of key in
+        match Var.typ v with
+        | Type.Imm w -> WordEnv.add words ~key ~data:(find_word w e v)
+        | _ -> words) in
+  let slices =
+    SliceEnv.filter_keys e.slices ~f:(fun k -> Set.mem keep (slice_owner k)) in
+  { e with words; slices;
+           scalar = (match e.scalar with
+             | Some v -> Some { v with block }
+             | None -> None) }
+
+(* The block's env keeps its own incoming phi values; the definitions'
+   values live in the cells. *)
+let enter_block store block e =
+  if equal e bottom then bottom else
+  { e with scalar = Some { store; block } }
+
+(* The env carries only incoming phi values and memory; a def's cell owns
+   its value.  Drop block-local bindings a pre-state may have supplied, so
+   they cannot shadow a cell. *)
+let scalar_snapshot e =
+  match e.scalar with
+  | None -> e
+  | Some v ->
+    let locals = Map.find_exn v.store.scopes v.block in
+    let words =
+      WordEnv.filter_keys e.words ~f:(fun k -> not (Set.mem locals k)) in
+    let slices =
+      SliceEnv.filter_keys e.slices
+        ~f:(fun k -> not (Set.mem locals (slice_owner k))) in
+    if phys_equal words e.words && phys_equal slices e.slices then e
+    else { e with words; slices }
+
 (* An SSA version is a single-definition value, never an ABI lane. *)
 let versioned (k : int) : bool = Var.index (Cbat_var_id.var_of k) > 0
-
-(* Drop dead virtual temps and dead SSA versions; unversioned machine
-   regs are the ABI surface and stay.  Missing keys read top, so
-   dropping only weakens. *)
-let gc ~(synth : Hike_synth.table) (e : t) ~(keep : Int.Set.t) : t =
-  let kept k =
-    let v = Cbat_var_id.var_of k in
-    (not (Var.is_virtual v || Hike_synth.is_temporary ~table:synth v
-          || versioned k))
-    || Core.Set.mem keep k in
-  let words = WordEnv.filter_keys e.words ~f:kept in
-  let slices =
-    SliceEnv.filter_keys e.slices ~f:(fun k -> kept (slice_owner k)) in
-  if phys_equal words e.words && phys_equal slices e.slices then e
-  else { e with words; slices }
-
-
-
 
 (* Bindings print by variable, not by id. *)
 let pp_words ppf (m : WordEnv.t) =
@@ -206,14 +324,18 @@ let pp ppf (e : t) =
   end
 
 (* The join's result record is the first operand itself when both
-   component maps come back physically unchanged. *)
+   component maps come back physically unchanged.  The cell table rides
+   along: the definitions' values are the sub's, not the state's. *)
 let rebuilt (e1 : t) ~(escaped : escape) memories words slices : t =
   if phys_equal memories e1.memories && phys_equal words e1.words
      && phys_equal slices e1.slices
      && compare_escape escaped e1.escaped = 0 then e1
-  else { memories; words; slices; escaped }
+  else { e1 with memories; words; slices; escaped }
 
 let join (e1 : t) (e2 : t) : t =
+  if phys_equal e1 e2 || phys_equal e2 bottom then e1
+  else if phys_equal e1 bottom then e2
+  else
   rebuilt e1 ~escaped:(join_escape e1.escaped e2.escaped)
     (MemEnv.join e1.memories e2.memories)
     (WordEnv.join e1.words e2.words)
@@ -348,7 +470,8 @@ let walk_landmarks ~(head : Tid.t)
                 ~data:(Mem.widen_join_op extr old nw)
             end)
     in
-    { memories; words; slices; escaped = join_escape e1.escaped e2.escaped }
+    { e1 with memories; words; slices;
+             escaped = join_escape e1.escaped e2.escaped }
 
 (* Extrapolate [need]'s keys by [steps]; each key still reads its own
    row first. *)
@@ -372,7 +495,8 @@ let meet (e1 : t) (e2 : t) : t =
     (* Conflicting slices are dropped, not read as unreachable. *)
     let slices =
       if SliceEnv.equal slices SliceEnv.bottom then SliceEnv.top else slices in
-    { memories; words; slices; escaped = join_escape e1.escaped e2.escaped }
+    { e1 with memories; words; slices;
+             escaped = join_escape e1.escaped e2.escaped }
 
 let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
@@ -384,6 +508,7 @@ let precedes (e1 : t) (e2 : t) : bool =
    key reads top, so the others are dropped.  A versioned var keeps its
    value: no call redefines it. *)
 let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
+  if Option.is_some env.scalar then env else
   let kept k = Core.Set.mem preserved k || versioned k in
   let words = WordEnv.filter_keys env.words ~f:kept in
   let slices =

@@ -123,7 +123,7 @@ let tests : unit Alcotest.test list =
 
 
     (* SP-RESTORE: the direct call rebinds sp to post-push + 8. *)
-    pin "EMIT-06" "the call-pushed word rides the restore def at the continuation; no SP phi survives"
+    pin "EMIT-06" "the call-pushed word rides the continuation phi"
       (fun () ->
         let rsp = sp in
         let m = memv "sp_m" in
@@ -151,11 +151,9 @@ let tests : unit Alcotest.test list =
         in
         let callee = fst (sub_of "sp_callee" [ [], [ (0, mk_ret) ] ]) in
         let ir = emit_ir ~synth:Hike.Synth.empty [ caller; callee ] in
-        (* The un-anchored frame folds the restore to a constant; the
-           pinned fact is the absence of any SP phi or sp_restored
-           lane — the continuation needs no merge. *)
+        (* Even a single continuation receives its values through phis. *)
         check "EMIT-06"
-          (not (contains_substring ir " = phi i64 ")
+          (contains_substring ir " = phi i64 "
           && not (contains_substring ir "sp_restored")
           && contains_substring ir "store i64 1234"));
 
@@ -781,9 +779,13 @@ let tests : unit Alcotest.test list =
               [Def.create m (Bil.Store (Bil.Var m,Bil.Int (atomic_w 0x2010),
                   Bil.Var old,LittleEndian,`r64))], [(0,mk_ret)] ] in
         let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
+        let carried = Core.String.split_lines ir
+          |> Base.List.find ~f:(fun line -> contains_substring line "= phi i64 [ %xold,") in
         check "EMIT-48"
           (contains_substring ir "i64 7 seq_cst"
-           && contains_substring ir "store i64 %xold"
+           && Base.Option.exists carried ~f:(fun line ->
+               let lhs = Core.String.lsplit2_exn line ~on:'=' |> fst |> Core.String.strip in
+               contains_substring ir ("store i64 " ^ lhs ^ ","))
            && not (contains_substring ir " = load ")));
 
     pin "EMIT-50" "a register xchg carries no markers and stays plain"
@@ -891,6 +893,16 @@ let tests : unit Alcotest.test list =
     (* ENTRY-NAME: the entry sub is analysed, never defined, and its
        declaration carries the ABI's process-entry symbol — a stripped
        binary's decoded tid must not leak into the link. *)
+    pin "EMIT-64" "phis follow emitted edges when an unconditional jump removes a fallthrough"
+      (fun () ->
+        let x = int_ret 0 in
+        let sub, _ = sub_of "dead_phi_edge"
+            [ [Def.create x (Bil.Int (Cbat_word.to_word (w64 1)))],
+              [(1, mk_goto); (2, mk_goto)];
+              [], [(0, mk_ret)];
+              [], [(0, mk_ret)] ] in
+        ignore (emit_ir_spec ~verify:true ~synth:Hike.Synth.empty empty_spec [sub]));
+
     pin "EMIT-46"
       "the entry's declaration carries the ABI entry symbol, not the decoded tid name"
       (fun () ->

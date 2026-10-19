@@ -2,9 +2,9 @@
    reads its destination through. *)
 open Bap.Std
 
-(* The sub's last rhs per var, built once so a loop resolving many
+(* The sub's definitions and phis, built once so a loop resolving many
    targets for one sub shares the scan. *)
-type index = exp Var.Map.t
+type index
 
 val index_of_sub : sub term -> index
 

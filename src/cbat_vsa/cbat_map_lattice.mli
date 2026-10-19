@@ -69,6 +69,10 @@ module type S_val = sig
   module Key : Value.S
   include S with type t := t and module Key := Key
   include Value.S with type t := t
+
+  (* The stored value, or None when the key is unmapped.  A stored
+     binding is never the lattice top, so None means "the default". *)
+  val find_opt : Val.idx -> t -> Key.t -> Val.t option
 end
 
 module type Key_val = sig

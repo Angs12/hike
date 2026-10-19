@@ -7,6 +7,11 @@ open Bap_core_theory
   val prepare_sub :
     synth:Hike_synth.table -> target:Theory.Target.t -> sub term -> sub term
 
+  (** The initial edge inserted before an entry block with backedges. *)
+  val entry_tag : unit Value.Tag.t
+
+  (** Every incoming register has a phi, including with one predecessor.
+      Memory retains its model identity. *)
   val ssa_sub :
     synth:Hike_synth.table -> target:Theory.Target.t -> sub term -> sub term
 

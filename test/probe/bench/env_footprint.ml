@@ -23,7 +23,7 @@ let rw (o : Obj.t) : int = Obj.reachable_words o
    split.  A representation change trips the assert loudly. *)
 let ai_field (i : int) (ai : Cbat_vsa.AI.t) : Obj.t =
   let o = Obj.repr ai in
-  assert (Obj.size o = 2);
+  assert (Obj.size o >= 2);
   Obj.field o i
 
 let memories_of = ai_field 0

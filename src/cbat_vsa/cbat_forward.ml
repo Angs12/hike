@@ -122,7 +122,7 @@ let denote_jump
     Option.iter jp.jp_disabled
       ~f:(fun dc ->
         Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~entry
-          ~landmarks:rctx.rc_landmarks ~cache:rctx.rc_prefix
+          ~landmarks:rctx.rc_landmarks
           ~witness:rctx.rc_nonneg
           env b dc);
     let env =
@@ -205,23 +205,12 @@ let denote_block
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(source : tid) (env : AI.t)
     : target:tid -> AI.t =
+  (* A woken edge can visit an unreached predecessor. Its calls and
+     stores must not turn bottom into a partially populated state. *)
+  if AI.equal env AI.bottom then fun ~target:_ -> AI.bottom
+  else
   let plan = plan_of source in
   let b = plan.bp_term in
-  (* The block's postcondition depends only on the source block's
-     IN state: one denotation per (block, state), shared by every
-     successor edge. *)
-  let postcond =
-    match Core.Map.find !(rctx.Cbat_runctx.rc_post) source with
-    | Some (e0, p0) when phys_equal e0 env -> p0
-    | _ ->
-      let p =
-        if plan.bp_has_conds then
-          Cbat_backward.denote_defs_cached ~synth:!(rctx.rc_synth)
-            rctx.Cbat_runctx.rc_prefix b env
-        else denote_defs ~synth:!(rctx.rc_synth) b env in
-      rctx.Cbat_runctx.rc_post :=
-        Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
-      p
-  in
+  let postcond = denote_block_values ~synth:!(rctx.rc_synth) b env in
   fun ~target ->
     denote_jump ~preserved ~callee ~rctx plan postcond ~entry:env ~target

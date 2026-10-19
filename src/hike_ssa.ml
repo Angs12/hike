@@ -1,11 +1,6 @@
-(* SSA materialization: every cross-block register value flows through
-   a BIR phi term, so the emitter renders joins straight off the terms.
-   The CFG is the BIR's own (every edge an explicit jmp — the completion
-   writes the guards' fallthroughs).  SP is renamed like any
-   register; the call-pushed word rides a restore def (single-pred
-   continuation) or the phi incoming (shared continuation).  Each call
-   site's ret lanes mint fresh versions, and every block carries the
-   versions in effect at its end. *)
+(* Every incoming register value has a block-local phi, including on
+   single-predecessor edges. Memory keeps its model storage identity.
+   Machine-call SP operands restore the pushed return-address word. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -17,12 +12,10 @@ module Abi = Hike_abi
    producer/emitter contract home). *)
 let versions_tag = Model.versions_tag
 
-(* Marks the SP restore defs the construction inserts at call
-   continuations, so an update can drop and re-derive them. *)
-let restore_tag : unit Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-ssa-restore"
-    ~uuid:"7b3e9a14-0c52-4f6d-9d81-5a2c6e4f1b07"
-    (module Core.Unit)
+let entry_tag : unit Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ssa-entry"
+    ~uuid:"1072b3e1-a039-4a5b-b340-d052dded07cd" (module Core.Unit)
+
 module Versions = Model.Versions
 
 module High_water = struct
@@ -80,35 +73,7 @@ let debug_graph g =
               (Graphs.Tid.Node.succs n g |> Seq.to_list
               |> Base.List.map ~f:Tid.name)))
 
-let debug_frontiers g frontier =
-  Format.eprintf "SSA-DBG dom-tree: %d nodes; frontiers: %s@."
-    (Base.List.length (Graphs.Tid.nodes g |> Seq.to_list))
-    (String.concat ","
-       (Graphs.Tid.nodes g
-        |> Seq.to_list
-        |> Base.List.filter_map ~f:(fun n ->
-               let fr = Graphlib.Std.Frontier.enum frontier n |> Seq.to_list in
-               if Base.List.is_empty fr then None
-               else
-                 Some
-                   (Tid.name n ^ "=>"
-                    ^ String.concat "," (Base.List.map fr ~f:Tid.name)))))
-
-let debug_vars vars =
-  Format.eprintf "SSA-DBG vars(%d): [%s]@." (Core.Set.length vars)
-    (String.concat "," (Core.Set.to_list vars |> Base.List.map ~f:Var.name))
-
-let debug_var_sites ~iterated_frontier v (tids : Tid.t list) =
-  let bs = Graphs.Tid.start :: tids |> Core.Set.of_list (module Tid) in
-  Format.eprintf "SSA-DBG var %s sites=[%s] idf=[%s]@." (Var.name v)
-    (String.concat "," (Base.List.map tids ~f:Tid.name))
-    (String.concat ","
-       (Core.Set.to_list (iterated_frontier bs) |> Base.List.map ~f:Tid.name))
 #endif
-
-(* The SP restore def at a call's single-pred continuation. *)
-let with_top_def (blk : blk term) (d : def term) : blk term =
-  Term.prepend def_t blk d
 
 (* One phi rewrite: the incoming from [src] becomes [exp]. *)
 let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
@@ -116,42 +81,6 @@ let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
     (Phi.values phi
     |> Seq.map ~f:(fun (s, e) -> if Tid.equal s src then (s, exp) else (s, e))
     |> Seq.to_list)
-
-(* Pruned SSA: a phi sits at the iterated dominance frontier of a var's
-   writes, and only where the var is live-in.  SP also has an edge
-   definition at a machine call with a continuation.  The result maps
-   each block to the base vars that need a phi there. *)
-let phi_needs ~sp ~vars ~def_sites_of ~live_in ~call_blocks
-    ~machine_blk_tids ~has_continuation ~iterated_frontier :
-    Var.Set.t Tid.Map.t =
-#ifdef VSA_DEBUG
-  debug_vars vars;
-#endif
-  Core.Set.to_list vars
-    |> Base.List.fold ~init:Tid.Map.empty ~f:(fun needs v ->
-#ifdef VSA_DEBUG
-        debug_var_sites ~iterated_frontier v (def_sites_of v);
-#endif
-        let sites = def_sites_of v in
-        let sites =
-          if Var.same v sp then
-            sites
-            @ Base.List.filter_map call_blocks ~f:(fun (blk, cs) ->
-                  if
-                    Core.Set.mem machine_blk_tids (Term.tid blk)
-                    && Base.List.exists cs ~f:has_continuation
-                  then Some (Term.tid blk)
-                  else None)
-          else sites
-        in
-        let bs = Graphs.Tid.start :: sites |> Core.Set.of_list (module Tid) in
-        iterated_frontier bs
-        |> Core.Set.fold ~init:needs ~f:(fun needs tid ->
-               if Core.Set.mem (live_in tid) v then
-                 Core.Map.update needs tid ~f:(function
-                   | None -> Var.Set.singleton v
-                   | Some vs -> Core.Set.add vs v)
-               else needs))
 
 (* The phis of [needs] in the blocks [only] accepts. *)
 let place_phis ~preds_of ~only (needs : Var.Set.t Tid.Map.t) (sub : sub term) :
@@ -337,8 +266,32 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty) ~abi ~sp
 let is_real tid =
   not (Tid.equal tid Graphs.Tid.start) && not (Tid.equal tid Graphs.Tid.exit)
 
+(* A backedge to the first block needs a separate initial incoming edge.
+   Keep its identity stable across fresh construction and updates; an
+   update reuses the old entry's attrs, so rebuilding it is not a change. *)
+let with_entry ?old sub =
+  match Term.first blk_t sub with
+  | None -> sub
+  | Some first ->
+    let g = Sub.to_graph sub in
+    if Graphs.Tid.Node.preds (Term.tid first) g |> Seq.exists ~f:is_real then
+      let tid = Tid.for_name ~package:"hike" ("ssa-entry-" ^ Tid.to_string (Term.tid sub)) in
+      let entry = Blk.create ~tid ~jmps:[Jmp.create (Goto (Direct (Term.tid first)))] ()
+        |> fun b -> Term.set_attr b entry_tag () in
+      let entry =
+        match old with
+        | Some old ->
+          (match Term.find blk_t old tid with
+           | Some previous when Term.has_attr previous entry_tag ->
+             Term.with_attrs entry (Term.attrs previous)
+           | _ -> entry)
+        | None -> entry
+      in
+      Term.prepend blk_t sub entry
+    else sub
+
 (* What phi placement and renaming share for one pre-SSA sub: its CFG,
-   the call restores, and the blocks' phi needs. *)
+   the call edges, and the blocks' phi needs. *)
 type ctx = {
   abi : Abi.t;
   sp : var;
@@ -348,7 +301,7 @@ type ctx = {
   succs_of : Tid.t -> Tid.t list;
   preds_of : Tid.t -> Tid.t list;
   machine_blk_tids : Tid.Set.t;
-  sub : sub term;  (* the input with the SP restore defs inserted *)
+  sub : sub term;
   needs : Var.Set.t Tid.Map.t;
 }
 
@@ -357,7 +310,7 @@ let analyze ~(synth : Hike_synth.table)
     let abi = Abi.of_target target in
     let pc = Abi.pc target in
     (* The sub's own SP var: the retype gave it the pointer sort, and the
-       SP-restore def must keep that sort (a fresh [Abi.sp] would
+       phi must keep that sort (a fresh [Abi.sp] would
        reintroduce an integer SP beside the pointer one). *)
     let sp =
       Term.enum blk_t sub
@@ -389,20 +342,6 @@ let analyze ~(synth : Hike_synth.table)
     let preds_of tid =
       Graphs.Tid.Node.preds tid g |> Seq.to_list |> Base.List.filter ~f:is_real
     in
-    (* The call blocks: ret-mint sites and (for SP) edge-def sites. *)
-    let call_info (blk : blk term) =
-      Term.enum jmp_t blk
-      |> Seq.filter_map ~f:(fun j ->
-             Base.Option.map (call_of_jmp j) ~f:(fun c -> (j, c)))
-      |> Seq.to_list
-    in
-    let call_blocks =
-      Term.enum blk_t sub
-      |> Seq.filter_map ~f:(fun blk ->
-             let cs = call_info blk in
-             if Base.List.is_empty cs then None else Some (blk, cs))
-      |> Seq.to_list
-    in
     let machine_blk_tids =
       Term.enum blk_t sub
       |> Seq.filter ~f:(fun blk ->
@@ -411,83 +350,11 @@ let analyze ~(synth : Hike_synth.table)
       |> Seq.to_list
       |> Core.Set.of_list (module Tid)
     in
-    let has_continuation (_, c) =
-      match Call.return c with Some (Direct _) -> true | _ -> false
-    in
-    let continuation_of (_, c) =
-      match Call.return c with
-      | Some (Direct t) -> Some t
-      | _ -> None
-    in
-    (* The SP restore def lands at the call's continuation when that
-       block's only predecessor is the call block. *)
-    let restores =
-      Base.List.fold call_blocks ~init:Tid.Map.empty ~f:(fun acc (blk, cs) ->
-          Base.List.fold cs ~init:acc ~f:(fun acc site ->
-              match continuation_of site with
-              | Some ft when
-                  Core.Set.mem machine_blk_tids (Term.tid blk)
-                  && preds_of ft = [ Term.tid blk ] ->
-                  let restore =
-                    Def.create sp
-                      (Bil.BinOp (Bil.PLUS, Bil.Var sp, restore_word ~abi))
-                    |> fun d -> Term.set_attr d restore_tag ()
-                  in
-                  Core.Map.add_multi acc ~key:ft ~data:restore
-              | _ -> acc))
-    in
-    let sub =
-      if Core.Map.is_empty restores then sub
-      else
-        Term.map blk_t sub ~f:(fun b ->
-            match Core.Map.find restores (Term.tid b) with
-            | Some defs -> Base.List.fold (Base.List.rev defs) ~init:b ~f:with_top_def
-            | None -> b)
-    in
-    let blks = Term.enum blk_t sub |> Seq.to_list in
-    (* The dom/phi machinery walks the BIR's own CFG ([g] above). *)
 #ifdef VSA_DEBUG
     debug_graph g;
 #endif
     let dom =
       Graphlib.Std.Graphlib.dominators (module Graphs.Tid) g Graphs.Tid.start
-    in
-    let frontier = Graphlib.Std.Graphlib.dom_frontier (module Graphs.Tid) g dom in
-#ifdef VSA_DEBUG
-    debug_frontiers g frontier;
-#endif
-    let df bs =
-      Core.Set.fold bs ~init:Tid.Set.empty ~f:(fun dfs b ->
-          Graphlib.Std.Frontier.enum frontier b
-          |> Seq.fold ~init:dfs ~f:(fun s x -> Core.Set.add s x))
-    in
-    let iterated_frontier bs =
-      let rec fixpoint idf =
-        let idf' = df (Core.Set.union idf bs) in
-        if Core.Set.equal idf idf' then idf' else fixpoint idf'
-      in
-      fixpoint Tid.Set.empty
-    in
-    let vars =
-      Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
-          Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->
-              Core.Set.union acc (Core.Set.union (Model.reads term) (Model.writes term))))
-      |> Core.Set.filter ~f:renamable
-    in
-    (* One term scan indexes the blocks that write each variable. *)
-    let def_sites : Tid.t list Var.Map.t =
-      Base.List.fold blks ~init:Var.Map.empty ~f:(fun m blk ->
-          let written =
-            Blk.elts blk
-            |> Seq.fold ~init:Var.Set.empty ~f:(fun ws elt ->
-                   Core.Set.union ws (Model.writes elt))
-          in
-          Core.Set.fold written ~init:m ~f:(fun m v ->
-              let tids = Base.Option.value (Core.Map.find m v) ~default:[] in
-              Core.Map.set m ~key:v ~data:(Term.tid blk :: tids)))
-    in
-    let def_sites_of v =
-      Base.Option.value (Core.Map.find def_sites v) ~default:[]
     in
     (* Block live-in over the terms' own reads and writes. *)
     let live_in =
@@ -502,9 +369,19 @@ let analyze ~(synth : Hike_synth.table)
         Base.Option.value (Core.Map.find live.Hike_bir_flow.before tid)
           ~default:Var.Set.empty
     in
+    (* Incoming values are block parameters even with one predecessor:
+       each edge's refinement belongs to the destination's own name. *)
     let needs =
-      phi_needs ~sp ~vars ~def_sites_of ~live_in ~call_blocks
-        ~machine_blk_tids ~has_continuation ~iterated_frontier
+      Term.enum blk_t sub
+      |> Seq.fold ~init:Tid.Map.empty ~f:(fun needs blk ->
+          let tid = Term.tid blk in
+          if Base.List.is_empty (preds_of tid) then needs
+          else
+            let inputs = Core.Set.filter (live_in tid) ~f:renamable in
+            let inputs =
+              if Base.List.exists (preds_of tid) ~f:(Core.Set.mem machine_blk_tids)
+              then Core.Set.add inputs sp else inputs in
+            Core.Map.set needs ~key:tid ~data:inputs)
     in
     { abi; sp; renamable; g; dom; succs_of; preds_of; machine_blk_tids; sub;
       needs }
@@ -514,7 +391,7 @@ let construct ~(synth : Hike_synth.table)
     ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub term =
   if Seq.is_empty (Term.enum blk_t sub) then sub
   else
-    let c = analyze ~synth ~target sub in
+    let c = analyze ~synth ~target (with_entry sub) in
     let sub =
       place_phis ~preds_of:c.preds_of ~only:(Fun.const true) c.needs c.sub
     in
@@ -525,8 +402,7 @@ let construct ~(synth : Hike_synth.table)
     in
     sub
 
-(* The block back in its pre-SSA form: base names, no phis, no restore
-   defs, no version stamps. *)
+(* The block back in its pre-SSA form: base names, no phis or stamps. *)
 let unssa_blk (blk : blk term) : blk term =
   let base_exp =
     (object
@@ -536,7 +412,6 @@ let unssa_blk (blk : blk term) : blk term =
   in
   blk
   |> Term.filter phi_t ~f:(Fun.const false)
-  |> Term.filter def_t ~f:(fun d -> not (Term.has_attr d restore_tag))
   |> Term.map def_t ~f:(fun d ->
          Def.with_lhs (Def.with_rhs d (base_exp (Def.rhs d)))
            (Var.base (Def.lhs d)))
@@ -641,12 +516,11 @@ let equivalent (a : sub term) (b : sub term) : bool =
    the other blocks keep their reaching definitions, so they keep their
    variables.  A block that only gained or lost pure jmps keeps them too,
    resolving the new jmps' reads in place. *)
-let update_sub_woken ~(synth : Hike_synth.table)
-    ~(target : Bap_core_theory.Theory.Target.t) ~(old : sub term)
+let update_sub_woken_analyzed ~(synth : Hike_synth.table)
+    ~(target : Bap_core_theory.Theory.Target.t) ~(old : sub term) ~(c : ctx)
     (sub : sub term) : sub term * Tid.Set.t =
   if Seq.is_empty (Term.enum blk_t sub) then (sub, Tid.Set.empty)
   else
-    let c = analyze ~synth ~target (unssa_sub sub) in
     let old_g = Sub.to_graph old in
     let old_preds tid =
       Graphs.Tid.Node.preds tid old_g |> Seq.to_list
@@ -667,6 +541,7 @@ let update_sub_woken ~(synth : Hike_synth.table)
       in
       match Term.find blk_t old tid with
       | None -> Full
+      | Some _ when not (Term.has_attr b versions_tag) -> Full
       | Some ob ->
           let changed_jmps = tids (Term.enum jmp_t) ob <> tids (Term.enum jmp_t) b in
           let pure j =
@@ -776,6 +651,15 @@ let update_sub_woken ~(synth : Hike_synth.table)
     let woken = Core.Map.fold kinds ~init:affected ~f:(fun ~key ~data acc ->
         if data = Reread then Core.Set.add acc key else acc) in
     (result, woken)
+
+let update_sub_woken ~(synth : Hike_synth.table)
+    ~(target : Bap_core_theory.Theory.Target.t) ~(old : sub term)
+    (sub : sub term) : sub term * Tid.Set.t =
+  if Seq.is_empty (Term.enum blk_t sub) then (sub, Tid.Set.empty)
+  else
+    let sub = with_entry ~old sub in
+    let c = analyze ~synth ~target (unssa_sub sub) in
+    update_sub_woken_analyzed ~synth ~target ~old ~c sub
 
 let update_sub ~synth ~target ~old sub =
   fst (update_sub_woken ~synth ~target ~old sub)
@@ -918,14 +802,16 @@ let relane_sub ~synth ~target ~callee sub =
           let before = Term.find_exn blk_t sub (Term.tid b)
             |> fun b -> Term.find_exn jmp_t b (Term.tid j) in
           not (Core.Set.equal (Model.writes (`Jmp before)) (Model.writes (`Jmp j))))) in
-  let c = analyze ~synth ~target (unssa_sub refreshed) in
+  let sub' = with_entry ~old:sub refreshed in
+  let c = analyze ~synth ~target (unssa_sub sub') in
   let needed b = Base.Option.value (Core.Map.find c.needs (Term.tid b))
       ~default:Var.Set.empty in
-  let missing = Term.enum blk_t refreshed |> Seq.exists ~f:(fun b ->
+  let missing = Term.enum blk_t sub' |> Seq.exists ~f:(fun b ->
       let existing = Term.enum phi_t b |> Seq.map ~f:(fun p -> Var.base (Phi.lhs p))
         |> Seq.to_list |> Var.Set.of_list in
       not (Core.Set.is_subset (needed b) ~of_:existing)) in
-  if changed_writes || missing then update_sub ~synth ~target ~old:sub refreshed
+  if changed_writes || missing then
+    fst (update_sub_woken_analyzed ~synth ~target ~old:sub ~c sub')
   else
     let dead = ref Var.Set.empty in
     let result = Term.map blk_t refreshed ~f:(fun b ->

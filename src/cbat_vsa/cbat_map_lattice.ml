@@ -74,6 +74,10 @@ module type S_val = sig
   module Key : Value.S
   include S with type t := t and module Key := Key
   include Value.S with type t := t
+
+  (* The stored value, or None when the key is unmapped.  A stored
+     binding is never the lattice top, so None means "the default". *)
+  val find_opt : Val.idx -> t -> Key.t -> Val.t option
 end
 
 (* Parameterized by the map implementation. *)
@@ -161,6 +165,9 @@ module Make_indexed_from_map
   let find idx (t : t) (k : K.t) : L.t =
     match t with None -> L.bottom idx | Some m -> find' idx m k
 
+  let find_opt (_idx : idx) (t : t) (k : K.t) : L.t option =
+    match t with None -> None | Some m -> Map.find m k
+
   (* Enumerate stored bindings. *)
   let fold (t : t) ~init ~f =
     Option.value_map t ~default:init ~f:(fun m ->
@@ -234,6 +241,9 @@ module Make_indexed_val(K : Key_val)(L : Lattice.S_indexed_val) = struct
            with type t := t
             and module Key := Key
             and module Val := Val)
+
+  let find_opt (idx : L.idx) (t : t) (k : K.t) : L.t option =
+    Base.find_opt idx t k
 
   let pp ppf m = match m with
     | _ when equal m top-> Format.fprintf ppf "unknown"

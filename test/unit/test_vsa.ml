@@ -583,6 +583,110 @@ let tests : unit Alcotest.test list =
         in
         let st = in_state (run_anchored sub) tids.(3) in
         check "VSA-76" (slice_bounded (AI.find_word 32 st y) 0x25));
+
+    pin "VSA-77" "waking an unreachable call preserves bottom at its continuation"
+      (fun () ->
+        let x = Var.with_index (v64 "unreached_load") 1 in
+        let m = memv "unreached_mem" in
+        let callee = Tid.create () in
+        let sub, tids = sub_of "dead_call"
+            [ [], [ (1, fun t -> mk_jmp_to t (Bil.Int (Word.zero 1)));
+                    (3, mk_goto) ];
+              [], [ (2, fun t -> mk_call_jmp t callee) ];
+              [ Def.create x (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64)) ],
+                [ (3, fun t -> mk_jmp_to t Bil.(var x <> int (Word.zero 64)));
+                  (3, mk_goto) ];
+              [], [ (0, mk_ret) ] ] in
+        let sol = Vsa.static_graph_vsa ~abi:sysv ~synth:(ref Hike.Synth.empty)
+            ~def_reads:(fun d -> Sm.reads (`Def d))
+            ~def_writes:(fun d -> Sm.writes (`Def d))
+            ~phi_reads:(fun p -> Sm.reads (`Phi p))
+            ~phi_writes:(fun p -> Sm.writes (`Phi p))
+            ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
+            ~wake:(Tid.Set.singleton tids.(1)) sub (Vsa.init_sol ~abi:sysv sub) in
+        check "VSA-77 unreachable continuation"
+          (AI.equal (in_state sol tids.(2)) AI.bottom));
+
+    pin "VSA-78"
+      "SSA: redefining a cell's owner keeps the state's physical identity"
+      (fun () ->
+        let tid = Tid.create () in
+        let x = Var.create ~is_virtual:false ~fresh:false "sl_cell" (Type.Imm 32) in
+        let store = AI.create_scalars ~variables:[ x ]
+            ~blocks:[ (tid, Var.Set.singleton x) ] ~seed:AI.top in
+        let st = AI.enter_block store tid AI.top in
+        let data = Ws.singleton (w32 7) in
+        let st1 = AI.add_word st ~key:x ~data in
+        let st2 = AI.add_word st1 ~key:x ~data in
+        check "VSA-78" (Stdlib.(st1 == st2)));
+
+    pin "VSA-79"
+      "SSA: a definition drops the owner's slices, and they stay gone after \
+       a projection and a phi copy"
+      (fun () ->
+        let tid = Tid.create () in
+        let x = Var.create ~is_virtual:false ~fresh:false "sl_def_x" (Type.Imm 32) in
+        let y = Var.create ~is_virtual:false ~fresh:false "sl_def_y" (Type.Imm 32) in
+        let store = AI.create_scalars ~variables:[ x; y ]
+            ~blocks:[ (tid, Var.Set.of_list [ x; y ]) ] ~seed:AI.top in
+        let st = AI.enter_block store tid AI.top in
+        let st = AI.add_slice st x ~hi:7 ~lo:0
+            ~data:(Ws.singleton (Cbat_word.of_int ~width:8 0x25)) in
+        let def = Ws.singleton (w32 0x1234abcd) in
+        let after = AI.add_word st ~key:x ~data:def in
+        check "VSA-79.cell" (Ws.equal (AI.find_word 32 after x) def);
+        let keep = Cbat_var_id.intern_set (Var.Set.of_list [ x; y ]) in
+        let projected = AI.project ~keep ~block:tid after in
+        check "VSA-79.owner-slices"
+          (Ws.is_top (AI.find_slice projected x ~hi:7 ~lo:0));
+        let copied = AI.copy_slices ~from:projected ~source:x ~target:y st in
+        check "VSA-79.copy" (Ws.is_top (AI.find_slice copied y ~hi:7 ~lo:0)));
+
+    pin "VSA-80"
+      "SSA: a projection keeps only the target's live bindings, leaves its \
+       memory, and joins the target block"
+      (fun () ->
+        let src = Tid.create () and dst = Tid.create () in
+        let source_only = i32 "sl_proj_source" in
+        let stale = i32 "sl_proj_stale" in
+        let phi = i32 "sl_proj_phi" in
+        let live = i32 "sl_proj_live" in
+        let free = i32 "sl_proj_free" in
+        let target_local = i32 "sl_proj_target" in
+        let ws n = Ws.singleton (w32 n) in
+        let store = AI.create_scalars
+            ~variables:[ source_only; stale; phi; live; free; target_local ]
+            ~blocks:[ (src, Var.Set.of_list [ source_only; free ]);
+                      (dst, Var.Set.singleton target_local) ]
+            ~seed:AI.top in
+        let st = AI.enter_block store src AI.top in
+        let st = AI.add_word st ~key:source_only ~data:(ws 0x11) in
+        let st = AI.add_word st ~key:free ~data:(ws 0x33) in
+        let st = AI.add_word st ~key:stale ~data:(ws 0x22) in
+        let st = AI.add_word st ~key:phi ~data:(ws 0x44) in
+        let st = AI.add_word st ~key:live ~data:(ws 0x55) in
+        let mem = memv "sl_proj_mem" in
+        let mem_idx = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+        let mval =
+          Mem.add (Mem.top mem_idx)
+            ~key:
+              (match Mem.Key.of_wordset (Ws.singleton (w64 0x1000)) with
+               | [ k ] -> k
+               | _ -> failwith "key")
+            ~data:(Mem.Val.create (ws 7) LittleEndian) in
+        let st = AI.add_memory st ~key:mem ~data:mval in
+        let keep = Cbat_var_id.intern_set (Var.Set.of_list [ phi; live; free ]) in
+        let projected = AI.project ~keep ~block:dst st in
+        check "VSA-80.stale" (Ws.is_top (AI.find_word 32 projected stale));
+        check "VSA-80.phi" (Ws.equal (AI.find_word 32 projected phi) (ws 0x44));
+        check "VSA-80.live" (Ws.equal (AI.find_word 32 projected live) (ws 0x55));
+        check "VSA-80.free" (Ws.equal (AI.find_word 32 projected free) (ws 0x33));
+        (* A target-local write hits its cell without touching the env, so
+           the physical identity proves the scalar view joined [dst]. *)
+        let after = AI.add_word projected ~key:target_local ~data:(ws 0x66) in
+        check "VSA-80.block" (Stdlib.(after == projected));
+        check "VSA-80.memory"
+          (Mem.equal (AI.find_memory mem_idx projected mem) mval));
   ]
 
 let () = run "vsa" tests

@@ -17,6 +17,23 @@ module WordSet = Cbat_clp_set_composite
 
 type t
 
+type scalar_store
+
+val create_scalars :
+  variables:var list -> blocks:(tid * Var.Set.t) list -> seed:t -> scalar_store
+
+(* The edge's own bindings: the destination's incoming phi values, read
+   from this state's surviving bindings or from the definitions' cells. *)
+val project : keep:Core.Int.Set.t -> block:tid -> t -> t
+
+(* The block's env keeps its own incoming phi values and its memory; the
+   definitions' values live in the cells. *)
+val enter_block : scalar_store -> tid -> t -> t
+
+(* Drop block-local word/slice bindings a caller-supplied entry may have
+   left behind after a def; the definitions' cells own those values. *)
+val scalar_snapshot : t -> t
+
 include Cbat_lattice_intf.S_val with type t := t
 
 (* Stack provenance is the WORD value itself: the entry RSP's word
@@ -44,6 +61,7 @@ val add_slice : t -> var -> hi:int -> lo:int -> data:WordSet.t -> t
 (* The slices of [from] met into the state: the edge refinement rebuilds
    the block-end state forward and carries the guard's slices across. *)
 val carry_slices : from:t -> t -> t
+val copy_slices : from:t -> source:var -> target:var -> t -> t
 
 (* The frame has escaped: a stack address may be held where a callee
    reaches it, so a call keeps no stack cell.  A path fact that joins by
@@ -52,9 +70,6 @@ val carry_slices : from:t -> t -> t
    a region set grows from it. *)
 val frame_escaped : t -> bool
 val escape_frame : t -> t
-
-(* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
-val gc : synth:Hike_synth.table -> t -> keep:Core.Int.Set.t -> t
 
 val selective_widen_extrapolate : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> steps:int -> t -> t -> t
 

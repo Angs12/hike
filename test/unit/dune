@@ -15,7 +15,8 @@
 
   threads
   unix
-  alcotest)
+  alcotest
+  llvm.analysis)
  (flags
   :standard -g)
  (preprocess

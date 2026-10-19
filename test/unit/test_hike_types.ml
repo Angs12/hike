@@ -784,7 +784,8 @@ let tests : unit Alcotest.test list =
           (not (kinds.is_ptr_def "types33" i));
         let ir = emit_ir ~synth:Hike.Synth.empty ~ssa:false ~types:kinds.retype [ sub ] in
         check "TYPES-33 the store is a GEP off the stack base, no cast"
-          (contains_substring ir "getelementptr i8, ptr %entry1, i64 %"
+          (contains_substring ir "phi ptr [ %entry1,"
+           && contains_substring ir "getelementptr i8, ptr %"
            && (not (contains_substring ir "= inttoptr"))
            && not (contains_substring ir "ptrtoint")));
 
@@ -855,7 +856,8 @@ let tests : unit Alcotest.test list =
         let _, stamped, _ = fixture_facts ~synth [ sub ] in
         let ir = emit_ir_spec ~synth ~ssa:false ~types:kinds.retype spec stamped in
         check "TYPES-35 the address is a GEP off the module base, no inttoptr"
-          (contains_substring ir "getelementptr i8, ptr getelementptr inbounds (i8, ptr @sec_comp_7"
+          (contains_substring ir "phi ptr [ getelementptr inbounds (i8, ptr @sec_comp_7"
+           && contains_substring ir "getelementptr i8, ptr %"
            && not (contains_substring ir "= inttoptr"))));
 
     (* The leaf's pointer argument is consumed by the middle sub, whose

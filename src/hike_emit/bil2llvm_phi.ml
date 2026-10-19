@@ -34,6 +34,7 @@ let create ctx scope blks =
 (* One incoming per (source block, exp): the exp evaluates in the
    source block's context, before its terminator. *)
 let fill ctx scope blks =
+  let empty = ref [] in
   Seq.iter blks ~f:(fun blk ->
       let tid = Term.tid blk in
       Term.enum phi_t blk
@@ -55,6 +56,15 @@ let fill ctx scope blks =
                        (Tid.name src)
                        (Tid.name (Term.tid (Seq.hd_exn blks))))
               in
+              let copies =
+                match Llvm.block_terminator src_bb with
+                | None -> 0
+                | Some term ->
+                  Array.fold_left (fun n bb ->
+                      if Stdlib.(bb = get_bb scope tid) then n + 1 else n)
+                    0 (Llvm.successors term)
+              in
+              if copies > 0 then begin
               let src_b =
                 match Llvm.block_terminator src_bb with
                 | Some t -> Llvm.builder_before ctx.llvm_ctx t
@@ -82,4 +92,11 @@ let fill ctx scope blks =
                  block — whichever edge runs leaves its value there. *)
               if Abi.is_env_reg ctx.abi (Phi.lhs phi) then
                 ignore (Llvm.build_store value (env_global ctx (Phi.lhs phi)) src_b);
-              Llvm.add_incoming (value, src_bb) phi_ll)))
+              for _ = 1 to copies do Llvm.add_incoming (value, src_bb) phi_ll done
+              end);
+          if Base.List.is_empty (Llvm.incoming phi_ll) then empty := phi_ll :: !empty));
+  (* Constant branches can leave a BIR block without emitted predecessors.
+     Replace its empty phis after every incoming has been wired. *)
+  Base.List.iter !empty ~f:(fun phi ->
+      Llvm.replace_all_uses_with phi (Llvm.poison (Llvm.type_of phi));
+      Llvm.delete_instruction phi)
