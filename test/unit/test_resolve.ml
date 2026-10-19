@@ -755,6 +755,119 @@ let tests : unit Alcotest.test list =
         check "RES-26b the guard compares table data against word - base"
           (Base.List.exists jmps ~f:(fun j ->
                data_guard (-0x1000L) j || data_guard (-0xFF8L) j)));
+
+    (* The return-address set is computed once per phase: a sub that
+       reads the return-address cell (its return epilogue) and carries an
+       indirect dispatch candidate resolves and materializes the same
+       when the precomputed set is passed to both consumers as when each
+       computes it.  The two case words and the return both stay on
+       their original edges. *)
+    pin "RES-27"
+      "RETADDR-ONCE: a shared retaddr set keeps dispatch and return edges"
+      (fun () ->
+        let ra = v64 "t27_ra" in
+        let rar = v64 "t27_rar" in
+        let m = memv "t27_m" in
+        let sel = v64 "t27_sel" in
+        let base = v64 "t27_base" in
+        let flag = v1 "t27_flag" in
+        let ra_ld =
+          Def.create ra
+            (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64))
+        in
+        let rar_ld =
+          Def.create rar
+            (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64))
+        in
+        let base_def =
+          Def.create base (Bil.Int (Cbat_word.to_word (q64 0x2000L)))
+        in
+        let sel1 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
+        let sel2 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
+        let sub, tids =
+          sub_of "t27_retaddr_dispatch"
+            [ [ ra_ld; base_def ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var flag)); (2, mk_goto) ];
+              [ sel1 ], [ (4, mk_goto) ];
+              [ sel2 ], [ (4, mk_goto) ];
+              [], [ (6, mk_goto) ];
+              [],
+              [ (3, fun _ ->
+                    Jmp.create
+                      (Goto
+                         (Indirect
+                            (Bil.BinOp
+                               (Bil.PLUS, Bil.Var sel, Bil.Var base))))) ];
+              [], [ (6, mk_goto) ];
+              [ rar_ld ],
+              [ (0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var rar)))) ] ]
+        in
+        let abi = Hike.Abi.x86_64_sysv in
+        let block_addrs =
+          Core.Map.of_alist_exn (module Addr)
+            [ (Addr.of_int64 0x3008L, tids.(3));
+              (Addr.of_int64 0x3010L, tids.(5)) ]
+        in
+        let sol =
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi ~resolved:Tid.Map.empty
+            sub (Cbat_vsa.init_sol ~abi sub)
+        in
+        let retaddr =
+          Hike.Cfg_complete.retaddr_defs ~abi ~synth:Hike.Synth.empty ~sol sub
+        in
+        let resolve ?retaddr () =
+          Hike.Cfg_complete.resolve_phase ~abi ~sol ~synth:Hike.Synth.empty
+            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ?retaddr sub
+            Tid.Map.empty
+        in
+        let resolved_a, grew_a = resolve () in
+        let resolved_b, grew_b = resolve ~retaddr () in
+        let materialize ?retaddr () =
+          Hike.Cfg_complete.materialize ~abi ~sol ~synth:Hike.Synth.empty
+            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ?retaddr sub
+        in
+        let materialized_a = materialize () in
+        let materialized_b = materialize ~retaddr () in
+        let outcome (s : sub term) =
+          let blk tid = Term.find blk_t s tid in
+          let return_edge =
+            match blk tids.(6) with
+            | Some b -> (
+                match Term.enum jmp_t b |> Seq.to_list with
+                | [ j ] -> Hike_return.is_jmp j
+                | _ -> false)
+            | None -> false
+          in
+          let dispatch_stays =
+            match blk tids.(4) with
+            | Some b -> (
+                match Term.enum jmp_t b |> Seq.to_list with
+                | [ j ] -> (
+                    match Jmp.kind j with Goto (Indirect _) -> true | _ -> false)
+                | _ -> false)
+            | None -> false
+          in
+          return_edge && dispatch_stays
+          && Int.equal (Term.enum blk_t s |> Seq.length) 7
+        in
+        let dispatch_cases =
+          match
+            Core.Map.find resolved_b (Term.tid (sub_jmp sub 4 0))
+          with
+          | Some ts ->
+            Core.Set.equal ts (Tid.Set.of_list [ tids.(3); tids.(5) ])
+          | None -> false
+        in
+        check "RES-27a the fixture has both return-address cells"
+          (Core.Set.mem retaddr (Term.tid ra_ld)
+           && Core.Set.mem retaddr (Term.tid rar_ld));
+        check "RES-27b the shared set resolves the same edges"
+          (Bool.equal grew_a grew_b
+           && Core.Map.equal (fun a b -> Core.Set.equal a b) resolved_a
+                resolved_b);
+        check "RES-27c the dispatch keeps its two cases" dispatch_cases;
+        check "RES-27d materialization with the shared set is unchanged"
+          (outcome materialized_a && outcome materialized_b));
   ]
 
 let () = run "resolve" tests
