@@ -944,6 +944,136 @@ let tests : unit Alcotest.test list =
         check "SSA-24 dead stamp lane removed"
           (not (mentions dropped stamp.Hike.Stack_model.Versions.args)
            && not (mentions dropped stamp.Hike.Stack_model.Versions.rets)));
+    pin "SSA-25"
+      "a multi-predecessor loop header with a call wires phis from its preds"
+      (fun () ->
+        let ctr = callee_saved 0 and arg = int_param 0 and out = callee_saved 1 in
+        let cond = v1 "ssa25_cond" in
+        let callee, _ = sub_of "ssa25_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Term.append arg_t callee
+            (Arg.create ~intent:Out ret_reg (Bil.Var ret_reg))
+        in
+        let e0 = blk_of_defs [ Def.create ctr (int_exp 0) ] in
+        let h0 =
+          blk_of_defs
+            [ Def.create arg
+                (Bil.BinOp (Bil.PLUS, Bil.Var ctr, int_exp 1)) ]
+        in
+        let a0 =
+          blk_of_defs
+            [ Def.create out
+                (Bil.BinOp (Bil.PLUS, Bil.Var ret_reg, Bil.Var ctr)) ]
+        in
+        let b0 = blk_of_defs [] in
+        let exit0 = blk_of_defs [ Def.create out (Bil.Var ctr) ] in
+        (* e -> h; h calls and returns to a; a loops through b or exits. *)
+        let h =
+          with_jmps h0
+            [ Jmp.create
+                (Call
+                   (Call.create ~return:(Direct (Term.tid a0))
+                      ~target:(Direct (Term.tid callee)) ())) ]
+        in
+        let a =
+          with_jmps a0
+            [ mk_jmp_to (Term.tid b0) (Bil.Var cond);
+              mk_goto (Term.tid exit0) ]
+        in
+        let b = with_jmps b0 [ mk_goto (Term.tid h0) ] in
+        let e = with_jmps e0 [ mk_goto (Term.tid h0) ] in
+        let exit_b = with_jmps exit0 [ Hike_return.create () ] in
+        let sub = sub_named "ssa25" [ e; h; a; b; exit_b ] in
+        let phi_of blk v =
+          Term.enum phi_t blk
+          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) v)
+          |> Base.Option.value_exn
+        in
+        let incoming phi src =
+          Base.List.Assoc.find (Phi.values phi |> Seq.to_list) src
+            ~equal:Tid.equal
+        in
+        let ssa = ssa_of sub in
+        let h' = blk_in ssa h and a' = blk_in ssa a in
+        let b' = blk_in ssa b and e' = blk_in ssa e in
+        let h_ctr = phi_of h' ctr in
+        let entry_ctr =
+          Term.first def_t e' |> Base.Option.value_exn |> Def.lhs
+        in
+        let back_ctr = Phi.lhs (phi_of b' ctr) in
+        let h_arg = Term.first def_t h' |> Base.Option.value_exn |> Def.lhs in
+        let call = Term.first jmp_t h' |> Base.Option.value_exn in
+        let stamp =
+          Term.get_attr h' Hike.Stack_model.versions_tag
+          |> Base.Option.value_exn
+        in
+        let ret_v =
+          Base.List.Assoc.find_exn stamp.Hike.Stack_model.Versions.rets ret_reg
+            ~equal:Var.same
+        in
+        let ret_phi = phi_of a' ret_reg in
+        let cont_ctr = phi_of a' ctr in
+        check "SSA-25 header phis take both predecessor outputs"
+          (Seq.length (Phi.values h_ctr) = 2
+          && Option.equal Exp.equal (incoming h_ctr (Term.tid e'))
+               (Some (Bil.Var entry_ctr))
+          && Option.equal Exp.equal (incoming h_ctr (Term.tid b'))
+               (Some (Bil.Var back_ctr)));
+        check "SSA-25 local def is fresh and reads the header phi"
+          (Var.index h_arg > 0
+          && not (Var.equal h_arg (Phi.lhs h_ctr))
+          && (match Def.rhs (Term.first def_t h' |> Base.Option.value_exn) with
+              | Bil.BinOp (Bil.PLUS, Bil.Var v, Bil.Int _) ->
+                  Var.equal v (Phi.lhs h_ctr)
+              | _ -> false));
+        check "SSA-25 call argument reads the def before the ret mint"
+          (Core.Set.mem (Hike.Stack_model.reads (`Jmp call)) h_arg
+          && Option.equal Var.equal
+               (Base.List.Assoc.find stamp.Hike.Stack_model.Versions.args arg
+                  ~equal:Var.same)
+               (Some h_arg)
+          && not (Var.equal h_arg ret_v));
+        check "SSA-25 call result reaches the continuation phi"
+          (Option.equal Exp.equal (incoming ret_phi (Term.tid h'))
+             (Some (Bil.Var ret_v))
+          && Option.equal Exp.equal (incoming cont_ctr (Term.tid h'))
+               (Some (Bil.Var (Phi.lhs h_ctr))));
+        (* A new back-edge def renames the header and the continuation; the
+           incremental body still equals fresh construction. *)
+        let full =
+          Term.map blk_t sub ~f:(fun blk ->
+              if Tid.equal (Term.tid blk) (Term.tid b0) then
+                Term.append def_t blk
+                  (Def.create ctr
+                     (Bil.BinOp (Bil.PLUS, Bil.Var ctr, int_exp 1)))
+              else blk)
+        in
+        let old_ssa, upd, fresh = updated ~old_pre:sub ~full in
+        let h_upd = blk_in upd h and b_upd = blk_in upd b in
+        let a_upd = blk_in upd a in
+        let b_def =
+          Term.enum def_t b_upd |> Seq.to_list |> Base.List.last_exn
+          |> Def.lhs
+        in
+        let h_ctr_upd = phi_of h_upd ctr in
+        let stamp_upd =
+          Term.get_attr h_upd Hike.Stack_model.versions_tag
+          |> Base.Option.value_exn
+        in
+        let ret_upd =
+          Base.List.Assoc.find_exn stamp_upd.Hike.Stack_model.Versions.rets
+            ret_reg ~equal:Var.same
+        in
+        check "SSA-25 update equals fresh" (Hike.Ssa.equivalent upd fresh);
+        check "SSA-25 update keeps the untouched entry" (kept old_ssa upd e);
+        check "SSA-25 back edge reads the new local def"
+          (Var.index b_def > 0
+          && Option.equal Exp.equal (incoming h_ctr_upd (Term.tid b_upd))
+               (Some (Bil.Var b_def)));
+        check "SSA-25 updated call result reaches the continuation"
+          (Option.equal Exp.equal
+             (incoming (phi_of a_upd ret_reg) (Term.tid h_upd))
+             (Some (Bil.Var ret_upd))));
   ]
 
 let () = run "hike_ssa" tests
