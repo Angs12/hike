@@ -529,13 +529,24 @@ let static_graph_vsa
   let head_arm = ref "" in
 #endif
   let incoming_of (v : Tid.t) ~(preds : Tid.t list) ~(old : AI.t) : AI.t =
+    let bf = Core.Map.find rctx.rc_blocks v in
     let keep =
-      Option.value_map (Core.Map.find rctx.rc_blocks v)
-        ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
+      Option.value_map bf ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
     in
+    (* A non-entry block's word inputs are its phi lhs values.  A free
+       word input here is an SSA construction bug: fail rather than
+       smuggle a source value through the edge. *)
+    (match bf, preds with
+     | Some bf, _ :: _ when not (Core.Set.is_empty bf.bf_free_word_ids) ->
+       failwithf "hike: block %s has free word input(s) outside its phi lhs set: %s"
+         (Tid.name v)
+         (String.concat ~sep:", "
+            (List.map (Core.Set.to_list bf.bf_free_word_ids)
+               ~f:(fun id -> Var.name (Cbat_var_id.var_of id)))) ()
+     | _ -> ());
     (* Deliver refined operands to the destination's phi names. *)
     let bind_phis p res =
-      match Core.Map.find rctx.rc_blocks v with
+      match bf with
       | Some bf -> Cbat_transfer.denote_phis ~synth:!synth ~source:p bf.bf_term res
       | None -> res
     in
@@ -605,11 +616,16 @@ let static_graph_vsa
       let sol = mk_sol () in
       raise (Fixpoint_not_converged (max_steps, sol))
     end;
-    let old = get v in
-    let old = match scalar_store, Map.find rctx.rc_blocks v with
-      | Some _, Some bf -> AI.project ~keep:bf.Cbat_runctx.bf_live_ids ~block:v old
-      | _ -> old in
     let preds = preds v in
+    let old = get v in
+    (* An entry has no predecessor: its seeded boundary inputs are not
+       edge-delivered phis and must not be projected away. *)
+    let old =
+      if List.is_empty preds then old
+      else match scalar_store, Map.find rctx.rc_blocks v with
+        | Some _, Some bf -> AI.project ~keep:bf.Cbat_runctx.bf_live_ids ~block:v old
+        | _ -> old
+    in
     let incoming = incoming_of v ~preds ~old in
 #ifdef VSA_DEBUG
     debug_entry ~rctx ~edge_conds ~get ~preds ~v incoming;

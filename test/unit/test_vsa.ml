@@ -687,6 +687,121 @@ let tests : unit Alcotest.test list =
         check "VSA-80.block" (Stdlib.(after == projected));
         check "VSA-80.memory"
           (Mem.equal (AI.find_memory mem_idx projected mem) mval));
+
+    pin "VSA-81"
+      "SSA: a two-predecessor join keeps only target phi values; a \
+       source-only value common to both edges does not reappear"
+      (fun () ->
+        let x = callee_saved 0 and y = callee_saved 1 in
+        let c = int_param 0 in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let sub, tids =
+          sub_of "phi_only_join"
+            [ [ Def.create x (k 7) ],
+              [ (1, fun t ->
+                     mk_jmp_to t
+                       (Bil.BinOp (Bil.LT, Bil.Var c, k 5)));
+                (2, mk_goto) ];
+              [ Def.create y (k 0x11);
+                Def.create (v64 "phi_only_read1") (Bil.Var x) ],
+              [ (3, mk_goto) ];
+              [ Def.create y (k 0x22);
+                Def.create (v64 "phi_only_read2") (Bil.Var x) ],
+              [ (3, mk_goto) ];
+              [ Def.create (callee_saved 2)
+                  (Bil.BinOp (Bil.PLUS, Bil.Var y, k 1)) ],
+              [ (4, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "phi_only_join" in
+        let sol = run_ssa_anchored ssa in
+        let join = Term.find_exn blk_t ssa tids.(3) in
+        let join_phi =
+          Term.enum phi_t join
+          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) y)
+          |> Base.Option.value_exn in
+        let source_phis =
+          [ tids.(1); tids.(2) ]
+          |> Base.List.concat_map ~f:(fun tid ->
+              Term.find_exn blk_t ssa tid
+              |> Term.enum phi_t |> Seq.map ~f:Phi.lhs |> Seq.to_list)
+          |> Base.List.filter ~f:(fun v -> Var.same (Var.base v) x)
+        in
+        let st = in_state sol tids.(3) in
+        check "VSA-81 source-only phis reach both edges"
+          (Base.List.length source_phis = 2);
+        check "VSA-81 source-only value dropped"
+          (Base.List.for_all source_phis ~f:(fun v ->
+               Ws.is_top (AI.find_word 64 st v)));
+        check "VSA-81 target phi kept"
+          (Ws.elem (w64 0x11) (AI.find_word 64 st (Phi.lhs join_phi))
+           && Ws.elem (w64 0x22) (AI.find_word 64 st (Phi.lhs join_phi)));
+        let keep = Cbat_var_id.intern_set (Var.Set.singleton (Phi.lhs join_phi)) in
+        check "VSA-81 top stays top"
+          (AI.equal AI.top (AI.project ~keep ~block:tids.(3) AI.top));
+        check "VSA-81 bottom stays bottom"
+          (AI.equal AI.bottom (AI.project ~keep ~block:tids.(3) AI.bottom)));
+
+    pin "VSA-82"
+      "SSA: a non-entry free word input outside the phi lhs set is rejected"
+      (fun () ->
+        let v = callee_saved 0 and out = callee_saved 1 in
+        let sub, tids =
+          sub_of "phi_missing"
+            [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var (v1 "pm_c")));
+                    (2, mk_goto) ];
+              [ Def.create v (Bil.Int (Cbat_word.to_word (w64 1))) ],
+              [ (3, mk_goto) ];
+              [ Def.create v (Bil.Int (Cbat_word.to_word (w64 2))) ],
+              [ (3, mk_goto) ];
+              [ Def.create out (Bil.Var v) ], [ (0, mk_ret) ] ]
+        in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "phi_missing" in
+        let join = Term.find_exn blk_t ssa tids.(3) in
+        let ssa =
+          Term.map blk_t ssa ~f:(fun b ->
+              if Tid.equal (Term.tid b) (Term.tid join)
+              then Term.filter phi_t b ~f:(fun _ -> false)
+              else b)
+        in
+        let rejected =
+          match run_ssa_anchored ssa with
+          | _ -> false
+          | exception Failure msg ->
+            contains_substring msg "free word input"
+        in
+        check "VSA-82" rejected);
+
+    pin "VSA-83"
+      "SSA: the entry's index-0 ABI input is seeded, and a free word input \
+       on the entry is exempt from the join check"
+      (fun () ->
+        let p = int_param 0 and out = callee_saved 0 in
+        let sub, _ =
+          sub_of "entry_boundary"
+            [ [ Def.create out (Bil.Var p) ], [ (0, mk_ret) ] ]
+        in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "entry_boundary" in
+        let entry =
+          Vsa.entry_block_of ssa |> Base.Option.value_exn in
+        let probe = Var.with_index (v64 "entry_probe") 1 in
+        let ssa =
+          Term.map blk_t ssa ~f:(fun b ->
+              if Tid.equal (Term.tid b) (Term.tid entry) then
+                Term.append def_t b (Def.create probe (Bil.Var p))
+              else b)
+        in
+        let seeded = Ws.singleton (w64 0x77) in
+        let entry_state =
+          AI.add_word (anchored_entry ()) ~key:p ~data:seeded in
+        let sol =
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
+            ssa
+            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_state ssa)
+        in
+        let st = in_state sol (Term.tid entry) in
+        check "VSA-83.entry-seed" (Ws.equal (AI.find_word 64 st p) seeded);
+        check "VSA-83.entry-def" (Ws.equal (AI.find_word 64 st probe) seeded));
   ]
 
 let () = run "vsa" tests
