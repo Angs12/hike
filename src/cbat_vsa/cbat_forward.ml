@@ -129,7 +129,7 @@ let denote_jump
        arm. *)
     Option.iter jp.jp_disabled
       ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~entry
+        Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~rctx ~entry
           ~landmarks:rctx.rc_landmarks
           ~witness:rctx.rc_nonneg
           env b dc);

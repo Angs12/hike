@@ -2166,6 +2166,115 @@ let tests : unit Alcotest.test list =
                 (Cbat_landmarks.entries
                    (Vsa.Test_seam.landmarks_of rctx) head
                    (Cbat_landmarks.Word x)))));
+
+    (* SSA scalar refinement follows the exact constrained definition cone.
+       The unrelated local has a deliberately stale cell value: a whole-block
+       prefix replay would overwrite it while refining [y]. *)
+    pin "BK-115"
+      "an SSA guard follows its local def chain and leaves unrelated scalar cells untouched"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "bk115_x" (Type.Imm 32) in
+        let y = Var.create ~is_virtual:false ~fresh:false "bk115_y" (Type.Imm 32) in
+        let unrelated =
+          Var.create ~is_virtual:false ~fresh:false "bk115_unrelated" (Type.Imm 32) in
+        let defs =
+          [ Def.create y
+              (Bil.BinOp (Bil.PLUS, Bil.Var x,
+                          Bil.Int (Cbat_word.to_word (w32 1))));
+            Def.create unrelated (Bil.Int (Cbat_word.to_word (w32 99))) ] in
+        let cond =
+          Bil.BinOp (Bil.LT, Bil.Var y,
+                     Bil.Int (Cbat_word.to_word (w32 10))) in
+        let raw, tids =
+          sub_of ~args:[ Arg.create ~intent:In x (Bil.Var x) ] "bk115"
+            [ defs,
+              [ (1, fun t -> mk_jmp_to t cond); (2, mk_goto) ];
+              [], [ (0, mk_ret) ];
+              [], [ (0, mk_ret) ] ] in
+        let sub = ssa_of_subs [ jump_compiled raw ] "bk115" in
+        let sol = run_ssa_anchored sub in
+        let blk = Term.find_exn blk_t sub tids.(0) in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty
+            ~abi:Hike_abi.x86_64_sysv sub in
+        let entry = Graphlib.Std.Solution.get sol (Term.tid blk) in
+        let post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk entry in
+        let cond =
+          Term.first jmp_t blk |> Base.Option.value_exn |> Jmp.cond in
+        let guard =
+          Core.Set.to_list (Exp.free_vars cond) |> Base.List.hd_exn in
+        let unrelated_lhs =
+          Term.enum def_t blk |> Seq.map ~f:Def.lhs
+          |> Seq.find_exn ~f:(Var.same (Var.base unrelated)) in
+        let stale = Ws.singleton (w32 7) in
+        let post = AI.add_word post ~key:unrelated_lhs ~data:stale in
+        let edge =
+          Vsa.Test_seam.constrain_edge ~synth:Hike.Synth.empty ~env:post
+            ~landmarks:(Vsa.Test_seam.landmarks_of rctx) cond in
+        let out =
+          Vsa.Test_seam.refine_edge ~sol ~rctx
+            ~seeds:(Var.Set.singleton guard) edge blk in
+        let x_in =
+          match Def.rhs (Term.enum def_t blk |> Seq.find_exn
+                           ~f:(fun d -> Var.same (Def.lhs d) y)) with
+          | Bil.BinOp (_, Bil.Var v, _) -> v
+          | _ -> failwith "BK-115: missing exact x operand" in
+        let x_ws = AI.find_word 32 out x_in in
+        check "BK-115.chain-narrows-x"
+          (not (Ws.is_top x_ws)
+           && not (Ws.elem (w32 9) x_ws)
+           && Ws.elem (w32 8) x_ws);
+        check "BK-115.unrelated-cell-kept"
+          (Ws.equal stale (AI.find_word 32 out unrelated_lhs)));
+
+    (* The SSA observer forces the disabled guard's seed in private cells,
+       then follows each exact local def to the conflicting entry input. *)
+    pin "BK-116"
+      "the SSA disabled-continuation observer reaches an empty meet through a multi-def chain"
+      (fun () ->
+        let x = Var.create ~is_virtual:false ~fresh:false "bk116_x" (Type.Imm 32) in
+        let a = Var.create ~is_virtual:false ~fresh:false "bk116_a" (Type.Imm 32) in
+        let y = Var.create ~is_virtual:false ~fresh:false "bk116_y" (Type.Imm 32) in
+        let defs =
+          [ Def.create a
+              (Bil.BinOp (Bil.PLUS, Bil.Var x,
+                          Bil.Int (Cbat_word.to_word (w32 1))));
+            Def.create y
+              (Bil.BinOp (Bil.PLUS, Bil.Var a,
+                          Bil.Int (Cbat_word.to_word (w32 1)))) ] in
+        let disabled =
+          Bil.BinOp (Bil.LT, Bil.Var y,
+                     Bil.Int (Cbat_word.to_word (w32 3))) in
+        let raw, tids =
+          sub_of ~args:[ Arg.create ~intent:In x (Bil.Var x) ] "bk116"
+            [ defs, [ (0, fun t -> mk_jmp_to t disabled) ] ] in
+        let sub = ssa_of_subs [ jump_compiled raw ] "bk116" in
+        let sol = run_ssa_anchored sub in
+        let blk = Term.find_exn blk_t sub tids.(0) in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty
+            ~abi:Hike_abi.x86_64_sysv sub in
+        let a_def =
+          Term.enum def_t blk |> Seq.find_exn
+            ~f:(fun d -> Var.same (Def.lhs d) a) in
+        let x_in =
+          match Def.rhs a_def with
+          | Bil.BinOp (_, Bil.Var v, _) -> v
+          | _ -> failwith "BK-116: missing x input" in
+        let disabled =
+          Term.first jmp_t blk |> Base.Option.value_exn |> Jmp.cond in
+        let head = Term.tid blk in
+        let base = Graphlib.Std.Solution.get sol head in
+        let live_x = Ws.singleton (w32 100) in
+        let base = AI.add_word base ~key:x_in ~data:live_x in
+        Vsa.Test_seam.with_widening_head rctx (Some head) (fun () ->
+            Vsa.Test_seam.acquire_unsat ~rctx ~entry:base base blk disabled);
+        check "BK-116.multi-def-landmark"
+          (not
+             (List.is_empty
+                (Cbat_landmarks.entries
+                   (Vsa.Test_seam.landmarks_of rctx) head
+                   (Cbat_landmarks.Word x_in))));
+        check "BK-116.shared-input-unchanged"
+          (Ws.equal live_x (AI.find_word 32 (Graphlib.Std.Solution.get sol head) x_in)));
   ]
 
 let () = run "backward" tests

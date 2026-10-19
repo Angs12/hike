@@ -31,6 +31,11 @@ type call_facts = {
 (* Static block facts: the term, call lanes, and scalar input names. *)
 type block_facts = {
   bf_term : blk term;
+  bf_defs : def term list;
+  (* Exact SSA lhs to its block-local statement position and definition.
+     Backward scalar refinement follows this index; it does not replay
+     unrelated scalar definitions. *)
+  bf_def_index : (int * def term) Var.Map.t;
   bf_call_facts : call_facts;
   bf_live_ids : Int.Set.t;
 }
@@ -131,12 +136,18 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     rc_blocks =
       Term.enum blk_t s
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+          let defs = Term.enum def_t b |> Seq.to_list in
+          let def_index =
+            List.foldi defs ~init:Var.Map.empty ~f:(fun pos index d ->
+                Map.set index ~key:(Def.lhs d) ~data:(pos, d)) in
           let inputs =
             if ssa then local_inputs ~def_reads ~def_writes ~jmp_reads b
             else Var.Set.empty in
           Core.Map.set m ~key:(Term.tid b)
             ~data:{
               bf_term = b;
+              bf_defs = defs;
+              bf_def_index = def_index;
               bf_call_facts = call_facts_of_block ~abi b;
               bf_live_ids = Cbat_var_id.intern_set
                   (Set.union inputs

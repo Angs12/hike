@@ -791,7 +791,7 @@ module Test_seam = struct
   let refine_edge_count_writes = refine_edge_count_writes
 
   let acquire_unsat ~(rctx : refine_ctx) ~entry env blk disabled =
-    Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~entry
+    Cbat_backward.acquire_unsat ~synth:!(rctx.rc_synth) ~rctx ~entry
       ~landmarks:rctx.Cbat_runctx.rc_landmarks
       ~witness:rctx.rc_nonneg env blk disabled
 

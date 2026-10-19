@@ -1051,6 +1051,12 @@ type write_site = Output_write | Input_write
 (* What the backward pass learned, by position: the constraint each
    def's output satisfies on the edge, and the cells each def's loads
    read under the edge.  The forward replay meets them in place. *)
+type def_trace = {
+  td_def : def term;
+  td_before : AI.t option;
+  td_after : AI.t option;
+}
+
 type walk_state = {
   words : word_env ref;
   cells : cell_env ref;
@@ -1073,9 +1079,7 @@ type locus = {
   record_reads :
     walk_state -> def term -> before:cell_env -> after:cell_env -> unit;
   harvest : walk_state -> base:AI.t -> env:AI.t -> rhs:exp -> unit;
-  replay :
-    walk_state -> entry:AI.t -> prefix:(def term * AI.t * AI.t) list ->
-    AI.t -> AI.t;
+  replay : walk_state -> entry:AI.t -> prefix:def_trace list -> AI.t -> AI.t;
 }
 
 (* A word fact through the one leaf rule's write discipline: an empty
@@ -1156,7 +1160,7 @@ let writer_locus ~(synth : Hike_synth.table)
         | _ -> ())
   in
   let replay (st : walk_state) ~(entry : AI.t)
-      ~(prefix : (def term * AI.t * AI.t) list) (_edge : AI.t) =
+      ~(prefix : def_trace list) (_edge : AI.t) =
     (* What no def consumed holds at the block's inputs. *)
     let inputs =
       meet_owed ~on_write:(fun () -> on_write Input_write) entry !(st.words) in
@@ -1169,11 +1173,15 @@ let writer_locus ~(synth : Hike_synth.table)
     in
     (* A def entered in its recorded pre-state keeps the recorded post; the
        first state a meet changes is denoted afresh from there on. *)
-    List.fold_right prefix ~init:inputs ~f:(fun (d, pre, post) acc ->
+    List.fold_right prefix ~init:inputs ~f:(fun trace acc ->
+        let d = trace.td_def in
         let acc =
           List.fold (Core.Map.find_multi !(st.reads) (Term.tid d)) ~init:acc
             ~f:(meet_cell ~landmarks:None) in
-        let acc = if phys_equal acc pre then post else denote_def ~synth d acc in
+        let acc =
+          match trace.td_before, trace.td_after with
+          | Some pre, Some post when phys_equal acc pre -> post
+          | _ -> denote_def ~synth d acc in
         match Core.Map.find !(st.outputs) (Term.tid d) with
         | Some c ->
           meet_word ~on_write:(fun () -> on_write Output_write) acc (Def.lhs d) c
@@ -1192,15 +1200,129 @@ let observer_locus : locus =
 
 (* The transient memory trace for one backward walk. Scalar values are
    read from their SSA cells; no trace survives the walk. *)
-let definition_trace ~synth blk entry =
+let definition_trace ?(record = fun _ -> true) ~synth blk entry =
   Term.enum def_t blk
   |> Seq.fold ~init:(entry, []) ~f:(fun (before, trace) d ->
       let after = denote_known_def ~synth d before in
       let after = if phys_equal before after then after else AI.scalar_snapshot after in
-      (after, (d, before, after) :: trace))
+      let item =
+        if record d then
+          { td_def = d; td_before = Some before; td_after = Some after }
+        else { td_def = d; td_before = None; td_after = None } in
+      (after, item :: trace))
   |> snd
 
-let walk ~(synth : Hike_synth.table) ~(locus : locus)
+(* The scalar def cone and whether it needs the ordered memory trace. *)
+let scalar_cone (bf : Cbat_runctx.block_facts) (seeds : Var.Set.t) =
+  let rec visit seen defs memory vars =
+    match vars with
+    | [] -> defs, memory
+    | v :: rest when Core.Set.mem seen v -> visit seen defs memory rest
+    | v :: rest ->
+      let seen = Core.Set.add seen v in
+      (match Core.Map.find bf.bf_def_index v with
+       | None -> visit seen defs memory rest
+       | Some (_, d) ->
+         let rhs = Def.rhs d in
+         let defs = Core.Set.add defs (Term.tid d) in
+         let vars = Core.Set.to_list (Exp.free_vars rhs) @ rest in
+         visit seen defs (memory || reads_memory rhs) vars)
+  in
+  visit Var.Set.empty Tid.Set.empty false (Core.Set.to_list seeds)
+
+(* Memory effects outside the scalar cone still delimit a load's ordered
+   history, but unrelated scalar definitions need no saved before/after pair. *)
+let memory_trace_keep (bf : Cbat_runctx.block_facts) (cone : Tid.Set.t) : Tid.Set.t =
+  List.fold bf.bf_defs ~init:cone ~f:(fun keep d ->
+      match Var.typ (Def.lhs d) with
+      | Type.Mem _ -> Core.Set.add keep (Term.tid d)
+      | Type.Imm _ | Type.Unk ->
+        if reads_memory (Def.rhs d) then Core.Set.add keep (Term.tid d)
+        else keep)
+
+(* In SSA, only a guard variable's exact local definition can consume its
+   constraint. Its operands are queued by statement position, so later
+   definitions are inverted before their earlier inputs. Entry and phi
+   names have no local def and remain edge-local overrides. *)
+let walk_ssa_scalars ?(observer = false) ~(on_write : write_site -> unit)
+    ~(synth : Hike_synth.table) ~(bf : Cbat_runctx.block_facts)
+    ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
+    ~(witness : env:AI.t -> exp -> bool) ~(seeds : Var.Set.t)
+    (env : AI.t) : AI.t =
+  let pending = ref (Core.Int.Map.empty : (var * def term * wordset) Core.Int.Map.t) in
+  let add_pending v c =
+    match Core.Map.find bf.bf_def_index v with
+    | None -> ()
+    | Some (position, d) ->
+      (match Core.Map.find !pending position with
+       | None -> pending := Core.Map.set !pending ~key:position ~data:(v, d, c)
+       | Some (_, _, old) ->
+         let merged = WordSet.meet old c in
+         pending := Core.Map.set !pending ~key:position ~data:(v, d, merged))
+  in
+  Core.Set.iter seeds ~f:(fun v ->
+      match Var.typ v with
+      | Type.Imm w -> add_pending v (AI.find_word w env v)
+      | Type.Mem _ | Type.Unk -> ());
+  let rec run env =
+    match Core.Map.max_elt !pending with
+    | None -> env
+    | Some (position, (v, d, cstr)) ->
+      pending := Core.Map.remove !pending position;
+      (match Var.typ v with
+       | Type.Imm w ->
+         if observer then
+           let env' =
+             constrain_operands ~synth ~seed:true ~env ~landmarks
+               ~nonneg:(fun e -> witness ~env e) (Def.rhs d) cstr in
+           if AI.equal env' AI.bottom then env'
+           else begin
+             Core.Set.iter (Exp.free_vars (Def.rhs d)) ~f:(fun operand ->
+                 match Var.typ operand with
+                 | Type.Imm ow ->
+                   let value = AI.find_word ow env' operand in
+                   if not (WordSet.is_top value || WordSet.is_bottom value
+                           || WordSet.is_infinite value)
+                   then add_pending operand value
+                 | Type.Mem _ | Type.Unk -> ());
+             run env'
+           end
+         else
+         let post = AI.find_word w env v in
+         let cstr = WordSet.meet cstr post in
+         if WordSet.is_bottom cstr then AI.bottom
+         else
+           let env =
+             if strictly_precedes cstr post then begin
+               on_write Output_write;
+               AI.refine_word env ~key:v ~data:cstr
+             end else env in
+           let before = env in
+           let env' =
+             constrain_operands ~synth ~env ~landmarks
+               ~nonneg:(fun e -> witness ~env e) (Def.rhs d) cstr in
+           if AI.equal env' AI.bottom then AI.bottom
+           else begin
+             Core.Set.iter (Exp.free_vars (Def.rhs d)) ~f:(fun operand ->
+                 match Var.typ operand with
+                 | Type.Imm ow ->
+                   let old = AI.find_word ow before operand
+                   and now = AI.find_word ow env' operand in
+                   if not (WordSet.is_bottom now)
+                      && strictly_precedes now old
+                   then begin
+                     match Core.Map.find bf.bf_def_index operand with
+                     | Some _ -> add_pending operand now
+                     | None -> on_write Input_write
+                   end
+                 | Type.Mem _ | Type.Unk -> ());
+             run env'
+           end
+       | Type.Mem _ | Type.Unk -> run env)
+  in
+  run env
+
+let walk ?(record = fun _ -> true) ~(synth : Hike_synth.table) ~(locus : locus)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
@@ -1209,7 +1331,7 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
   (* The walked block's IN state, handed in by the caller — no
      solution lookup, no snapshot copy. *)
   let blk_state = entry in
-  let prefixed = definition_trace ~synth blk blk_state in
+  let prefixed = definition_trace ~record ~synth blk blk_state in
   (* The seeds are the word env's entries (each seed's constraint is
      the edge state's own value for the var); the loads push the cells. *)
   let words =
@@ -1235,7 +1357,8 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
     locus.harvest st ~base:ce ~env:env' ~rhs:(Def.rhs d);
     not (AI.equal env' AI.bottom)
   in
-  let walk_word_def (d, pre, post) =
+  let walk_word_def (trace : def_trace) =
+    let d = trace.td_def in
     let v = Def.lhs d in
     match Var.typ v with
     | Type.Imm w ->
@@ -1243,6 +1366,7 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
        | Some cstr ->
          (* The def consumes its var's constraint, whatever it says. *)
          words := Core.Map.remove !words v;
+         let post = Option.value trace.td_after ~default:blk_state in
          (match locus.at_def ~post:(fun () -> AI.find_word w post v) ~cstr with
           | None ->
             (* The produced value cannot satisfy the constraint: no
@@ -1250,11 +1374,14 @@ let walk ~(synth : Hike_synth.table) ~(locus : locus)
             false
           | Some cstr' ->
             locus.record_output st d cstr';
+            let pre = Option.value trace.td_before ~default:blk_state in
             invert_def d pre cstr')
        | None -> true)
     | Type.Mem _ ->
       (* Driven by the cells the loads pushed. *)
-      not (locus.invert_mem !cells) || invert_def d pre undefined_width
+      not (locus.invert_mem !cells)
+      || invert_def d
+        (Option.value trace.td_before ~default:blk_state) undefined_width
     | Type.Unk -> true
   in
   (* A def with no state behind it ends the walk: the edge is bottom. *)
@@ -1287,10 +1414,11 @@ let rooted ~(landmarks : Cbat_landmarks.t) (cond : exp) (f : unit -> 'a) : 'a =
 
 (* The refinement walk (the state-writer locus): the constraint meets
    the produced values (the producer subtraction). *)
-let walk_block ?(on_write : write_site -> unit = ignore)
+let walk_block ?(record = fun _ -> true)
+    ?(on_write : write_site -> unit = ignore)
     ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
     ~seeds env blk =
-  walk ~synth:!(rctx.Cbat_runctx.rc_synth)
+  walk ~record ~synth:!(rctx.Cbat_runctx.rc_synth)
     ~locus:(writer_locus ~synth:!(rctx.Cbat_runctx.rc_synth) ~on_write)
     ~entry ~landmarks
     ~witness ~seeds env blk
@@ -1303,14 +1431,26 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
     ~(seeds : Var.Set.t)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
-  walk_block ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
-    ~witness:rctx.rc_nonneg ~seeds env blk
+  match Core.Map.find rctx.rc_blocks (Term.tid blk) with
+  | Some bf when rctx.rc_ssa ->
+    let cone, has_memory = scalar_cone bf seeds in
+    if not has_memory then
+      walk_ssa_scalars ~on_write ~synth:!(rctx.rc_synth) ~bf ~entry
+        ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg ~seeds env
+    else
+      let keep = memory_trace_keep bf cone in
+      walk_block ~record:(fun d -> Core.Set.mem keep (Term.tid d))
+        ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
+        ~witness:rctx.rc_nonneg ~seeds env blk
+  | _ ->
+    walk_block ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
+      ~witness:rctx.rc_nonneg ~seeds env blk
 
 (* The disabled continuation observed through the same rules, the
    result DISCARDED: every empty meet records the excluded boundary +
    distance as the enclosing WTO cycle's widening landmark (words and
    memory cells alike). *)
-let acquire_unsat ~(synth : Hike_synth.table)
+let acquire_unsat ~(synth : Hike_synth.table) ~(rctx : Cbat_runctx.refine_ctx)
     ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
@@ -1329,9 +1469,23 @@ let acquire_unsat ~(synth : Hike_synth.table)
       (* Without seeds the observer, which never inverts memory defs,
          reaches no leaf meet: skip the walk and its prefix replay. *)
       if not (Core.Set.is_empty seeds) then
-        ignore
-          (walk ~synth ~locus:observer_locus ~entry ~landmarks ~witness ~seeds
-             constrained blk)
+        (match Core.Map.find rctx.rc_blocks (Term.tid blk) with
+         | Some bf when rctx.rc_ssa ->
+           let cone, has_memory = scalar_cone bf seeds in
+           if not has_memory then
+             ignore
+               (walk_ssa_scalars ~observer:true ~on_write:ignore ~synth ~bf
+                  ~entry ~landmarks ~witness ~seeds constrained)
+           else
+             let keep = memory_trace_keep bf cone in
+             ignore
+               (walk ~record:(fun d -> Core.Set.mem keep (Term.tid d))
+                  ~synth ~locus:observer_locus ~entry ~landmarks ~witness
+                  ~seeds constrained blk)
+         | _ ->
+           ignore
+             (walk ~synth ~locus:observer_locus ~entry ~landmarks ~witness
+                ~seeds constrained blk))
     end
   end)
 
