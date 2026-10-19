@@ -842,6 +842,100 @@ let tests : unit Alcotest.test list =
         let st = in_state sol (Term.tid entry) in
         check "VSA-83.entry-seed" (Ws.equal (AI.find_word 64 st p) seeded);
         check "VSA-83.entry-def" (Ws.equal (AI.find_word 64 st probe) seeded));
+
+    pin "VSA-84"
+      "SSA: both outgoing edges agree with ordered independent source replay"
+      (fun () ->
+        let x = callee_saved 0 and y = callee_saved 1 in
+        let c = int_param 0 and mem = memv "post_branch_mem" in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let load = Bil.Load (Bil.Var mem, k 0x1000, LittleEndian, `r64) in
+        let store data = Def.create mem
+            (Bil.Store (Bil.Var mem, k 0x1000, data, LittleEndian, `r64)) in
+        let sub, tids = sub_of "post_branch"
+            [ [ store (k 0x11);
+                Def.create x (Bil.BinOp (Bil.PLUS, load, k 0x11));
+                store (Bil.Var x) ],
+              [ (1, fun t -> mk_jmp_to t
+                     (Bil.BinOp (Bil.LT, Bil.Var c, k 5)));
+                (2, mk_goto) ];
+              [ Def.create y (Bil.Var x) ], [ (3, mk_goto) ];
+              [ Def.create y (Bil.Var x) ], [ (3, mk_goto) ];
+              [], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "post_branch" in
+        let sol = run_ssa_anchored ssa in
+        let source = Term.find_exn blk_t ssa tids.(0) in
+        let pre = AI.copy_scalars (in_state sol tids.(0)) in
+        let replay = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty source pre in
+        let read env = Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty load env
+          |> Result.get_ok in
+        let expected = read replay in
+        check "VSA-84 ordered stores" (Ws.equal expected (Ws.singleton (w64 0x22)));
+        Base.List.iter [ tids.(1); tids.(2) ] ~f:(fun tid ->
+            let target = Term.find_exn blk_t ssa tid in
+            let phi = Term.enum phi_t target
+              |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) x)
+              |> Base.Option.value_exn in
+            let state = in_state sol tid in
+            check "VSA-84 edge memory" (Ws.equal (read state) expected);
+            check "VSA-84 edge scalar"
+              (Ws.equal (AI.find_word 64 state (Phi.lhs phi)) expected)));
+
+    pin "VSA-85"
+      "SSA: a changed IN state refreshes the cached loop edge and exit value"
+      (fun () ->
+        let x = callee_saved 0 and y = callee_saved 1 in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let sub, tids = sub_of "post_loop"
+            [ [ Def.create x (k 0) ], [ (1, mk_goto) ];
+              [], [ (2, fun t -> mk_jmp_to t
+                       (Bil.BinOp (Bil.LT, Bil.Var x, k 5)));
+                    (3, mk_goto) ];
+              [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var x, k 1)) ],
+              [ (1, mk_goto) ];
+              [ Def.create y (Bil.Var x) ], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "post_loop" in
+        let sol = run_ssa_anchored ssa in
+        let exit = Term.find_exn blk_t ssa tids.(3) in
+        let phi = Term.enum phi_t exit
+          |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) x)
+          |> Base.Option.value_exn in
+        check "VSA-85 exit value"
+          (Ws.equal (AI.find_word 64 (in_state sol tids.(3)) (Phi.lhs phi))
+             (Ws.singleton (w64 5))));
+
+    pin "VSA-86"
+      "SSA: revisited successors reuse separate taken and fallthrough refinements"
+      (fun () ->
+        let p = int_param 0 and x = callee_saved 0 in
+        let y = callee_saved 1 and out = callee_saved 2 in
+        let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        let sub, tids = sub_of "post_refinement"
+            [ [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var p, k 1));
+                Def.create y (Bil.BinOp (Bil.PLUS, Bil.Var x, k 1)) ],
+              [ (1, fun t -> mk_jmp_to t
+                     (Bil.BinOp (Bil.LT, Bil.Var x, k 5)));
+                (2, mk_goto) ];
+              [ Def.create out (Bil.Var y) ],
+              [ (2, fun t -> mk_jmp_to t (Bil.Int (Word.zero 1))); (1, mk_goto) ];
+              [ Def.create out (Bil.Var y) ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Int (Word.zero 1))); (2, mk_goto) ];
+              [], [ (0, mk_ret) ] ] in
+        let ssa = ssa_of_subs [ jump_compiled sub ] "post_refinement" in
+        let entry = AI.add_word (anchored_entry ()) ~key:p
+            ~data:(Ws.of_clp (Clp.interval ~width:64 (w64 0) (w64 9))) in
+        let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi:sysv ssa
+            (Vsa.init_sol ~abi:sysv ~entry ssa) in
+        let edge tid =
+          let b = Term.find_exn blk_t ssa tid in
+          let p = Term.enum phi_t b
+            |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) y)
+            |> Base.Option.value_exn in
+          AI.find_word 64 (in_state sol tid) (Phi.lhs p) in
+        let low = edge tids.(1) and high = edge tids.(2) in
+        check "VSA-86 taken" (Ws.elem (w64 2) low && bounded_above low (w64 5));
+        check "VSA-86 fallthrough"
+          (Ws.elem (w64 11) high && not (Ws.elem (w64 2) high)));
   ]
 
 let () = run "vsa" tests

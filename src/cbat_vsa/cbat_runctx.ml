@@ -43,6 +43,8 @@ type refine_ctx = {
   rc_abi : Hike_abi.t;
   rc_synth : Hike_synth.table ref;
   rc_blocks : block_facts Tid.Map.t;
+  (* Refined edge states for one source IN state, before target phis bind. *)
+  rc_edges : (AI.t * AI.t Tid.Map.t) Tid.Map.t ref;
   (* The producer non-negativity oracle (the walk's signed rows): an
      expression whose every possible value has its sign bit clear.  The
      default proves nothing. *)
@@ -120,6 +122,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
   let ssa = scalar_ssa ~synth:!synth s in
   {
     rc_ssa = ssa;
+    rc_edges = ref Tid.Map.empty;
     rc_nonneg = (fun ~env:_ _ -> false);
     rc_landmarks = Cbat_landmarks.create ();
     rc_abi = abi;

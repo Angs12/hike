@@ -108,11 +108,19 @@ let denote_jump
     ~(preserved : Int.Set.t)
     ~(callee : Tid.t -> Cbat_call_effects.callee)
     ~(rctx : Cbat_runctx.refine_ctx)
-    (plan : block_plan)  (env : AI.t) ~(entry : AI.t) ~(target : tid)
+    (plan : block_plan) ~(entry : AI.t) ~(target : tid)
     : AI.t =
   (* The backward refinement's entry state IS the source block's IN
      state — the env this jump transfers. *)
   let b = plan.bp_term in
+  let source = Term.tid b in
+  let edges = match Map.find !(rctx.rc_edges) source with
+    | Some (saved, edges) when phys_equal saved entry -> edges
+    | _ -> Tid.Map.empty in
+  match Map.find edges target with
+  | Some refined -> refined
+  | None ->
+  let env = denote_block_values ~synth:!(rctx.rc_synth) b entry in
   let per_jump acc (jp : jump_plan) =
     let jmp = jp.jp_jmp in
     let rel = jp.jp_rel in
@@ -191,11 +199,16 @@ let denote_jump
       | Goto (Indirect _)
       | Ret (Indirect _) -> env in
     AI.join acc env_res in
-  Seq.fold
+  let refined = Seq.fold
     (reachable_jumps_by ~synth:!(rctx.rc_synth)
        ~jmp:(fun jp -> jp.jp_jmp) env (Seq.of_list plan.bp_jumps))
     ~init:AI.bottom
-    ~f:per_jump
+    ~f:per_jump in
+  (* Later replays mutate the general cells; keep this edge's facts private. *)
+  let refined = AI.copy_scalars refined in
+  rctx.rc_edges := Map.set !(rctx.rc_edges) ~key:source
+      ~data:(entry, Map.set edges ~key:target ~data:refined);
+  refined
 
 (* Block denotation toward a target. *)
 let denote_block
@@ -210,7 +223,5 @@ let denote_block
   if AI.equal env AI.bottom then fun ~target:_ -> AI.bottom
   else
   let plan = plan_of source in
-  let b = plan.bp_term in
-  let postcond = denote_block_values ~synth:!(rctx.rc_synth) b env in
   fun ~target ->
-    denote_jump ~preserved ~callee ~rctx plan postcond ~entry:env ~target
+    denote_jump ~preserved ~callee ~rctx plan ~entry:env ~target
