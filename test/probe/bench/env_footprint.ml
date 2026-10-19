@@ -4,8 +4,8 @@
    reachable heap words of its per-block (pre, post) environments.
    [Obj.reachable_words] counts each reachable word once per call, so
    the persistent maps' shared structure is not double-counted.  The
-   [AI.t] record is {memories; words}; the two fields are measured
-   separately to split the footprint.
+   [AI.t] record is {memories; words; slices; escaped; scalar}; each
+   heap-carrying field is measured separately to split the footprint.
 
    Reporting probe: prints a table, asserts nothing, never installed.
 
@@ -19,15 +19,18 @@ open Probe_common
 (* Reachable heap words from [o]; shared sub-graphs counted once. *)
 let rw (o : Obj.t) : int = Obj.reachable_words o
 
-(* The [AI.t] declaration is {memories; words}; field order gives the
-   split.  A representation change trips the assert loudly. *)
+(* The [AI.t] declaration is {memories; words; slices; escaped; scalar};
+   field order gives the split.  A representation change trips the
+   assert loudly; [escaped] is an immediate and has no heap position. *)
 let ai_field (i : int) (ai : Cbat_vsa.AI.t) : Obj.t =
   let o = Obj.repr ai in
-  assert (Obj.size o >= 2);
+  assert (Obj.size o >= 5);
   Obj.field o i
 
 let memories_of = ai_field 0
 let words_of = ai_field 1
+let slices_of = ai_field 2
+let scalar_of = ai_field 4
 
 let kib (w : int) : float = float_of_int w *. 8. /. 1024.
 
@@ -37,6 +40,8 @@ type row = {
   total : int;   (* whole (pre,post) map, shared nodes once *)
   w_words : int; (* aggregate of the word maps, shared nodes once *)
   m_words : int; (* aggregate of the memory maps, shared nodes once *)
+  s_words : int; (* aggregate of the slice maps, shared nodes once *)
+  c_words : int; (* aggregate of the scalar views, shared nodes once *)
   max_block : int; (* the largest single state's reachable words *)
 }
 
@@ -52,9 +57,15 @@ let measure_sub (target : Bap_core_theory.Theory.Target.t) (sub : sub term) : ro
     Core.List.map pre ~f:words_of @ Core.List.map post ~f:words_of in
   let m_list =
     Core.List.map pre ~f:memories_of @ Core.List.map post ~f:memories_of in
+  let s_list =
+    Core.List.map pre ~f:slices_of @ Core.List.map post ~f:slices_of in
+  let c_list =
+    Core.List.map pre ~f:scalar_of @ Core.List.map post ~f:scalar_of in
   let whole = rw (Obj.repr envs) in
   let w_words = rw (Obj.repr w_list) in
   let m_words = rw (Obj.repr m_list) in
+  let s_words = rw (Obj.repr s_list) in
+  let c_words = rw (Obj.repr c_list) in
   let max_block =
     Core.List.fold pairs ~init:0 ~f:(fun acc (a, b) ->
         Stdlib.max acc (Stdlib.max (rw (Obj.repr a)) (rw (Obj.repr b))))
@@ -64,6 +75,8 @@ let measure_sub (target : Bap_core_theory.Theory.Target.t) (sub : sub term) : ro
     total = whole;
     w_words;
     m_words;
+    s_words;
+    c_words;
     max_block }
 
 let pct (part : int) (whole : int) : float =
@@ -71,9 +84,10 @@ let pct (part : int) (whole : int) : float =
 
 let print_row (r : row) : unit =
   Printf.printf
-    "%-28s %7d %12d %9.1f %7.1f%% %7.1f%% %10d\n%!"
+    "%-28s %7d %12d %9.1f %7.1f%% %7.1f%% %7.1f%% %7.1f%% %10d\n%!"
     r.name r.blocks r.total (kib r.total)
     (pct r.w_words r.total) (pct r.m_words r.total)
+    (pct r.s_words r.total) (pct r.c_words r.total)
     r.max_block
 
 let rows_of (target : Bap_core_theory.Theory.Target.t) (subs : sub term list) :
@@ -99,8 +113,9 @@ let () =
     let prog = Project.program proj in
     let target = Project.target proj in
     Printf.printf "=== env_footprint %s ===\n%!" (Filename.basename path);
-    Printf.printf "%-28s %7s %12s %9s %8s %8s %10s\n%!"
-      "sub" "blocks" "total(w)" "KiB" "words%" "mem%" "max(w)";
+    Printf.printf "%-28s %7s %12s %9s %8s %8s %8s %8s %10s\n%!"
+      "sub" "blocks" "total(w)" "KiB" "words%" "mem%" "slices%" "scalar%"
+      "max(w)";
     (match rest with
      (* No name: the whole binary, the largest [top] subs + the total. *)
      | [] -> print_rows_with_total ~top:15 (rows_of target (all_subs prog))
