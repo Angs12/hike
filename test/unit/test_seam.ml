@@ -14,7 +14,12 @@ let tests : unit Alcotest.test list =
     (* SC-A: a guard [x SLT 5] over a load from a stack cell that has a
        non-negative constant store — provably non-negative though the load's
        abstract value is TOP.  The builder's oracle makes the signed row the
-       interval [0,4], so the walk's [x] is [0,4]. *)
+       interval [0,4], so the walk's [x] is [0,4].
+
+       The store follows the load in the guard's own block: the oracle's
+       store index is keyed by the address expression, and in the SSA form
+       a block's address names that block's own phi version, so only a
+       store beside the load shares its address. *)
     pin "SEAM-01"
       "the seam builder wires the non-negativity oracle — the SLT row on a provably non-negative load is the interval [0,4]"
       (fun () ->
@@ -32,16 +37,16 @@ let tests : unit Alcotest.test list =
               [ Def.create x (Bil.Load (Bil.Var m, addr, LittleEndian, `r32));
                 Def.create zf
                   (Bil.BinOp
-                     (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) ],
-              [ (2, mk_goto) ];
-              [ Def.create m
+                     (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5))));
+                Def.create m
                   (Bil.Store
                      ( Bil.Var m,
                        addr,
                        Bil.Int (Cbat_word.to_word (w32 5)),
                        LittleEndian,
                        `r32 )) ],
-              [] ]
+              [ (2, mk_goto) ];
+              [], [ (2, mk_ret) ] ]
         in
         let guard_tid = tids.(1) in
         let entry =
@@ -57,15 +62,19 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
         in
+        (* The guard block's own definitions: the state and the walk name
+           the flag and the loaded word by their versions. *)
+        let zf_v = Base.Option.value_exn (def_version sub guard_tid zf) in
+        let x_v = Base.Option.value_exn (def_version sub guard_tid x) in
         let out =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:(Var.Set.singleton zf)
-            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
+            ~seeds:(Var.Set.singleton zf_v)
+            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf_v
                ~data:(Ws.singleton Cbat_word.b1))
             guard_blk
         in
         let row = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 4)) in
-        check "SEAM-01" (Ws.precedes (AI.find_word 32 out x) row));
+        check "SEAM-01" (Ws.equal (AI.find_word 32 out x_v) row));
 
     (* SC-B: the context's landmark table is the one source of truth: a refine
        run under the context's widening head records the empty meet's boundary
@@ -141,16 +150,21 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
         in
+        (* The guard block's own definitions: the walk names the flag and
+           the derived word by their versions. *)
+        let zf_v = Base.Option.value_exn (def_version sub guard_tid zf) in
+        let x_v = Base.Option.value_exn (def_version sub guard_tid x) in
         let out =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:(Var.Set.singleton zf)
-            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
+            ~seeds:(Var.Set.singleton zf_v)
+            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf_v
                ~data:(Ws.singleton Cbat_word.b1))
             guard_blk
         in
         check "SEAM-04"
           (Ws.elem (Cbat_word.of_int64 ~width:32 (-1L))
-             (AI.find_word 32 out x)));
+             (AI.find_word 32 out x_v)
+           && not (Ws.is_top (AI.find_word 32 out x_v))));
     (* The edge step reads a guard no state satisfies as a dead edge. *)
     pin "SEAM-05"
       "refine_edge_inline: an empty guard meet is a dead edge; a satisfiable or merely narrowing guard and a discarded walk are not"
@@ -158,8 +172,16 @@ let tests : unit Alcotest.test list =
         let x = Var.create ~is_virtual:false ~fresh:false "dead_x" (Type.Imm 32) in
         let zf = v1 "dead_zf" in
         let c32 k = Bil.Int (Cbat_word.to_word (w32 k)) in
-        let edge ?(defs = []) ?(discarded = false) ?(landmarks = fun f -> f ())
-            xval cond =
+        (* A guard that names a flag the block defines reads that
+           definition's version: the state holds the version, not the
+           base variable. *)
+        let flag_version sub =
+          let blk = List.hd (Term.enum blk_t sub |> Seq.to_list) in
+          match def_version sub (Term.tid blk) zf with
+          | Some v -> v
+          | None -> zf
+        in
+        let edge ?(defs = []) ?(discarded = false) xval cond_of =
           let sub = straight_sub "dead_edge" defs in
           let entry =
             AI.add_word (anchored_entry ()) ~key:x ~data:xval in
@@ -171,7 +193,8 @@ let tests : unit Alcotest.test list =
           Vsa.Test_seam.with_widening_head rctx (Some (Tid.for_name "dead_head"))
             (fun () ->
               out :=
-                Vsa.Test_seam.refine_edge_inline ~sol ~rctx ~discarded blk env cond);
+                Vsa.Test_seam.refine_edge_inline ~sol ~rctx ~discarded blk env
+                  (cond_of sub));
           (!out, rctx)
         in
         let two = Ws.of_list ~width:32 [ w32 1; w32 5 ] in
@@ -179,27 +202,34 @@ let tests : unit Alcotest.test list =
         let both =
           Bil.BinOp (Bil.AND, Bil.BinOp (Bil.LT, Bil.Var x, c32 3),
                      Bil.BinOp (Bil.LT, c32 2, Bil.Var x)) in
-        let o, _ = edge two both in
+        let o, _ = edge two (fun _ -> both) in
         check "SEAM-05.empty-meet" (dead o);
-        let o, _ = edge two (Bil.BinOp (Bil.LT, Bil.Var x, c32 3)) in
+        let o, _ = edge two (fun _ -> Bil.BinOp (Bil.LT, Bil.Var x, c32 3)) in
         check "SEAM-05.narrowing"
           ((not (dead o)) && Ws.equal (AI.find_word 32 o x) (Ws.singleton (w32 1)));
         let o, _ =
           edge two
-            (Bil.BinOp (Bil.AND, Bil.BinOp (Bil.LT, Bil.Var x, c32 6),
-                        Bil.BinOp (Bil.LT, c32 0, Bil.Var x))) in
+            (fun _ ->
+               Bil.BinOp (Bil.AND, Bil.BinOp (Bil.LT, Bil.Var x, c32 6),
+                          Bil.BinOp (Bil.LT, c32 0, Bil.Var x)))
+        in
         check "SEAM-05.satisfiable" ((not (dead o)) && Ws.equal (AI.find_word 32 o x) two);
-        let o, _ = edge ~discarded:true two both in
+        let o, _ = edge ~discarded:true two (fun _ -> both) in
         check "SEAM-05.discarded" (not (dead o));
-        let o, _ = edge (Ws.bottom 32) (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) in
+        let o, _ =
+          edge (Ws.bottom 32) (fun _ -> Bil.BinOp (Bil.EQ, Bil.Var x, c32 3))
+        in
         check "SEAM-05.unreached-read" (dead o);
         let o, _ =
           edge ~defs:[ Def.create zf (Bil.BinOp (Bil.EQ, Bil.Var x, c32 3)) ]
-            two (Bil.Var zf) in
+            two (fun sub -> Bil.Var (flag_version sub)) in
         check "SEAM-05.flag-def" (dead o);
-        let o, _ = edge two (Bil.BinOp (Bil.EQ, c32 3, c32 4)) in
+        let o, _ =
+          edge two (fun _ -> Bil.BinOp (Bil.EQ, c32 3, c32 4)) in
         check "SEAM-05.constants" (dead o);
-        let o, rctx = edge (Ws.singleton (w32 0)) (Bil.BinOp (Bil.EQ, Bil.Var x, c32 20)) in
+        let o, rctx =
+          edge (Ws.singleton (w32 0))
+            (fun _ -> Bil.BinOp (Bil.EQ, Bil.Var x, c32 20)) in
         check "SEAM-05.dead-with-landmark"
           (dead o
            && List.exists

@@ -138,15 +138,16 @@ let component_is (c : Hike.Stack_model.sec_comp) ~(id : int) ~(lo_w : int)
   && c.Hike.Stack_model.hi_w = hi_w
   && c.Hike.Stack_model.typed_w = typed_w
 
-(* The pre-call state of a two-block escape fixture: the first two
-   blocks' defs folded from the anchored entry. *)
-let st_pre (sub : sub term) (blk0 : blk term) (blk1 : blk term) : AI.t =
-  let blk_of tid =
-    match Term.find blk_t sub tid with Some b -> b | None -> assert false
+(* The pre-call state of a two-block escape fixture: the call block's
+   end state — the block's phis applied, its defs folded — from the
+   anchored run. *)
+let st_pre (sub : sub term) (call_blk : blk term) : AI.t =
+  let sol = run_anchored sub in
+  let _, after =
+    Vsa.fold_block_states ~synth:Hike.Synth.empty ~sol call_blk ~init:()
+      ~f:(fun _ _ _ () -> ())
   in
-  Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty
-    (blk_of (Term.tid blk1))
-    (Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty (blk_of (Term.tid blk0)) (anchored_entry ()))
+  after
 
 let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
   match Mem.Key.of_wordset (Ws.stack_word_i64 addr) with
@@ -835,14 +836,14 @@ let tests : unit Alcotest.test list =
     pin "SEC-56" "C3: pre-call the caller-frame cell [RSP-8] holds {0xAA} (non-vacuous pin)"
       (fun () ->
         let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
-        let st = st_pre fx.es_sub fx.es_blk0 fx.es_blk1 in
+        let st = st_pre fx.es_sub fx.es_blk1 in
         check "SEC-56"
           (Ws.equal (read64 fx.es_m st (-8L)) (Ws.singleton (w64 0xAA))));
 
     pin "SEC-57" "C3: pre-call the outgoing slot [RSP+16] holds {0xBB} (non-vacuous pin)"
       (fun () ->
         let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
-        let st = st_pre fx.es_sub fx.es_blk0 fx.es_blk1 in
+        let st = st_pre fx.es_sub fx.es_blk1 in
         check "SEC-57"
           (Ws.equal (read64 fx.es_m st (-16L)) (Ws.singleton (w64 0xBB))));
 

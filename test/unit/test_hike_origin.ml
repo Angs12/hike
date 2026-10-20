@@ -216,10 +216,9 @@ let ori_26 () =
 (* ORI-27 (T35): the stack-probe shape — an SP that is a non-singleton
    Stack set (two guarded sizes), then a fixed page decrement.  SP is
    ordinary Stack arithmetic: its origin stays Stack and its offsets are
-   the exact shifted set. *)
+   the exact shifted set.  The decrementing block owns the SP's
+   definitions, so its own post-state holds the shifted value. *)
 let ori_27 () =
-  let m = memv "ori27_m" in
-  ignore m;
   let rsp = sp and rax = int_ret 0 in
   let f = v1 "ori27_f" in
   let w (i : int64) = Cbat_word.to_word (i2w i) in
@@ -240,21 +239,22 @@ let ori_27 () =
   let sol =
     static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi ~entry sub)
   in
-  let envs, _ = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
-  let post =
-    Core.Map.data envs
-    |> List.map ~f:(fun (_, post) -> AI.find_word 64 post rsp)
-    |> List.filter ~f:(fun ws -> Option.is_some (Ws.stack_offsets ws)
-                                 && not (Ws.is_top ws))
+  let dec_tid =
+    Term.enum blk_t sub |> Seq.to_list
+    |> List.find_map ~f:(fun b ->
+           let tid = Term.tid b in
+           if Option.is_some (def_version sub tid rsp) then Some tid else None)
+  |> Option.value_exn
   in
+  let sp_after = value_after sub sol dec_tid rsp in
   check "SP stays on the Stack origin through the fixed decrement"
-    (List.for_all post ~f:(fun ws ->
-         Option.equal Origin.equal (Ws.origin ws) (Some Origin.Stack)));
+    (Option.equal Origin.equal (Ws.origin sp_after) (Some Origin.Stack));
   check "the final SP is exactly the two shifted positions"
-    (List.exists post ~f:(fun ws ->
-         Option.value_map (Ws.stack_offsets ws) ~default:false ~f:(fun offs ->
-             Clp.elem (i2w (-4128L)) offs && Clp.elem (i2w (-4112L)) offs
-             && not (Clp.elem (i2w (-4120L)) offs))))
+    (Option.value_map (Ws.stack_offsets sp_after) ~default:false ~f:(fun offs ->
+        Clp.elem (i2w (-4128L)) offs && Clp.elem (i2w (-4112L)) offs
+        && not (Clp.elem (i2w (-4120L)) offs)
+        && Option.equal Cbat_word.equal (Clp.min_elem offs) (Some (i2w (-4128L)))
+        && Option.equal Cbat_word.equal (Clp.max_elem offs) (Some (i2w (-4112L)))))
 
 let ori_28 () =
   let m = memv "ori28_mem" and p = v64 "ori28_pointer" in
@@ -269,7 +269,7 @@ let ori_28 () =
         Def.create q (Bil.Load (Bil.Var m, slot, LittleEndian, `r64));
         Def.create out (Bil.Load (Bil.Var m, Bil.Var q, LittleEndian, `r64)) ] in
   let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
-  let envs, stamped = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
+  let _, stamped = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
   let defs = Term.enum blk_t stamped |> Seq.concat_map ~f:(Term.enum def_t)
       |> Seq.to_list in
   List.iter defs ~f:(fun d ->
@@ -278,9 +278,10 @@ let ori_28 () =
            (origin_name (Vsa.Def_origin.def_origin d))
            (Some (if Var.same (Def.lhs d) q then "stack" else "fs"))
          || Var.same (Def.lhs d) m));
+  (* The reloaded pointer's own value: the block's state holds the
+     definition's version, so the pin reads it there. *)
   let blk = Option.value_exn (Term.first blk_t sub) in
-  let _, state = Core.Map.find_exn envs (Term.tid blk) in
-  let pointer = AI.find_word 64 state q in
+  let pointer = value_after sub sol (Term.tid blk) q in
   check "FS pointers use their own memory namespace"
     (match Ws.address_groups pointer with
      | [(Some o, offs)] -> String.equal (Origin.name o) "fs"
@@ -320,11 +321,18 @@ let ori_30 () =
         [Def.create p (Bil.Load (Bil.Var m, Bil.Var abi.thread_pointer,
                                  LittleEndian, `r64))], [(0, mk_ret)] ]) in
   let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
-  let envs, _ = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
+  (* The block that owns the self-pointer load: a block's state holds the
+     definition's version, so the pin reads the value there. *)
+  let load_tid =
+    Term.enum blk_t sub |> Seq.to_list
+    |> List.find_map ~f:(fun b ->
+           let tid = Term.tid b in
+           if Option.is_some (def_version sub tid p) then Some tid else None)
+    |> Option.value_exn
+  in
+  let pointer = value_after sub sol load_tid p in
   check "a foreign call preserves FS and its self-pointer load"
-    (Core.Map.exists envs ~f:(fun (_, post) ->
-         Option.equal String.equal (origin_name (Ws.origin (AI.find_word 64 post p)))
-           (Some "fs")))
+    (Option.equal String.equal (origin_name (Ws.origin pointer)) (Some "fs"))
 
 let ori_31 () =
   let m = memv "ori31_mem" in

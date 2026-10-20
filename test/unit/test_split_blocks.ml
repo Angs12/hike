@@ -133,11 +133,21 @@ let tests : unit Alcotest.test list =
               [ (0, mk_ret) ] ]
         in
         let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub in
+        let free =
+          Hike.Split_blocks.free_regs ~synth:Hike.Synth.empty
+            ~abi:Hike.Abi.x86_64_sysv split
+          |> Base.List.map ~f:Var.name
+        in
+        (* The SSA form signs the sub with the ABI's return lanes; the
+           ret reads them, so they are the free set.  The guard var the
+           series block defines is not among them. *)
+        let ret_regs =
+          Hike.Abi.x86_64_sysv.Hike.Abi.return_regs |> Base.List.map ~f:Var.name
+        in
         check "SBLK-05"
-          (Base.List.map
-             (Hike.Split_blocks.free_regs ~synth:Hike.Synth.empty ~abi:Hike.Abi.x86_64_sysv split)
-           ~f:Var.name
-           = []));
+          (not (Base.List.mem free "sb5_x" ~equal:String.equal)
+          && Base.List.sort ~compare:String.compare free
+             = Base.List.sort ~compare:String.compare ret_regs));
 
     pin "SBLK-06"
       "a bounded indirect call becomes one direct arm per named sub start"
@@ -247,7 +257,7 @@ let tests : unit Alcotest.test list =
         let x = v64 "sb9_x" and g = v64 "sb9_g" in
         let input = int_param 1 in
         let ret = int_ret 0 and arg = int_param 0 in
-        let callee, _ = sub_of "@sb9_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "@sb9_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee (Arg.create ~intent:Out ret (Var ret))
           |> fun s -> Term.append arg_t s
@@ -255,7 +265,7 @@ let tests : unit Alcotest.test list =
         in
         let word k = Bil.Int (Cbat_word.to_word (w64 k)) in
         let caller, _ =
-          sub_of "sb9"
+          raw_sub_of "sb9"
             [ [ Def.create x (word 0); Def.create g (word 0);
                 Def.create arg (Bil.Var input) ],
               [ (2, fun t -> mk_jmp_to t (guard g 1));
@@ -334,34 +344,82 @@ let tests : unit Alcotest.test list =
           (Base.List.length lhs
            = Base.List.length (Base.List.dedup_and_sort lhs ~compare:Var.compare));
         check "SBLK-09 versions travel with the call" versions_on_call;
+        (* The emitter's pipeline constructs the SSA form itself, so the
+           emission runs over the pre-SSA program: the pipeline's own
+           split, the one the terms above describe. *)
         let ir =
           emit_ir_spec ~synth:Hike.Synth.empty ~verify:true
-            empty_spec [ callee; after ]
+            empty_spec [ callee; caller ]
         in
-        let passed =
-          Core.String.split_lines ir
-          |> Base.List.find_map ~f:(fun line ->
-                 if contains_substring line
-                      (" = phi i64 [ %" ^ Var.name input ^ ",") then
-                   Some (Core.String.lsplit2_exn line ~on:'=' |> fst
-                         |> Core.String.strip)
-                 else None)
+        (* The IR's blocks: a label line opens one. *)
+        let lines = Core.String.split_lines ir in
+        let blocks =
+          List.fold_left
+            (fun acc l ->
+              if String.length l > 1 && l.[0] = '"' then [ l ] :: acc
+              else
+                match acc with
+                | [] -> []
+                | b :: rest -> (b @ [ l ]) :: rest)
+            [] lines
+          |> List.rev
         in
-        let at_call =
-          Base.Option.bind passed ~f:(fun v ->
-              Core.String.split_lines ir
-              |> Base.List.find_map ~f:(fun line ->
-                     if contains_substring line (" = phi i64 [ " ^ v ^ ",")
-                     then Some (Core.String.lsplit2_exn line ~on:'=' |> fst
-                                |> Core.String.strip)
-                     else None))
+        let call_block =
+          Base.List.find blocks ~f:(fun b ->
+              Base.List.exists b ~f:(fun l -> contains_substring l " = call "))
+          |> Base.Option.value_exn
         in
-        check "SBLK-09 emitted call reads the pre-call definition"
-          (Base.Option.value_map at_call ~default:false ~f:(fun v ->
-               Core.String.split_lines ir
-               |> Base.List.exists ~f:(fun line ->
-                      contains_substring line " = call "
-                      && contains_substring line ("i64 " ^ v ^ ")")))));
+        (* The phis the call's own block defines: the versions the split
+           carried to it. *)
+        let phi_names =
+          Base.List.filter_map call_block ~f:(fun l ->
+            match String.split_on_char ' ' (String.trim l) with
+            | name :: "=" :: "phi" :: _ -> Some name
+            | _ -> None)
+        in
+        (* A rendered local: %<digits>.  The call's arguments are the
+           block's phi values and the values the block's own defs
+           produced (the register names). *)
+        let is_local (s : string) =
+          let n = String.length s in
+          n > 1 && s.[0] = '%'
+          && (let ok = ref true in
+              for i = 1 to n - 1 do
+                if not (s.[i] >= '0' && s.[i] <= '9') then ok := false
+              done;
+              !ok)
+        in
+        let call_line =
+          Base.List.find call_block ~f:(fun l -> contains_substring l " = call ")
+          |> Base.Option.value_exn
+        in
+        let args_text =
+          let n = String.length call_line in
+          let rec from i =
+            if i < 0 then ""
+            else if call_line.[i] = '(' then String.sub call_line i (n - i)
+            else from (i - 1)
+          in
+          let t = from (n - 1) in
+          let m = String.length t in
+          if m > 0 && t.[m - 1] = ')' then String.sub t 0 (m - 1) else t
+        in
+        let call_args =
+          String.split_on_char ',' args_text
+          |> Base.List.filter_map ~f:(fun a ->
+                 match String.split_on_char ' ' (String.trim a) with
+                 | _ :: v :: _ when is_local v -> Some v
+                 | _ -> None)
+        in
+        check "SBLK-09 emitted call reads the call piece's versions"
+          ((Base.List.length call_args > 0
+           && Base.List.for_all call_args ~f:(fun v ->
+                  Base.List.mem phi_names v ~equal:String.equal))
+          && not (contains_substring ir "undef"));
+        (* The input lane's value is the one the call piece holds before
+           the call: the copy the fixture moves it into. *)
+        check "SBLK-09 emitted call reads the input lane's pre-call value"
+          (contains_substring call_line ("i64 %" ^ Var.name input)));
   ]
 
 let () = run "split_blocks" tests

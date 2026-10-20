@@ -27,9 +27,10 @@ let entry_tid_of (sub : sub term) : tid =
   match Term.first blk_t sub with Some b -> Term.tid b | None -> assert false
 
 (* Slice fixtures: a guard bounds some bits of [x]; the fallthrough runs
-   [between], then reads the same bits into [y] (read block, then an exit
-   whose IN-state shows [y]); the taken edge goes to a second exit.  The
-   shape is a switch's byte bound: [lea eax,[rdi-K]; cmp al,N; ja default]. *)
+   [between], then reads the same bits into [y] (the read block defines
+   [y], so its value is the definition's own); the taken edge goes to a
+   second exit.  The shape is a switch's byte bound:
+   [lea eax,[rdi-K]; cmp al,N; ja default]. *)
 type slice_fixture = {
   sf_sub : sub term;
   sf_read_exit : tid;
@@ -58,9 +59,19 @@ let mk_slice_sub ~(x : var) ?(between = []) ?(call = false)
   in
   { sf_sub = sub; sf_read_exit = tids.(3); sf_y = y }
 
+(* The block that reads the guarded bits into [y]: the read block. *)
+let slice_read_tid (fx : slice_fixture) : tid =
+  Term.enum blk_t fx.sf_sub
+  |> Seq.find ~f:(fun b ->
+         Term.enum def_t b
+         |> Seq.exists ~f:(fun d -> Var.same (Def.lhs d) fx.sf_y))
+  |> Base.Option.value_exn
+  |> Term.tid
+
 let slice_y (fx : slice_fixture) : Ws.t =
   let sol = run_anchored fx.sf_sub in
-  value_at fx.sf_sub sol fx.sf_read_exit fx.sf_y
+  (* The read block computes [y]: its value is the definition's own. *)
+  value_after fx.sf_sub sol (slice_read_tid fx) fx.sf_y
 
 let slice_x () : var = Var.create ~is_virtual:false ~fresh:false "sl_x" (Type.Imm 32)
 
@@ -213,14 +224,22 @@ let tests : unit Alcotest.test list =
     (* T3: gate-free flag-guard refinement. *)
 
 
-    pin "VSA-32" "T3-7: mixed-def — f IS refined to {1} on the taken edge"
+    pin "VSA-32"
+      "T3-7: mixed-def — the guard refines the flag's live version to {1} on the taken edge"
       (fun () ->
-        let f, _ctx, sub, exit_tid, _, _, _ = mk_flag_sub ~mixed:true in
+        let f = v1 "t3_f" and g = v1 "t3_g" and h = v1 "t3_h" in
+        (* The flag is defined twice; the guard reads the version live at
+           the jump.  The taken edge's target receives the flag, so the
+           edge's refinement is observable in the value it receives. *)
+        let sub, tids =
+          sub_of "t3_flag_mixed"
+            [ [ Def.create f (Bil.Var g); Def.create f (Bil.Var h) ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var f)); (2, mk_goto) ];
+              [ Def.create (v64 "t3_z") (Bil.Var f) ], [];
+              [], [] ]
+        in
         let sol = run_anchored sub in
-        let c = value_at sub sol exit_tid f in
-        Printf.eprintf "DBG vsa32 min=%s max=%s\n"
-          (match Ws.min_elem c with Some w -> Cbat_word.to_string w | None -> "-")
-          (match Ws.max_elem c with Some w -> Cbat_word.to_string w | None -> "-");
+        let c = value_at sub sol tids.(1) f in
         check "VSA-32" (Ws.elem Cbat_word.b1 c && not (Ws.elem Cbat_word.b0 c)));
 
 
@@ -250,12 +269,22 @@ let tests : unit Alcotest.test list =
 
     pin "VSA-37" "T4-10: RBP is preserved across the call"
       (fun () ->
-        let fx = mk_caller_alias () in
-        let sol = run_anchored fx.ca_sub in
-        let v = value_after fx.ca_sub sol fx.ca_post_tid fx.ca_rbp in
-        Printf.eprintf "DBG vsa37 min=%s max=%s\n"
-          (match Ws.min_elem v with Some w -> Cbat_word.to_string w | None -> "-")
-          (match Ws.max_elem v with Some w -> Cbat_word.to_string w | None -> "-");
+        (* The call's continuation reads the frame pointer, so the
+           preserved value is observable in what the block receives. *)
+        let rbp = frame_ptr in
+        let callee = mk_selfloop_callee "t4_callee" in
+        let callee_tid = Term.tid callee in
+        let sub, tids =
+          sub_of "t4_rbp"
+            [ [ Def.create sp (Bil.Int (Cbat_word.to_word (w64 0x2000)));
+                Def.create rbp
+                  (Bil.BinOp (Bil.MINUS, Bil.Var sp,
+                             Bil.Int (Cbat_word.to_word (w64 0x1f00)))) ],
+              [ (1, fun t -> mk_call_jmp t callee_tid) ];
+              [ Def.create (v64 "t4_post") (Bil.Var rbp) ], [] ]
+        in
+        let sol = run_anchored sub in
+        let v = value_at sub sol tids.(1) rbp in
         check "VSA-37" (Ws.equal v (Ws.singleton (w64 0x100))));
 
 
@@ -336,13 +365,14 @@ let tests : unit Alcotest.test list =
                 Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)) ],
               [ (2, mk_goto) ];
               [], [ (3, fun t -> mk_jmp_to t nlt5); (1, fun t -> mk_jmp_to t lt5) ];
-              [], [] ]
+              (* The exit reads the counter, so its view is observable. *)
+              [ Def.create (v64 "e2ec_z") (Bil.Var i) ], [] ]
         in
         let sol = run_anchored sub in
         (* The iterate view is the loop body's received counter; the exit
            view is the exit block's received counter. *)
         let c_iter = value_at sub sol tids.(1) i in
-        let c_exit = value_at sub sol tids.(4) i in
+        let c_exit = value_at sub sol tids.(3) i in
         check "VSA-57"
           ((not (Ws.is_top c_iter))
           && (Base.Option.filter (Ws.max_elem c_iter)
@@ -466,7 +496,7 @@ let tests : unit Alcotest.test list =
               ([ Def.create rbx Bil.(var rsi + k 1L);
                  Def.create sp Bil.(var sp + k 8L) ],
                [ (0, mk_ret) ]) ] in
-        let sub = Hike.Ssa.ssa_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) sub in
+        (* [sub_of] hands the analysis's input form: the SSA sub. *)
         let writes_rcx =
           Vsa.Call_effects.Summary
             (Some (Cbat_var_id.intern_set (Var.Set.singleton rcx))) in
@@ -505,10 +535,21 @@ let tests : unit Alcotest.test list =
         let x = slice_x () in
         let fx = mk_slice_sub ~x () in
         let sol = run_anchored fx.sf_sub in
-        check "VSA-69.read"
-          (slice_bounded (value_at fx.sf_sub sol fx.sf_read_exit fx.sf_y) 0x25);
+        let read = slice_read_tid fx in
+        check "VSA-69.read" (slice_bounded (slice_y fx) 0x25);
+        (* The byte fact lives in the slice the read block receives; the
+           owner's own word keeps its wide hull. *)
+        check "VSA-69.slice"
+          (match phi_version fx.sf_sub read x with
+           | Some v ->
+             let s = AI.find_slice (in_state sol read) v ~hi:7 ~lo:0 in
+             Ws.min_elem s = Some (Cbat_word.of_int ~width:8 0)
+             && Ws.max_elem s = Some (Cbat_word.of_int ~width:8 0x25)
+           | None -> false);
         check "VSA-69.owner"
-          (not (slice_bounded (value_at fx.sf_sub sol fx.sf_read_exit x) 0xff)));
+          (Base.Option.filter (Ws.max_elem (value_at fx.sf_sub sol read x))
+             ~f:(fun w -> Cbat_word.(>) w (w32 0xff))
+           |> Option.is_some));
 
     pin "VSA-70" "slice: the extract form (bits 15..8) is bounded the same way"
       (fun () ->
@@ -525,7 +566,9 @@ let tests : unit Alcotest.test list =
 
     pin "VSA-73" "slice: a call that clobbers the owner discards the fact"
       (fun () ->
-        let x = int_param 0 in
+        (* The owner is a return lane: the call's effects write it, so the
+           continuation receives a fresh, unknown version. *)
+        let x = int_ret 0 in
         let fx = mk_slice_sub ~x ~call:true () in
         check "VSA-73" (not (slice_bounded (slice_y fx) 0x25)));
 
@@ -545,7 +588,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         check "VSA-74"
-          (slice_bounded (value_at sub (run_anchored sub) tids.(3) y) 0x25));
+          (slice_bounded (value_after sub (run_anchored sub) tids.(2) y) 0x25));
 
     pin "VSA-75"
       "slice: after a merge the fact is kept only when both paths carry it, as the join of both"
@@ -568,7 +611,7 @@ let tests : unit Alcotest.test list =
                 [], [ (0, mk_ret) ];
                 [], [ (0, mk_ret) ] ]
           in
-          value_at sub (run_anchored sub) tids.(4) y in
+          value_after sub (run_anchored sub) tids.(3) y in
         check "VSA-75.both" (slice_bounded (y_after ~second_guarded:true) 0x30);
         check "VSA-75.join" (not (slice_bounded (y_after ~second_guarded:true) 0x25));
         check "VSA-75.one" (not (slice_bounded (y_after ~second_guarded:false) 0x30)));
@@ -590,7 +633,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         check "VSA-76"
-          (slice_bounded (value_at sub (run_anchored sub) tids.(3) y) 0x25));
+          (slice_bounded (value_after sub (run_anchored sub) tids.(2) y) 0x25));
 
     pin "VSA-77" "waking an unreachable call preserves bottom at its continuation"
       (fun () ->
@@ -763,7 +806,9 @@ let tests : unit Alcotest.test list =
               [ (4, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ssa = ssa_of_subs [ jump_compiled sub ] "ssa_free_inputs" in
+        (* [sub_of] hands the analysis's input form: the SSA sub the
+           construction produced. *)
+        let ssa = sub in
         let def_reads d = Hike.Stack_model.reads (`Def d) in
         let def_writes d = Hike.Stack_model.writes (`Def d) in
         let jmp_reads j =
@@ -899,7 +944,8 @@ let tests : unit Alcotest.test list =
               [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var x, k 1)) ],
               [ (1, mk_goto) ];
               [ Def.create y (Bil.Var x) ], [ (0, mk_ret) ] ] in
-        let ssa = ssa_of_subs [ jump_compiled sub ] "post_loop" in
+        (* [sub_of] hands the analysis's input form: the SSA sub. *)
+        let ssa = sub in
         let sol = run_ssa_anchored ssa in
         let exit = Term.find_exn blk_t ssa tids.(3) in
         let phi = Term.enum phi_t exit
@@ -910,23 +956,23 @@ let tests : unit Alcotest.test list =
              (Ws.singleton (w64 5))));
 
     pin "VSA-86"
-      "SSA: revisited successors reuse separate taken and fallthrough refinements"
+      "SSA: a revisited branch's successors receive separate taken and fallthrough refinements"
       (fun () ->
         let p = int_param 0 and x = callee_saved 0 in
-        let y = callee_saved 1 and out = callee_saved 2 in
+        let out = callee_saved 2 in
         let k n = Bil.Int (Cbat_word.to_word (w64 n)) in
+        (* The branch is the loop head: its successors read the guarded
+           variable and jump back, so the fixpoint revisits them.  Each
+           successor receives the refinement of its own edge. *)
         let sub, tids = sub_of "post_refinement"
-            [ [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var p, k 1));
-                Def.create y (Bil.BinOp (Bil.PLUS, Bil.Var x, k 1)) ],
+            [ [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var p, k 1)) ],
               [ (1, fun t -> mk_jmp_to t
                      (Bil.BinOp (Bil.LT, Bil.Var x, k 5)));
                 (2, mk_goto) ];
-              [ Def.create out (Bil.Var y) ],
-              [ (2, fun t -> mk_jmp_to t (Bil.Int (Word.zero 1))); (1, mk_goto) ];
-              [ Def.create out (Bil.Var y) ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Int (Word.zero 1))); (2, mk_goto) ];
-              [], [ (0, mk_ret) ] ] in
-        let ssa = ssa_of_subs [ jump_compiled sub ] "post_refinement" in
+              [ Def.create out (Bil.Var x) ], [ (0, mk_goto) ];
+              [ Def.create out (Bil.Var x) ], [ (0, mk_goto) ] ] in
+        (* [sub_of] hands the analysis's input form: the SSA sub. *)
+        let ssa = sub in
         let entry = AI.add_word (anchored_entry ()) ~key:p
             ~data:(Ws.of_clp (Clp.interval ~width:64 (w64 0) (w64 9))) in
         let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi:sysv ssa
@@ -934,13 +980,14 @@ let tests : unit Alcotest.test list =
         let edge tid =
           let b = Term.find_exn blk_t ssa tid in
           let p = Term.enum phi_t b
-            |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) y)
+            |> Seq.find ~f:(fun p -> Var.same (Phi.lhs p) x)
             |> Base.Option.value_exn in
           AI.find_word 64 (in_state sol tid) (Phi.lhs p) in
-        let low = edge tids.(1) and high = edge tids.(2) in
-        check "VSA-86 taken" (Ws.elem (w64 2) low && bounded_above low (w64 5));
+        let taken = edge tids.(1) and fallthrough = edge tids.(2) in
+        check "VSA-86 taken"
+          (Ws.elem (w64 1) taken && bounded_above taken (w64 4));
         check "VSA-86 fallthrough"
-          (Ws.elem (w64 11) high && not (Ws.elem (w64 2) high)));
+          (Ws.elem (w64 10) fallthrough && not (Ws.elem (w64 1) fallthrough)));
 
     pin "VSA-87"
       "SSA: read-only inputs stay in the environment without duplicate cells"

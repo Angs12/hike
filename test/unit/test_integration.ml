@@ -16,19 +16,36 @@ module W = Cbat_word
 
 (* VSK-02 fixture: an acyclic diamond over a ranged counter; the entry
    state carries the range, so the guard edges refine to absolute halves.
+   The two arms read the counter, so the SSA construction gives them a
+   phi for it: a block's state holds the values it receives, and the
+   refinement of an edge is visible in the destination's state.
    Returns (sub, guard_tid, then_tid, else_tid, x). *)
 let vsk_diamond () : sub term * tid * tid * tid * var =
   let x = Var.create ~is_virtual:false ~fresh:false "vsk_x" (Type.Imm 32) in
   let guard_e = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))) in
+  let y = Var.create ~is_virtual:false ~fresh:false "vsk_y" (Type.Imm 32) in
   let sub, tids =
     sub_of "vsk_diamond"
       [ [], [ (1, mk_goto) ];
         [], [ (2, fun t -> mk_jmp_to t guard_e);
               (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, guard_e))) ];
-        [], [];
-        [], [] ]
+        [ Def.create y (Bil.Var x) ], [];
+        [ Def.create y (Bil.Var x) ], [] ]
   in
   (sub, tids.(1), tids.(2), tids.(3), x)
+
+(* The sub's memory variable: the first memory-typed definition's
+   left-hand side (the memory variables keep their name across the SSA
+   renaming, so the pin reads the same cell the analysis wrote). *)
+let mem_var_of (sub : sub term) : var =
+  Term.enum blk_t sub
+  |> Seq.concat_map ~f:(Term.enum def_t)
+  |> Seq.filter_map ~f:(fun d ->
+         match Var.typ (Def.lhs d) with
+         | Type.Mem _ -> Some (Def.lhs d)
+         | Type.Imm _ | Type.Unk -> None)
+  |> Seq.to_list
+  |> function [] -> failwith "mem_var_of: the sub has no memory definition" | v :: _ -> v
 
 (* The word key the landmark pins use: each pin builds its own table, so
    one base variable serves them all. *)
@@ -590,7 +607,9 @@ let tests : unit Alcotest.test list =
 
     (* VSK-02: the diamond's entry state carries x in [0,20]; the
        constant-true identity edge is the empty-seed shape and the guard's
-       taken/fallthrough edges refine to the absolute halves. *)
+       taken/fallthrough edges refine to the absolute halves.  Each arm
+       reads x, so the refinement is visible in the state the arm
+       receives. *)
     pin "INT-04"
       "VSK-02 empty-seed/mixed-seed oracle: the constant-true guard seeds nothing and the \
        diamond's edges refine to the absolute halves"
@@ -616,12 +635,11 @@ let tests : unit Alcotest.test list =
           static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let st tid = Graphlib.Std.Solution.get sol tid in
         check
-          "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals \
-           the seeded entry state; the frame relation is gone — the identity is over words and \
-           memories)"
-          (AI.equal (st guard_tid) entry);
+          "property LM VSK-EMPTY: the unconditional edge is the identity transfer — the guard \
+           block receives the seeded range unchanged (the destination's state is built from the \
+           values it receives, not copied from the source)"
+          (Ws.equal (value_at sub sol guard_tid x) (AI.find_word 32 entry x));
         check "property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly"
           (Ws.equal (value_at sub sol then_tid x) (range 0 9));
         check "property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly"
@@ -660,21 +678,39 @@ let tests : unit Alcotest.test list =
       "T01: the when-chain's edges partition by their accumulated conditions and a lone \
        unconditional goto is the identity transfer"
       (fun () ->
-        let sub, l1_tid, l2_tid, l3_tid, _chain_tid, x = mk_when_chain () in
+        let sub, l1_tid, l2_tid, l3_tid, chain_tid, x = mk_when_chain () in
         let sol = run_anchored sub in
-        let in_x (t : tid) : Ws.t = value_at sub sol t x in
+        (* The chain's cell: the guard's refinement meets the cell the
+           chain reads, and the destination's state carries the memory
+           the edge delivers — so the partition is visible there. *)
+        let chain_mem = mem_var_of sub in
+        let midx = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+        let key =
+          match Mem.Key.of_wordset (Ws.stack_word_i64 (-8L)) with
+          | [ k ] -> k
+          | _ -> failwith "T01: no stack key"
+        in
+        let cell_of (t : tid) : Ws.t =
+          let mv = AI.find_memory midx (Graphlib.Std.Solution.get sol t) chain_mem in
+          Mem.Val.data (Mem.find (32, LittleEndian) mv key)
+        in
         check
-          "T01-1a (when-chain): the FIRST edge's IN-state is refined by its own cond (x < 10 over \
-           {5,15,25} = {5} exactly)"
-          (Ws.equal (in_x l1_tid) (Ws.singleton (w32 5)));
+          "T01-0 (when-chain): the chain block reads the ladder {5,15,25} — the cell's whole \
+           value, before the edges split it"
+          (Ws.equal (value_after sub sol chain_tid x)
+             (Ws.of_list ~width:32 [ w32 5; w32 15; w32 25 ]));
         check
-          "T01-1b (when-chain): the MID-CHAIN edge's IN-state is refined by the ACCUMULATED `c2 & \
-           ~c1`, not the jmp's own cond (x = {15} exactly — not {5,15})"
-          (Ws.equal (in_x l2_tid) (Ws.singleton (w32 15)));
+          "T01-1a (when-chain): the FIRST edge's destination receives the cell refined by its own \
+           cond (x < 10 over {5,15,25} = {5} exactly)"
+          (Ws.equal (cell_of l1_tid) (Ws.singleton (w32 5)));
         check
-          "T01-1c (when-chain): the unconditional chain TAIL's IN-state is refined by the \
-           accumulated negatives `~c1 & ~c2` (x = {25} exactly)"
-          (Ws.equal (in_x l3_tid) (Ws.singleton (w32 25)));
+          "T01-1b (when-chain): the MID-CHAIN edge's destination receives the cell refined by the \
+           ACCUMULATED `c2 & ~c1`, not the jmp's own cond ({15} exactly — not {5,15})"
+          (Ws.equal (cell_of l2_tid) (Ws.singleton (w32 15)));
+        check
+          "T01-1c (when-chain): the unconditional chain TAIL's destination receives the cell \
+           refined by the accumulated negatives `~c1 & ~c2` ({25} exactly)"
+          (Ws.equal (cell_of l3_tid) (Ws.singleton (w32 25)));
         let m = memv "t01_m" in
         let rbp = frame_ptr in
         let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -691,11 +727,15 @@ let tests : unit Alcotest.test list =
         let mid_tid = tids.(1) in
         let exit_tid = tids.(2) in
         let sol2 = run_anchored sub2 in
-        let cell t = cell_at m rbp (Graphlib.Std.Solution.get sol2 t) in
+        (* The straight-line fixture stores 3 at the same frame offset. *)
+        let cell t =
+          let mv = AI.find_memory midx (Graphlib.Std.Solution.get sol2 t) m in
+          Mem.Val.data (Mem.find (32, LittleEndian) mv key)
+        in
         check
           "T01-2 (uniform rule): a lone unconditional goto's accumulated cond is the literal TRUE \
-           — the identity transfer: EXIT's IN-state equals MID's (both read the stored {3} \
-           exactly; no spurious refinement, no bottom)"
+           — the identity transfer: EXIT's state equals MID's (both read the stored {3} exactly; \
+           no spurious refinement, no bottom)"
           (Ws.equal (cell mid_tid) (Ws.singleton (w32 3))
           && Ws.equal (cell exit_tid) (Ws.singleton (w32 3))));
 
@@ -744,10 +784,17 @@ let tests : unit Alcotest.test list =
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
-        let entry = AI.add_word entry ~key:t ~data:(Ws.singleton (w32 5)) in
+        (* The walk follows the exact SSA definition: the seed is the
+           version the block defines, and the state carries its value. *)
+        let t_v =
+          match def_version sub (Term.tid blk) t with
+          | Some v -> v
+          | None -> failwith "T5-1: no version of t"
+        in
+        let entry = AI.add_word entry ~key:t_v ~data:(Ws.singleton (w32 5)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:(Var.Set.singleton t)
+            ~seeds:(Var.Set.singleton t_v)
             entry blk
         in
         let cell =
@@ -807,10 +854,25 @@ let tests : unit Alcotest.test list =
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
-        let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
+        (* The walk follows the exact SSA definition: the seed is the
+           version the block defines, and the state carries its value.
+           The addresses are the frame-pointer version the block holds. *)
+        let t2_v =
+          match def_version sub (Term.tid blk) t2 with
+          | Some v -> v
+          | None -> failwith "T5-2: no version of t2"
+        in
+        let rbp_v = version_at sub (Term.tid blk) frame_ptr in
+        let ka_v =
+          Bil.BinOp (Bil.MINUS, Bil.Var rbp_v, Bil.Int (Cbat_word.to_word (w64 16)))
+        in
+        let kb_v =
+          Bil.BinOp (Bil.MINUS, Bil.Var rbp_v, Bil.Int (Cbat_word.to_word (w64 8)))
+        in
+        let entry = AI.add_word entry ~key:t2_v ~data:(Ws.singleton (w32 6)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:(Var.Set.singleton t2)
+            ~seeds:(Var.Set.singleton t2_v)
             entry blk
         in
         let cell_of_key k =
@@ -819,11 +881,11 @@ let tests : unit Alcotest.test list =
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
         check "T5-2 (Store row): the constrained cell (the store's key) meets {6}"
-          (Ws.equal (cell_of_key kb) (Ws.singleton (w32 6)));
+          (Ws.equal (cell_of_key kb_v) (Ws.singleton (w32 6)));
         check
           "T5-2 (Store row): the constraint flows into the stored data's producers — the \
            producing load's cell meets {6}"
-          (Ws.equal (cell_of_key ka) (Ws.singleton (w32 6)));
+          (Ws.equal (cell_of_key ka_v) (Ws.singleton (w32 6)));
         (* The hull case: the consuming load's address is a SET whose hull
            contains the store's key without equalling it.  The handshake's
            match is interval intersection, so the store row still delivers —
@@ -925,11 +987,12 @@ let tests : unit Alcotest.test list =
 
     (* The cross-block cell carry: the store that wrote the cell is in
        ANOTHER block; the guard block's walk still delivers the load's
-       constraint across the boundary — the walked block's entry state
-       (and the taken view's IN state after the fixpoint) holds the
-       constrained cell. *)
+       constraint across the boundary — the walked block's state (and
+       the taken view's state after the fixpoint, whose memory rides
+       the edge) holds the constrained cell. *)
     pin "INT-33"
-      "C3: a cell constraint crosses the block boundary — the store is in another block, and        the guard block's walk delivers the constrained cell"
+      "C3: a cell constraint crosses the block boundary — the store is in another block, and the \
+       guard block's walk delivers the constrained cell"
       (fun () ->
         let mem = memv "cb_m" in
         let rbp = frame_ptr in
@@ -954,6 +1017,8 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
+        (* The guard block (it loads the cell and guards on it) and the
+           block its taken edge leads to. *)
         let guard_tid = tids.(1) and taken_tid = tids.(2) in
         let key_ofw w =
           match Mem.Key.of_wordset (Ws.stack_word_i64 (Stdlib.Int64.of_int w)) with
@@ -971,42 +1036,59 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv
-            sub
+          static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
+        in
+        (* The walk follows the exact SSA definition: the seed is the
+           version the block defines, and the state carries its value.
+           The address is the frame-pointer version the block holds. *)
+        let t2_v =
+          match def_version sub guard_tid t2 with
+          | Some v -> v
+          | None -> failwith "C3: no version of t2"
+        in
+        let rbp_v = version_at sub guard_tid frame_ptr in
+        let kb_v =
+          Bil.BinOp (Bil.MINUS, Bil.Var rbp_v, Bil.Int (Cbat_word.to_word (w64 8)))
         in
         let cell_of env =
           Result.fold
-            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty (Bil.Load (Bil.Var mem, kb, LittleEndian, `r32)) env)
+            (Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty
+               (Bil.Load (Bil.Var mem, kb_v, LittleEndian, `r32)) env)
             ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
         in
-        (* Walk-level: the guard block's walk returns the block's entry
-           state with the constrained cell. *)
         let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
-        let blk1 =
-          Term.enum blk_t sub |> Seq.to_list
-          |> List.find (fun b -> Term.tid b = guard_tid)
-        in
+        let blk1 = Term.find_exn blk_t sub guard_tid in
+        (* Walk-level: the guard block's walk returns the block's state
+           with the constrained cell. *)
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:(Var.Set.singleton t2)
-            (AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6))) blk1
+            ~seeds:(Var.Set.singleton t2_v)
+            (AI.add_word entry ~key:t2_v ~data:(Ws.singleton (w32 6))) blk1
         in
         check
-          "C3: the constraint crosses the block boundary — the walked block's entry state holds            the constrained cell {6}"
+          "C3: the constraint crosses the block boundary — the walked block's state holds the \
+           constrained cell {6}"
           (Ws.equal (cell_of refined) (Ws.singleton (w32 6)));
-        (* Fixpoint-level: the taken view's IN state carries it too. *)
+        (* Fixpoint-level: the taken view's state carries it too — the
+           memory rides the edge, and the edge's walk constrained the
+           cell. *)
+        let midx = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+        let taken_cell =
+          let mv = AI.find_memory midx (Graphlib.Std.Solution.get sol taken_tid) mem in
+          Mem.Val.data (Mem.find (32, LittleEndian) mv k8)
+        in
         check
-          "C3: the taken view's IN state holds the constrained cell {6} (the store is in            another block)"
-          (Ws.equal
-             (cell_of (Graphlib.Std.Solution.get sol taken_tid))
-             (Ws.singleton (w32 6))));
+          "C3: the taken view's state holds the constrained cell {6} (the store is in another \
+           block)"
+          (Ws.equal taken_cell (Ws.singleton (w32 6))));
 
     (* Pin F: the negative store match — a store that must NOT match
        (mismatched endianness, mismatched width, or a disjoint key)
        delivers nothing: the store's data producers stay unconstrained. *)
     pin "INT-34"
-      "F: a store whose shape mismatches the read (endian, width) or whose key is disjoint        delivers nothing — the data producers stay unconstrained"
+      "F: a store whose shape mismatches the read (endian, width) or whose key is disjoint \
+       delivers nothing — the data producers stay unconstrained"
       (fun () ->
         let mk ~(store_endian : endian) ~(store_sz : Size.t) ~(load_addr : exp)
             ~(load_endian : endian) ~(seed_wide : Mem.Key.t list)
@@ -1047,11 +1129,23 @@ let tests : unit Alcotest.test list =
           in
           let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
           let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
-          let forward = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk entry in
-          let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
+          (* The forward state: the block's definitions replayed from the
+             block's own IN state — the values the walk starts from. *)
+          let forward =
+            Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk
+              (Graphlib.Std.Solution.get sol (Term.tid blk))
+          in
+          (* The walk follows the exact SSA definition: the seed is the
+             version the block defines, and the state carries its value. *)
+          let t2_v =
+            match def_version sub (Term.tid blk) t2 with
+            | Some v -> v
+            | None -> failwith "F: no version of t2"
+          in
+          let entry = AI.add_word entry ~key:t2_v ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol ~rctx
-              ~seeds:(Var.Set.singleton t2)
+              ~seeds:(Var.Set.singleton t2_v)
               entry blk
           in
           (refined, ta, tb, forward, sub, Term.tid blk)
@@ -1067,7 +1161,7 @@ let tests : unit Alcotest.test list =
         (* No delivery: each producer keeps its forward value at the edge. *)
         let unconstrained refined forward ta tb fsub fblk =
           let at v st =
-            let version = version_at (ssa_form fsub) fblk v in
+            let version = version_at fsub fblk v in
             let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
             AI.find_word width st version in
           Ws.equal (at ta refined) (at ta forward) && Ws.equal (at tb refined) (at tb forward)
@@ -1171,13 +1265,12 @@ let tests : unit Alcotest.test list =
           (Ws.min_elem taken_i) (fun lo -> Cbat_word.equal lo (w32 0)));
 
         (* F1-FT: the fallthrough-edge fixture — the head, taken body, and
-       fallthrough exit pin the walk's delivered values. *)
+       fallthrough edge pin the delivered counter values. *)
     pin "INT-15"
-      "LM F1-FT: the head, taken body, and fallthrough exit pin the walk-delivered counter values"
+      "LM F1-FT: the head, taken body, and fallthrough edge pin the delivered counter values"
       (fun () ->
         let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
         let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-        let st tid = Graphlib.Std.Solution.get sol tid in
         let head_i = value_at sub sol l1_tid i in
         check_bound "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side \
                      of the pin)"
@@ -1191,14 +1284,41 @@ let tests : unit Alcotest.test list =
         check_bound "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the \
                      landmark)"
           (Ws.max_elem body_i) (fun hi -> Cbat_word.equal hi (Cbat_word.pred k));
+        (* The fallthrough exit receives no counter (it has no phi for
+           it), so the edge's own delivery is the observable: the
+           production's edge step meets the guard's cond into the
+           counter the head holds. *)
         let exits = exit_blocks_of sub in
-        let exit_i =
-          match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
+        let exit_tid =
+          match exits with [ b ] -> Term.tid b | _ -> assert false
+        in
+        let guard_blk = Term.find_exn blk_t sub l1_tid in
+        let fall_jmp =
+          Term.enum jmp_t guard_blk
+          |> Seq.find ~f:(fun j ->
+                 match Jmp.kind j with
+                 | Goto (Direct t) -> Tid.equal t exit_tid
+                 | _ -> false)
+          |> Base.Option.value_exn
+        in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
+        let post =
+          Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty guard_blk
+            (Graphlib.Std.Solution.get sol l1_tid)
+        in
+        let refined =
+          Vsa.Test_seam.refine_edge_inline ~sol ~rctx ~discarded:false guard_blk post
+            (Jmp.cond fall_jmp)
+        in
+        let i_v =
+          match phi_version sub l1_tid i with
+          | Some v -> v
+          | None -> failwith "F1-FT: the head holds no phi for the counter"
         in
         check
-          "property LM F1-FT: the fallthrough exit pins the counter to {K} exactly (walk side of \
+          "property LM F1-FT: the fallthrough edge pins the counter to {K} exactly (edge side of \
            the pin)"
-          (Ws.equal exit_i (Ws.singleton k)));
+          (Ws.equal (AI.find_word 32 refined i_v) (Ws.singleton k)));
 
                 (* F1-B4 (the walk's cell meet): the walk's product is the cell meet
        through a Load-producing def, so the fixture seeds a Var constraint

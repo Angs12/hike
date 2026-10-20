@@ -41,7 +41,9 @@ let targets_of (sub : sub term) : string list =
                 | _ -> None))
   |> Seq.to_list
 
-(* One temp def at [w] bits, read back, plus an FP call to [intr]. *)
+(* One temp def at [w] bits, read back, plus an FP call to [intr].
+   The FP pass is a pre-SSA stage (the pipeline qualifies the temps
+   before the SSA construction), so the fixture is the pre-SSA sub. *)
 let fp_fixture (intr : string) (w : int) : sub term =
   let temp =
     Var.create ~is_virtual:false ~fresh:false "intrinsic:x0" (Type.Imm w)
@@ -49,7 +51,7 @@ let fp_fixture (intr : string) (w : int) : sub term =
   let rd = Var.create ~is_virtual:false ~fresh:false "fp_rd" (Type.Imm w) in
   let callee = Tid.for_name intr in
   fst
-    (sub_of "fp_w"
+    (raw_sub_of "fp_w"
        [ ( [ Def.create temp (Bil.Int (Cbat_word.to_word (w64 1))) ],
            [ (1,
               fun t ->

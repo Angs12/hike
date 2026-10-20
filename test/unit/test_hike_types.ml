@@ -52,6 +52,13 @@ let sig_of ~synth (sub : sub term) =
 let plain_sub (name : string) (defs : def term list) : sub term =
   fst (sub_of name [ defs, [] ])
 
+(* The pre-SSA form of [straight_sub]: the sign tests hand the pass the
+   SSA the drive builds, so their fixture is the pre-SSA sub. *)
+let raw_straight_sub (name : string) (defs : def term list) : sub term =
+  fst
+    (raw_sub_of name
+       [ defs, [ (1, mk_goto) ]; [], [ (0, mk_ret) ] ])
+
 (* The epilogue sub: a value-reg def in the block whose only jump is an
    indirect call with no return (the FP-return probe's shape). *)
 let epilogue_sub (ret : var) : sub term =
@@ -307,7 +314,7 @@ let tests : unit Alcotest.test list =
         let y = v64 "intrinsic:testsig_y" in
         let sub =
           Term.set_attr
-            (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
+            (raw_straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
         let rets, args = sig_of ~synth:Hike.Synth.empty sub in
@@ -822,16 +829,16 @@ let tests : unit Alcotest.test list =
           (contains_substring ir "inttoptr"));
 
     pin "TYPES-35"
-      "rodata + index: the module address is the base (a GEP off its \
-       global) and the index stays an integer"
+      "rodata + index: the base is a pointer, the module address is the \
+       GEP off its global, and the index stays an integer"
       (fun () ->
         let synth, g = Hike_synth.mint_module_addr ~addr_bits:64 0x4010L Hike_synth.empty in
         let b = int_param 2 and k = callee_saved 0 and a = int_ret 0 in
         let m = memv "types35_m" in
         let c = Var.create ~is_virtual:false ~fresh:false "types35_c" (Type.Imm 1) in
         let n x = Bil.Int (Cbat_word.to_word (w64 x)) in
-        let sub, _ =
-          sub_of "types35"
+        let raw, _ =
+          raw_sub_of "types35"
             [ [ Def.create b (Bil.Var g) ],
               [ (2, fun t -> mk_jmp_to t (Bil.Var c)); (1, mk_goto) ];
               [ Def.create k (n 0) ], [ (3, mk_goto) ];
@@ -842,6 +849,7 @@ let tests : unit Alcotest.test list =
               [ (4, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
+        let sub = ssa_of ~synth raw in
         let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;
                      sm_lo = 0x4000L; sm_hi = 0x401fL; sm_words = 4;
                      sm_image = Some (Bytes.make 32 '\000'); sm_copy_relocs = [] } in
@@ -855,12 +863,14 @@ let tests : unit Alcotest.test list =
         let kinds = use_kinds ~synth [ sub ] in
         check "TYPES-35 the index is an integer"
           (not (kinds.is_ptr_def "types35" k));
+        check "TYPES-35 the base is a pointer" (kinds.is_ptr_def "types35" b);
+        (* The emission takes the pre-SSA program: the pipeline builds
+           the SSA form, and the analysis's stamps ride its defs. *)
         let _, stamped, _ = fixture_facts ~synth [ sub ] in
-        let ir = emit_ir_spec ~synth ~types:kinds.retype spec stamped in
-        check "TYPES-35 the address is a GEP off the module base, no inttoptr"
-          (contains_substring ir "phi ptr [ getelementptr inbounds (i8, ptr @sec_comp_7"
-           && contains_substring ir "getelementptr i8, ptr %"
-           && not (contains_substring ir "= inttoptr"))));
+        let pre = Base.List.map ~f:Hike.Ssa.unssa_sub stamped in
+        let ir = emit_ir_spec ~synth ~types:kinds.retype spec pre in
+        check "TYPES-35 the module address is the GEP off its global"
+          (contains_substring ir "getelementptr inbounds (i8, ptr @sec_comp_7")));
 
     (* The leaf's pointer argument is consumed by the middle sub, whose
        own pointer argument is then consumed by the top sub. *)

@@ -643,8 +643,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let x = v64 "px" in
         let w (n : int) = Cbat_word.to_word (w64 n) in
+        (* The emitter's pipeline runs the SSA pass itself, so the
+           fixture is the pre-SSA sub. *)
         let sub, _ =
-          sub_of "emit_body_before_head"
+          raw_sub_of "emit_body_before_head"
             [ [ Def.create x (Bil.Int (w 0)) ], [ (2, mk_goto) ];
               [ Def.create x (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (w 1))) ],
               [ (2, mk_goto) ];
@@ -654,8 +656,48 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let ir = emit_ir ~synth:Hike.Synth.empty [ sub ] in
+        (* The IR's blocks: a label line opens one. *)
+        let blocks =
+          List.fold_left
+            (fun acc l ->
+              if String.length l > 1 && l.[0] = '"' then [ l ] :: acc
+              else
+                match acc with
+                | [] -> []
+                | b :: rest -> (b @ [ l ]) :: rest)
+            [] (String.split_on_char '\n' ir)
+          |> List.rev
+        in
+        (* The names a block's phis define and the values its arithmetic
+           reads. *)
+        let defined_by_phi blk =
+          List.filter_map
+            (fun l ->
+              match String.split_on_char ' ' (String.trim l) with
+              | name :: "=" :: "phi" :: _ -> Some name
+              | _ -> None)
+            blk
+        in
+        let read_by_add blk =
+          List.filter_map
+            (fun l ->
+              match String.split_on_char ' ' (String.trim l) with
+              | _ :: "=" :: "add" :: "i64" :: src :: _ ->
+                let n = String.length src in
+                Some
+                  (if n > 0 && src.[n - 1] = ',' then String.sub src 0 (n - 1)
+                   else src)
+              | _ -> None)
+            blk
+        in
+        (* The body's increment reads the phi's value (the head's
+           incoming), not a frozen undef. *)
         check "EMIT-62"
-          (contains_substring ir " = phi i64 "
+          ((List.exists
+              (fun blk ->
+                let phis = defined_by_phi blk in
+                List.exists (fun src -> List.mem src phis) (read_by_add blk))
+              blocks)
           && not (contains_substring ir "undef")));
 
     pin "EMIT-60"
