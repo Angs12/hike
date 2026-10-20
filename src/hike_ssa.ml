@@ -874,6 +874,28 @@ module Edit = struct
           Term.filter jmp_t b ~f:(fun j -> not (Tid.equal (Term.tid j) tid)));
     t
 
+  (* Replace a block's jmp series.  Every call in the new series is a
+     derived lane set: its target may be new, so its effects are not
+     trusted. *)
+  let set_jmps t blk js =
+    Base.List.iter js ~f:(fun j ->
+        match Jmp.kind j with
+        | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+        | _ -> ());
+    update_blk t blk (fun b ->
+        Base.List.fold js
+          ~init:(Term.filter jmp_t b ~f:(Fun.const false))
+          ~f:(Term.append jmp_t))
+
+  (* Add a local definition (a dispatch-base binding).  It is a new
+     renamable value, so the commit must version it. *)
+  let add_def t ~blk ?before d =
+    t.mint <- true;
+    update_blk t blk (fun b ->
+        match before with
+        | Some before -> Term.prepend def_t ~before b d
+        | None -> Term.append def_t b d)
+
   let add_block t b =
     let call_arg d = Model.is_call_arg t.synth (Def.lhs d) in
     if (Term.enum phi_t b |> Seq.is_empty |> not)

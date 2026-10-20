@@ -9,6 +9,17 @@
 open Bap.Std
 module Model = Hike_stack_model
 
+(* Calls execute in their own arm blocks; the selector blocks contain
+   only guarded gotos and explicit false edges. A call's return remains
+   its original continuation, so SSA sees one ret-lane definition per arm. *)
+let compilable_series (jmps : jmp term list) : bool =
+  Base.List.for_all jmps ~f:(fun j ->
+      match Jmp.kind j with
+      | Goto (Direct tid) ->
+          not (Hike_abi.is_interrupt_name (Tid.name tid))
+      | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
+      | _ -> false)
+
 (* Materialize before attribution rewrites addresses. Keep the call arms
    beside their stores until promotion binds the outgoing slot pointers;
    [normalize] then gives every call its own block before signature/SSA. *)
@@ -120,11 +131,11 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) :
      fallback's default, else the remaining words follow the fallback as
      a series.  An armed block without a sound series fails: its guards
      compare model addresses. *)
-  let dispatch_blk ~sub ~plans blk =
+  let dispatch_jmps ~sub ~plans blk =
     let jmps = Term.enum jmp_t blk |> Seq.to_list in
     let arms = Base.List.filter jmps ~f:(fun j -> Option.is_some (Hike_cfg_complete.arm_word j)) in
     match Base.List.find jmps ~f:(fun j -> Core.Map.mem plans (Term.tid j)) with
-    | None when Base.List.is_empty arms -> blk
+    | None when Base.List.is_empty arms -> None
     | None ->
       failwith
         (Printf.sprintf "hike: dispatch: sub %s block %s: an armed transfer has no sound case series"
@@ -153,12 +164,13 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) :
         | [], Some last -> (Some (Term.tid last), [ Jmp.with_kind fb (Jmp.kind last) ])
         | _ -> (None, series sub fb e rest base)
       in
-      Term.concat_map jmp_t blk ~f:(fun j ->
-          if Tid.equal (Term.tid j) (Term.tid fb) then tail
-          else if Option.is_some (Hike_cfg_complete.arm_word j) then
-            if Base.Option.exists default ~f:(Tid.equal (Term.tid j)) then []
-            else [ tested j ]
-          else [ j ])
+      Some
+        (Base.List.concat_map jmps ~f:(fun j ->
+             if Tid.equal (Term.tid j) (Term.tid fb) then tail
+             else if Option.is_some (Hike_cfg_complete.arm_word j) then
+               if Base.Option.exists default ~f:(Tid.equal (Term.tid j)) then []
+               else [ tested j ]
+             else [ j ]))
   in
   (* Every dispatch is read on the unbound sub; a base whose var is
      rewritten before the transfer is bound at its site, and the guards
@@ -206,26 +218,34 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) :
                 in
                 (e, d, base))
           in
-          Hike_backsubst.bind sub binds
-          |> Term.map blk_t ~f:(dispatch_blk ~sub ~plans)))
+          let edit =
+            Hike_ssa.Edit.start ~synth:!synth ~target:facts.target
+              ~callee:(fun _ -> None) sub
+          in
+          let edit =
+            Base.List.fold binds ~init:edit ~f:(fun edit (f, v) ->
+                Hike_ssa.Edit.add_def edit ~blk:(Term.tid f.blk)
+                  ?before:(Base.Option.map f.at ~f:Term.tid)
+                  (Def.create v f.exp))
+          in
+          let edit =
+            Term.enum blk_t sub
+            |> Seq.fold ~init:edit ~f:(fun edit blk ->
+                   match dispatch_jmps ~sub ~plans blk with
+                   | None -> edit
+                   | Some js ->
+                       Hike_ssa.Edit.set_jmps edit (Term.tid blk) js)
+          in
+          (* Promotion must see the call arms beside their stores; the
+             SSA commit is [normalize]'s, after promotion. *)
+          Hike_ssa.Edit.view edit))
   in
   (!synth, prog)
-
-(* Calls execute in their own arm blocks; the selector blocks contain
-   only guarded gotos and explicit false edges. A call's return remains
-   its original continuation, so SSA sees one ret-lane definition per arm. *)
-let compilable_series (jmps : jmp term list) : bool =
-  Base.List.for_all jmps ~f:(fun j ->
-      match Jmp.kind j with
-      | Goto (Direct tid) ->
-          not (Hike_abi.is_interrupt_name (Tid.name tid))
-      | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
-      | _ -> false)
 
 (* The block/jmp split rides the SSA edit session: each jmp becomes its
    own piece, a call moves into an action block, and successor phi edges
    are duplicated per holder.  A series with another jmp stays whole. *)
-let split_sub ~synth ~target (sub : sub term) : sub term =
+let split_sub ?(update = true) ~synth ~target (sub : sub term) : sub term =
   let t0 =
     Hike_ssa.Edit.start ~synth ~target ~callee:(fun _ -> None) sub
   in
@@ -250,7 +270,8 @@ let split_sub ~synth ~target (sub : sub term) : sub term =
              t
            end)
   in
-  fst (Hike_ssa.Edit.finish t)
+  if update then fst (Hike_ssa.Edit.finish t)
+  else Hike_ssa.Edit.view t
 
 let normalize ~synth ~target (prog : program term) : program term =
   Term.map sub_t prog ~f:(split_sub ~synth ~target)

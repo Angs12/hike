@@ -82,6 +82,12 @@ open Bap_core_theory
 
     val remove_jmp : t -> Tid.t -> t
 
+    (** Replace a block's jmp series; its calls get derived lanes. *)
+    val set_jmps : t -> Tid.t -> jmp term list -> t
+
+    (** Add a local definition, optionally before [before]. *)
+    val add_def : t -> blk:Tid.t -> ?before:Tid.t -> def term -> t
+
     val add_block : t -> blk term -> t
 
     val remove_block : t -> Tid.t -> t

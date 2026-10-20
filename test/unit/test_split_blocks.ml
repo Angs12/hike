@@ -186,12 +186,15 @@ let tests : unit Alcotest.test list =
           Term.find sub_t result (Term.tid caller)
           |> Base.Option.value_exn
         in
-        let js = Term.enum blk_t caller' |> Seq.hd_exn |> Term.enum jmp_t
-                   |> Seq.to_list
+        let calls =
+          Term.enum blk_t caller'
+          |> Seq.concat_map ~f:(Term.enum jmp_t)
+          |> Seq.filter_map ~f:(fun j ->
+                 if Hike.Ssa.is_call_jmp j then direct_call_target j else None)
+          |> Seq.to_list
         in
         let targets =
-          Base.List.filter_map js ~f:direct_call_target
-          |> Base.List.map ~f:Tid.name
+          Base.List.map calls ~f:Tid.name
           |> Base.List.sort ~compare:String.compare
         in
         check "SBLK-06"
