@@ -39,6 +39,9 @@ open Bap_core_theory
     synth:Hike_synth.table -> target:Theory.Target.t ->
     callee:(Tid.t -> sub term option) -> sub term -> sub term
 
+  (** The retained version high-water per base variable. *)
+  val high_water : sub term -> (var * int) list
+
   (** The input lanes of an SSA sub: its index-0 reads. *)
   val free_regs_ssa :
     synth:Hike_synth.table -> abi:Hike_abi.t -> sub term -> var list

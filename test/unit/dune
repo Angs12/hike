@@ -1,6 +1,6 @@
 (library
  (name hike_test)
- (modules harness common fixtures)
+ (modules harness common fixtures verify_ssa)
  (libraries
   hike
   hike.hike_core
@@ -61,7 +61,37 @@
   test_worklist
   test_drive
   test_integration)
- (modules :standard \ harness common fixtures test_clp_equiv)
+ (modules :standard \ harness common fixtures verify_ssa test_ssa_verify test_clp_equiv)
+ (libraries
+  hike_test
+  alcotest
+  hike
+  hike.hike_core
+  hike.hike_emit
+  bap
+  bap-main
+  bap-core-theory
+  cbat_vsa
+  cbat_vsa_domain
+  graphlib
+  hike_bir_flow
+  core
+
+  precision_probe_rows
+  llvm
+  hike.hike_origin
+  hike.hike_stack_bounds
+  unix)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+; The SSA property verifier: tests/vsa-debug only.
+(test
+ (name test_ssa_verify)
+ (enabled_if (= %{profile} vsa-debug))
+ (modules test_ssa_verify)
  (libraries
   hike_test
   alcotest
