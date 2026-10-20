@@ -5,7 +5,7 @@
 
 open Bap.Std
 
-type temporary = Comparison | Load | Refinement | Binding
+type temporary = Comparison | Load | Store | Refinement | Binding
 
 type kind =
   | K_addr of int64
@@ -55,10 +55,13 @@ let var ~addr_bits kind =
     | K_accumulator -> "hike_acc", Type.Imm addr_bits
     | K_let (i, typ) -> Printf.sprintf "hike_let%d" i, typ
     | K_temporary (temporary, i) ->
-      let prefix = match temporary with
-        | Comparison -> "hike_cmp" | Load -> "hike_ld" | Refinement -> "hike_rd"
-        | Binding -> "hike_bd" in
-      Printf.sprintf "%s%d" prefix i, Type.Imm addr_bits
+      let prefix, typ = match temporary with
+        | Comparison -> "hike_cmp", Type.Imm addr_bits
+        | Load -> "hike_ld", Type.Imm addr_bits
+        | Store -> "hike_st", mem_type addr_bits
+        | Refinement -> "hike_rd", Type.Imm addr_bits
+        | Binding -> "hike_bd", Type.Imm addr_bits in
+      Printf.sprintf "%s%d" prefix i, typ
   in
   Var.create ~is_virtual:false ~fresh:false name typ
 
@@ -118,6 +121,10 @@ let mint_fp_lane ~addr_bits lane i =
 let mint_fresh ~bits temporary tbl =
   incr next_temporary;
   mint ~addr_bits:bits (K_temporary (temporary, !next_temporary)) tbl
+
+let mint_fresh_mem ~addr_bits temporary tbl =
+  incr next_temporary;
+  mint ~addr_bits (K_temporary (temporary, !next_temporary)) tbl
 
 (* The accumulating form for a traversal that keeps its table in a cell. *)
 let record (cell : table ref) f =

@@ -224,6 +224,42 @@ let tests : unit Alcotest.test list =
           (Base.List.exists n3_defs ~f:(fun d -> not (is_original d))
           && slot_addressed));
 
+    pin "MOD-46"
+      "a three-deep store chain splits to one memory node per def and hoisted stores are memory-typed"
+      (fun () ->
+        let store off data =
+          Bil.Store
+            ( Bil.Var pr_c_m,
+              minus_addr sp off,
+              data,
+              LittleEndian,
+              `r64 )
+        in
+        let chain =
+          store 24L (Bil.Int (Cbat_word.to_word (w64 3)))
+          |> store 16L
+          |> store 8L
+        in
+        let sub =
+          straight_sub "mod46_store_chain" [ Def.create pr_c_m chain ]
+          |> fun sub -> Program.create ~subs:[ sub ] ()
+          |> Hike.Split_mem.normalize ~synth:Hike.Synth.empty |> snd
+          |> Term.first sub_t
+          |> Base.Option.value_exn
+        in
+        let defs =
+          Term.enum blk_t sub
+          |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.to_list
+        in
+        check "MOD-46"
+          (Base.List.for_all defs ~f:(fun d ->
+               Sm.mem_node_count (Def.rhs d) <= 1
+               &&
+               match Var.typ (Def.lhs d) with
+               | Type.Mem _ -> true
+               | _ -> false)));
+
     pin "MOD-19"
       "PR-C4: the compiled guard is a value comparison — no memory node rides a cond"
       (fun () ->

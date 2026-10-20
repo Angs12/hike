@@ -6,7 +6,7 @@
 
 open Bap.Std
 
-type temporary = Comparison | Load | Refinement | Binding
+type temporary = Comparison | Load | Store | Refinement | Binding
 type kind =
   | K_addr of int64
   | K_thread_addr of int64
@@ -84,6 +84,8 @@ val mint_module_addr : addr_bits:int -> int64 -> table -> table * var
 val mint_thread_addr : addr_bits:int -> int64 -> table -> table * var
 val mint_fp_lane : addr_bits:int -> lane -> int -> table -> table * var
 val mint_fresh : bits:int -> temporary -> table -> table * var
+(** Mint a temporary whose value is a memory state. *)
+val mint_fresh_mem : addr_bits:int -> temporary -> table -> table * var
 
 (** Runs one mint against a traversal's table cell and keeps the grown
     table there. *)
