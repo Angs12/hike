@@ -1212,8 +1212,7 @@ let tests : unit Alcotest.test list =
         in
         let edit = Hike.Ssa.Edit.remove_jmp edit (Term.tid goto) in
         let edit = Hike.Ssa.Edit.append_jmp edit tids.(0) call in
-        let after, woken = Hike.Ssa.Edit.finish edit in
-        check "SSA-28 woken" (not (Core.Set.is_empty woken));
+        let after = Hike.Ssa.Edit.finish edit in
         let call_blk = Term.find_exn blk_t after tids.(0) in
         let call' =
           Term.enum jmp_t call_blk
@@ -1269,7 +1268,7 @@ let tests : unit Alcotest.test list =
               Base.Option.some_if (Tid.equal t (Term.tid callee)) callee)
             ssa
         in
-        let after, _ =
+        let after =
           Hike.Ssa.Edit.finish
             (Hike.Ssa.Edit.split_block edit tids.(1)
                [ [ call ]; [ goto ] ])
@@ -1313,6 +1312,40 @@ let tests : unit Alcotest.test list =
                               | Bil.Var v ->
                                   Base.List.exists writes ~f:(Var.equal v)
                               | _ -> false))));
+
+    pin "SSA-30"
+      "Edit.add_block and remove_block commit graph-only changes through SSA"
+      (fun () ->
+        let sub, tids =
+          raw_sub_of "edit_graph" [ [], [ (0, mk_ret) ] ]
+        in
+        let old = ssa_of sub in
+        let fresh = Tid.create () in
+        let block =
+          Blk.create ~tid:fresh
+            ~jmps:[ Jmp.create (Goto (Direct tids.(0))) ] ()
+        in
+        let edit =
+          Hike.Ssa.Edit.start ~synth:Hike.Synth.empty
+            ~target:(x86_target ()) ~callee:(fun _ -> None) old
+        in
+        let added = Hike.Ssa.Edit.finish (Hike.Ssa.Edit.add_block edit block) in
+        check "SSA-30 added block is committed"
+          (Base.Option.is_some (Term.find blk_t added fresh));
+        check "SSA-30 added block is named"
+          (Term.find_exn blk_t added fresh
+          |> fun b -> Term.has_attr b Hike.Stack_model.ssa_tag);
+        let edit =
+          Hike.Ssa.Edit.start ~synth:Hike.Synth.empty
+            ~target:(x86_target ()) ~callee:(fun _ -> None) added
+        in
+        let removed =
+          Hike.Ssa.Edit.finish (Hike.Ssa.Edit.remove_block edit fresh)
+        in
+        check "SSA-30 removed block is committed"
+          (Base.Option.is_none (Term.find blk_t removed fresh));
+        check "SSA-30 original block is kept"
+          (Base.Option.is_some (Term.find blk_t removed tids.(0))))
   ]
 
 let () = run "hike_ssa" tests

@@ -270,7 +270,7 @@ let split_sub ?(update = true) ~synth ~target (sub : sub term) : sub term =
              t
            end)
   in
-  if update then fst (Hike_ssa.Edit.finish t)
+  if update then Hike_ssa.Edit.finish t
   else Hike_ssa.Edit.view t
 
 let normalize ~synth ~target (prog : program term) : program term =

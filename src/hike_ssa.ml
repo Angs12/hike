@@ -800,18 +800,26 @@ let relane_sub ~synth ~target ~callee sub =
    commits the whole edit through the update once.  [split_block] gives
    every call its own block and rewires the successor phis per piece. *)
 module Edit = struct
+  (* What an operation changed.  The operations record their effect;
+     [finish] commits from this log instead of inferring it from flags. *)
+  type change =
+    | Added_block of Tid.t
+    | Removed_block of Tid.t
+    | Added_def of Tid.t
+    | Removed_jmp of Tid.t
+    | Replaced_jmp of Tid.t
+    | Set_jmps of Tid.t
+    | Derived_call of Tid.t
+    | Bare_call of Tid.t
+    | Split of Tid.t
+
   type t = {
     synth : Hike_synth.table;
     target : Bap_core_theory.Theory.Target.t;
     callee : Tid.t -> sub term option;
     original : sub term;
     mutable current : sub term;
-    (* New or retargeted call jmps: their lanes are derived at finish. *)
-    mutable derive : Tid.Set.t;
-    (* Moved call jmps that had no effects: derive only if still bare. *)
-    mutable bare : Tid.Set.t;
-    (* A block with a new renamable definition needs the update. *)
-    mutable mint : bool;
+    mutable changes : change list;
   }
 
   let start ~synth ~target ~callee sub =
@@ -820,9 +828,9 @@ module Edit = struct
       callee;
       original = sub;
       current = sub;
-      derive = Tid.Set.empty;
-      bare = Tid.Set.empty;
-      mint = false }
+      changes = [] }
+
+  let record t change = t.changes <- change :: t.changes
 
   let view t = t.current
 
@@ -837,7 +845,7 @@ module Edit = struct
 
   let append_jmp t blk j =
     (match Jmp.kind j with
-     | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+     | Call _ -> record t (Derived_call (Term.tid j))
      | _ -> ());
     update_blk t blk (fun b -> Term.append jmp_t b j)
 
@@ -855,12 +863,14 @@ module Edit = struct
     if not !found then
       failwith
         (Printf.sprintf "Hike_ssa.Edit: no jmp %s" (Tid.name old_tid));
+    record t (Replaced_jmp old_tid);
     (match Jmp.kind j with
-     | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+     | Call _ -> record t (Derived_call (Term.tid j))
      | _ -> ());
     t
 
   let remove_jmp t tid =
+    record t (Removed_jmp tid);
     t.current <-
       Term.map blk_t t.current ~f:(fun b ->
           Term.filter jmp_t b ~f:(fun j -> not (Tid.equal (Term.tid j) tid)));
@@ -870,33 +880,37 @@ module Edit = struct
      derived lane set: its target may be new, so its effects are not
      trusted. *)
   let set_jmps t blk js =
+    record t (Set_jmps blk);
     Base.List.iter js ~f:(fun j ->
         match Jmp.kind j with
-        | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+        | Call _ -> record t (Derived_call (Term.tid j))
         | _ -> ());
     update_blk t blk (fun b ->
         Base.List.fold js
           ~init:(Term.filter jmp_t b ~f:(Fun.const false))
           ~f:(Term.append jmp_t))
 
-  (* Add a local definition (a dispatch-base binding).  It is a new
-     renamable value, so the commit must version it. *)
+  (* Add a local definition (a dispatch-base binding).  The commit names
+     the new value. *)
   let add_def t ~blk ?before d =
-    t.mint <- true;
+    record t (Added_def blk);
     update_blk t blk (fun b ->
         match before with
         | Some before -> Term.prepend def_t ~before b d
         | None -> Term.append def_t b d)
 
   let add_block t b =
-    let call_arg d = Model.is_call_arg t.synth (Def.lhs d) in
-    if (Term.enum phi_t b |> Seq.is_empty |> not)
-       || (Term.enum def_t b |> Seq.exists ~f:(fun d -> not (call_arg d)))
-    then t.mint <- true;
+    Term.enum jmp_t b
+    |> Seq.iter ~f:(fun j ->
+           match Jmp.kind j with
+           | Call _ -> record t (Derived_call (Term.tid j))
+           | _ -> ());
+    record t (Added_block (Term.tid b));
     t.current <- Term.append blk_t t.current b;
     t
 
   let remove_block t tid =
+    record t (Removed_block tid);
     t.current <-
       Term.filter blk_t t.current ~f:(fun b ->
           not (Tid.equal (Term.tid b) tid));
@@ -1047,17 +1061,35 @@ module Edit = struct
           Term.enum jmp_t b
           |> Seq.iter ~f:(fun j ->
                  if Base.Option.is_none (Model.effects_opt j) then
-                   t.bare <- Core.Set.add t.bare (Term.tid j)));
+                   record t (Bare_call (Term.tid j))));
+      record t (Split blk_tid);
       t
 
   let finish t =
-    if Base.phys_equal t.current t.original then (t.original, Tid.Set.empty)
-    else if (not t.mint) && Core.Set.is_empty t.derive
-            && Core.Set.is_empty t.bare
-    then (t.current, Tid.Set.empty)
+    if Base.phys_equal t.current t.original then t.original
     else
+      let changes = Base.List.rev t.changes in
+      let derive =
+        Core.Set.of_list (module Tid)
+          (Base.List.filter_map changes ~f:(function
+             | Derived_call tid -> Some tid
+             | _ -> None))
+      in
+      let bare =
+        Core.Set.of_list (module Tid)
+          (Base.List.filter_map changes ~f:(function
+             | Bare_call tid -> Some tid
+             | _ -> None))
+      in
+      let needs_update =
+        Base.List.exists changes ~f:(function
+          | Added_block _ | Removed_block _ | Added_def _
+          | Removed_jmp _ | Replaced_jmp _ | Set_jmps _
+          | Derived_call _ | Bare_call _ -> true
+          | Split _ -> false)
+      in
       let current =
-        if Core.Set.is_empty t.derive && Core.Set.is_empty t.bare then
+        if Core.Set.is_empty derive && Core.Set.is_empty bare then
           t.current
         else
           let abi = Abi.of_target t.target in
@@ -1069,15 +1101,19 @@ module Edit = struct
               Term.map jmp_t b ~f:(fun j ->
                   let tid = Term.tid j in
                   let want =
-                    Core.Set.mem t.derive tid
-                    || (Core.Set.mem t.bare tid
+                    Core.Set.mem derive tid
+                    || (Core.Set.mem bare tid
                         && Base.Option.is_none (Model.effects_opt j))
                   in
                   if want then
                     Base.Option.value (Term.find jmp_t db tid) ~default:j
                   else j))
       in
-      update_sub_woken ~synth:t.synth ~target:t.target ~old:t.original current
+      if not needs_update then current
+      else
+        fst
+          (update_sub_woken ~synth:t.synth ~target:t.target
+             ~old:t.original current)
 end
 
 (* The SSA of a lifted sub: its calls read and write the machine

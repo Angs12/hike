@@ -66,10 +66,11 @@ open Bap_core_theory
   (** The sub in pre-SSA form: base names, no phis, no version stamps. *)
   val unssa_sub : sub term -> sub term
 
-  (** A mutable edit session over an SSA sub.  Restructuring passes use
-      the primitives instead of rebuilding terms; [finish] derives the
-      new calls' lanes from [callee] and commits the whole edit through
-      one update.  Existing identities are preserved. *)
+  (** A mutable edit session over an SSA sub.  Each primitive records
+      its structural effect; [finish] derives the new calls' lanes from
+      [callee] and commits the edit through one SSA update when a block,
+      def or jmp changed.  [split_block] wires its own pieces and does
+      not need the global update.  Existing identities are preserved. *)
   module Edit : sig
     type t
 
@@ -101,6 +102,6 @@ open Bap_core_theory
     val split_block : t -> Tid.t -> jmp term list list -> t
 
     (** Commit the edit: derive the edited calls' lanes, mint versions,
-        rewire phis, and return the sub with the VSA invalidation set. *)
-    val finish : t -> sub term * Tid.Set.t
+        rewire phis, and return the updated sub. *)
+    val finish : t -> sub term
   end
