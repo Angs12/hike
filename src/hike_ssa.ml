@@ -90,9 +90,9 @@ let place_phis ~preds_of ~only (needs : Var.Set.t Tid.Map.t) (sub : sub term) :
               (Core.Set.fold vs ~init:blk
                  ~f:(insert_phi ~preds:(preds_of tid))))
 
-(* [Full] names a new block. [Stable] keeps old term outputs and names
-   only newly added outputs; [Reread] resolves changed jump reads. *)
-type mode = Fixed | Reread | Stable | Full
+(* [Full] names a new block. [Changed] keeps old term outputs and names
+   only newly added outputs. *)
+type mode = Fixed | Changed | Full
 
 (* Block-local renaming.  A block's incoming names are its phi lhs
    values; its defs and call results take fresh versions.  A second pass
@@ -186,12 +186,7 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
           match mode tid with
           | Full -> full_blk blk
           | Fixed -> kept_blk blk
-          | Reread ->
-              let blk = kept_blk blk in
-              Term.map jmp_t blk ~f:(fun j ->
-                  Jmp.map_exp ~f:substitute j
-                  |> Model.map_effects ~read:lookup ~write:Fun.id)
-          | Stable ->
+          | Changed ->
               names := Var.Map.empty;
               let blk = Term.map phi_t blk ~f:(fun p ->
                   let v = Phi.lhs p in
@@ -517,49 +512,53 @@ let update_sub_woken_analyzed ~(old : sub term) ~(c : ctx)
       |> Var.Set.of_list
     in
     (* A block whose only change is new pure jmps keeps its names; the
-       jmps' reads are resolved in place. *)
+       jmps' reads are resolved in place.  The VSA warm set is narrower
+       than the SSA rewrite set: only a block whose outgoing edge
+       denotation changed (a new block, or changed defs/jmps/calls)
+       exposes different values to a successor.  Phi pruning changes
+       terms without changing what an edge denotes; a changed jmp set
+       wakes conservatively because its target may have moved. *)
+    let edge_dirty = ref Tid.Set.empty in
     let kind b =
       let tid = Term.tid b in
       let needed =
         Base.Option.value (Core.Map.find c.needs tid) ~default:Var.Set.empty
       in
       match Term.find blk_t old tid with
-      | None -> Full
+      | None ->
+        edge_dirty := Core.Set.add !edge_dirty tid;
+        Full
       | Some ob when not (Term.has_attr ob ssa_tag) ->
           failwith "Hike_ssa.update_sub: existing block lacks SSA marker"
       | Some ob ->
           let changed_jmps = tids (Term.enum jmp_t) ob <> tids (Term.enum jmp_t) b in
-          let pure j =
-            Core.Set.is_empty (Model.writes (`Jmp j))
-            && Base.Option.is_none (call_of_jmp j)
-          in
-          let differing x y =
-            Term.enum jmp_t x
-            |> Seq.filter ~f:(fun j -> Base.Option.is_none (Term.find jmp_t y (Term.tid j)))
-          in
-          if
+          let preds_changed =
             not (Core.Set.equal (old_preds tid) (Tid.Set.of_list (c.preds_of tid)))
-            || not (Base.List.equal (fun a b ->
-                      Tid.equal (Term.tid a) (Term.tid b)
-                      && Var.equal (Def.lhs a) (Def.lhs b)
-                      && Exp.equal (Def.rhs a) (Def.rhs b))
-                      (Term.enum def_t ob |> Seq.to_list)
-                      (Term.enum def_t b |> Seq.to_list))
-            || Seq.exists (Term.enum jmp_t b) ~f:(fun j ->
-                 match Term.find jmp_t ob (Term.tid j) with
-                 | None -> false
-                 | Some oj ->
-                   not (Core.Set.equal (Model.reads (`Jmp oj)) (Model.reads (`Jmp j)))
-                   || not (Core.Set.equal (Model.writes (`Jmp oj)) (Model.writes (`Jmp j)))
-                   || not (Exp.equal (Jmp.cond oj) (Jmp.cond j))
-                   || Jmp.kind oj <> Jmp.kind j)
-            || not (Core.Set.equal needed (phi_bases b))
-          then Stable
-          else if changed_jmps then
-            if Seq.for_all (differing b ob) ~f:pure
-               && Seq.for_all (differing ob b) ~f:pure
-            then Reread
-            else Stable
+          in
+          let defs_changed =
+            not (Base.List.equal (fun a b ->
+                     Tid.equal (Term.tid a) (Term.tid b)
+                     && Var.equal (Def.lhs a) (Def.lhs b)
+                     && Exp.equal (Def.rhs a) (Def.rhs b))
+                     (Term.enum def_t ob |> Seq.to_list)
+                     (Term.enum def_t b |> Seq.to_list))
+          in
+          let jmp_changed =
+            Seq.exists (Term.enum jmp_t b) ~f:(fun j ->
+                match Term.find jmp_t ob (Term.tid j) with
+                | None -> false
+                | Some oj ->
+                  not (Core.Set.equal (Model.reads (`Jmp oj)) (Model.reads (`Jmp j)))
+                  || not (Core.Set.equal (Model.writes (`Jmp oj)) (Model.writes (`Jmp j)))
+                  || not (Exp.equal (Jmp.cond oj) (Jmp.cond j))
+                  || Jmp.kind oj <> Jmp.kind j)
+          in
+          let needs_changed = not (Core.Set.equal needed (phi_bases b)) in
+          if defs_changed || changed_jmps || jmp_changed then
+            edge_dirty := Core.Set.add !edge_dirty tid;
+          if preds_changed || defs_changed || jmp_changed || needs_changed
+             || changed_jmps
+          then Changed
           else Fixed
     in
     let kinds =
@@ -567,17 +566,10 @@ let update_sub_woken_analyzed ~(old : sub term) ~(c : ctx)
       |> Base.List.fold ~init:Tid.Map.empty ~f:(fun m b ->
              Core.Map.set m ~key:(Term.tid b) ~data:(kind b))
     in
-    let roots =
-      Core.Map.fold kinds ~init:[] ~f:(fun ~key ~data acc ->
-          if data <> Fixed then key :: acc else acc)
-    in
-    let rec close seen = function
-      | [] -> seen
-      | t :: rest ->
-          if Core.Set.mem seen t then close seen rest
-          else close (Core.Set.add seen t) (c.succs_of t @ rest)
-    in
-    let affected = close Tid.Set.empty roots in
+    (* The solve's warm seed enqueues each woken block's successors.
+       A successor whose incoming edge changed is reached from the block
+       that owns the changed edge; no successor closure is needed. *)
+    let affected = !edge_dirty in
     let mode tid =
       match Term.find blk_t old tid with
       | None -> Full

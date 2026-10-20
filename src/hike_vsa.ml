@@ -96,26 +96,22 @@ let blocked_callees ~(synth : Hike_synth.table) ~(lookup : lookup_fn)
               (Core.Set.add callees t, Core.Set.add blocks (Term.tid blk))
             | _ -> acc))
 
-(* Entries of renamed blocks are recomputed from their predecessors.
-   The entry keeps the ABI seed; unchanged blocks retain exact-version facts. *)
+(* Edge-dirty blocks keep their incoming state; the solve starts from
+   their successors, which replay the changed terms.  The entry keeps the
+   ABI seed. *)
 let warm_seed ~abi ~sub ~woken sol =
   let entry = Base.Option.map (Vsa.entry_block_of sub) ~f:Term.tid in
   let initial = Vsa.init_sol ~abi sub in
   let seed = Graphlib.Std.Solution.enum sol
     |> Seq.filter ~f:(fun (b, _) ->
-        Option.is_some (Term.find blk_t sub b) && not (Core.Set.mem woken b))
+        Option.is_some (Term.find blk_t sub b))
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (b, v) -> Core.Map.set m ~key:b ~data:v) in
   let seed = match entry with
     | Some b when Core.Set.mem woken b ->
       Core.Map.set seed ~key:b ~data:(Graphlib.Std.Solution.get initial b)
     | _ -> seed in
   let seed = Graphlib.Std.Solution.create seed (Graphlib.Std.Solution.default sol) in
-  let g = Sub.to_graph sub in
-  let wake = Core.Set.fold woken ~init:woken ~f:(fun acc b ->
-      Graphs.Tid.Node.preds b g |> Seq.fold ~init:acc ~f:(fun acc p ->
-          if Tid.equal p Graphs.Tid.start || Tid.equal p Graphs.Tid.exit then acc
-          else Core.Set.add acc p)) in
-  (seed, wake)
+  (seed, woken)
 
 (* The fused solve: each phase runs the engine over the resolved
    extra-edge set, then the resolver grows the edges and splits
@@ -197,15 +193,28 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
         let sol =
           if Core.Set.is_empty woken then sol
           else begin
-            let seed, wake = warm_seed ~abi ~sub:sub' ~woken sol in
-            let own =
-              Core.Set.of_list (module Tid)
-                (Seq.to_list (Seq.map (Term.enum blk_t sub') ~f:Term.tid))
+            (* An edge-dirty block with no real successor changes no
+               other block's incoming state: the terms are committed and
+               the warm solution already holds every reachable state. *)
+            let g = Sub.to_graph sub' in
+            let reaches_successor =
+              Core.Set.exists woken ~f:(fun b ->
+                  Graphs.Tid.Node.succs b g |> Seq.exists ~f:(fun s ->
+                      (not (Tid.equal s Graphs.Tid.start))
+                      && not (Tid.equal s Graphs.Tid.exit)))
             in
-            let resolved =
-              Core.Map.map resolved ~f:(fun ts -> Core.Set.inter ts own)
-            in
-            solve_once sub' ~resolved ~init:seed ~wake
+            if not reaches_successor then sol
+            else begin
+              let seed, wake = warm_seed ~abi ~sub:sub' ~woken sol in
+              let own =
+                Core.Set.of_list (module Tid)
+                  (Seq.to_list (Seq.map (Term.enum blk_t sub') ~f:Term.tid))
+              in
+              let resolved =
+                Core.Map.map resolved ~f:(fun ts -> Core.Set.inter ts own)
+              in
+              solve_once sub' ~resolved ~init:seed ~wake
+            end
           end
         in
         (* The round-down normalization rides the returned sub: the
