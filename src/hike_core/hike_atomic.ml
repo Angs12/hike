@@ -103,3 +103,12 @@ let normalize ~addr_bits program =
                   Jmp.with_kind j (Goto (Direct continuation))
                 else other)
           | _ -> failwith "hike: multiple atomic intrinsics in one block"))
+
+(* One block's atomic rewrite.  A one-block wrapper keeps the pass's
+   exact term rule; [normalize] remains the whole-program path. *)
+let normalize_block ~addr_bits (blk : blk term) : blk term =
+  let sub = Term.append blk_t (Sub.create ()) blk in
+  let program = Term.append sub_t (Program.create ()) sub in
+  let program = normalize ~addr_bits program in
+  let sub = Base.Option.value_exn (Term.first sub_t program) in
+  Base.Option.value_exn (Term.first blk_t sub)

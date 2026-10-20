@@ -14,3 +14,6 @@ val write : unit Value.Tag.t
 (** Expand BAP atomic calls before analysis into tagged memory accesses.
     The producer captures address and input lanes in the call block. *)
 val normalize : addr_bits:int -> program term -> program term
+
+(** One block's atomic rewrite. *)
+val normalize_block : addr_bits:int -> blk term -> blk term

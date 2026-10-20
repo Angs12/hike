@@ -49,6 +49,15 @@ let split_def ~(synth : Hike_synth.table ref) (d : def term) : def term list =
     in
     hoists @ [ Def.with_rhs d rhs' ]
 
+(* One block's rewrite: identity unless a def needs splitting. *)
+let split_block ~(synth : Hike_synth.table ref) (blk : blk term) : blk term =
+  let bad =
+    Term.enum def_t blk
+    |> Seq.exists ~f:(fun d -> Hike_stack_model.mem_node_count (Def.rhs d) > 1)
+  in
+  if not bad then blk
+  else Term.concat_map def_t blk ~f:(split_def ~synth)
+
 (* Identity unless a def needs splitting. *)
 let split_sub ~(synth : Hike_synth.table ref) (sub : sub term) : sub term =
   (* One traversal decides; the map pass re-checks only the blocks it
@@ -67,7 +76,7 @@ let split_sub ~(synth : Hike_synth.table ref) (sub : sub term) : sub term =
     let offending = Tid.Set.of_list offending in
     Term.map blk_t sub ~f:(fun blk ->
         if Core.Set.mem offending (Term.tid blk) then
-          Term.concat_map def_t blk ~f:(split_def ~synth)
+          split_block ~synth blk
         else blk)
 
 let normalize ~(synth : Hike_synth.table) (prog : program term) :

@@ -8,6 +8,11 @@ val prepare_program :
   synth:Hike_synth.table -> addr_bits:int -> is_address:(int64 -> bool) ->
   program term -> Hike_synth.table * program term
 
+(** One block's RIP-tag rewrite; the table grows in place. *)
+val prepare_block :
+  synth:Hike_synth.table ref -> addr_bits:int ->
+  is_address:(int64 -> bool) -> blk term -> blk term
+
 (** Lets attribution finalize storage on the resolved values. Its named
     accesses receive byte indices; a copy-relocated [slots] address
     keeps its absolute form. *)

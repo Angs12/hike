@@ -101,25 +101,64 @@ let tag_rip context ~synth ~(is_entry : int64 -> bool) program =
    that the results a call defines lie on the call's own edge.  The new
    blocks follow the existing ones, which keeps every implicit
    fall-through. *)
-let isolate_transfers (sub : sub term) : sub term =
+let isolate_block (blk : blk term) : blk term * blk term list =
   let moved = ref [] in
   let is_goto j = match Jmp.kind j with Goto _ -> true | _ -> false in
+  let jmps = Term.enum jmp_t blk |> Seq.to_list in
+  if Base.List.length jmps < 2 || Base.List.for_all jmps ~f:is_goto then
+    (blk, [])
+  else
+    let blk =
+      Term.concat_map jmp_t blk ~f:(fun j ->
+          if is_goto j then [ j ]
+          else begin
+            let own =
+              Blk.create ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
+            in
+            moved := own :: !moved;
+            [ Jmp.create_goto ~cond:(Jmp.cond j) (Direct (Term.tid own)) ]
+          end)
+    in
+    (blk, Base.List.rev !moved)
+
+let isolate_transfers (sub : sub term) : sub term =
+  let moved = ref [] in
   let sub =
     Term.map blk_t sub ~f:(fun blk ->
-        let jmps = Term.enum jmp_t blk |> Seq.to_list in
-        if Base.List.length jmps < 2 || Base.List.for_all jmps ~f:is_goto then blk
-        else
-          Term.concat_map jmp_t blk ~f:(fun j ->
-              if is_goto j then [ j ]
-              else begin
-                let own =
-                  Blk.create ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
-                in
-                moved := own :: !moved;
-                [ Jmp.create_goto ~cond:(Jmp.cond j) (Direct (Term.tid own)) ]
-              end))
+        let blk, own = isolate_block blk in
+        moved := Base.List.rev_append own !moved;
+        blk)
   in
   Base.List.fold (Base.List.rev !moved) ~init:sub ~f:(Term.append blk_t)
+
+(* The block-level normalization seam: the passes that do not need the
+   whole-sub graph.  Jump compilation stays on the whole-sub path: it
+   walks unique-goto predecessors and can bind a def in a predecessor.
+   SSA follows separately through [update_sub_woken]. *)
+let normalize_blocks context ~synth ~is_address (blocks : blk term list) :
+    Hike_synth.table * blk term list =
+  let addr_bits = Hike_abi.word_bits (Hike_abi.of_target context.target) in
+  let cell = ref synth in
+  let blocks =
+    Base.List.map blocks ~f:(Hike_atomic.normalize_block ~addr_bits)
+  in
+  let blocks =
+    Base.List.map blocks ~f:(Hike_split_mem.split_block ~synth:cell)
+  in
+  let blocks = Base.List.map blocks ~f:Hike_coerce.coerce_block in
+  let blocks = Base.List.map blocks ~f:(Hike_fp.run_block ~synth:cell) in
+  let blocks =
+    Base.List.map blocks
+      ~f:(Hike_rip.prepare_block ~synth:cell ~addr_bits ~is_address)
+  in
+  let moved = ref [] in
+  let blocks =
+    Base.List.map blocks ~f:(fun blk ->
+        let blk, own = isolate_block blk in
+        moved := Base.List.rev_append own !moved;
+        blk)
+  in
+  (!cell, blocks @ Base.List.rev !moved)
 
 (* The function's normalized body in SSA and the table grown by its
    minted vars.  The returns read the ABI's return lanes and the calls the

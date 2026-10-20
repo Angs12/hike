@@ -7,11 +7,26 @@ module KB = Bap_knowledge.Knowledge
    addresses, which the VSA denotes with their [Rip] anchor.  The later
    storage bind turns every Load/Store into its storage form. *)
 
-let prepare_program ~synth ~addr_bits ~is_address program =
-  let cell = ref synth in
+let prepare_def ~resolved addresses d =
+  if not (KB.Value.get rip_relative_addr (Def.value d)) then d
+  else begin
 #ifdef VSA_DEBUG
-  let resolved = ref false in
+    resolved := false;
 #endif
+    let d = Def.map_exp d ~f:addresses#map_exp in
+#ifdef VSA_DEBUG
+    Cbat_vsa.Cbat_kb_census.bump "rip.resolved.def";
+    Cbat_vsa.Cbat_kb_census.bump
+      (if not !resolved then "rip.resolved.unclassified"
+       else if Option.is_some (Hike_stack_model.mem_node_of (Def.rhs d))
+       then "rip.resolved.access" else "rip.resolved.value");
+#endif
+    d
+  end
+
+let prepare_block ~(synth : Hike_synth.table ref) ~addr_bits ~is_address
+    (blk : blk term) : blk term =
+  let resolved = ref false in
   let addresses =
     object (self)
       inherit Exp.mapper
@@ -21,7 +36,7 @@ let prepare_program ~synth ~addr_bits ~is_address program =
 #ifdef VSA_DEBUG
           resolved := true;
 #endif
-          Bil.Var (Synth.record cell (Synth.mint_module_addr ~addr_bits a))
+          Bil.Var (Synth.record synth (Synth.mint_module_addr ~addr_bits a))
         | _ -> Bil.Int w
       (* A store's data is not an address: only the address operand
          takes the synthetic form. *)
@@ -29,25 +44,16 @@ let prepare_program ~synth ~addr_bits ~is_address program =
         Bil.Store (mem, self#map_exp addr, exp, endian, size)
     end
   in
-  let program = (object
-     inherit Term.mapper
-     method! map_def d =
-       if not (KB.Value.get rip_relative_addr (Def.value d)) then d
-       else begin
-#ifdef VSA_DEBUG
-         resolved := false;
-#endif
-         let d = Def.map_exp d ~f:addresses#map_exp in
-#ifdef VSA_DEBUG
-         Cbat_vsa.Cbat_kb_census.bump "rip.resolved.def";
-         Cbat_vsa.Cbat_kb_census.bump
-           (if not !resolved then "rip.resolved.unclassified"
-            else if Option.is_some (Hike_stack_model.mem_node_of (Def.rhs d))
-            then "rip.resolved.access" else "rip.resolved.value");
-#endif
-         d
-       end
-   end)#run program in
+  Term.map def_t blk
+    ~f:(prepare_def ~resolved addresses)
+
+let prepare_program ~synth ~addr_bits ~is_address program =
+  let cell = ref synth in
+  let program =
+    Term.map sub_t program ~f:(fun sub ->
+        Term.map blk_t sub
+          ~f:(prepare_block ~synth:cell ~addr_bits ~is_address))
+  in
   (!cell, program)
 
 (* The finalized component layout exists after attribution.  Named
