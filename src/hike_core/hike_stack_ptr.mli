@@ -17,9 +17,6 @@ type frame = {
       (* a runtime sub's cursor at entry, restored at every exit *)
 }
 
-(* The per-thread reservation of the runtime stack, in bytes. *)
-val runtime_stack_bytes : int64
-
 (* The sub's storages: one alloca per layout region in layout order; a
    runtime sub's residue is the region below the cursor instead, and
    the frame carries the cursor value. *)

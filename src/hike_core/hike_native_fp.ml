@@ -91,15 +91,12 @@ let row_of_name (name : string) : (native_fp * int option) option =
 let native_fp_op (name : string) : native_fp option =
   Core.Option.map (row_of_name name) ~f:fst
 
-(* The operand width the target names; [None] for an untagged spelling. *)
-let fp_width_of_name (name : string) : int option =
-  Core.Option.bind (row_of_name name) ~f:snd
-
 (* The ONE lane-width policy for a mapped call: the width the target
    names, the target word when the spelling stayed unqualified.  Every
    consumer of a mapped call's widths reads this. *)
 let lane_width_of_name ~(word_bits : int) (name : string) : int =
-  Base.Option.value (fp_width_of_name name) ~default:word_bits
+  let named = Core.Option.bind (row_of_name name) ~f:snd in
+  Base.Option.value named ~default:word_bits
 
 (* The bare sized spelling of an untagged FP target, when the table
    knows it: the name [hike-fp] rewrites the target to. *)

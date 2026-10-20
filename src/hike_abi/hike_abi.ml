@@ -122,13 +122,12 @@ let is_lock_marker (name : string) : bool =
   | "intrinsic:x86:lock" | "intrinsic:x86:unlock" -> true
   | _ -> false
 
-let is_fence_intrinsic (name : string) : bool =
+let is_atomic_intrinsic_name (name : string) : bool =
+  is_lock_marker name
+  ||
   match strip_at name with
   | "intrinsic:mfence" | "intrinsic:lfence" | "intrinsic:sfence" -> true
   | _ -> false
-
-let is_atomic_intrinsic_name (name : string) : bool =
-  is_lock_marker name || is_fence_intrinsic name
 
 (* The trap-id vocabulary's one test (the divide-by-zero interrupt sub). *)
 let is_interrupt_name (n : string) : bool =
