@@ -43,7 +43,7 @@ let write : unit Value.Tag.t =
 
 let normalize ~addr_bits program =
   let mem = Var.create ~is_virtual:false ~fresh:false "mem"
-      (Type.Mem (Size.addr_of_int_exn addr_bits,`r8)) in
+      (Hike_abi.mem_type ~addr_bits) in
   Term.map sub_t program ~f:(fun sub ->
       Term.map blk_t sub ~f:(fun blk ->
           let calls = Term.enum jmp_t blk |> Seq.filter_map ~f:(fun j ->

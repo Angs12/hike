@@ -144,6 +144,10 @@ let addr_size_bits target =
 let addr_size_of_bits (bits : int) : [> `r32 | `r64 ] =
   if bits <= 32 then `r32 else `r64
 
+(* The one byte-addressed memory type for an address width. *)
+let mem_type ~(addr_bits : int) : Type.t =
+  Type.Mem (addr_size_of_bits addr_bits, `r8)
+
 (* The stack pointer, the frame pointer and the arithmetic flags are the
    target's own registers, found by role.  A target that declares none of
    that role has no such register: the lookup fails rather than guess a
