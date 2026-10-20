@@ -12,10 +12,6 @@ open Hike_test.Fixtures
 
 module Abi = Hike.Abi
 
-(* A register list names exactly [names]. *)
-let names_are (vs : var list) (names : string list) : bool =
-  Base.List.map vs ~f:(fun v -> Var.name v) = names
-
 (* 64-bit literal word (native-int [w64] covers 63 bits only). *)
 
 let minus_addr sp (off : int64) : exp =
@@ -32,9 +28,6 @@ let tp_offset_equal (a : Hike.Stack_model.tp_offset) (b : Hike.Stack_model.tp_of
   | Tp_based x, Tp_based y -> Base.Option.equal Int64.equal x y
   | _ -> false
 
-
-let tid_set (tids : tid list) : Tid.Set.t =
-  List.fold_left (fun s t -> Core.Set.add s t) Tid.Set.empty tids
 
 (* The def with the given tid in the sub. *)
 let def_of_tid (sub : sub term) (dtid : tid) : def term option =

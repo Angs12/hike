@@ -19,15 +19,6 @@ let def_lhs_names (sub : sub term) : string list =
          Term.enum def_t b |> Seq.map ~f:(fun d -> Var.name (Def.lhs d)))
   |> Seq.to_list
 
-let var_names (sub : sub term) : string list =
-  Term.enum blk_t sub
-  |> Seq.concat_map ~f:(fun b ->
-         Term.enum def_t b
-         |> Seq.concat_map ~f:(fun d ->
-                Core.Set.to_sequence (Exp.free_vars (Def.rhs d)))
-         |> Seq.map ~f:Var.name)
-  |> Seq.to_list
-
 let targets_of (sub : sub term) : string list =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(fun b ->

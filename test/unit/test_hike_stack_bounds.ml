@@ -14,9 +14,7 @@ module Hsb = Hike_stack_bounds
 (* The test's word vocabulary: a width-64 word from an int64, and the two
    line ends. *)
 let wof64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
-let ones64 = Cbat_word.ones 64
 let base = Ws.stack_base
-let cei = Int64.max_int
 
 let wc (a : Cbat_word.t) (b : Cbat_word.t) : bool = Cbat_word.equal a b
 

@@ -305,8 +305,8 @@ type site =
 (* Forward provenance and backward address uses meet at a local monotone
    fixpoint over SSA versions (int <= ptr).  Callee contracts seed the
    call results and pointer arguments; storage still needs a VSA proof.
-   Both Bir_flow directions retain their states within the local solve
-   and when a recursive callee's contract grows. *)
+   One Bir_flow closure carries the local solve; the seed list survives
+   across calls so a growing recursive callee's contract is re-seeded. *)
 let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     extra:Var.Set.t -> used:Var.Set.t -> ptr_facts =
   let layout =
@@ -317,6 +317,13 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
           runtime_residue = false }
   in
   let word = facts.Hike_kb.abi.Hike_abi.word in
+  let rec spine (e : exp) =
+    match e with
+    | Bil.Var v -> [ v ]
+    | Bil.Ite (_, a, b) | Bil.BinOp (Bil.PLUS, a, b) -> spine a @ spine b
+    | Bil.BinOp (Bil.MINUS, a, _) -> spine a
+    | _ -> []
+  in
   let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage option =
     (* One storage per value: the denotation must name exactly one
        alloca.  A value whose offsets span several regions (a phi's
@@ -453,14 +460,6 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     | Bil.Var v, _ -> Lone v
     | _, None -> Spine []
     | _, Some blk ->
-        let rec spine (e : exp) =
-          match e with
-          | Bil.Var v -> [ v ]
-          | Bil.Ite (_, a, b) | Bil.BinOp (Bil.PLUS, a, b) ->
-              spine a @ spine b
-          | Bil.BinOp (Bil.MINUS, a, _) -> spine a
-          | _ -> []
-        in
         let vs = spine e in
         (* The denotation keys on the base register: its value in the
            before-env of [d] is the version's. *)
@@ -515,13 +514,6 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
      makes the result one) and use (an address base, or an operand of a
      pointer, is one) close together in one flow-insensitive solve. *)
   let use_all add vs = Base.List.iter vs ~f:(fun v -> if use_ok v then add v) in
-  let rec spine_of (e : exp) =
-    match e with
-    | Bil.Var v -> [ v ]
-    | Bil.Ite (_, a, b) | Bil.BinOp (Bil.PLUS, a, b) -> spine_of a @ spine_of b
-    | Bil.BinOp (Bil.MINUS, a, _) -> spine_of a
-    | _ -> []
-  in
   let def_rules (_, d) =
     let lhs = Def.lhs d in
     let addr, rhs = Core.Map.find_exn sites (Term.tid d) in
@@ -538,12 +530,12 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     let addr_use =
       match (addr, Hike_stack_model.addr_of_rhs (Def.rhs d)) with
       | Some a, Some (e, _) ->
-          [ { Hike_bir_flow.reads = spine_of e;
+          [ { Hike_bir_flow.reads = spine e;
               fire = (fun ~holds ~add -> use_all add (bases holds a)) } ]
       | _ -> []
     in
     let rhs_use =
-      { Hike_bir_flow.reads = lhs :: spine_of (Def.rhs d);
+      { Hike_bir_flow.reads = lhs :: spine (Def.rhs d);
         fire =
           (fun ~holds ~add ->
             if holds lhs then use_all add (bases holds rhs)) }

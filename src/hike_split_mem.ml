@@ -1,14 +1,14 @@
 (* The node-fission pass: every def keeps exactly one memory node
-   inline; the later nodes of a multi-node rhs become fresh synthetic
-   load defs before it, reading the same mem-var state (nested loads
-   see pre-store memory either way).  The per-def tag is then the
+   inline; the later memory nodes of a multi-node rhs become fresh
+   synthetic defs before it, reading the same mem-var state (nested
+   loads see pre-store memory either way).  The per-def tag is then the
    complete proof of the def's only memory node. *)
 
 open Bap.Std
 
 (* The first memory node stays inline (the one the VSA's
-   classification describes); every distinct later load becomes a
-   fresh synthetic def; equal later nodes share one def. *)
+   classification describes); every distinct later memory node becomes
+   a fresh synthetic def; equal later nodes share one def. *)
 let split_def ~(synth : Hike_synth.table ref) (d : def term) : def term list =
   let rhs = Def.rhs d in
   if Hike_stack_model.mem_node_count rhs <= 1 then [ d ]
@@ -60,8 +60,8 @@ let split_block ~(synth : Hike_synth.table ref) (blk : blk term) : blk term =
 
 (* Identity unless a def needs splitting. *)
 let split_sub ~(synth : Hike_synth.table ref) (sub : sub term) : sub term =
-  (* One traversal decides; the map pass re-checks only the blocks it
-     visits after the cheap whole-sub reject. *)
+  (* One traversal decides; the map pass visits every block but splits
+     only the recorded offending set. *)
   let offending =
     Term.enum blk_t sub
     |> Seq.filter_map ~f:(fun blk ->
