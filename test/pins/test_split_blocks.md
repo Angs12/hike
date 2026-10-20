@@ -1,7 +1,7 @@
 # Pins — test_split_blocks
 
 Module: `test/unit/test_split_blocks.ml` (group `split_blocks`, ids
-`SBLK-03`…`SBLK-08`).  Production mechanism: `src/hike_split_blocks.ml`
+`SBLK-03`…`SBLK-09`).  Production mechanism: `src/hike_split_blocks.ml`
 (the `hike-split-blocks` pass, chained after `hike-sections`) — it
 materializes every guard's implicit fallthrough as an explicit `Goto`
 and splits a 3+-jmp direct-goto series into pieces, each carrying an
@@ -23,3 +23,4 @@ Every pin builds its own sub inside its closure.
 | SBLK-08 | A dispatch word naming an in-sub block that the arming phase (`arm_dispatches`) did not arm is ruled into `series` under its own case test — a destination, never a failure. | In `series`, restore the `Goto (Direct t) -> failwith` arm. | SBLK-08 FAILs: `materialize` raises `Failure` instead of emitting the arm to the target. |
 | SBLK-06 | a bounded indirect call becomes one direct arm per named sub start. | textually invert the pinned contract in `Hike_split_blocks` | pin FAILs under that inversion (re-demonstrated by review) |
 | SBLK-07 | a bounded target with no naming-map entry fails loudly. | textually invert the pinned contract in `Hike_split_blocks` | pin FAILs under that inversion (re-demonstrated by review) |
+| SBLK-09 | Splitting an SSA call-and-goto block keeps boundary versions: the split block still carries the SSA tag, its call effects retain boundary read/write identities, phis name exactly the predecessor blocks, definitions stay single, and emission verifies. | Rebuild boundary versions from names during the split instead of carrying the tagged lanes. | SBLK-09 versions travel with the call FAILs, or the emitted module fails verification. |

@@ -79,7 +79,7 @@
 ;   - vsa-debug  -> cbat_vsa_stages_debug_src.ml  (times and accumulates)
 ;   - everything -> cbat_vsa_stages_prod.ml       (no-ops, erased)
 ; Production therefore pays nothing — no refs, no clock reads, no env
-; lookups (AGENTS.md §6).
+; lookups (see `AGENTS.md`'s diagnostics rules).
 (rule
  (enabled_if (= %{profile} vsa-debug))
  (targets cbat_vsa_stages.ml)

@@ -8,10 +8,8 @@
 #       parameter for window mems).
 #   (b) a region GEP's index must be an integer (never a ptrtoint of an
 #       address value — the index is a model offset).
-#   (c) no @stack global reference.
-#   (d) residue discipline: no legacy %frame alloca (the residue is
-#       stack_r0); at most one residue storage per define; references
-#       imply their storage.
+#   (d) residue discipline: at most one residue storage per define;
+#       references imply their storage.
 #   (e) no entry-edge poison phis.
 #   (f) every section component/residue global is internal.
 #   (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
@@ -43,7 +41,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
     continue
   fi
 
-  # The count rules (a/c/e/f/g) read one awk pass over the module;
+  # The count rules (a/e/f/g) read one awk pass over the module;
   # the state-machine rules (b/d/INFO) keep their own passes.
   eval "$(awk '
     { line = $0
@@ -54,7 +52,6 @@ for ll in "$OUT_DIR"/out_*.ll; do
       }
       if (line ~ /%stack_r[0-9]/) n_sr_ref++
       if (line ~ /%stack_r[0-9]+ = (alloca|getelementptr)/) n_sr_alloca++
-      if (line ~ /@stack/) n_stack++
       if (line ~ /phi .*\[ poison, %entry/) n_poison++
       if (line ~ /^@sec_comp_[0-9]+ =/) n_comp++
       if (line ~ /^@sec_res_[0-9]+ =/) n_res++
@@ -73,7 +70,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
     END {
       m = 0
       for (id in missing_sr) m++
-      printf "n_sr_ref=%d n_sr_alloca=%d n_sr_missing=%d n_stack=%d n_poison=%d n_comp=%d n_res=%d n_ext=%d n_esc=%d n_wm_ref=%d n_wp=%d", n_sr_ref, n_sr_alloca, m, n_stack, n_poison, n_comp, n_res, n_ext, n_esc, n_wm_ref, n_wp
+      printf "n_sr_ref=%d n_sr_alloca=%d n_sr_missing=%d n_poison=%d n_comp=%d n_res=%d n_ext=%d n_esc=%d n_wm_ref=%d n_wp=%d", n_sr_ref, n_sr_alloca, m, n_poison, n_comp, n_res, n_ext, n_esc, n_wm_ref, n_wp
     }
   ' "$ll")"
   # (a) references imply storage: every referenced stack_rN id needs its
@@ -120,28 +117,18 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (c) no @stack global reference.
-  if [ "$n_stack" -ne 0 ]; then
-    echo "FAIL $name: (c) module references the legacy @stack global $n_stack time(s)"
-    FAIL=$((FAIL + 1))
-  else
-    echo "PASS $name: (c) no @stack global references"
-    PASS=$((PASS + 1))
-  fi
-
-  # (d) residue discipline: the legacy %frame is gone; the residue is
-  #     stack_r0 and a define carries at most one.
-  n_frame="$(grep -c '%frame = alloca' "$ll")"
+  # (d) residue discipline: the residue is stack_r0 and a define carries
+  #     at most one.
   n_multi="$(awk '
     /^define / { if (in_d && n_r0 > 1) bad++; in_d = 1; n_r0 = 0 }
     /%stack_r0 = (alloca|getelementptr)/ { n_r0++ }
     END { if (in_d && n_r0 > 1) bad++; print bad + 0 }
   ' "$ll")"
-  if [ "$n_frame" -ne 0 ] || [ "$n_multi" -ne 0 ]; then
-    echo "FAIL $name: (d) legacy %frame alloca(s)=$n_frame, multi-residue define(s)=$n_multi"
+  if [ "$n_multi" -ne 0 ]; then
+    echo "FAIL $name: (d) multi-residue define(s)=$n_multi"
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (d) residue discipline ok (no %frame; at most one stack_r0 per define)"
+    echo "PASS $name: (d) residue discipline ok (at most one stack_r0 per define)"
     PASS=$((PASS + 1))
   fi
 

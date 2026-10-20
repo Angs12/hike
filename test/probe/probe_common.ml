@@ -8,6 +8,57 @@ module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 module Model = Hike.Stack_model
 
+(* The words of a bounded denotation; [None] when it is too wide. *)
+let bounded_words (ws : Vsa.WordSet.t) : int64 list option =
+  if Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws
+     || Vsa.WordSet.is_infinite ws
+  then None
+  else
+    Base.Option.map (Vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
+        Base.List.filter_map words ~f:Cbat_word.to_int64_opt)
+
+let text_words (ws : Vsa.WordSet.t) : int64 list =
+  match Vsa.WordSet.origin ws with
+  | Some (Vsa.WordSet.Origin.Rip Model.Text) ->
+    Base.Option.value (bounded_words ws) ~default:[]
+  | _ -> []
+
+(* The worklist's materialised-word scan, over a solved sub.  Returns
+   (def tid, words) for every non-call def it scans. *)
+let materialised ~word_bits ~synth ~envs sub : (Tid.t * int64 list) list =
+  let wb = word_bits in
+  let text ~pre ~post ~blk ~def e =
+    match Vsa.denote_exp_at ~synth ~pre ~post ~blk ~def e with
+    | Ok ws -> text_words ws
+    | Error _ -> []
+  in
+  Term.enum blk_t sub |> Seq.to_list
+  |> Base.List.concat_map ~f:(fun blk ->
+         match Core.Map.find envs (Term.tid blk) with
+         | None -> []
+         | Some (pre, post) ->
+           Term.enum def_t blk |> Seq.to_list
+           |> Base.List.filter ~f:(fun d ->
+                  match Term.get_attr d Disasm.insn with
+                  | Some insn -> not (Insn.is Insn.call insn)
+                  | None -> true)
+           |> Base.List.concat_map ~f:(fun d ->
+                  let values =
+                    match Model.store_data_of_rhs (Def.rhs d) with
+                    | None -> [ Def.rhs d ]
+                    | Some data -> (
+                      match Model.addr_of_rhs (Def.rhs d) with
+                      | Some (_, size) when Size.in_bits size > wb ->
+                        Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
+                            Bil.extract ~hi:(((k + 1) * wb) - 1) ~lo:(k * wb)
+                              data)
+                      | _ -> [ data ])
+                  in
+                  let words =
+                    Base.List.concat_map values ~f:(text ~pre ~post ~blk ~def:d)
+                  in
+                  [ (Term.tid d, words) ]))
+
 let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
   Vsa.static_graph_vsa ~abi
     ~synth:(ref synth)
@@ -107,12 +158,17 @@ type ws_binary_error =
    production runs it, never the raw lift. *)
 let production_input (proj : Project.t) : Hike.Synth.table * program term =
   let target = Project.target proj in
+  let addr_bits = Hike_abi.word_bits (Hike.Abi.of_target target) in
   let synth = ref Hike.Synth.empty in
   let compile sub =
     let table, sub = Hike.Jump.compile_sub ~synth:!synth target sub in
     synth := table;
     sub in
-  let program = Term.map sub_t (Project.program proj) ~f:compile in
+  let program =
+    Project.program proj
+    |> Hike_atomic.normalize ~addr_bits
+    |> Term.map sub_t ~f:compile
+  in
   let synth, program = Hike.Split_mem.normalize ~synth:!synth program in
   Hike.Fp.run_program ~synth (Hike.Coerce.coerce_program program)
 
@@ -134,15 +190,16 @@ let section_images (proj : Project.t) : Vsa.section_image list =
                    Int64.compare a img_lo >= 0 && Int64.compare a img_hi <= 0) })
 
 (* Load a binary and apply [run_sub] to each sub in program order. *)
-let ws_run_binary (path : string) (run_sub : Hike.Synth.table -> Vsa.section_image list -> sub term -> 'a) :
+let ws_run_binary (path : string) (run_sub : Hike_abi.t -> Hike.Synth.table -> Vsa.section_image list -> sub term -> 'a) :
     ('a list, ws_binary_error) result =
   try
     match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
     | Error e -> Error (Load_error e)
     | Ok proj ->
+      let abi = Hike.Abi.of_target (Project.target proj) in
       let synth, program = production_input proj in
       let subs = Term.enum sub_t program |> Seq.to_list in
-      Ok (List.map (run_sub synth (section_images proj)) subs)
+      Ok (List.map (run_sub abi synth (section_images proj)) subs)
   with e -> Error (Run_error e)
 
 (* Load a binary through the production driver and apply [run_sub] to each
@@ -183,13 +240,13 @@ let all_subs (prog : program term) : sub term list =
 (* The ONE per-sub solve (spec §2.1): the sub over its own program,
    seeded from init_sol, with the image-backed sections armed exactly
    as production arms them.  Every probe's fixpoint flow is this. *)
-let run_sub_fixpoint ~synth ?(images = []) (sub : sub term) : Vsa.vsa_sol =
+let run_sub_fixpoint ?(abi = Hike_abi.x86_64_sysv) ~synth ?(images = []) (sub : sub term) : Vsa.vsa_sol =
   Vsa.with_images images (fun () ->
-      static_graph_vsa ~synth ~abi:Hike_abi.x86_64_sysv sub
-        (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub))
+      static_graph_vsa ~synth ~abi sub
+        (Vsa.init_sol ~abi sub))
 
-let analyze_and_fixpoint ~synth (sub : sub term) : sub term * Vsa.vsa_sol =
-  (sub, run_sub_fixpoint ~synth sub)
+let analyze_and_fixpoint ?abi ~synth (sub : sub term) : sub term * Vsa.vsa_sol =
+  (sub, run_sub_fixpoint ?abi ~synth sub)
 
 (* Word-set printers. *)
 

@@ -14,10 +14,10 @@ type outcome =
   | Crash of string * string (* exception description * backtrace *)
 
 (* One sub, one full fixpoint on the raw sub (spec §2.1). *)
-let run_sub synth (images : Vsa.section_image list) (sub : sub term) : outcome =
+let run_sub abi synth (images : Vsa.section_image list) (sub : sub term) : outcome =
   let t0 = Unix.gettimeofday () in
   try
-    let _sol = Probe_common.run_sub_fixpoint ~synth ~images sub in
+    let _sol = Probe_common.run_sub_fixpoint ~abi ~synth ~images sub in
     let t1 = Unix.gettimeofday () in
     Ok (t1 -. t0)
   with e ->
@@ -36,11 +36,11 @@ type bin_report = {
 let run_binary (path : string) : bin_report =
   let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0;
             nloadfail = 0; ftime = 0.0; slow = [] } in
-  let run_one synth images sub =
+  let run_one abi synth images sub =
     let tid = Term.tid sub in
     let name = Sub.name sub in
     r.nsubs <- r.nsubs + 1;
-    match run_sub synth images sub with
+    match run_sub abi synth images sub with
     | Ok dt ->
       r.nok <- r.nok + 1;
       r.ftime <- r.ftime +. dt;

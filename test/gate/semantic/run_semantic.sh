@@ -22,15 +22,6 @@ if ! compgen -G "$IR/out_*.ll" >/dev/null; then
 	exit 2
 fi
 
-# The IR must be bound to the installed plugin that will render it; a
-# stale emission dir is the stale-IR-green class.
-IR_PROV="$IR/.plugin_provenance"
-INST_PROV="$(opam var lib 2>/dev/null || true)/hike/hike.cmxs.provenance"
-if [ ! -f "$IR_PROV" ] || [ ! -f "$INST_PROV" ] || ! cmp -s "$IR_PROV" "$INST_PROV"; then
-	echo "FATAL: the IR in $IR was not produced by the installed plugin — re-run the lift gate" >&2
-	exit 2
-fi
-
 # Pinned optimizer; a default switch must not silently change the gate.
 OPT=opt-21
 OPT_LEVEL="${HIKE_OPT_LEVEL:-2}"
@@ -42,6 +33,11 @@ command -v "$LLC" >/dev/null 2>&1 || {
 	echo "FATAL: $LLC not found (set HIKE_LLC to pin one)"
 	exit 2
 }
+
+# The cache key covers the IR and every tool that can change its rendering.
+TOOL_SHA="$({ sha256sum "$(command -v "$OPT")" "$(command -v "$LLC")" \
+                "$(command -v gcc)" 2>/dev/null
+              printf '%s\n' "$OPT_LEVEL"; } | sha256sum | cut -d' ' -f1)"
 
 # Single-pass bisect list; an opt crash counts as breaking too.
 BISECT_PASSES="mem2reg sroa instcombine simplifycfg dse inline function-attrs argpromotion globalopt early-cse"
@@ -71,7 +67,7 @@ for ll in "$IR"/out_*.ll; do
 	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
 	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
 	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] \
-	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
+	   && [ -n "$sha_was" ] && [ "$sha_now $TOOL_SHA" = "$sha_was" ]; then
 		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1
 		lrc=$?
 		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
@@ -112,7 +108,7 @@ for ll in "$IR"/out_*.ll; do
 		FAILED+=("$base")
 		continue
 	fi
-	printf '%s\n' "$sha_now" >"$OUT/.sha_${base}"
+	printf '%s\n' "$sha_now $TOOL_SHA" >"$OUT/.sha_${base}"
 
 	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
 	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1

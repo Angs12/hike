@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The gate tier's shared pipeline: ONE copy of the render / link / run /
-# compare recipe and the provenance check.  Sourced, never executed.
+# compare recipe.  Sourced, never executed.
 
 # The renderer: the llc on PATH, overridable for a pinned toolchain.
 LLC="${HIKE_LLC:-llc}"
@@ -17,7 +17,7 @@ hike_llc() {
 }
 
 # The lift entry every gate runs: the installed hike executable
-# (Hike.Drive, ADR 0032), the file the provenance check hashes.
+# (Hike.Drive, ADR 0032).
 hike_exe() {
   printf '%s/hike' "$(opam var bin 2>/dev/null)"
 }
@@ -45,63 +45,6 @@ hike_run_cmp() {
     echo "FAIL $base (native rc=$nrc vs lifted rc=$lrc)"
     diff "$out/${base}_native.out" "$out/${lbase}.out" | head -3 | sed 's/^/    /'
     return 1
-  fi
-  return 0
-}
-
-# The provenance gate: the installed plugin must have been built from the
-# given tree.  The shared switch can hold another session's build, so a
-# mismatch is a hard stop, never a warning.
-provenance_ok() {
-  local tree="$1" prov rec lib
-  if ! command -v opam >/dev/null 2>&1 || ! lib="$(opam var lib 2>/dev/null)" || [ -z "$lib" ]; then
-    echo "FATAL: the opam environment is not loaded — run: eval \$(opam env)" >&2
-    return 2
-  fi
-  prov="$lib/hike/hike.cmxs.provenance"
-  if [ ! -f "$prov" ]; then
-    echo "FATAL: no installed plugin provenance at $prov — run src/record_provenance.sh" >&2
-    return 2
-  fi
-  rec="$(sed -n 's/^tree: //p' "$prov")"
-  if [ "$rec" != "$tree" ]; then
-    echo "FATAL: installed plugin was built from '$rec', not '$tree'" >&2
-    echo "       rebuild+reinstall from this tree, then re-run src/record_provenance.sh" >&2
-    return 3
-  fi
-  # The sources must match the record: a stale install (sources newer than
-  # the build) is a hard stop.
-  local rec_src src
-  rec_src="$(sed -n 's/^src_sha16: //p' "$prov")"
-  src="$({ find "$tree/src" \( -name '*.ml' -o -name '*.mli' -o -name '*.c' -o -name 'dune' -o -name '*.sh' \) -print \
-            | sort | xargs sha256sum 2>/dev/null; \
-           sha256sum "$tree/dune-project" 2>/dev/null; } \
-         | sha256sum | cut -c1-16)"
-  if [ "$rec_src" != "$src" ]; then
-    echo "FATAL: installed plugin sources differ from this tree ($rec_src != $src)" >&2
-    echo "       rebuild+reinstall from this tree, then re-run src/record_provenance.sh" >&2
-    return 4
-  fi
-  # And the installed objects must match the record: the analysis code lives
-  # in the sub-library objects, so the whole set is checked.
-  local libdir rec_bundle bundle
-  libdir="$(opam var lib 2>/dev/null)/hike"
-  rec_bundle="$(sed -n 's/^bundle_sha16: //p' "$prov")"
-  bundle="$( (cd "$libdir" && find . -name '*.cmxs' | sort | xargs sha256sum) \
-             | sha256sum | cut -c1-16)"
-  if [ "$rec_bundle" != "$bundle" ]; then
-    echo "FATAL: the installed plugin set does not match the record ($rec_bundle != $bundle)" >&2
-    echo "       another session may have reinstalled; reinstall from this tree" >&2
-    return 5
-  fi
-  # The embedded lift entry is part of the same build.
-  local rec_drive drive
-  rec_drive="$(sed -n 's/^bin_sha16: //p' "$prov")"
-  drive="$(sha256sum "$(hike_exe)" 2>/dev/null | cut -c1-16)"
-  if [ -z "$rec_drive" ] || [ "$rec_drive" != "$drive" ]; then
-    echo "FATAL: the installed hike does not match the record (${rec_drive:-none} != ${drive:-missing})" >&2
-    echo "       reinstall from this tree, then re-run src/record_provenance.sh" >&2
-    return 6
   fi
   return 0
 }

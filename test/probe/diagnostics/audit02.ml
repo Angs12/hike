@@ -21,11 +21,11 @@ let ws_str (w : Ws.t) : string =
 let exp_str (e : exp) : string = Format.asprintf "%a" Exp.pp e
 
 (* Walks the sub like the production producer; `on_unbounded` compares replica vs production. *)
-let audit_sub ~synth (sub : sub term) : unit =
+let audit_sub ~abi ~synth (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   (* The production per-def verdict, recomputed from the denotations. *)
-  let sol = run_sub_fixpoint ~synth sub in
+  let sol = run_sub_fixpoint ~abi ~synth sub in
   (* The seam reads the defs' Env Tags: audit the sweep's stamped sub. *)
   let _, sub = Vsa.stamp_envs_of_sol ~synth ~sol sub in
   let kind_of (blk : blk term) (d : def term) : Ws.kind option =
@@ -148,6 +148,7 @@ let audit_sub ~synth (sub : sub term) : unit =
    fixpoint report and skip. *)
 let wbig_main (path : string) : unit =
   let proj = load_project path in
+  let abi = Hike.Abi.of_target (Project.target proj) in
   let synth, prog = production_input proj in
   let total = ref 0 in
   let skipped = ref 0 in
@@ -155,8 +156,8 @@ let wbig_main (path : string) : unit =
   |> List.iter (fun sub ->
       try
         let n = ref 0 in
-        let sub', sol = analyze_and_fixpoint ~synth sub in
-        (* The analyze pass's solution is the kind source — no re-solve. *)
+        let sub', sol = analyze_and_fixpoint ~abi ~synth sub in
+        (* The fixpoint solution is the kind source — no re-solve. *)
         let kind_of = Probe_common.seam_kinds_of ~synth sol sub' in
         Term.enum blk_t sub'
         |> Seq.iter ~f:(fun b ->
@@ -204,12 +205,13 @@ let () =
      | Ok proj ->
        (* The address width follows the loaded target ABI. *)
        let target = Project.target proj in
+       let abi = Hike.Abi.of_target target in
          Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
        let synth, prog = production_input proj in
        (if String.equal subname "ALL" then
-          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub ~synth sub)
+          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub ~abi ~synth sub)
         else
           match Seq.find (Term.enum sub_t prog) ~f:(fun s -> String.equal (Sub.name s) subname) with
-          | Some sub -> audit_sub ~synth sub
+          | Some sub -> audit_sub ~abi ~synth sub
           | None -> Printf.printf "sub '%s' not found\n" subname);
        flush stdout)

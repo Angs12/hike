@@ -20,7 +20,7 @@ def sha256(path):
 
 
 def installed_hike():
-    """The installed lift entry (Hike.Drive, ADR 0032) the provenance hashes."""
+    """The installed lift entry (Hike.Drive, ADR 0032)."""
     bindir = subprocess.check_output(["opam", "var", "bin"], text=True).strip()
     return Path(bindir) / "hike"
 
@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--reference", type=Path,
                         help="interleave a saved build: a directory holding its hike "
-                             "executable and hike.cmxs.provenance")
+                             "executable")
     parser.add_argument("--cpu", type=int, help="pin both builds to the same CPU")
     parser.add_argument("--profile", action="store_true",
                         help="capture perf once per binary after all timing runs")
@@ -125,19 +125,14 @@ def main():
             parser.error("baseline was not recorded through the hike executable")
         baseline = recorded["binaries"]
     args.hike = installed_hike()
-    lib = Path(subprocess.check_output(["ocamlfind", "query", "hike"], text=True).strip())
-    provenance = lib / "hike.cmxs.provenance"
     manifest = {"entry": "hike", "hike": str(args.hike),
                 "affinity": sorted(os.sched_getaffinity(0)),
-                "plugin_provenance": provenance.read_text() if provenance.exists() else None,
                 "binaries": {}}
     reference_hike = None
     if args.reference:
         reference_hike = args.reference.resolve() / "hike"
-        provenance = args.reference / "hike.cmxs.provenance"
-        if not (reference_hike.is_file() and provenance.is_file()):
-            parser.error("reference must contain hike and hike.cmxs.provenance")
-        manifest["reference_provenance"] = provenance.read_text()
+        if not reference_hike.is_file():
+            parser.error("reference must contain a hike executable")
     failed = False
     for index, binary in enumerate(args.binaries):
         binary = binary.resolve(strict=True)

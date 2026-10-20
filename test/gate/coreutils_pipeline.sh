@@ -2,6 +2,8 @@
 # End-to-end coreutils pipeline: clone -> build -> collect ELFs -> lift ->
 # recompile -> native-vs-lifted success-rate table.
 # Resumable: each stage skips existing work (delete $WORK/ir to re-emit).
+# Report-only by default: lift/link/suite failures are recorded in the
+# summary.  STRICT=1 makes any of them exit nonzero.
 # Usage: coreutils_pipeline.sh [workdir] [stage]
 #   stage: all|clone|build|collect|lift|link|suite|summary (default all)
 #   workdir default /tmp/opencode/coreutils-test
@@ -11,11 +13,10 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib.sh"
-SEM="$HERE/semantic"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 WORK="${1:-/tmp/opencode/coreutils-test}"
 STAGE="${2:-all}"
+STRICT="${STRICT:-0}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 URL="https://github.com/coreutils/coreutils"
 CORE="$WORK/coreutils"
@@ -196,6 +197,7 @@ do_link() {
         echo "OK $name" >> "$TEST_LOG"; ok=$((ok+1))
     done
     note "link: OK=$ok FAIL=$fail (details: $TEST_LOG)"
+    [ "$fail" -eq 0 ]
 }
 
 # Coreutils' own suite (make check), three-way: native baseline, lifted,
@@ -204,6 +206,7 @@ do_link() {
 do_suite() {
     [ -x "$CORE/src/ls" ] || { note "suite: build first"; return 1; }
     local suite_log="$WORK/suite"
+    local suite_fail=0
     mkdir -p "$suite_log"
 
     clean_test_state() {
@@ -249,7 +252,7 @@ do_suite() {
     if [ "${SUITE_FRESH:-0}" = "1" ] || [ ! -s "$suite_log/native.test-suite.log" ]; then
         touch "$suite_log/.stamp.$$"
         echo "== native baseline ==" > "$suite_log/native.counts"
-        run_check native >> "$suite_log/native.counts" 2>&1 || true
+        run_check native >> "$suite_log/native.counts" 2>&1 || suite_fail=1
         rm -f "$suite_log/.stamp.$$"
     fi
 
@@ -272,7 +275,7 @@ do_suite() {
     # ---- lifted run ----
     touch "$suite_log/.stamp.$$"
     echo "== lifted ==" > "$suite_log/lifted.counts"
-    run_check lifted >> "$suite_log/lifted.counts" 2>&1 || true
+    run_check lifted >> "$suite_log/lifted.counts" 2>&1 || suite_fail=1
 
     # ---- restore ----
     for f in "$suite_log/src_orig"/*; do
@@ -288,6 +291,7 @@ do_suite() {
       | awk '{printf "%-12s native=%-6s lifted=%-6s\n", $1" "$2, $3, $6}'
     echo "(delta FAIL+ERROR lifted-minus-native = the hike-caused breakage)"
     echo "logs: $suite_log/{native,lifted}.test-suite.log"
+    return "$suite_fail"
 }
 
 # -------------------------------------------------------------- summary ----
@@ -334,12 +338,14 @@ case "$STAGE" in
     suite)   do_suite ;;
     summary) do_summary ;;
     all)
+        strict_fail=0
         do_collect || exit 1
-        do_lift     # failures recorded, not fatal - the report shows them
-        do_link
-        do_suite    # the upstream suite IS the semantic oracle
+        do_lift     || strict_fail=1   # failures recorded for the report
+        do_link     || strict_fail=1
+        do_suite    || strict_fail=1   # the upstream suite IS the semantic oracle
         do_summary
         do_lift_report
+        [ "$STRICT" != 1 ] || [ "$strict_fail" -eq 0 ] || exit 1
         ;;
     *) echo "unknown stage '$STAGE'" >&2; exit 2 ;;
 esac

@@ -385,13 +385,13 @@ let tests : unit Alcotest.test list =
 
 
 
-    pin "MOD-37" "PR-E1: an unknown target falls back to the SysV record (total)"
+    pin "MOD-37" "PR-E1: a non-primary target is refused"
       (fun () ->
         check "MOD-37"
-          (Abi.is_sp
-             (Hike.Abi.of_target Theory.Target.unknown)
-             (named "RSP")
-          && Hike.Abi.addr_size_bits Theory.Target.unknown = 0));
+          (match Abi.of_target Theory.Target.unknown with
+           | exception Failure msg ->
+             Base.String.is_substring msg ~substring:"not x86_64-gnu-elf"
+           | _ -> false));
 
     pin "MOD-38" "PR-E1: the x86_64-gnu-elf target reifies the SysV stack pointer as the SP"
       (fun () ->

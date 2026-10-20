@@ -61,16 +61,15 @@ let tag_targets_block ~synth (blk : blk term) : blk term =
                            (Call.with_target c
                               (Direct (Tid.for_name sized))))
                   | None ->
-                      (* No sized row at the temp's width: the
-                         unqualified target stays.  An op with sized
-                         rows at other widths says so — the residue
-                         is the recorded word-width fallback; an op
-                         with none (the runtime boundary) keeps the
-                         unqualified spelling as its identity. *)
+                      (* No sized row at the temp's width: an op with
+                         sized rows at other widths is a hard refusal;
+                         an op with none (the runtime boundary) keeps
+                         the unqualified spelling as its identity. *)
                       if Hike_native_fp.has_sized_rows name then
-                        Hike_diag.warn
-                          "fp: block %s: intrinsic %s has no sized spelling at width %d - the unqualified target stays"
-                          (Tid.name (Term.tid blk)) name w;
+                        failwith
+                          (Printf.sprintf
+                             "hike_fp: block %s: intrinsic %s has no sized spelling at width %d"
+                             (Tid.name (Term.tid blk)) name w);
                       j)
               | _ -> j)
           | _ -> j)

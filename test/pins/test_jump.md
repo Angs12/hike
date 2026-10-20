@@ -1,6 +1,6 @@
 # Pins — test_jump
 
-Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-51`),
+Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-53`),
 migrating `test_cbat/test_jump.ml`.  Production mechanism:
 `src/hike_jump.ml` (`Hike.Jump.compile_sub`, target-driven by the
 `jump_target` flag-role target in `test/unit/fixtures.ml`, which declares
@@ -38,3 +38,5 @@ cross-pin state.
 | JMP-49 | `jp` after `ucomisd`: the lifter's PF is `is_nan(a) \| is_nan(b)` over intrinsic results, defined in the predecessor block; the cond compiles to that unordered test. | Drop `parity_flag` from `flag_vars`. | the cond stays `PF` (PF is then not a flag, and the original `PF` is already acceptable). |
 | JMP-50 | Integer `jp`: PF is the low byte's parity of the result; the cond becomes that expression and the PF def dies. | Drop `parity_flag` from `flag_vars`. | the cond stays `PF`. |
 | JMP-51 | A call edge ends the walk (`preds_of` marks it `Other_edge`): the callee may write the flags, so a ZF set before the call never reaches the jump after it.  The pre-substitution compiler compiled this shape. | Mark call-return edges `Goto_edge` in `preds_of`. | the cond becomes `x = 0` across the call. |
+| JMP-52 | Low casts compose by width: `LOW:width(kind:middle(src))` is a low cast when narrower, the source at its own width, and keeps the extension kind when wider. | In the cast-composition rule, always keep `LOW` instead of collapsing by width. | JMP-52 FAILs on the equal-width and widening rows. |
+| JMP-53 | A casted reused switch index retains its inclusive bound: `saved = LOW 32(xv)` and the guard read `saved < 23` yields the comparison against the original inclusive bound. | Fold the cast into the reused index or drop the inclusive-bound adjustment. | JMP-53 sees no guard def or the bound is exclusive. |

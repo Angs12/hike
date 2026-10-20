@@ -16,7 +16,7 @@ let plus_addr sp (off : int64) : exp =
   Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 (Int64.to_int off))))
 
 (* The fixture stamps the producer's facts onto the terms, then runs the
-   promotion as a BIR rewrite — what the pipeline's vsa pass does. *)
+   promotion as a BIR rewrite — what the attribution/promote stage does. *)
 let stamp ~synth (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   Hike.Ssa.ssa_sub ~synth:!synth ~target:(x86_target ()) sub
   |> Hike.Promote.promote_sub ~synth ~addr_bits:64 ~abi:Hike.Abi.x86_64_sysv facts

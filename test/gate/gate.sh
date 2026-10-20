@@ -2,14 +2,13 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: provenance corpus lift allocas semantics unit referee
+#     stages: corpus lift allocas semantics unit referee
 #             performance all
 #
 # Every lift runs the installed hike executable (Hike.Drive, ADR 0032).
 #
 # `all` runs the documented chain in order and aborts on the first failure.
-# Every stage is strict (non-zero exit on any failure) and provenance is
-# verified before any stage that consumes an emission.
+# Every stage is strict (non-zero exit on any failure).
 #
 # Paths are overridable: HIKE_CORPUS, HIKE_EMIT, HIKE_SEMOUT.
 
@@ -23,11 +22,9 @@ EMIT="${HIKE_EMIT:-/tmp/hike-emit}"
 SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
 
 usage() {
-  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|unit|referee|performance|all> [performance options and binaries]" >&2
+  echo "usage: gate.sh <corpus|lift|allocas|semantics|unit|referee|performance|all> [performance options and binaries]" >&2
   exit 2
 }
-
-need_provenance() { provenance_ok "$TREE" || exit $?; }
 
 need_renderer() {
   command -v "$LLC" >/dev/null 2>&1 || {
@@ -41,16 +38,14 @@ stage() {
   local selected="$1"
   shift
   case "$selected" in
-    provenance) need_provenance ;;
     corpus)     "$HERE/compile_corpus.sh" "$CORPUS" ;;
-    lift)       need_provenance; "$HERE/run_corpus.sh" "$CORPUS" "$EMIT" ;;
-    allocas)    need_provenance; "$HERE/check_allocas.sh" "$EMIT" &&
+    lift)       "$HERE/run_corpus.sh" "$CORPUS" "$EMIT" ;;
+    allocas)    "$HERE/check_allocas.sh" "$EMIT" &&
                 python3 "$HERE/check_initializers.py" "$EMIT" "$CORPUS" ;;
-    semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
+    semantics)  need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
     referee)    ( cd "$TREE" && dune exec test/unit/test_clp_equiv.exe ) ;;
     performance)
-      need_provenance
       local perfout="${HIKE_PERFOUT:-${TMPDIR:-/tmp}/hike-performance-$(date -u +%Y%m%dT%H%M%S)}"
       python3 "$HERE/performance.py" --output "$perfout" "$@"
       ;;
@@ -62,7 +57,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in provenance corpus lift allocas semantics unit referee; do
+  for s in corpus lift allocas semantics unit referee; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2

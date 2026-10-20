@@ -175,55 +175,6 @@ let tests : unit Alcotest.test list =
                ~f:(fun w -> Cbat_word.(>=) w (w32 0))
              |> Option.is_some));
 
-    (* D6: coercing width helpers — mismatched ops coerce, never raise. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    (* D6-14: a mixed-width rshift reaching the domain is the pass's
-       contract violation; the domain answers top at the common width
-       (no crash, no not_implemented fire). *)
-
-
-    (* D6b: Exact lift2 default width — mismatched sets widen to 64. *)
-
-
-
-
-
-
-
-
-    (* E6: not_implemented logs through Event.Log only; stderr stays clean. *)
-
-
-
-
-    (* T3: gate-free flag-guard refinement. *)
-
-
     pin "VSA-32"
       "T3-7: mixed-def — the guard refines the flag's live version to {1} on the taken edge"
       (fun () ->

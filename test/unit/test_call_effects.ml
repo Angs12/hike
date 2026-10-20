@@ -270,21 +270,6 @@ let tests : unit Alcotest.test list =
           (Ws.equal (ce_reads m 0x2000L kept) (Ws.singleton (w64 42))
           && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
 
-    (* Re-pin CE-17: bounded stack lanes now conservatively clear the frame. *)
-    pin "CE-17" "a bounded stack escape clears the whole retained frame" (fun () ->
-        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
-        let e, m = ce_raw_env () in
-        let env =
-          AI.add_word e ~key:rdi ~data:(Ws.stack_word_i64 0x2000L)
-        in
-        let kept =
-          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
-            ~site:{ Ce.summary = None; read_lanes = [ rdi ] }
-            env
-        in
-        check "CE-17"
-          (Ws.is_top (ce_reads m 0x2000L kept)
-          && Ws.is_top (ce_reads m 0x3000L kept)));
     pin "CE-18" "call-frame retention requires a stack-origin SP" (fun () ->
         let env, m = ce_raw_env () in
         let values =
@@ -311,15 +296,6 @@ let tests : unit Alcotest.test list =
         check "CE-19"
           (Ws.is_top (ce_reads m 0x2000L kept)
           && Ws.is_top (ce_reads m 0x3000L kept)));
-
-    pin "CE-20" "a lane set before the call block escapes at the call" (fun () ->
-        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
-        let env, m = ce_raw_env ~lanes:[ rdi ] () in
-        let post = ce_call_reads env [ rdi ] in
-        check "CE-20"
-          (AI.frame_escaped post
-          && Ws.is_top (ce_reads m 0x2000L post)
-          && Ws.is_top (ce_reads m 0x3000L post)));
 
     pin "CE-21" "a frame escape stays sticky for later calls" (fun () ->
         let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in

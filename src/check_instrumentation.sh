@@ -96,7 +96,7 @@ for f in sorted(set(files)):
             violations.append(f"RULE 2 (direct print): {f}:{no}: {s}")
 
 if violations:
-    print("check_instrumentation: VIOLATION(S) — principle #6 "
+    print("check_instrumentation: VIOLATION(S) — diagnostics rule "
           "(instrumentation is not compiled into the production binary):",
           file=sys.stderr)
     for v in violations:

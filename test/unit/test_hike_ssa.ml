@@ -18,10 +18,7 @@ let sub_named name blks =
   List.iter (Sub.Builder.add_blk sb) blks;
   Sub.Builder.result sb
 
-let ssa_of sub =
-  Program.create ~subs:[ sub ] ()
-  |> Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ())
-  |> Term.enum sub_t |> Seq.hd_exn
+let ssa_of sub = ssa_of_subs [ sub ] (Sub.name sub)
 
 (* The SSA of [old_pre], the update to [full] (the new blocks pre-SSA,
    changed blocks replaced), and fresh construction on [full]. *)

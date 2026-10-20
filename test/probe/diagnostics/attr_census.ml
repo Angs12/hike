@@ -231,9 +231,9 @@ let census_addr ~synth ~(sub : string) ~(env : AI.t) (a : exp) : unit =
           (Format.asprintf "%a" Exp.pp a) m
     end
 
-let census_sub ~synth (sub : sub term) : unit =
+let census_sub ~abi ~synth (sub : sub term) : unit =
   try
-    let sol = Probe_common.run_sub_fixpoint ~synth sub in
+    let sol = Probe_common.run_sub_fixpoint ~abi ~synth sub in
     let sname = Sub.name sub in
     shadow := VarMap.empty;
     shift_pend := VarMap.empty;
@@ -317,7 +317,8 @@ let () =
          with
          | Error e -> ws_load_fail path e
          | Ok proj ->
+           let abi = Hike.Abi.of_target (Project.target proj) in
            let synth, prog = production_input proj in
-           Term.enum sub_t prog |> Seq.iter ~f:(census_sub ~synth));
+           Term.enum sub_t prog |> Seq.iter ~f:(census_sub ~abi ~synth));
         dump ();
         Core.Hashtbl.clear counts)

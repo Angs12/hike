@@ -1,9 +1,9 @@
 ; The workspace-wide env stanzas live here (NOT in dune-project: profiles
 ; are not dune-project fields).
 ;
-; [vsa-debug] is the sanctioned home for EVERYTHING diagnostic (AGENTS.md
-; §6): temporary debug prints, env-gated instrumentation, profiling
-; drivers, and analysis forensics. Select it with
+; [vsa-debug] is the sanctioned home for EVERYTHING diagnostic (see
+; `AGENTS.md`'s diagnostics rules): temporary debug prints, env-gated
+; instrumentation, profiling drivers, and analysis forensics. Select it with
 ;
 ;   dune build --profile vsa-debug <target>
 ;   dune exec  --profile vsa-debug <target> -- <args>

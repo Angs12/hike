@@ -163,7 +163,14 @@ let sp target =
 let thread_pointer target =
   match Theory.Target.reg target thread with
   | Some v -> Var.reify v
-  | None -> x86_64_sysv.thread_pointer
+  | None when Theory.Target.matches target "x86_64-gnu-elf" ->
+    (* The primary x86-64 target exposes no `thread` role in this BAP;
+       its TP is the SysV FS base. *)
+    x86_64_sysv.thread_pointer
+  | None ->
+    failwith
+      (Printf.sprintf "hike_abi: target %s declares no thread-pointer register"
+         (Theory.Target.to_string target))
 
 let frame_pointer target =
   by_role target Theory.Role.Register.frame_pointer "frame-pointer"
@@ -178,52 +185,43 @@ let sign_flag target =
 let overflow_flag target =
   by_role target Theory.Role.Register.overflow_flag "overflow-flag"
 
-(* The one target the pipeline's facts are written against; unknown
-   targets take the SysV fallback record. *)
+(* The one target the pipeline's facts are written against. *)
 let is_primary_target (t : Theory.Target.t) : bool =
   Theory.Target.matches t "x86_64-gnu-elf"
 
-(* A recognized target that is not the primary one: the pass entry warns
-   that the x86-64 convention record serves it. *)
-let is_known_foreign (t : Theory.Target.t) : bool =
-  not (Theory.Target.is_unknown t) && not (is_primary_target t)
-
 let pc target =
-  if is_primary_target target then
-    Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
-  else
-    (* A synthetic RIP for var-equality tests on unknown targets. *)
-    Var.create ~is_virtual:false ~fresh:false "RIP" (Type.Imm 64)
+  Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
 
 (* Consumers reach register lists and predicates only through here. *)
 
 let of_target (target : Theory.Target.t) : t =
-  (* The SysV record serves unknown targets. *)
-  if is_primary_target target then
-    {
-      sp = sp target;
-      frame_pointer = frame_pointer target;
-      thread_pointer = thread_pointer target;
-      int_param_regs = x86_64_sysv.int_param_regs;
-      vector_param_regs = x86_64_sysv.vector_param_regs;
-      return_regs = x86_64_sysv.return_regs;
-      callee_saved = x86_64_sysv.callee_saved;
-      caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
-      variadic_count_reg = x86_64_sysv.variadic_count_reg;
-      env_regs = x86_64_sysv.env_regs;
-      carry_flag = carry_flag target;
-      parity_flag = parity_flag target;
-      zero_flag = zero_flag target;
-      sign_flag = sign_flag target;
-      overflow_flag = overflow_flag target;
-      flag_regs = x86_64_sysv.flag_regs;
-      word = Theory.Target.bits target / 8;
-      page_size = x86_64_sysv.page_size;
-      red_zone = x86_64_sysv.red_zone;
-      entry_symbol = x86_64_sysv.entry_symbol;
-      noreturn_symbols = x86_64_sysv.noreturn_symbols;
-    }
-  else x86_64_sysv
+  if not (is_primary_target target) then
+    failwith
+      (Printf.sprintf "hike_abi: target %s is not x86_64-gnu-elf"
+         (Theory.Target.to_string target));
+  {
+    sp = sp target;
+    frame_pointer = frame_pointer target;
+    thread_pointer = thread_pointer target;
+    int_param_regs = x86_64_sysv.int_param_regs;
+    vector_param_regs = x86_64_sysv.vector_param_regs;
+    return_regs = x86_64_sysv.return_regs;
+    callee_saved = x86_64_sysv.callee_saved;
+    caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
+    variadic_count_reg = x86_64_sysv.variadic_count_reg;
+    env_regs = x86_64_sysv.env_regs;
+    carry_flag = carry_flag target;
+    parity_flag = parity_flag target;
+    zero_flag = zero_flag target;
+    sign_flag = sign_flag target;
+    overflow_flag = overflow_flag target;
+    flag_regs = x86_64_sysv.flag_regs;
+    word = Theory.Target.bits target / 8;
+    page_size = x86_64_sysv.page_size;
+    red_zone = x86_64_sysv.red_zone;
+    entry_symbol = x86_64_sysv.entry_symbol;
+    noreturn_symbols = x86_64_sysv.noreturn_symbols;
+  }
 
 (* The target's word size in bits, from the byte size the record carries. *)
 let word_bits (t : t) : int = 8 * t.word

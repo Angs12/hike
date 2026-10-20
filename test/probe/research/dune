@@ -6,8 +6,8 @@
  (flags :standard -g))
 
 (executables
- (names corpus_watch dec_diff overlap precision_probe)
- (modules corpus_watch dec_diff overlap precision_probe)
+ (names corpus_watch overlap precision_probe)
+ (modules corpus_watch overlap precision_probe)
  (libraries precision_probe_rows probe_common hike bap bap-core-theory bap-main llvm
   cbat_vsa cbat_vsa_domain core graphlib threads unix)
  (flags :standard -g)

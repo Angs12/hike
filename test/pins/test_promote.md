@@ -1,6 +1,6 @@
 # Pins — test_promote
 
-Module: `test/unit/test_promote.ml` (group `promote`, ids `PR-01`…`PR-39`),
+Module: `test/unit/test_promote.ml` (group `promote`, ids `PR-01`…`PR-43`),
 merging every entry point of `test_cbat/test_promote.ml` in source order:
 `run_promotion` (9 `T4-*` checks), `run_t10_rewrite` (5 `T10-*` checks),
 `run_producer_promotion` (6 `PR-A*` checks), and `run_window_escape`
@@ -51,3 +51,7 @@ closure — no cross-pin state.
 | PR-34 | the caller binds the slot address (the store's own address). | textually invert the pinned contract in `Hike_sections` | pin FAILs under that inversion (re-demonstrated by review) |
 | PR-35 | the emitted slot parameter is an LLVM pointer and the access loads through it. | textually invert the pinned contract in `Hike_sections` | pin FAILs under that inversion (re-demonstrated by review) |
 | PR-36 | the twin forwards the window slot pointer (no load). | textually invert the pinned contract in `Hike_sections` | pin FAILs under that inversion (re-demonstrated by review) |
+| PR-40 | Retargeting an SSA indirect call to an ordinary sub rewrites the call target, leaves the SSA marker unchanged, and keeps the surviving written/read lane identities. | Re-create the call's effects from names instead of retaining the previous lane versions. | PR-40 surviving result/argument identities FAIL: lanes are rebuilt with new identities. |
+| PR-41 | Retargeting an SSA call to a lane-free target drops the call's write lanes and rets. | Keep the previous lane set when the new target has none. | PR-41 FAILs: writes remain non-empty. |
+| PR-42 | Promotion keeps an SSA sub SSA and gives its promoted slot parameters entry version 0. | Assign fresh versions to promoted parameters. | PR-42 FAILs: a slot's index is not 0. |
+| PR-43 | The storage rewrite of an SSA sub with stack, window, and global accesses leaves every var with a single definition and every read defined. | Emit each storage access as a fresh def of the underlying var. | PR-43 single definitions or reads defined FAILs. |

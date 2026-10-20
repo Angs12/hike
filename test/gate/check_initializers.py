@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 # The emitter's LLVM global name for a section -> its ELF section name.
-# The keys are Model.sec_name's spellings, which carry the dots.
+# The keys are Model.sec_name's dotless spellings; the values carry the dots.
 SECTIONS = {
     "data": ".data",
     "rodata": ".rodata",
@@ -124,7 +124,11 @@ def check_module(ll_path, binary):
             raise SystemExit(
                 f"FATAL: {ll_path.name}: @{gname} declares {n} elements but "
                 f"the initializer parses {len(elems)}")
-        if gname in SECTIONS and SECTIONS[gname] in secs:
+        if gname in SECTIONS:
+            if SECTIONS[gname] not in secs:
+                undispatched.append(
+                    f"{gname} (ELF section {SECTIONS[gname]} is absent)")
+                continue
             vaddr, size = secs[SECTIONS[gname]]
             for i, e in enumerate(elems):
                 if LITERAL_RE.match(e):

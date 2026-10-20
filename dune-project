@@ -19,9 +19,10 @@
  (description
   "A BAP plugin that lifts x86-64 ELF binaries to LLVM IR.  A vendored \
    value-set analysis attributes every memory access to a section; the \
-   stack splits into real LLVM allocas (regions, VLA allocas, the \
-   residue fallback), and the emitter renders the program through one \
-   seam (bil2llvm) with the semantic harness as the acceptance oracle.")
+   stack splits into real LLVM allocas (regions and the residue, emitted \
+   as an alloca or a runtime stack), and the emitter renders the program \
+   through one seam (bil2llvm) with the semantic harness as the acceptance \
+   oracle.")
  (depends
   ocaml
   dune

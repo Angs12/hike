@@ -6,7 +6,7 @@ open Bap.Std.Bil.Types
    promoted-slot loads read the args. *)
 
 (* The promotion's input facts: the promoted arity and the resolved
-   direct targets (the vsa pass's products). *)
+   direct targets (the layout's slot arity and call resolution). *)
 type facts = {
   prom_arity : int;
   prom_resolved : Tid.t option Tid.Map.t;

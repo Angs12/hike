@@ -88,10 +88,10 @@ let chain' ~name ~deps run =
    facts every later pass reads. *)
 let pass_discover proj =
   let target = Project.target proj in
-  if Hike_abi.is_known_foreign target then
-    Hike_diag.warn
-      "target %s is not x86_64-gnu-elf; the x86-64 SysV convention record serves it"
-      (KB.Name.to_string (Theory.Target.name target));
+  if not (Hike_abi.is_primary_target target) then
+    failwith
+      (Printf.sprintf "hike: target %s is not x86_64-gnu-elf"
+         (KB.Name.to_string (Theory.Target.name target)));
   let result = Hike_drive.run proj in
   Hike_kb.install result.facts;
   Project.with_program (Project.with_symbols proj result.symtab) result.program

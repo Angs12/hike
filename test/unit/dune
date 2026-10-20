@@ -108,7 +108,6 @@
   hike_bir_flow
   core
 
-  precision_probe_rows
   llvm
   hike.hike_origin
   hike.hike_stack_bounds
@@ -119,7 +118,7 @@
   (pps ppx_bap)))
 
 ; The CLP/word differential referee.  Its subject is the vendored domain,
-; not a pass: it sweeps 1.7M operand pairs against a concrete oracle, so it
+; not a pass: it sweeps ~1.93M operand pairs against a concrete oracle, so it
 ; is the gate's own stage (gate.sh referee) rather than part of the
 ; per-change `dune runtest`.
 (executable

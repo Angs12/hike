@@ -8,54 +8,6 @@ open Probe_common
 module Model = Hike.Stack_model
 module Vsa = Cbat_vsa
 
-let bounded_words (ws : Vsa.WordSet.t) : int64 list option =
-  if Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws
-     || Vsa.WordSet.is_infinite ws
-  then None
-  else
-    Base.Option.map (Vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
-        Base.List.filter_map words ~f:Cbat_word.to_int64_opt)
-
-let text_words (ws : Vsa.WordSet.t) : int64 list =
-  match Vsa.WordSet.origin ws with
-  | Some (Vsa.WordSet.Origin.Rip Model.Text) ->
-    Base.Option.value (bounded_words ws) ~default:[]
-  | _ -> []
-
-let materialised ~word_bits ~synth ~envs sub : (Tid.t * int64 list) list =
-  let wb = word_bits in
-  let text ~pre ~post ~blk ~def e =
-    match Vsa.denote_exp_at ~synth ~pre ~post ~blk ~def e with
-    | Ok ws -> text_words ws
-    | Error _ -> []
-  in
-  Term.enum blk_t sub |> Seq.to_list
-  |> Base.List.concat_map ~f:(fun blk ->
-         match Core.Map.find envs (Term.tid blk) with
-         | None -> []
-         | Some (pre, post) ->
-           Term.enum def_t blk |> Seq.to_list
-           |> Base.List.filter ~f:(fun d ->
-                  match Term.get_attr d Disasm.insn with
-                  | Some insn -> not (Insn.is Insn.call insn)
-                  | None -> true)
-           |> Base.List.concat_map ~f:(fun d ->
-                  let values =
-                    match Model.store_data_of_rhs (Def.rhs d) with
-                    | None -> [ Def.rhs d ]
-                    | Some data -> (
-                      match Model.addr_of_rhs (Def.rhs d) with
-                      | Some (_, size) when Size.in_bits size > wb ->
-                        Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
-                            Bil.extract ~hi:(((k + 1) * wb) - 1) ~lo:(k * wb)
-                              data)
-                      | _ -> [ data ])
-                  in
-                  let words =
-                    Base.List.concat_map values ~f:(text ~pre ~post ~blk ~def:d)
-                  in
-                  [ (Term.tid d, words) ]))
-
 let () =
   init ();
   match Array.to_list Sys.argv |> List.tl with

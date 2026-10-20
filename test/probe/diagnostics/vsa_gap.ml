@@ -1,7 +1,7 @@
-(* The production-config non-convergence diagnostic: replicates the
-   pass's per-sub solve (jump -> split-mem terms, whole-program kill
-   summaries) and on Fixpoint_not_converged prints the widening heads
-   and the head states.
+(* The jump/split non-convergence diagnostic: replicates the per-sub solve
+   after jump and split-mem (not the full atomic/coerce/FP production
+   input) with whole-program kill summaries, and on
+   Fixpoint_not_converged prints the widening heads and the head states.
    Usage: vsa_gap.exe <binary> <subname> [raw|jump|split|both] *)
 
 open Bap.Std

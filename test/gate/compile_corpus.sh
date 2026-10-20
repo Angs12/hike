@@ -8,6 +8,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-/tmp/corpus-o2}"
 cd "$(dirname "$0")/../../src/synth" || exit 1
 
+TLS_MODELS=(local-exec initial-exec global-dynamic local-dynamic)
+
 build_lane () {
   local flags="$1" dest="$2"
   local fail=0
@@ -22,23 +24,27 @@ build_lane () {
   gcc $flags -fno-stack-protector -I. -o "$dest/list" list.c "$HERE/fixtures/list_main.c" \
     || { echo "FAIL list (compile)"; fail=1; }
 
-  for model in local-exec initial-exec global-dynamic local-dynamic; do
+  for model in "${TLS_MODELS[@]}"; do
     gcc $flags -fno-stack-protector -ftls-model="$model" \
       -o "$dest/tls_models_$model" tls_models.c -lpthread \
       || { echo "FAIL tls_models_$model (compile)"; fail=1; }
   done
 
-  # One binary per source: a silently-shrunk corpus masks everything
-  # downstream.
-  local expected built
-  expected=$(( $(ls *.c | wc -l) + 4 ))
+  # One binary per source (plus the list driver and the TLS models): a
+  # silently-shrunk corpus masks everything downstream.
+  local expected=1
+  for f in *.c; do
+    [ "$f" = "list.c" ] || expected=$((expected + 1))
+  done
+  expected=$((expected + ${#TLS_MODELS[@]}))
+  local built
   built=$(find "$dest" -maxdepth 1 -type f -perm -u+x | wc -l)
   if [ "$built" -ne "$expected" ]; then
     echo "FAIL: $built binaries built, $expected sources (see the FAIL lines above)"
     fail=1
   fi
 
-  # Guard: every binary must be ET_DYN (PIE) — both lanes, hard-fail
+  # Guard: every binary must be ET_DYN (PIE) — the O2 lane, hard-fail
   # on the ELF header's own word, never file(1) prose.
   local pie_fail=0
   for b in "$dest"/*; do

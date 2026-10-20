@@ -10,10 +10,7 @@ open Hike_test.Fixtures
 let target = x86_target ()
 let synth = Hike.Synth.empty
 
-let ssa_of sub =
-  Program.create ~subs:[ sub ] ()
-  |> Hike.Ssa.ssa_program ~synth ~target
-  |> Term.enum sub_t |> Seq.hd_exn
+let ssa_of sub = ssa_of_subs [ sub ] (Sub.name sub)
 
 let removed sub dce v =
   let in_sub s =

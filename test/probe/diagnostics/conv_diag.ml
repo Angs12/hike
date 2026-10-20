@@ -15,6 +15,7 @@ let () =
   | [] -> usage Sys.argv.(0) "<binary> [subname]"
   | path :: rest ->
     let proj = load_project path in
+    let abi = Hike.Abi.of_target (Project.target proj) in
     let prog = Project.program proj in
     let name = match rest with n :: _ -> n | [] -> "main" in
     let sub =
@@ -28,7 +29,7 @@ let () =
       (Sub.name sub);
     let sub' = sub in
     let sol, converged =
-      try (Probe_common.run_sub_fixpoint ~synth:Hike.Synth.empty sub', true)
+      try (Probe_common.run_sub_fixpoint ~abi ~synth:Hike.Synth.empty sub', true)
       with Vsa.Fixpoint_not_converged (n, sol) ->
         Printf.printf "FIXPOINT NOT CONVERGED after %d rounds\n" n;
         (sol, false)

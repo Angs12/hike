@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Lifts x86-64 ELF binaries to LLVM IR through a value-set analysis"
 description:
-  "A BAP plugin that lifts x86-64 ELF binaries to LLVM IR.  A vendored value-set analysis attributes every memory access to a section; the stack splits into real LLVM allocas (regions, VLA allocas, the residue fallback), and the emitter renders the program through one seam (bil2llvm) with the semantic harness as the acceptance oracle."
+  "A BAP plugin that lifts x86-64 ELF binaries to LLVM IR.  A vendored value-set analysis attributes every memory access to a section; the stack splits into real LLVM allocas (regions and the residue, emitted as an alloca or a runtime stack), and the emitter renders the program through one seam (bil2llvm) with the semantic harness as the acceptance oracle."
 maintainer: ["Angs12"]
 authors: ["Angs12"]
 homepage: "https://github.com/Angs12/hike"

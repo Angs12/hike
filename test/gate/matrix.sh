@@ -3,6 +3,7 @@
 # TLS models, and LLVM O0/O3/Oz, compared with native runs.
 
 set -u
+set -o pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TREE="$(cd "$HERE/../.." && pwd)"
@@ -11,8 +12,6 @@ TREE="$(cd "$HERE/../.." && pwd)"
 WORK="${HIKE_MATRIX:-/tmp/hike-matrix}"
 SRC="$TREE/src/synth"
 LLC="${HIKE_LLC:-llc-21}"
-
-provenance_ok "$TREE" || exit $?
 
 if [ "$#" -ne 0 ]; then
   echo "matrix.sh takes no arguments; it always runs the complete matrix" >&2
@@ -117,9 +116,13 @@ cell () {
 
 stage_cells () {
   python3 "$HERE/matrix_cases.py" "$1" |
-    { failed=0; while IFS=$'\t' read -r tag cc optflag sp strip model; do
-      cell "$tag" "$cc" "$optflag" "$sp" "$strip" "$model" || failed=1
-    done; exit "$failed"; }
+    { failed=0; rows=0
+      while IFS=$'\t' read -r tag cc optflag sp strip model; do
+        rows=$((rows + 1))
+        cell "$tag" "$cc" "$optflag" "$sp" "$strip" "$model" || failed=1
+      done
+      [ "$rows" -gt 0 ] || exit 1
+      exit "$failed"; }
 }
 
 failed=0

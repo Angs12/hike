@@ -11,6 +11,7 @@
 # Runs one lift at a time. Exit 1 if any fixture fails.
 
 set -u
+set -o pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-/tmp/vla-fixtures}"
@@ -18,7 +19,7 @@ LEVELS="${2:-O0 O2}"
 SRC="$ROOT/src/synth"
 mkdir -p "$OUT/bin" "$OUT/lift"
 
-dune build --root "$ROOT" -j 4 src/drive/main.exe 2>&1 | tail -3
+dune build --root "$ROOT" -j 4 src/drive/main.exe 2>&1 | tail -3 || exit 1
 
 fixtures="alloca_vla vla_loop vla_call vla_iter vla_2d vla_big vla_nested vla_thread vla_clash"
 fail=0

@@ -113,25 +113,19 @@ let tests : unit Alcotest.test list =
           && Base.List.mem targets "@intrinsic:not_a_real_intrinsic"
                ~equal:String.equal));
 
-    (* HFP-05: an unqualified target whose temp width has no sized row
-       stays unqualified AND says so — the residue is loud, and every
-       consumer's word-width fallback is the recorded answer. *)
-    pin "HFP-05" "an unsizable width leaves the target unqualified and warns"
+    (* HFP-05: an unqualified mapped target whose temp width has no sized
+       row is refused loudly; there is no word-width fallback. *)
+    pin "HFP-05" "an unsizable width refuses the mapped target"
       (fun () ->
-        let out = ref "" in
-        let synth, prog = fp_run [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ] in
-        let sub = the_sub prog in
-        out := capture_stderr (fun () ->
-            ignore (Hike.Fp.run_program ~synth (Program.create ~subs:[ sub ] ())));
-        let targets =
-          Base.List.concat_map (subs_of (fp_prog
-              [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ]))
-            ~f:targets_of
+        let sub = fp_fixture "intrinsic:forder_ieee754_binary" 80 in
+        let refused =
+          match Hike.Fp.run_program ~synth:Hike.Synth.empty
+                  (Program.create ~subs:[ sub ] ()) with
+          | _ -> false
+          | exception Failure msg ->
+            Base.String.is_substring msg ~substring:"no sized spelling at width 80"
         in
-        check "HFP-05: the warn fires and the target stays unqualified"
-          (contains_substring !out "has no sized spelling at width 80"
-          && Base.List.mem targets "@intrinsic:forder_ieee754_binary"
-               ~equal:String.equal));
+        check "HFP-05: the refusal names the unsized width" refused);
   ]
 
 let () = run "hike_fp" tests

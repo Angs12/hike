@@ -1,6 +1,6 @@
 # Pins: Cbat_clp.Exact
 
-Module `Cbat_clp.Exact` (formerly `Cbat_fin_set`, superseded by ADR 0031, T27 step 2). One row per pin in `test/unit/test_exact.ml`.
+Module `Cbat_clp.Exact` (the flat-array exact tier, ADR 0036). One row per pin in `test/unit/test_exact.ml`.
 
 Red evidence is by review: the pinned mechanisms live in the vendored
 domain library and are not reachable from a test seam, so the disable

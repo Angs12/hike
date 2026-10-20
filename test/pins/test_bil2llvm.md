@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-63`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-65`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -57,3 +57,5 @@ is the pin's point, not its subject.
 | EMIT-58 | a pointer masked by an integer stays a pointer (`ptrmask`); a pointer difference is an integer. | textually invert the pinned contract in `Bil2llvm` | pin FAILs under that inversion (re-demonstrated by review) |
 | EMIT-62 | a loop body listed before its head in term order still reads the head's phi, not undef. | create phis per block as bodies emit, or emit bodies in term order | EMIT-62 red: no phi, or `undef` in the IR |
 | EMIT-63 | FS origin survives a loaded thread pointer and stack spill; TLS resolution turns the derived address into a synthetic address emitted through the TLS block. | omit `Hike_tls.rewrite_program` | the final load has no synthetic TLS address and emits no `threadlocal.address` |
+| EMIT-64 | Phis follow the emitted successor edges, so removing a fallthrough with an unconditional jump leaves no phi with a stale predecessor; the emitted module verifies. | Build phis from the BIR term order instead of the emitted edges. | EMIT-64 fails the verifier: a phi names a predecessor edge that was not emitted. |
+| EMIT-65 | An unversioned call result mints no SSA name; only a versioned write is a definition (`Bil2llvm_env.Ssa_name.of_var`). | Accept unversioned vars in `Bil2llvm_env.Ssa_name.of_var`. | EMIT-65a FAILs: the base name becomes an SSA definition. |

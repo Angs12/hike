@@ -30,23 +30,14 @@ if [ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]; then
   exit 2
 fi
 
-# Bind every emission in $OUT to the build that produced it: a later
-# consumer compares this copy with the installed provenance, which also
-# records the hike executable's hash.
+# Bind every emission in $OUT to the build that produced it: the toolchain
+# stamp names the hike executable and the bap plugin objects it loads.
 LIBDIR="$(opam var lib 2>/dev/null || true)"
-PROV="$LIBDIR/hike/hike.cmxs.provenance"
-if [ ! -f "$PROV" ]; then
-  echo "FATAL: no installed plugin provenance — run src/record_provenance.sh" >&2
-  exit 2
-fi
-cp "$PROV" "$OUT/.plugin_provenance"
-PROV_SHA="$(sha256sum "$PROV" | cut -d' ' -f1)"
 
-# The whole toolchain the lift reads: the hike executable, its build
-# (through the provenance), and the bap plugin objects it loads.  A stamp
-# naming only the hike build would serve a stale emission after a bap
-# upgrade or a lifter rebuild — the stale-IR-green class the gate exists
-# to stop.
+# The whole toolchain the lift reads: the hike executable and the bap plugin
+# objects it loads.  A stamp naming only the hike build would serve a stale
+# emission after a bap upgrade or a lifter rebuild — the stale-IR-green class
+# the gate exists to stop.
 HIKE_BIN="$(hike_exe)"
 if [ ! -x "$HIKE_BIN" ]; then
   echo "FATAL: no installed hike executable at $HIKE_BIN (dune install)" >&2
@@ -80,7 +71,7 @@ for f in $BINS; do
   bin_sha="$(sha256sum "$CORPUS/$f" | cut -d' ' -f1)"
   stamp="$OUT/.lift_$f"
   if [ "${FRESH:-0}" != "1" ] && [ -f "$stamp" ] && [ -f "$OUT/out_$f.ll" ] \
-     && [ -f "$OUT/rc_$f.txt" ] && [ "$(cat "$stamp")" = "$bin_sha $PROV_SHA $TOOLCHAIN_SHA" ]; then
+     && [ -f "$OUT/rc_$f.txt" ] && [ "$(cat "$stamp")" = "$bin_sha $TOOLCHAIN_SHA" ]; then
     rc="$(cat "$OUT/rc_$f.txt")"
     cached=$((cached + 1))
     printf 'CACHED %s\n' "$f"
@@ -90,7 +81,7 @@ for f in $BINS; do
       >"$OUT/stdout_$f.txt" 2>"$OUT/err_$f.txt"
     rc=$?
     echo "$rc" >"$OUT/rc_$f.txt"
-    printf '%s\n' "$bin_sha $PROV_SHA $TOOLCHAIN_SHA" >"$stamp"
+    printf '%s\n' "$bin_sha $TOOLCHAIN_SHA" >"$stamp"
     if [ "$rc" -ne 0 ]; then
       printf 'FAIL %s rc=%d\n' "$f" "$rc"
     else
@@ -108,6 +99,15 @@ done
 diag_stats="$(awk '/^hike:/ { n++; if (match($0, /^hike: [a-z-]+:/)) { c=substr($0, RSTART+6, RLENGTH-7); cls[c]=1 } } END { printf "%d", n; for (k in cls) printf " %s", k }' "$OUT/diagnostics.txt" 2>/dev/null)"
 ndiag="${diag_stats%% *}"
 classes="${diag_stats#* }"
+if [ "${ndiag:-0}" -gt 0 ]; then
+  KNOWN_CLASSES="discover emit fp split-blocks summary undef-read"
+  for c in $classes; do
+    case " $KNOWN_CLASSES " in
+      *" $c "*) ;;
+      *) echo "FAIL unknown diagnostic class: $c" >&2; fail=$((fail + 1)) ;;
+    esac
+  done
+fi
 printf '\nlift: %d binaries, %d failed, %d cached; %s diagnostic line(s) [classes: %s]\n' \
   "$n" "$fail" "$cached" "${ndiag:-0}" "${classes:-none}"
 

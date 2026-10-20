@@ -1,7 +1,7 @@
 # Pins — test_integration
 
 Module: `test/unit/test_integration.ml` (group `integration`, ids
-`INT-01`…`INT-34`; `INT-11`/`INT-12` were never minted — the source
+`INT-01`…`INT-38`; `INT-11`/`INT-12` were never minted — the source
 sweep skipped them — and the survivors' id gaps carry no meaning),
 merging the word-domain / backward-walk soundness properties and the
 landmark / T5 pins from `test_cbat/test_properties.ml` and
@@ -45,3 +45,4 @@ produces, re-demonstrated whenever the cited mechanism changes. Production
 | INT-35 (lane vsa-backward 05) | The narrowed word arm: a narrowed record carries its own reading as the prior (never fresh — the INT-15 hazard closed at record time), and a second, closer narrowed reading fires the traversal-step estimate. | In `cbat_landmarks.ml` `record`, drop the `warmed` handling (`dist_p = None` always). | The lone warmed record reads `Zero` instead of widening-until-paired, and the pair reads `Zero` instead of `Finite 1` — the exact INT-15 class. |
 | INT-36 (pin B, lane vsa-backward 05; RE-PINNED on the corpus's evidence) | A cell whose OWN arm is `Zero` advances its own row and WIDENS — the widening is the cell's tuned Zero action, the word's Zero joins (`AI.advance_join_landmarks` through `consume_arm`). The ticket's Zero unification (advance-and-join for both kinds) is REFUTED: with the cell Zero arm joining, `out_section_sweep`/`out_rodata_strings` grind to the 6000-visit backstop (mass `fixpoint not converged`, two SIGILLs) — a loop-carried cell never stabilizes under a plain join. | Make the cell's Zero continuation `WordSet.join` (the refuted join form). | The cell data stays bounded instead of widening infinite, and the corpus fixpoints stop converging (demonstrated both ways 2026-09-30). |
 | INT-37 (pin C, lane vsa-backward 05) | Per-key consumption: the head's arm spends only the key it consumed — the word advance leaves no cell row behind, and the word extrapolation clears its own row only (`clear_words`/`advance_head` are gone; `Cbat_landmarks.clear_key` per consumed key). | Reinstate the head-wide sweeps: clear/advance every key at the head after the head arm runs. | `C (Zero)` finds a cell row the word-driven arm must not have touched; `C (Finite)` finds the cell row cleared with the word's. |
+| INT-38 (lane vsa-backward) | The guard identity: a boundary recorded under a widening head and a guard is one landmark per guard; the moved boundary updates that one entry and the paired reading fires, while an unguarded head mints a new entry. | Drop the guard scoping in `record` (treat every record as unguarded). | The guarded head holds two entries instead of one, and `steps` does not read `Finite 9`. |
