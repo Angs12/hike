@@ -83,6 +83,9 @@ val entry_block_of : sub term -> blk term option
 val normalize_round : Sub.t -> Sub.t
 val normalize_round_with_synth : synth:Hike_synth.table ref -> Sub.t -> Sub.t
 
+(** Clear the per-solve pure-op memo.  Call once at a solve boundary. *)
+val reset_memos : unit -> unit
+
 (* The fixpoint from [init]; a [wake] block's successors re-join even
    when no state changes (a resumed solve's blocked calls). *)
 val static_graph_vsa :

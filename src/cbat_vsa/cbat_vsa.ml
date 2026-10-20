@@ -336,6 +336,8 @@ let normalize_round_with_synth ~(synth : Hike_synth.table ref)
 let normalize_round (s : Sub.t) : Sub.t =
   normalize_round_with_synth ~synth:(ref Hike_synth.empty) s
 
+let reset_memos () = Cbat_clp_set_scalar.reset_memos ()
+
 #ifdef VSA_DEBUG
 (* Forward witness: every guard cond from [p] to [v] denotates false on
    the pred's entry state, so the edge is dead without the backward

@@ -131,6 +131,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
     ~(synth : Hike_synth.table)
     ~(seed : Vsa.vsa_sol option) ~(wake : Tid.Set.t) : outcome =
   self_arm target;
+  Vsa.reset_memos ();
   let abi = Hike_abi.of_target target in
   (* The images arm the whole fused solve: every denotation the
      phases, the completion's rewrites, and the replay compute reads

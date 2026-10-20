@@ -867,11 +867,44 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   | Fs s, Ps b -> [ op_fs_ps op s b ]
   | Opaque, _ | _, Opaque -> [ op_wide q1 q2 ]
 
-let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
+let lift_binop_raw (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with
   | ((Clp _ | Exact _ | Rel _) as q1), ((Clp _ | Exact _ | Rel _) as q2) ->
     canonical (op_pair op q1 q2)
   | p1, p2 -> pairwise (op_pair op) p1 p2
+
+(* The forward transfer repeats the same immutable operand pairs inside a
+   solve.  Cache the two fragmented bitwise ops only; the table is
+   cleared at each solve boundary and bounded. *)
+type value = t
+let value_equal = equal
+
+module MemoKey = struct
+  type t = value * value
+  let equal (a, b) (c, d) = value_equal a c && value_equal b d
+  let hash = Stdlib.Hashtbl.hash
+end
+
+module Memo = Stdlib.Hashtbl.Make (MemoKey)
+let xor_memo : t Memo.t = Memo.create 2048
+let rshift_memo : t Memo.t = Memo.create 1024
+
+let reset_memos () =
+  Memo.clear xor_memo;
+  Memo.clear rshift_memo
+
+let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
+  if Stdlib.( = ) op Logxor || Stdlib.( = ) op Rshift then begin
+    let memo = if Stdlib.( = ) op Logxor then xor_memo else rshift_memo in
+    let cap = if Stdlib.( = ) op Logxor then 8192 else 4096 in
+    match Memo.find_opt memo (t1, t2) with
+    | Some r -> r
+    | None ->
+      let r = lift_binop_raw op t1 t2 in
+      if Memo.length memo < cap then Memo.add memo (t1, t2) r;
+      r
+  end
+  else lift_binop_raw op t1 t2
 
 let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
   match t with

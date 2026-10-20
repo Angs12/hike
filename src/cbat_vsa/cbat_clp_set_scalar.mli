@@ -169,6 +169,9 @@ type unop = Cbat_preimage.unop =
 val lift2 : binop -> t -> t -> t
 val lift1 : unop -> t -> t
 
+(** Clear the per-solve pure-op memo. *)
+val reset_memos : unit -> unit
+
 #ifdef VSA_DEBUG
 (* The value's constructor, for the churn diagnosis. *)
 val tag : t -> string

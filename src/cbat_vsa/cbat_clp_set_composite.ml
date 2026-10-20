@@ -213,6 +213,7 @@ let of_list ~width l = Scalar (S.of_list ~width l)
 let of_exact s = Scalar (S.of_exact s)
 let singleton w = Scalar (S.singleton w)
 let of_clp p = Scalar (S.of_clp p)
+let reset_memos = S.reset_memos
 let module_address a = Scalar (S.module_address a)
 let stack_word p = Scalar (S.stack_word p)
 let stack_word_i64 k = Scalar (S.stack_word_i64 k)
