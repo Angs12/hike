@@ -25,6 +25,19 @@ type llvalue_map = Llvm.llvalue WVarMap.t
 (* A var's bound value, typed. *)
 type value_map = Bil2llvm_value.t WVarMap.t
 
+(* A name that is an SSA definition (version > 0).  The sealed
+   representation is the constructor: a version-0 name cannot be
+   published as a definition. *)
+module Ssa_name : sig
+  type t
+  val of_var : Var.t -> t option
+  val var : t -> Var.t
+end = struct
+  type t = { name : Var.t }
+  let of_var v = Base.Option.some_if (Var.index v > 0) { name = v }
+  let var t = t.name
+end
+
 type blk_llvals = { locals : value_map ref }
 
 (* One owner of a byte range of a section: a component or a gap
@@ -167,9 +180,13 @@ type sub_scope = {
   (* The lock-marker brackets' per-def plans, computed once per sub
      before any body emits.  Key: the def's tid. *)
   atomic_plan : atomic_action Tid.Map.t ref;
-  (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a call result —
-     one var, one value, valid wherever the def dominates. *)
-  ssavals : value_map ref;
+  (* Sub-wide bindings, split by what they may name.  [entries] holds
+     version-0 values bound once at entry (parameters, the entry SP, a
+     storage base): they dominate the sub by construction.  [definitions]
+     holds versioned SSA values, which dominate by the SSA property.  No
+     path may publish a version-0 definition. *)
+  entries : value_map ref;
+  definitions : value_map ref;
   (* The BIR phi terms' own llvalues, per block. *)
   bir_phis : llvalue_map ref Tid.Map.t ref;
   (* Original BIR blocks for boundary lane lookup during emission. *)
@@ -191,7 +208,8 @@ let fresh_scope () : sub_scope =
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     atomic_plan = ref Tid.Map.empty;
-    ssavals = ref WVarMap.empty;
+    entries = ref WVarMap.empty;
+    definitions = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_blocks = ref Tid.Map.empty;
     ptr_offsets = ref WVarMap.empty;
@@ -419,13 +437,40 @@ let get_local scope blk_tid var =
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
 
-(* The sub-wide SSA binding: one var one value (a phi lhs, a
-   versioned def, a call result, or a parameter). *)
-let bind_ssaval scope var value =
-  scope.ssavals := WVarMap.add (wvar_of var) value !(scope.ssavals)
+(* The entry bindings: parameters, the entry SP, storage bases.  Bound
+   once before any body emits; each dominates the whole sub. *)
+let bind_entry scope var value =
+#ifdef VSA_DEBUG
+  if Var.index var <> 0 then
+    failwith "bind_entry: a versioned var is a definition";
+#endif
+  scope.entries := WVarMap.add (wvar_of var) value !(scope.entries)
 
-let get_ssaval scope var =
-  WVarMap.find_opt (wvar_of var) !(scope.ssavals)
+(* The definition bindings: phi lhs, versioned defs, versioned call
+   results.  The sealed [Ssa_name] is the only key. *)
+let bind_definition scope (name : Ssa_name.t) value =
+  scope.definitions :=
+    WVarMap.add (wvar_of (Ssa_name.var name)) value !(scope.definitions)
+
+let entry scope var = WVarMap.find_opt (wvar_of var) !(scope.entries)
+
+let definition scope (name : Ssa_name.t) =
+  WVarMap.find_opt (wvar_of (Ssa_name.var name)) !(scope.definitions)
+
+(* The value a name denotes on an edge into [blk_tid].  A versioned name
+   is its definition, then a block-local value.  A version-0 name is the
+   block's own value (an unversioned call result) before an entry value:
+   an entry name never shadows a value defined in the block. *)
+let resolve_ssa scope blk_tid var =
+  match Ssa_name.of_var var with
+  | Some name -> (
+      match definition scope name with
+      | Some value -> Some value
+      | None -> get_local scope blk_tid var)
+  | None -> (
+      match get_local scope blk_tid var with
+      | Some value -> Some value
+      | None -> entry scope var)
 
 let load_ssa_blocks scope blks =
   Seq.iter blks ~f:(fun blk ->
@@ -443,6 +488,7 @@ let mint_version scope blk_tid v =
   Core.Map.find !(scope.ssa_blocks) blk_tid
   |> Base.Option.bind ~f:(fun blk ->
          Hike_stack_model.boundary_write blk v)
+  |> Base.Option.bind ~f:Ssa_name.of_var
 
 
 
@@ -517,30 +563,30 @@ let lane_exp scope blk_tid (e : exp) : exp =
   end)#map_exp e
 
 
-(* Binds a call result to the version written by its jump. *)
+(* Binds a call result to the version written by its jump.  A jump with
+   no versioned write has no SSA identity: its result stays local to the
+   call's own block and reaches successors through the edge's phi. *)
 let bind_call_ret ctx scope blk_tid (ret : Arg.t) value =
   match mint_version scope blk_tid (Arg.lhs ret) with
-  | Some v ->
-      bind_ssaval scope v value;
-      insert_local scope blk_tid v value
+  | Some name ->
+      bind_definition scope name value;
+      insert_local scope blk_tid (Ssa_name.var name) value
   | None -> insert_local scope blk_tid (Arg.lhs ret) value
 
-(* A lane's value at a block: its end-of-defs version, then the
-   sub-wide and per-block bindings of the base. *)
+(* A lane's value at a block: its end-of-defs version, then the edge's
+   own resolution. *)
 let lane_value ctx scope blk_tid v =
   match
-    Base.Option.bind (lane_version scope blk_tid v) ~f:(get_ssaval scope)
+    Base.Option.bind (lane_version scope blk_tid v)
+      ~f:(resolve_ssa scope blk_tid)
   with
   | Some x -> x
   | None -> (
-      match get_ssaval scope v with
+      match resolve_ssa scope blk_tid v with
       | Some x -> x
-      | None -> (
-          match get_local scope blk_tid v with
-          | Some x -> x
-          | None ->
-              warn_undef_read ctx scope v blk_tid;
-              frozen_undef ctx scope v))
+      | None ->
+          warn_undef_read ctx scope v blk_tid;
+          frozen_undef ctx scope v)
 
 
 let call_exn jmp =

@@ -140,8 +140,8 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
   Base.List.iteri (get_args ctx sub_tid) ~f:(fun i arg ->
       let value = lane_value_of ctx arg (Llvm.param fn i) in
       insert_local scope blk_tid (Arg.lhs arg) value;
-      (* A parameter dominates every reader: bind it sub-wide too. *)
-      bind_ssaval scope (Arg.lhs arg) value)
+      (* A parameter dominates every reader: bind it at entry, sub-wide. *)
+      bind_entry scope (Arg.lhs arg) value)
 
 let create_fun_declaration ?name ctx sub_tid =
   let name = Base.Option.value name ~default:(Tid.name sub_tid) in
@@ -476,7 +476,7 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
         let v =
           match
             Base.Option.bind (mint_version scope blk_tid lane)
-              ~f:(get_ssaval scope)
+              ~f:(definition scope)
           with
           | Some x -> x
           | None -> lane_value ctx scope blk_tid lane

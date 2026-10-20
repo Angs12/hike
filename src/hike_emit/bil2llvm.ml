@@ -204,7 +204,7 @@ let build_entry_block ctx scope llvm_builder fr sub =
     | None -> Bil2llvm_value.Int fr.entry_line
   in
   insert_local scope Graphs.Tid.start ctx.sp sp0;
-  bind_ssaval scope ctx.sp sp0;
+  bind_entry scope ctx.sp sp0;
   insert_ptr_offset scope ctx.sp fr.entry_line;
   exit_entry scope llvm_builder sub
 
@@ -280,7 +280,7 @@ let create_sub ctx scope sub =
         in
         Bil2llvm_synth.bind_storage scope pv s.base s.rel;
         insert_local scope Graphs.Tid.start pv (Bil2llvm_value.Ptr s.base);
-        bind_ssaval scope pv (Bil2llvm_value.Ptr s.base));
+        bind_entry scope pv (Bil2llvm_value.Ptr s.base));
     (* The entry line is the model's fixed stack base; its residue pointer
        is the storage's base GEP'd at the entry position. *)
     let entry_line =

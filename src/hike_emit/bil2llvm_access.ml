@@ -249,7 +249,8 @@ let create_def ctx scope blk_tid llvm_builder sub_tid def =
   insert_local scope blk_tid var res;
   (* An SSA version has one def: its value is valid wherever the def
      dominates, so the binding is sub-wide. *)
-  if Var.index var > 0 then bind_ssaval scope var res;
+  Base.Option.iter (Ssa_name.of_var var)
+    ~f:(fun name -> bind_definition scope name res);
   lower_cursor ctx scope llvm_builder blk_tid def res;
   (* An environment register's def also stores the process-global cell:
      the value must outlive the sub (its lane rides no signature). *)

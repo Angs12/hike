@@ -957,6 +957,40 @@ let tests : unit Alcotest.test list =
         check "EMIT-46"
           (contains_substring ir "@_start("
            && not (contains_substring ir "@sub_10b0")));
+
+    (* MINT: a jump with no versioned write is not an SSA definition.  A
+       post-SSA call arm carries the ABI fallback with base names; its
+       result may stay local to the arm, but publishing it sub-wide would
+       let an entry-edge phi resolve to it. *)
+    pin "EMIT-65"
+      "an unversioned call result mints no SSA name; only a versioned write is a definition"
+      (fun () ->
+        let base =
+          Var.create ~is_virtual:false ~fresh:false "YMM0" (Type.Imm 256)
+        in
+        check "EMIT-65a" (Option.is_none (Bil2llvm_env.Ssa_name.of_var base));
+        check "EMIT-65b"
+          (Option.is_some
+             (Bil2llvm_env.Ssa_name.of_var (Var.with_index base 1)));
+        let j =
+          Jmp.create
+            (Call (Call.create ~target:(Direct (Tid.create ())) ()))
+        in
+        let blk = Blk.create ~jmps:[ j ] () in
+        let scope = Bil2llvm_env.fresh_scope () in
+        Bil2llvm_env.load_ssa_blocks scope (Seq.return blk);
+        check "EMIT-65c"
+          (Option.is_none
+             (Bil2llvm_env.mint_version scope (Term.tid blk) base));
+        let versioned =
+          Hike.Stack_model.map_effects ~read:Fun.id
+            ~write:(fun v -> Var.with_index v 1) j
+        in
+        let blk = Blk.create ~jmps:[ versioned ] () in
+        Bil2llvm_env.load_ssa_blocks scope (Seq.return blk);
+        check "EMIT-65d"
+          (Option.is_some
+             (Bil2llvm_env.mint_version scope (Term.tid blk) base)));
   ]
 
 let () = run "bil2llvm" tests

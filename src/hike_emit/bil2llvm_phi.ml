@@ -29,7 +29,8 @@ let create ctx scope blks =
           in
           insert_bir_phi scope tid var (Bil2llvm_value.ll res);
           insert_local scope tid var res;
-          bind_ssaval scope var res))
+          Base.Option.iter (Ssa_name.of_var var)
+            ~f:(fun name -> bind_definition scope name res)))
 
 (* One incoming per (source block, exp): the exp evaluates in the
    source block's context, before its terminator. *)
@@ -72,13 +73,15 @@ let fill ctx scope blks =
               in
               let value =
                 match exp with
-                | Bil.Var v when Base.Option.is_some (get_ssaval scope v) ->
-                    Base.Option.value_exn (get_ssaval scope v)
+                | Bil.Var v -> (
+                    match resolve_ssa scope src v with
+                    | Some value -> value
+                    | None -> create_exp ctx scope src_b src exp)
                 | _ -> create_exp ctx scope src_b src exp
               in
               (* The incoming takes the phi's type. *)
               let phi_is_ptr =
-                match get_ssaval scope (Phi.lhs phi) with
+                match resolve_ssa scope tid (Phi.lhs phi) with
                 | Some (Bil2llvm_value.Ptr _) -> true
                 | _ -> false
               in

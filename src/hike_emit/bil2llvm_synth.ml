@@ -112,9 +112,7 @@ let value ctx scope llvm_builder blk_tid v : Bil2llvm_value.t option =
                  ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
               ~default:(Llvm.const_of_int64 ty a false)))
   | _ -> (
-    match
-      Base.Option.first_some (get_ssaval scope v) (get_local scope blk_tid v)
-    with
+    match resolve_ssa scope blk_tid v with
     | Some value -> Some value
     | None -> (
       match classified with
@@ -160,9 +158,7 @@ let materialize ctx scope llvm_builder blk_tid
   | Hike_stack_model.Ptr_residue -> region_ptr Hike_stack_model.residue_id
   | Hike_stack_model.Ptr_window -> (
       let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Hike_abi.word in
-      match
-        Base.Option.first_some (get_ssaval scope wv) (get_local scope blk_tid wv)
-      with
+      match resolve_ssa scope blk_tid wv with
       | Some wp ->
           Bil2llvm_ptr.offset ~addr_bits llvm_builder
             (Bil2llvm_value.as_ptr llvm_builder wp) (entry_rel ())
