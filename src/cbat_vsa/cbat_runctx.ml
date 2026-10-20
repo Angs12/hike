@@ -41,14 +41,14 @@ type block_facts = {
 }
 
 type refine_ctx = {
-  rc_ssa : bool;
   (* The run's convention facts (Hike_abi is the one home): the sp var
      the walk anchors on, the call-read lanes, and the
      word size behind every word lookup. *)
   rc_abi : Hike_abi.t;
   rc_synth : Hike_synth.table ref;
   rc_blocks : block_facts Tid.Map.t;
-  (* Refined edge states for one source IN state, before target phis bind. *)
+  (* The state each edge delivers, for one source IN state: the values
+     the destination receives and the memory the edge carries. *)
   rc_edges : (AI.t * AI.t Tid.Map.t) Tid.Map.t ref;
   (* The producer non-negativity oracle (the walk's signed rows): an
      expression whose every possible value has its sign bit clear.  The
@@ -87,46 +87,12 @@ let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
     Option.value (List.find machine_reads ~f:is_sp) ~default:abi.Hike_abi.sp in
   { cf_lanes; cf_sp }
 
-(* SSA construction gives every cross-block scalar its own phi. *)
-let scalar_ssa ~synth s =
-  let word v = match Var.typ v with Type.Imm _ -> true | _ -> false in
-  let definitions = Term.enum blk_t s
-    |> Seq.concat_map ~f:(fun b ->
-        Seq.append (Term.enum def_t b |> Seq.map ~f:Def.lhs)
-          (Term.enum phi_t b |> Seq.map ~f:Phi.lhs))
-    |> Seq.filter ~f:word |> Seq.to_list in
-  let result = Term.enum blk_t s |> Seq.for_all ~f:(fun b ->
-      Term.has_attr b Hike_stack_model.ssa_tag)
-  && List.exists definitions ~f:(fun v -> Var.index v > 0)
-  && List.for_all definitions ~f:(fun v ->
-      Var.index v > 0 || Hike_synth.is_temporary ~table:synth v)
-  && List.length definitions = Set.length (Var.Set.of_list definitions) in
-  result
-
-(* The block's free inputs: reads with no prior local definition and no
-   incoming phi.  Only the sub-entry has word inputs here (its index-0
-   ABI arguments, seeded by the caller); a non-entry word input is an
-   SSA construction error. *)
-let local_inputs ~def_reads ~def_writes ~jmp_reads b =
-  let phis = Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
-    |> Var.Set.of_list in
-  let written, needed = Term.enum def_t b
-    |> Seq.fold ~init:(phis, Var.Set.empty) ~f:(fun (written, needed) d ->
-        (Set.union written (def_writes d),
-         Set.union needed (Set.diff (def_reads d) written))) in
-  Term.enum jmp_t b |> Seq.fold ~init:needed ~f:(fun needed j ->
-      Set.union needed (Set.diff (jmp_reads j)
-          (Set.union written (Hike_stack_model.writes (`Jmp j)))))
-
-(* Only SSA block inputs participate in scalar fixpoint delivery. *)
 let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     ~jmp_reads
     ~(synth : Hike_synth.table ref)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (s : sub term) : refine_ctx =
-  let ssa = scalar_ssa ~synth:!synth s in
   {
-    rc_ssa = ssa;
     rc_edges = ref Tid.Map.empty;
     rc_nonneg = (fun ~env:_ _ -> false);
     rc_landmarks = Cbat_landmarks.create ();
@@ -140,9 +106,6 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
           let def_index =
             List.foldi defs ~init:Var.Map.empty ~f:(fun pos index d ->
                 Map.set index ~key:(Def.lhs d) ~data:(pos, d)) in
-          let inputs =
-            if ssa then local_inputs ~def_reads ~def_writes ~jmp_reads b
-            else Var.Set.empty in
           Core.Map.set m ~key:(Term.tid b)
             ~data:{
               bf_term = b;
@@ -150,8 +113,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
               bf_def_index = def_index;
               bf_call_facts = call_facts_of_block ~abi b;
               bf_live_ids = Cbat_var_id.intern_set
-                  (Set.union inputs
-                     (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
-                      |> Var.Set.of_list));
+                  (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
+                   |> Var.Set.of_list);
             });
   }

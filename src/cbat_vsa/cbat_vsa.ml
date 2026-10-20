@@ -479,43 +479,16 @@ let static_graph_vsa
       ~f:(fun ~key:h ~data:blocks acc ->
         Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~def_reads ~phi_reads ~rc_blocks:rctx.rc_blocks blocks)))
   in
-  let scalar_store =
-    let word v = match Var.typ v with Type.Imm _ -> true | _ -> false in
-    if not rctx.rc_ssa then None else
-    let variables = Term.enum blk_t s
-      |> Seq.fold ~init:Var.Set.empty ~f:(fun vars b ->
-          let vars = Term.enum phi_t b |> Seq.fold ~init:vars
-              ~f:(fun vars p -> Set.add vars (Phi.lhs p)) in
-          Term.enum def_t b |> Seq.fold ~init:vars ~f:(fun vars d ->
-              Set.add vars (Def.lhs d)))
-      |> Set.filter ~f:word |> Set.to_list in
-    let blocks = Map.to_alist rctx.rc_blocks |> List.map ~f:(fun (tid, bf) ->
-        let locals =
-          let phis = Term.enum phi_t bf.bf_term |> Seq.map ~f:Phi.lhs in
-          let defs = Term.enum def_t bf.bf_term |> Seq.map ~f:Def.lhs in
-          Seq.append phis defs |> Seq.filter ~f:word |> Seq.to_list
-          |> Var.Set.of_list in
-        (tid, locals)) in
-    let seed = Solution.enum init |> Seq.find_map ~f:(fun (_, env) ->
-        if AI.equal env AI.bottom then None else Some env)
-      |> Option.value ~default:AI.top in
-    Some (AI.create_scalars ~variables ~blocks ~seed)
-  in
-  let save n env = Option.value_map scalar_store ~default:env ~f:(fun store ->
-      let env = AI.enter_block store n env in
-      if not (AI.equal env AI.bottom) then
-        Option.iter (Map.find rctx.rc_blocks n) ~f:(fun bf ->
-            ignore (Cbat_transfer.denote_defs ~synth:!synth bf.Cbat_runctx.bf_term env));
-      env) in
   let sol_default = Solution.default init in
-  (* The initial solution seeds the store; from here the store is the only
-     home for per-block values. *)
+  (* The solve's own store: each block's state is what the block needs —
+     the values it receives and the memory it carries.  The values a
+     block computes are a derived working set, never stored here. *)
   let sol_store =
     ref (Solution.enum init
          |> Seq.fold ~init:Tid.Map.empty
-              ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:(save k v))) in
+              ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v)) in
   let get n = Option.value (Core.Map.find !sol_store n) ~default:sol_default in
-  let set n v = sol_store := Core.Map.set !sol_store ~key:n ~data:(save n v) in
+  let set n v = sol_store := Core.Map.set !sol_store ~key:n ~data:v in
   let mk_sol () = Solution.create !sol_store sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
@@ -525,24 +498,13 @@ let static_graph_vsa
   let head_warmed (v : Tid.t) : bool =
     Option.value ~default:0 (Hashtbl.find head_visits v)
     > head_warmup_visits in
-  (* The join of the predecessors' denoted edges: the first edge seeds
-     it, each later edge joins in as it is denoted, in predecessor
-     order.  Dead bindings never reach the join; the keep-set depends
-     only on the visited block, not on the predecessor. *)
+  (* The destination's state is built: every predecessor contributes the
+     values of this block's phis and the memory it carries.  Nothing of a
+     predecessor's own values comes along. *)
 #ifdef VSA_DEBUG
   let head_arm = ref "" in
 #endif
   let incoming_of (v : Tid.t) ~(preds : Tid.t list) ~(old : AI.t) : AI.t =
-    let bf = Core.Map.find rctx.rc_blocks v in
-    let keep =
-      Option.value_map bf ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
-    in
-    (* Deliver refined operands to the destination's phi names. *)
-    let bind_phis p res =
-      match bf with
-      | Some bf -> Cbat_transfer.denote_phis ~synth:!synth ~source:p bf.bf_term res
-      | None -> res
-    in
     let out p =
       Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
         (Hashtbl.find block_to_head p) (fun () ->
@@ -551,38 +513,19 @@ let static_graph_vsa
               Cbat_forward.denote_block ~preserved ~callee ~plan_of
                 ~rctx
                 ~source:p p_entry ~target:v) in
-          let res = Stages.time `Denote (fun () -> bind_phis p res) in
-          let res = Stages.time `Glue (fun () ->
-              match scalar_store with
-              | Some _ -> AI.project ~keep ~block:v res
-              | None -> res) in
 #ifdef VSA_DEBUG
           debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;
 #endif
-          res) in
-    let incoming =
-      if List.is_empty preds then old
-      else
-        Option.value ~default:old
-          (List.fold preds ~init:None ~f:(fun acc p ->
-               let res = out p in
-               match acc with
-               | None -> Some res
-               | Some a -> Some (Stages.time `Join (fun () -> AI.join a res)))) in
-    (* Edge phi values first join in the environment. Publish the joined
-       values to their preallocated cells only after all incoming edges
-       have been combined. *)
-    match scalar_store, Core.Map.find rctx.rc_blocks v with
-    | Some store, Some bf when not (List.is_empty preds) ->
-      let incoming = AI.enter_block store v incoming in
-      Term.enum phi_t bf.Cbat_runctx.bf_term
-      |> Seq.fold ~init:incoming ~f:(fun env phi ->
-          match Var.typ (Phi.lhs phi) with
-          | Type.Imm width ->
-            let value = AI.find_word width env (Phi.lhs phi) in
-            AI.add_word env ~key:(Phi.lhs phi) ~data:value
-          | Type.Mem _ | Type.Unk -> env)
-    | _ -> incoming
+          res)
+    in
+    if List.is_empty preds then old
+    else
+      Option.value ~default:old
+        (List.fold preds ~init:None ~f:(fun acc p ->
+             let res = out p in
+             match acc with
+             | None -> Some res
+             | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
   in
   (* A warm head whose join grew widens by the landmark module's arm:
      Finite extrapolates; Zero advances and joins; Inf widens.
@@ -625,9 +568,6 @@ let static_graph_vsa
       raise (Fixpoint_not_converged (max_steps, sol))
     end;
     let old = get v in
-    let old = match scalar_store, Map.find rctx.rc_blocks v with
-      | Some _, Some bf -> AI.project ~keep:bf.Cbat_runctx.bf_live_ids ~block:v old
-      | _ -> old in
     let preds = preds v in
     let incoming = incoming_of v ~preds ~old in
 #ifdef VSA_DEBUG

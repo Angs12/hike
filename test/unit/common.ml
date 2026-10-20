@@ -159,7 +159,59 @@ module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Ds = Hike.Def_slots
 
+(* The VSA's input form: an SSA sub.  Every sub the analysis sees is
+   SSA-constructed; there is no other form.  The form is memoised: the
+   construction is deterministic and the pins read it repeatedly. *)
+let ssa_forms : (string, sub term) Hashtbl.t = Hashtbl.create 16
+
+let ssa_form (sub : sub term) : sub term =
+  let key = Tid.to_string (Term.tid sub) in
+  match Hashtbl.find_opt ssa_forms key with
+  | Some s -> s
+  | None ->
+    let prog = Program.create ~subs:[ sub ] () in
+    let prog = Hike.Ssa.ssa_program ~synth:Hike.Synth.empty ~target:(x86_target ()) prog in
+    let s =
+      Term.enum sub_t prog
+      |> Seq.find ~f:(fun s -> String.equal (Sub.name s) (Sub.name sub))
+      |> Base.Option.value_exn in
+    Hashtbl.replace ssa_forms key s;
+    s
+
+(* Is the sub already in the analysis's input form?  A sub that is, is
+   used as it is; one that is not, is SSA-constructed. *)
+let is_ssa (sub : sub term) : bool =
+  Term.enum blk_t sub
+  |> Seq.for_all ~f:(fun b -> Term.has_attr b Sm.ssa_tag)
+
+(* The version of the base variable [v] that block [tid] holds: the
+   definition's own version, or the block's incoming phi. *)
+let version_at (ssa : sub term) (tid : tid) (v : var) : var =
+  let blk = Term.find_exn blk_t ssa tid in
+  Sm.version_at_end blk v
+
+(* The value of the base variable [v] in the block [tid]'s state: the
+   value it received. *)
+let value_at (sub : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
+  let sub = if is_ssa sub then sub else ssa_form sub in
+  let version = version_at sub tid v in
+  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  AI.find_word width (Graphlib.Std.Solution.get sol tid) version
+
+(* The value of the base variable [v] after the block [tid]'s
+   definitions. *)
+let value_after (sub : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
+  let ssa = if is_ssa sub then sub else ssa_form sub in
+  let blk = Term.find_exn blk_t ssa tid in
+  let version = Sm.version_at_end blk v in
+  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  let post =
+    Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk
+      (Graphlib.Std.Solution.get sol tid) in
+  AI.find_word width post version
+
 let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
+  let sub = if is_ssa sub then sub else ssa_form sub in
   Vsa.static_graph_vsa ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
@@ -168,6 +220,7 @@ let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
     ?callee ?resolved ?sub_lookup sub init
 
 let mk_rctx ~abi ~synth ?sub_lookup sub =
+  let sub = if is_ssa sub then sub else ssa_form sub in
   Vsa.Test_seam.mk_rctx ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))

@@ -60,7 +60,7 @@ let mk_slice_sub ~(x : var) ?(between = []) ?(call = false)
 
 let slice_y (fx : slice_fixture) : Ws.t =
   let sol = run_anchored fx.sf_sub in
-  AI.find_word 32 (in_state sol fx.sf_read_exit) fx.sf_y
+  value_at fx.sf_sub sol fx.sf_read_exit fx.sf_y
 
 let slice_x () : var = Var.create ~is_virtual:false ~fresh:false "sl_x" (Type.Imm 32)
 
@@ -152,8 +152,8 @@ let tests : unit Alcotest.test list =
               [], [] ]
         in
         let sol = run_anchored sub in
-        let c_iter = AI.find_word 32 (in_state sol tids.(1)) i in
-        let c_exit = AI.find_word 32 (in_state sol tids.(3)) i in
+        let c_iter = value_at sub sol tids.(1) i in
+        let c_exit = value_at sub sol tids.(3) i in
         check "VSA-09"
           ((not (Ws.is_top c_iter))
           && (Base.Option.filter (Ws.max_elem c_iter)
@@ -217,7 +217,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let f, _ctx, sub, exit_tid, _, _, _ = mk_flag_sub ~mixed:true in
         let sol = run_anchored sub in
-        let c = AI.find_word 1 (in_state sol exit_tid) f in
+        let c = value_at sub sol exit_tid f in
         check "VSA-32" (Ws.elem Cbat_word.b1 c && not (Ws.elem Cbat_word.b0 c)));
 
 
@@ -227,8 +227,8 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let fx = mk_caller_alias () in
         let sol = run_anchored fx.ca_sub in
-        let post_ai = in_state sol fx.ca_post_tid in
-        check "VSA-34" (Ws.is_top (AI.find_word 64 post_ai fx.ca_r2)));
+        check "VSA-34"
+          (Ws.is_top (value_after fx.ca_sub sol fx.ca_post_tid fx.ca_r2)));
 
 
 
@@ -249,9 +249,9 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let fx = mk_caller_alias () in
         let sol = run_anchored fx.ca_sub in
-        let post_ai = in_state sol fx.ca_post_tid in
         check "VSA-37"
-          (Ws.equal (AI.find_word 64 post_ai fx.ca_rbp) (Ws.singleton (w64 0x100))));
+          (Ws.equal (value_after fx.ca_sub sol fx.ca_post_tid fx.ca_rbp)
+             (Ws.singleton (w64 0x100))));
 
 
 
@@ -298,8 +298,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let rax, _ctx, sub, final_tid = mk_high0_cast_sub () in
         let sol = run_anchored sub in
-        let final_ai = in_state sol final_tid in
-        check "VSA-52" (Ws.is_top (AI.find_word 64 final_ai rax)));
+        check "VSA-52" (Ws.is_top (value_at sub sol final_tid rax)));
 
     (* E2eH: equal's short-circuit changes no observable result. *)
 
@@ -335,8 +334,8 @@ let tests : unit Alcotest.test list =
               [], [] ]
         in
         let sol = run_anchored sub in
-        let c_iter = AI.find_word 32 (in_state sol tids.(1)) i in
-        let c_exit = AI.find_word 32 (in_state sol tids.(3)) i in
+        let c_iter = value_at sub sol tids.(1) i in
+        let c_exit = value_at sub sol tids.(3) i in
         check "VSA-57"
           ((not (Ws.is_top c_iter))
           && (Base.Option.filter (Ws.max_elem c_iter)
@@ -357,8 +356,9 @@ let tests : unit Alcotest.test list =
         let rsp_var = sp in
         let sub = mk_p3_anchor_sub () in
         let sol = run_anchored sub in
-        let st = in_state sol (entry_tid_of sub) in
-        check "VSA-60" (Ws.equal (AI.find_word 64 st rsp_var) (Ws.stack_word_i64 0L)));
+        check "VSA-60"
+          (Ws.equal (value_at sub sol (entry_tid_of sub) rsp_var)
+             (Ws.stack_word_i64 0L)));
 
     (* L2b: the full 1-bit domain reads cardinality 2. *)
 
@@ -498,9 +498,10 @@ let tests : unit Alcotest.test list =
         let x = slice_x () in
         let fx = mk_slice_sub ~x () in
         let sol = run_anchored fx.sf_sub in
-        let st = in_state sol fx.sf_read_exit in
-        check "VSA-69.read" (slice_bounded (AI.find_word 32 st fx.sf_y) 0x25);
-        check "VSA-69.owner" (not (slice_bounded (AI.find_word 32 st x) 0xff)));
+        check "VSA-69.read"
+          (slice_bounded (value_at fx.sf_sub sol fx.sf_read_exit fx.sf_y) 0x25);
+        check "VSA-69.owner"
+          (not (slice_bounded (value_at fx.sf_sub sol fx.sf_read_exit x) 0xff)));
 
     pin "VSA-70" "slice: the extract form (bits 15..8) is bounded the same way"
       (fun () ->
@@ -536,8 +537,8 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
-        let st = in_state (run_anchored sub) tids.(3) in
-        check "VSA-74" (slice_bounded (AI.find_word 32 st y) 0x25));
+        check "VSA-74"
+          (slice_bounded (value_at sub (run_anchored sub) tids.(3) y) 0x25));
 
     pin "VSA-75"
       "slice: after a merge the fact is kept only when both paths carry it, as the join of both"
@@ -560,7 +561,7 @@ let tests : unit Alcotest.test list =
                 [], [ (0, mk_ret) ];
                 [], [ (0, mk_ret) ] ]
           in
-          AI.find_word 32 (in_state (run_anchored sub) tids.(4)) y in
+          value_at sub (run_anchored sub) tids.(4) y in
         check "VSA-75.both" (slice_bounded (y_after ~second_guarded:true) 0x30);
         check "VSA-75.join" (not (slice_bounded (y_after ~second_guarded:true) 0x25));
         check "VSA-75.one" (not (slice_bounded (y_after ~second_guarded:false) 0x30)));
@@ -581,8 +582,8 @@ let tests : unit Alcotest.test list =
               [ step ], [ (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        let st = in_state (run_anchored sub) tids.(3) in
-        check "VSA-76" (slice_bounded (AI.find_word 32 st y) 0x25));
+        check "VSA-76"
+          (slice_bounded (value_at sub (run_anchored sub) tids.(3) y) 0x25));
 
     pin "VSA-77" "waking an unreachable call preserves bottom at its continuation"
       (fun () ->
@@ -608,13 +609,11 @@ let tests : unit Alcotest.test list =
           (AI.equal (in_state sol tids.(2)) AI.bottom));
 
     pin "VSA-78"
-      "SSA: redefining a cell's owner keeps the state's physical identity"
+      "SSA: redefining a word with the same value keeps the state's physical \
+       identity"
       (fun () ->
-        let tid = Tid.create () in
         let x = Var.create ~is_virtual:false ~fresh:false "sl_cell" (Type.Imm 32) in
-        let store = AI.create_scalars ~variables:[ x ]
-            ~blocks:[ (tid, Var.Set.singleton x) ] ~seed:AI.top in
-        let st = AI.enter_block store tid AI.top in
+        let st = AI.top in
         let data = Ws.singleton (w32 7) in
         let st1 = AI.add_word st ~key:x ~data in
         let st2 = AI.add_word st1 ~key:x ~data in
@@ -622,31 +621,26 @@ let tests : unit Alcotest.test list =
 
     pin "VSA-79"
       "SSA: a definition drops the owner's slices, and they stay gone after \
-       a projection and a phi copy"
+       a delivery and a phi copy"
       (fun () ->
-        let tid = Tid.create () in
         let x = Var.create ~is_virtual:false ~fresh:false "sl_def_x" (Type.Imm 32) in
         let y = Var.create ~is_virtual:false ~fresh:false "sl_def_y" (Type.Imm 32) in
-        let store = AI.create_scalars ~variables:[ x; y ]
-            ~blocks:[ (tid, Var.Set.of_list [ x; y ]) ] ~seed:AI.top in
-        let st = AI.enter_block store tid AI.top in
+        let st = AI.top in
         let st = AI.add_slice st x ~hi:7 ~lo:0
             ~data:(Ws.singleton (Cbat_word.of_int ~width:8 0x25)) in
         let def = Ws.singleton (w32 0x1234abcd) in
         let after = AI.add_word st ~key:x ~data:def in
-        check "VSA-79.cell" (Ws.equal (AI.find_word 32 after x) def);
-        let keep = Cbat_var_id.intern_set (Var.Set.of_list [ x; y ]) in
-        let projected = AI.project ~keep ~block:tid after in
+        check "VSA-79.def" (Ws.equal (AI.find_word 32 after x) def);
+        let delivered = AI.deliver ~keep:[ y ] after in
         check "VSA-79.owner-slices"
-          (Ws.is_top (AI.find_slice projected x ~hi:7 ~lo:0));
-        let copied = AI.copy_slices ~from:projected ~source:x ~target:y st in
+          (Ws.is_top (AI.find_slice delivered x ~hi:7 ~lo:0));
+        let copied = AI.copy_slices ~from:after ~source:x ~target:y st in
         check "VSA-79.copy" (Ws.is_top (AI.find_slice copied y ~hi:7 ~lo:0)));
 
     pin "VSA-80"
-      "SSA: a projection keeps only the target's live bindings, leaves its \
-       memory, and joins the target block"
+      "SSA: a delivery keeps only the target's phis, leaves its memory, and \
+       drops the source's own values"
       (fun () ->
-        let src = Tid.create () and dst = Tid.create () in
         let source_only = i32 "sl_proj_source" in
         let stale = i32 "sl_proj_stale" in
         let phi = i32 "sl_proj_phi" in
@@ -654,12 +648,7 @@ let tests : unit Alcotest.test list =
         let free = i32 "sl_proj_free" in
         let target_local = i32 "sl_proj_target" in
         let ws n = Ws.singleton (w32 n) in
-        let store = AI.create_scalars
-            ~variables:[ source_only; stale; phi; live; free; target_local ]
-            ~blocks:[ (src, Var.Set.of_list [ source_only; free ]);
-                      (dst, Var.Set.singleton target_local) ]
-            ~seed:AI.top in
-        let st = AI.enter_block store src AI.top in
+        let st = AI.top in
         let st = AI.add_word st ~key:source_only ~data:(ws 0x11) in
         let st = AI.add_word st ~key:free ~data:(ws 0x33) in
         let st = AI.add_word st ~key:stale ~data:(ws 0x22) in
@@ -675,18 +664,17 @@ let tests : unit Alcotest.test list =
                | _ -> failwith "key")
             ~data:(Mem.Val.create (ws 7) LittleEndian) in
         let st = AI.add_memory st ~key:mem ~data:mval in
-        let keep = Cbat_var_id.intern_set (Var.Set.of_list [ phi; live; free ]) in
-        let projected = AI.project ~keep ~block:dst st in
-        check "VSA-80.stale" (Ws.is_top (AI.find_word 32 projected stale));
-        check "VSA-80.phi" (Ws.equal (AI.find_word 32 projected phi) (ws 0x44));
-        check "VSA-80.live" (Ws.equal (AI.find_word 32 projected live) (ws 0x55));
-        check "VSA-80.free" (Ws.equal (AI.find_word 32 projected free) (ws 0x33));
-        (* A target-local write hits its cell without touching the env, so
-           the physical identity proves the scalar view joined [dst]. *)
-        let after = AI.add_word projected ~key:target_local ~data:(ws 0x66) in
-        check "VSA-80.block" (Stdlib.(after == projected));
+        let delivered = AI.deliver ~keep:[ phi; live ] st in
+        check "VSA-80.stale" (Ws.is_top (AI.find_word 32 delivered stale));
+        check "VSA-80.phi" (Ws.equal (AI.find_word 32 delivered phi) (ws 0x44));
+        check "VSA-80.live" (Ws.equal (AI.find_word 32 delivered live) (ws 0x55));
+        check "VSA-80.source-only"
+          (Ws.is_top (AI.find_word 32 delivered source_only));
+        check "VSA-80.free" (Ws.is_top (AI.find_word 32 delivered free));
+        check "VSA-80.target-local"
+          (Ws.is_top (AI.find_word 32 delivered target_local));
         check "VSA-80.memory"
-          (Mem.equal (AI.find_memory mem_idx projected mem) mval));
+          (Mem.equal (AI.find_memory mem_idx delivered mem) mval));
 
     pin "VSA-81"
       "SSA: a two-predecessor join keeps only target phi values; a \
@@ -736,17 +724,15 @@ let tests : unit Alcotest.test list =
         check "VSA-81 target phi kept"
           (Ws.elem (w64 0x11) (AI.find_word 64 st (Phi.lhs join_phi))
            && Ws.elem (w64 0x22) (AI.find_word 64 st (Phi.lhs join_phi)));
-        let phi_cell = AI.project ~keep:Core.Int.Set.empty
-            ~block:tids.(3) st in
-        check "VSA-81 target phi cell"
-          (Ws.elem (w64 0x11) (AI.find_word 64 phi_cell (Phi.lhs join_phi))
+        let delivered = AI.deliver ~keep:[ Phi.lhs join_phi ] st in
+        check "VSA-81 target phi delivered"
+          (Ws.elem (w64 0x11) (AI.find_word 64 delivered (Phi.lhs join_phi))
            && Ws.elem (w64 0x22)
-                (AI.find_word 64 phi_cell (Phi.lhs join_phi)));
-        let keep = Cbat_var_id.intern_set (Var.Set.singleton (Phi.lhs join_phi)) in
+                (AI.find_word 64 delivered (Phi.lhs join_phi)));
         check "VSA-81 top stays top"
-          (AI.equal AI.top (AI.project ~keep ~block:tids.(3) AI.top));
+          (AI.equal AI.top (AI.deliver ~keep:[ Phi.lhs join_phi ] AI.top));
         check "VSA-81 bottom stays bottom"
-          (AI.equal AI.bottom (AI.project ~keep ~block:tids.(3) AI.bottom)));
+          (AI.equal AI.bottom (AI.deliver ~keep:[ Phi.lhs join_phi ] AI.bottom)));
 
     (* SSA construction supplies every non-entry word input through a phi. *)
     pin "VSA-82"
@@ -847,7 +833,13 @@ let tests : unit Alcotest.test list =
         in
         let st = in_state sol (Term.tid entry) in
         check "VSA-83.entry-seed" (Ws.equal (AI.find_word 64 st p) seeded);
-        check "VSA-83.entry-def" (Ws.equal (AI.find_word 64 st probe) seeded));
+        check "VSA-83.entry-def"
+          (Ws.equal (AI.find_word 64
+                       (Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty
+                          (Term.find_exn blk_t ssa (Term.tid entry))
+                          st)
+                       probe)
+             seeded));
 
     pin "VSA-84"
       "SSA: both outgoing edges agree with ordered independent source replay"
@@ -871,7 +863,7 @@ let tests : unit Alcotest.test list =
         let ssa = ssa_of_subs [ jump_compiled sub ] "post_branch" in
         let sol = run_ssa_anchored ssa in
         let source = Term.find_exn blk_t ssa tids.(0) in
-        let pre = AI.copy_scalars (in_state sol tids.(0)) in
+        let pre = in_state sol tids.(0) in
         let replay = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty source pre in
         let read env = Vsa.Test_seam.denote_imm_exp ~synth:Hike.Synth.empty load env
           |> Result.get_ok in
@@ -954,9 +946,6 @@ let tests : unit Alcotest.test list =
               [ (0, mk_ret) ] ] in
         let ssa = ssa_of_subs [ jump_compiled sub ] "readonly_cell" in
         let entry = Vsa.entry_block_of ssa |> Base.Option.value_exn in
-        let defined = Term.enum def_t entry
-          |> Seq.find ~f:(fun d -> Var.same (Def.lhs d) output)
-          |> Base.Option.value_exn |> Def.lhs in
         let seed = AI.add_word (anchored_entry ()) ~key:input
             ~data:(Ws.singleton (w64 42)) in
         let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi:sysv ssa
@@ -964,14 +953,11 @@ let tests : unit Alcotest.test list =
         let state = in_state sol (Term.tid entry) in
         check "VSA-87 input remains available"
           (Ws.equal (AI.find_word 64 state input) (Ws.singleton (w64 42)));
-        let projected = AI.project ~keep:Core.Int.Set.empty
-            ~block:(Term.tid entry) state in
-        check "VSA-87 no read-only fallback cell"
-          (Ws.is_top (AI.find_word 64 projected input));
-        check "VSA-87 defined output retains its cell"
-          (Ws.equal (AI.find_word 64 projected defined) (Ws.singleton (w64 43)));
+        let delivered = AI.deliver ~keep:[] state in
+        check "VSA-87 read-only input is not delivered"
+          (Ws.is_top (AI.find_word 64 delivered input));
         check "VSA-87 absent variable reads top"
-          (Ws.is_top (AI.find_word 64 projected (v64 "readonly_missing"))));
+          (Ws.is_top (AI.find_word 64 delivered (v64 "readonly_missing"))));
   ]
 
 let () = run "vsa" tests

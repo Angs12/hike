@@ -1204,7 +1204,6 @@ let definition_trace ?(record = fun _ -> true) ~synth blk entry =
   Term.enum def_t blk
   |> Seq.fold ~init:(entry, []) ~f:(fun (before, trace) d ->
       let after = denote_known_def ~synth d before in
-      let after = if phys_equal before after then after else AI.scalar_snapshot after in
       let item =
         if record d then
           { td_def = d; td_before = Some before; td_after = Some after }
@@ -1432,7 +1431,10 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
   match Core.Map.find rctx.rc_blocks (Term.tid blk) with
-  | Some bf when rctx.rc_ssa ->
+  | Some bf ->
+    (* A scalar-only cone follows the exact definitions; a cone that
+       touches memory keeps the ordered replay, because a load's value
+       depends on the stores that precede it. *)
     let cone, has_memory = scalar_cone bf seeds in
     if not has_memory then
       walk_ssa_scalars ~on_write ~synth:!(rctx.rc_synth) ~bf ~entry
@@ -1442,7 +1444,7 @@ let refine_edge ?(on_write : write_site -> unit = ignore)
       walk_block ~record:(fun d -> Core.Set.mem keep (Term.tid d))
         ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
         ~witness:rctx.rc_nonneg ~seeds env blk
-  | _ ->
+  | None ->
     walk_block ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
       ~witness:rctx.rc_nonneg ~seeds env blk
 
@@ -1457,11 +1459,9 @@ let acquire_unsat ~(synth : Hike_synth.table) ~(rctx : Cbat_runctx.refine_ctx)
   (* Outside a cycle no observation records, so the walk has no effect. *)
   if Cbat_landmarks.in_cycle landmarks then rooted ~landmarks disabled (fun () -> begin
     (* The observer seeds the requested facts even when the live state
-       excludes them, and the walk replays the block forward; both write
-       on a private cell copy, so the probe cannot change the shared
-       store it observes.  The constrained environment is discarded. *)
-    let env = AI.copy_scalars env in
-    let entry = AI.adopt_scalars ~from:env entry in
+       excludes them, and the walk replays the block forward; the maps
+       are persistent, so the probe cannot change the state it observes.
+       The constrained environment is discarded. *)
     let constrained = constrain_operands ~synth ~seed:true ~env ~landmarks disabled
         (WordSet.singleton Cbat_word.b1) in
     if not (AI.equal constrained AI.bottom) then begin
@@ -1470,7 +1470,7 @@ let acquire_unsat ~(synth : Hike_synth.table) ~(rctx : Cbat_runctx.refine_ctx)
          reaches no leaf meet: skip the walk and its prefix replay. *)
       if not (Core.Set.is_empty seeds) then
         (match Core.Map.find rctx.rc_blocks (Term.tid blk) with
-         | Some bf when rctx.rc_ssa ->
+         | Some bf ->
            let cone, has_memory = scalar_cone bf seeds in
            if not has_memory then
              ignore
@@ -1482,7 +1482,7 @@ let acquire_unsat ~(synth : Hike_synth.table) ~(rctx : Cbat_runctx.refine_ctx)
                (walk ~record:(fun d -> Core.Set.mem keep (Term.tid d))
                   ~synth ~locus:observer_locus ~entry ~landmarks ~witness
                   ~seeds constrained blk)
-         | _ ->
+         | None ->
            ignore
              (walk ~synth ~locus:observer_locus ~entry ~landmarks ~witness
                 ~seeds constrained blk))

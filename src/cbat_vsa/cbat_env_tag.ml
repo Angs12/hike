@@ -191,7 +191,7 @@ let stamp_envs_of_sol ~(synth : Hike_synth.table)
           Term.map def_t blk ~f:(fun d ->
               let before = !env in
               let after = Cbat_transfer.denote_known_def ~synth d before in
-              let after = if phys_equal before after then after else AI.scalar_snapshot after in
+              let after = after in
               env := after;
               let d = Cbat_def_origin.stamp_origin ~synth ~before d after in
 #ifdef VSA_DEBUG

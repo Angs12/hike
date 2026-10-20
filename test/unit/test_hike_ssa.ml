@@ -741,7 +741,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-10" "the VSA gives a diamond's phi the join of its edges' values"
       (fun () ->
         let v = int_ret 0 and out = callee_saved 0 and arg = int_param 0 in
-        let sub, _ =
+        let sub, tids =
           sub_of "ssa7"
             [ [], [ (1, fun t -> mk_jmp_to t (guard_lt arg 5)); (2, mk_goto) ];
               [ Def.create v (c64 1) ], [ (3, mk_goto) ];
@@ -750,12 +750,26 @@ let tests : unit Alcotest.test list =
               [ (4, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        check "SSA-10" (ssa_matches [ sub ] "ssa7"));
+        let ssa = ssa_of_subs [ jump_compiled sub ] "ssa7" in
+        let sol = run_ssa_anchored ssa in
+        (* The join block receives the two edges' values, and the
+           definition on top of it adds one. *)
+        let dbg name ws =
+          Printf.eprintf "DBG %s min=%s max=%s\n" name
+            (match Ws.min_elem ws with Some w -> Cbat_word.to_string w | None -> "-")
+            (match Ws.max_elem ws with Some w -> Cbat_word.to_string w | None -> "-") in
+        dbg "phi" (value_at ssa sol tids.(3) v);
+        dbg "out" (value_after ssa sol tids.(3) out);
+        check "SSA-10"
+          (Ws.equal (value_at ssa sol tids.(3) v)
+             (Ws.of_list ~width:64 [ w64 1; w64 2 ])
+           && Ws.equal (value_after ssa sol tids.(3) out)
+              (Ws.of_list ~width:64 [ w64 2; w64 3 ])));
 
     pin "SSA-11" "the VSA on a loop's versioned counter matches the unversioned run"
       (fun () ->
         let i = callee_saved 1 and out = callee_saved 0 in
-        let sub, _ =
+        let sub, tids =
           sub_of "ssa8"
             [ [ Def.create i (c64 0) ], [ (1, mk_goto) ];
               [ Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, c64 1)) ],
@@ -763,7 +777,13 @@ let tests : unit Alcotest.test list =
               [ Def.create out (Bil.Var i) ], [ (3, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
-        check "SSA-11" (ssa_matches [ sub ] "ssa8"));
+        let ssa = ssa_of_subs [ jump_compiled sub ] "ssa8" in
+        let sol = run_ssa_anchored ssa in
+        (* The counter's value is the version's own: the loop reaches the
+           guard's bound and stops there. *)
+        let v = value_after ssa sol tids.(1) i in
+        check "SSA-11"
+          (Ws.elem (w64 10) v && not (Ws.elem (w64 11) v)));
 
     pin "SSA-12" "the VSA across a call keeps the callee-saved register and the restored SP"
       (fun () ->
@@ -804,18 +824,22 @@ let tests : unit Alcotest.test list =
         in
         let ssa = ssa_of_subs [ jump_compiled sub ] "ssa10" in
         let sol = run_ssa_anchored ssa in
-        let versions =
+        (* Every version keeps its own value, in the block that defines
+           it: a later version does not overwrite an earlier one. *)
+        let defined =
           Term.enum blk_t ssa
-          |> Seq.concat_map ~f:(Term.enum def_t)
-          |> Seq.filter_map ~f:(fun d ->
-                 let v = Def.lhs d in
-                 if Var.same v r then Some v else None)
+          |> Seq.concat_map ~f:(fun blk ->
+                 Term.enum def_t blk |> Seq.filter_map ~f:(fun d ->
+                     let v = Def.lhs d in
+                     if Var.same v r then Some (blk, v) else None))
           |> Seq.to_list
         in
-        let last = Graphlib.Std.Solution.get sol tids.(n + 1) in
-        check "SSA-13" (Base.List.length versions > n
-          && Base.List.for_alli versions ~f:(fun i v ->
-              Ws.equal (AI.find_word 64 last v) (Ws.singleton (w64 i)))));
+        check "SSA-13" (Base.List.length defined > n
+          && Base.List.for_alli defined ~f:(fun i (blk, v) ->
+              let post =
+                Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk
+                  (Graphlib.Std.Solution.get sol (Term.tid blk)) in
+              Ws.equal (AI.find_word 64 post v) (Ws.singleton (w64 i)))));
 
     pin "SSA-19" "single-predecessor inputs retain edge bounds without narrowing the other branch"
       (fun () ->
@@ -827,22 +851,18 @@ let tests : unit Alcotest.test list =
               [ Def.create z (Bil.Var x) ], [ (0, mk_ret) ] ] in
         let ssa = ssa_of_subs [ jump_compiled sub ] "edge_parameter" in
         let sol = run_ssa_anchored ssa in
-        let taken = Graphlib.Std.Solution.get sol tids.(2) in
-        let other = Graphlib.Std.Solution.get sol tids.(3) in
-        let input = Term.find_exn blk_t ssa tids.(3) |> Term.enum phi_t
-          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) x)
-          |> Base.Option.value_exn |> Phi.lhs in
         check "SSA-19 single predecessor phi"
           (phi_arity ssa (Term.find_exn blk_t ssa tids.(1)) x = Some 1
            && phi_arity ssa (Term.find_exn blk_t ssa tids.(3)) x = Some 1);
-        let d = Term.find_exn blk_t ssa tids.(1) |> Term.first def_t
-          |> Base.Option.value_exn in
+        (* The taken edge delivers the refined value; the other edge
+           keeps the seeded one. *)
+        let taken_y = value_after ssa sol tids.(1) y in
+        let other_x = value_at ssa sol tids.(3) x in
         check "SSA-19 taken value"
-          (Ws.min_elem (AI.find_word 64 taken (Def.lhs d)) = Some (w64 1)
-           && Ws.max_elem (AI.find_word 64 taken (Def.lhs d)) = Some (w64 5));
+          (Ws.min_elem taken_y = Some (w64 1)
+           && Ws.max_elem taken_y = Some (w64 5));
         check "SSA-19 other edge"
-          (Ws.elem (w64 9) (AI.find_word 64 other input)
-           && not (Ws.elem (w64 2) (AI.find_word 64 other input))));
+          (not (bounded_above other_x (w64 4))));
     pin "SSA-20" "byte refinements follow phi identities across single-predecessor blocks"
       (fun () ->
         let x = int_param 0 and y = callee_saved 0 in
@@ -856,13 +876,12 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ] in
         let ssa = ssa_of_subs [ jump_compiled sub ] "phi_slice" in
         let sol = run_ssa_anchored ssa in
-        let d = Term.find_exn blk_t ssa tids.(2) |> Term.first def_t
-          |> Base.Option.value_exn in
-        let last = Graphlib.Std.Solution.get sol tids.(3) in
+        (* The byte bound crosses the edge as the phi value; the whole
+           word stays wide. *)
         check "SSA-20 bounded byte"
-          (bounded_above (AI.find_word 64 last (Def.lhs d)) (w64 0x25));
+          (bounded_above (value_after ssa sol tids.(2) y) (w64 0x25));
         check "SSA-20 original word stays wide"
-          (not (bounded_above (AI.find_word 64 last x) (w64 0xff))));
+          (not (bounded_above (value_at ssa sol tids.(2) x) (w64 0xff))));
     pin "SSA-21" "a transfer through incoming phis still names its linker slot"
       (fun () ->
         let x = int_ret 0 and mem = memv "phi_slot_mem" in

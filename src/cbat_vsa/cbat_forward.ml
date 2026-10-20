@@ -103,6 +103,28 @@ let plans_of ~resolved ~edge_conds ~disabled ~rctx : tid -> block_plan =
       Hashtbl.set memo ~key:source ~data:p;
       p
 
+(* The destination's state, as one edge delivers it: the values it
+   receives and the memory it carries.  The source's own values do not
+   come along — the destination's state is built, not filtered.
+
+   The live-in set is the destination's free reads and its phis.  On an
+   SSA sub every non-entry word input is a phi, so the set is the phis;
+   on an unversioned sub it is the registers the block reads.  One rule
+   either way. *)
+let contribution (rctx : Cbat_runctx.refine_ctx) ~(source : tid)
+    ~(target : tid) (edge : AI.t) : AI.t =
+  if AI.equal edge AI.bottom then AI.bottom
+  else
+    match Core.Map.find rctx.Cbat_runctx.rc_blocks target with
+    | None -> edge
+    | Some bf ->
+      let edge =
+        denote_phis ~synth:!(rctx.Cbat_runctx.rc_synth) ~source bf.Cbat_runctx.bf_term edge in
+      let keep =
+        Core.Set.to_list bf.Cbat_runctx.bf_live_ids
+        |> List.map ~f:Cbat_var_id.var_of in
+      AI.deliver ~keep edge
+
 (* Denotation of a block's jumps. *)
 let denote_jump
     ~(preserved : Int.Set.t)
@@ -118,8 +140,11 @@ let denote_jump
     | Some (saved, edges) when phys_equal saved entry -> edges
     | _ -> Tid.Map.empty in
   match Map.find edges target with
-  | Some refined -> refined
+  | Some delivered -> delivered
   | None ->
+  (* The source's post state: its IN state with its definitions
+     replayed.  It is the edge's own working set — the destination's
+     state is built from it, and none of it is stored. *)
   let env = denote_block_values ~synth:!(rctx.rc_synth) b entry in
   let per_jump acc (jp : jump_plan) =
     let jmp = jp.jp_jmp in
@@ -204,11 +229,12 @@ let denote_jump
        ~jmp:(fun jp -> jp.jp_jmp) env (Seq.of_list plan.bp_jumps))
     ~init:AI.bottom
     ~f:per_jump in
-  (* Later replays mutate the general cells; keep this edge's facts private. *)
-  let refined = AI.copy_scalars refined in
+  (* The edge delivers the destination's state: the values it receives and
+     the memory it carries. *)
+  let delivered = contribution rctx ~source ~target refined in
   rctx.rc_edges := Map.set !(rctx.rc_edges) ~key:source
-      ~data:(entry, Map.set edges ~key:target ~data:refined);
-  refined
+      ~data:(entry, Map.set edges ~key:target ~data:delivered);
+  delivered
 
 (* Block denotation toward a target. *)
 let denote_block

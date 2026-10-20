@@ -266,7 +266,8 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * 
   in
   (sub, tids.(1))
 
-(* Cell at [base-8] in [st], read back as the load denotation reads it. *)
+(* Cell at [base-8] in [st], read back as the load denotation reads it.
+   [base] is the version the block holds of the frame pointer. *)
 let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
   Result.fold
@@ -300,6 +301,7 @@ let jump_target =
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let _, sub = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub in
+  let sub = ssa_form sub in
   static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
 (* The jump-compiled sub, as [run_anchored] runs it. *)
@@ -345,8 +347,10 @@ let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_o
   cell_of (iter_state_of sub sol target_tid)
 
 let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
-  (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3a_m") frame_ptr)
+  (* Gate-free (spec §2.1): every def is denoted. *)
+  let sol = run_anchored sub in
+  let base = version_at (ssa_form sub) body_tid frame_ptr in
+  iter_cell_of sub sol body_tid (cell_at (memv "l3a_m") base)
 
 (* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
 
@@ -453,7 +457,7 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") frame_ptr)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (version_at (ssa_form sub) body_tid frame_ptr))
 
 (* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
 
@@ -521,7 +525,7 @@ let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") frame_ptr)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (version_at (ssa_form sub) body_tid frame_ptr))
 
 (* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
 
@@ -532,7 +536,7 @@ let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") frame_ptr)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (version_at (ssa_form sub) body_tid frame_ptr))
 
 (* L3c-6: the -O0 store-head loop — the counter's increment store lives
    in the WALKED head block (the do-while merge), the guard's bound is a
@@ -779,7 +783,7 @@ let mk_l39b5_loop () : sub term * tid =
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") frame_ptr)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (version_at (ssa_form sub) body_tid frame_ptr))
 
 (* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
 
@@ -856,7 +860,8 @@ let mk_l6_rbp_loop () : sub term * tid =
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
-  cell_at (memv "l6_m") frame_ptr (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
+  cell_at (memv "l6_m") (version_at (ssa_form sub) body_tid frame_ptr)
+    (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
 
 (* The secondary guarded-refinement shapes: inline-arithmetic record
    operand, NOT-edge, const-first flip, nested BinOp. *)
@@ -909,7 +914,7 @@ let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : B
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") frame_ptr)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (version_at (ssa_form sub) body_tid frame_ptr))
 
 (* Indexed-loop twin (C4a/R11): i := 0; body indexed store + inc; exit singleton store.
    The two tests differ only in the var-name prefix; the divergent pins stay in the tests. *)

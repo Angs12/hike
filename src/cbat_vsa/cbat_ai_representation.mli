@@ -17,38 +17,16 @@ module WordSet = Cbat_clp_set_composite
 
 type t
 
-type scalar_store
-
-val create_scalars :
-  variables:var list -> blocks:(tid * Var.Set.t) list -> seed:t -> scalar_store
-
-(* The edge's own bindings: the destination's incoming phi values, read
-   from this state's surviving bindings or from the definitions' cells. *)
-val project : keep:Core.Int.Set.t -> block:tid -> t -> t
-
-(* The block's env keeps its own incoming phi values and its memory; the
-   definitions' values live in the cells. *)
-val enter_block : scalar_store -> tid -> t -> t
-
-(* A temporary walk's private cells: [copy_scalars e] gives [e] its own
-   copy of the shared cell array, so writes through it cannot reach the
-   store every permanent state shares.  [adopt_scalars ~from e] puts [e]
-   on [from]'s store, keeping [e]'s block, so two states of one walk
-   share the private cells. *)
-val copy_scalars : t -> t
-val adopt_scalars : from:t -> t -> t
-
-(* Drop block-local word/slice bindings a caller-supplied entry may have
-   left behind after a def; the definitions' cells own those values. *)
-val scalar_snapshot : t -> t
+(* The state a block receives on one edge: the values of its live-in set
+   and the memory the edge carries. *)
+val deliver : keep:var list -> t -> t
 
 include Cbat_lattice_intf.S_val with type t := t
 
 (* Stack provenance is the WORD value itself: the entry RSP's word
    carries the symbolic segment base. *)
 
-(* A redefinition: the word is overwritten and the owner's slices, which
-   describe its previous value, are discarded. *)
+(* An incoming value: the state's own word binding. *)
 val add_word : t -> key:var -> data:WordSet.t -> t
 
 (* A narrowing of the word's current value: its slices stay valid. *)

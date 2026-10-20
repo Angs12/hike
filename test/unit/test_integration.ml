@@ -623,9 +623,9 @@ let tests : unit Alcotest.test list =
            memories)"
           (AI.equal (st guard_tid) entry);
         check "property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly"
-          (Ws.equal (AI.find_word 32 (st then_tid) x) (range 0 9));
+          (Ws.equal (value_at sub sol then_tid x) (range 0 9));
         check "property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly"
-          (Ws.equal (AI.find_word 32 (st else_tid) x) (range 10 20)));
+          (Ws.equal (value_at sub sol else_tid x) (range 10 20)));
 
     (* F2a: landmark consumption at CLP level — never lands short of the join. *)
     pin "INT-05" "LM F2a: widen_join soundness over the landmark-input pair"
@@ -645,8 +645,8 @@ let tests : unit Alcotest.test list =
         let sol = run_anchored sub in
         let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
         let l2_tid = match l2_tid with Some t -> t | None -> failwith "F2c: missing L2" in
-        let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-        let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
+        let i1 = value_at sub sol l1_tid i in
+        let i2 = value_at sub sol l2_tid i in
         check_bound "property LM F2c: loop 1's head lower bound is the entry constant 0"
           (Ws.min_elem i1) (fun lo -> Cbat_word.equal lo (w32 0));
         check_bound
@@ -662,7 +662,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub, l1_tid, l2_tid, l3_tid, _chain_tid, x = mk_when_chain () in
         let sol = run_anchored sub in
-        let in_x (t : tid) : Ws.t = AI.find_word 32 (Graphlib.Std.Solution.get sol t) x in
+        let in_x (t : tid) : Ws.t = value_at sub sol t x in
         check
           "T01-1a (when-chain): the FIRST edge's IN-state is refined by its own cond (x < 10 over \
            {5,15,25} = {5} exactly)"
@@ -1010,7 +1010,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let mk ~(store_endian : endian) ~(store_sz : Size.t) ~(load_addr : exp)
             ~(load_endian : endian) ~(seed_wide : Mem.Key.t list)
-            ~(seed_data : Ws.t) : AI.t * var * var * AI.t =
+            ~(seed_data : Ws.t) : AI.t * var * var * AI.t * sub term * tid =
           let mem = memv "pf_m" in
           let rbp = frame_ptr in
           (* The producing chain runs at the store's own width. *)
@@ -1054,7 +1054,7 @@ let tests : unit Alcotest.test list =
               ~seeds:(Var.Set.singleton t2)
               entry blk
           in
-          (refined, ta, tb, forward)
+          (refined, ta, tb, forward, sub, Term.tid blk)
         in
         let rbp = frame_ptr in
         let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
@@ -1065,31 +1065,34 @@ let tests : unit Alcotest.test list =
           | _ -> failwith "key"
         in
         (* No delivery: each producer keeps its forward value at the edge. *)
-        let unconstrained refined forward ta tb =
-          let at v st = AI.find_word (match Var.typ v with Type.Imm w -> w | _ -> 64) st v in
+        let unconstrained refined forward ta tb fsub fblk =
+          let at v st =
+            let version = version_at (ssa_form fsub) fblk v in
+            let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+            AI.find_word width st version in
           Ws.equal (at ta refined) (at ta forward) && Ws.equal (at tb refined) (at tb forward)
         in
         (* Endian: the store writes LittleEndian, the read is BigEndian. *)
-        let r_e, ta_e, tb_e, f_e =
+        let r_e, ta_e, tb_e, f_e, s_e, blk_e =
           mk ~store_endian:LittleEndian ~store_sz:`r32 ~load_addr:kb
             ~load_endian:BigEndian ~seed_wide:[ key_ofw (-16); key_ofw (-8) ]
             ~seed_data:(Ws.top 32) in
         check "F (endian): a foreign-endian store's data producers stay unconstrained"
-          (unconstrained r_e f_e ta_e tb_e);
+          (unconstrained r_e f_e ta_e tb_e s_e blk_e);
         (* Width: the store writes 8 bytes, the read takes 4. *)
-        let r_w, ta_w, tb_w, f_w =
+        let r_w, ta_w, tb_w, f_w, s_w, blk_w =
           mk ~store_endian:LittleEndian ~store_sz:`r64 ~load_addr:kb
             ~load_endian:LittleEndian ~seed_wide:[ key_ofw (-16); key_ofw (-8) ]
             ~seed_data:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))) in
         check "F (width): a wider store's data producers stay unconstrained"
-          (unconstrained r_w f_w ta_w tb_w);
+          (unconstrained r_w f_w ta_w tb_w s_w blk_w);
         (* Disjoint key: the read's cell is elsewhere. *)
-        let r_d, ta_d, tb_d, f_d =
+        let r_d, ta_d, tb_d, f_d, s_d, blk_d =
           mk ~store_endian:LittleEndian ~store_sz:`r32 ~load_addr:k24
             ~load_endian:LittleEndian ~seed_wide:[ key_ofw (-16); key_ofw (-24) ]
             ~seed_data:(Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))) in
         check "F (disjoint): a store outside the read's range leaves the producers unconstrained"
-          (unconstrained r_d f_d ta_d tb_d));
+          (unconstrained r_d f_d ta_d tb_d s_d blk_d));
 
     (* Pin A: the empty cell meet is the identity — the cell keeps its
        stored value; the dead-path bottom is never written. *)
@@ -1159,11 +1162,11 @@ let tests : unit Alcotest.test list =
         let sub, l1_tid, b1_tid, _ = lm_jle_loop ~k1:(w32 100) () in
         let sol = run_anchored sub in
         let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
-        let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
+        let head_i = value_at sub sol l1_tid i in
         check_bound "property LM F1: the head's lower bound is the entry constant 0"
           (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
         (* The taken view's state is the body's IN-state. *)
-        let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
+        let taken_i = value_at sub sol b1_tid i in
         check_bound "property LM F1: the taken view's lower bound is the entry constant 0"
           (Ws.min_elem taken_i) (fun lo -> Cbat_word.equal lo (w32 0)));
 
@@ -1175,14 +1178,14 @@ let tests : unit Alcotest.test list =
         let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
         let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
         let st tid = Graphlib.Std.Solution.get sol tid in
-        let head_i = AI.find_word 32 (st l1_tid) i in
+        let head_i = value_at sub sol l1_tid i in
         check_bound "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side \
                      of the pin)"
           (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
         check_bound "property LM F1-FT: the head's upper bound is the landmark K (vertex side of the \
                      pin)"
           (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k);
-        let body_i = AI.find_word 32 (st b1_tid) i in
+        let body_i = value_at sub sol b1_tid i in
         check_bound "property LM F1-FT: the taken body's lower bound is the entry constant 0"
           (Ws.min_elem body_i) (fun lo -> Cbat_word.equal lo (w32 0));
         check_bound "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the \

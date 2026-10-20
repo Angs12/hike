@@ -678,8 +678,7 @@ let denote_known_def ~synth df env = denote_def ~synth df env
 (* The one def replay: a no-op def keeps the state physically and skips
    the snapshot; otherwise the snapshot drops caller-supplied locals. *)
 let replay_def ~synth env d =
-  let after = denote_known_def ~synth d env in
-  if phys_equal after env then after else AI.scalar_snapshot after
+  denote_known_def ~synth d env
 
 let denote_defs ~(synth : Hike_synth.table) (b : blk term) : AI.t -> AI.t =
   fun env ->

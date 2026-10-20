@@ -83,7 +83,8 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
     | Ok ws -> ws
     | Error _ -> failwith "a4: the guard does not denote"
   in
-  let cell st = cell_at (memv "a4_m") frame_ptr st in
+  let cell st = cell_at (memv "a4_m")
+      (version_at (ssa_form sub) (Term.tid head) frame_ptr) st in
   ( Ws.elem Cbat_word.b0 cond_ws,
     Ws.elem exit (cell head_in),
     not (Ws.elem exit (cell (Graphlib.Std.Solution.get sol body_tid))) )
@@ -91,7 +92,10 @@ let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
 (* The guard-edge walk on one block after an [RBP := RSP] entry: [defs]
    end in [zf]'s guard, the edge takes zf = {1}, and the refined edge
    state is returned.  [m] is the block's memory, top at entry. *)
-let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t =
+(* The refined edge state of a block's guard, with the SSA form the
+   versions come from and the block's tid. *)
+let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) :
+    AI.t * sub term * tid =
   let rsp = sp in
   let rbp = frame_ptr in
   let sub, tids =
@@ -100,26 +104,39 @@ let wr_refine (name : string) (m : var) (zf : var) (defs : def term list) : AI.t
         defs, [ (2, mk_goto) ];
         [], [] ]
   in
+  let ssa = ssa_form sub in
   let entry =
     AI.add_memory (anchored_entry ()) ~key:m
       ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
   in
   let sol =
-    static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
-      (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
+    static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv ssa
+      (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry ssa)
   in
-  let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
+  let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv ssa in
   let blk =
-    Term.enum blk_t sub |> Seq.to_list
+    Term.enum blk_t ssa |> Seq.to_list
     |> List.find (fun b -> Tid.equal (Term.tid b) tids.(1))
   in
   let post = Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk (Graphlib.Std.Solution.get sol tids.(1)) in
+  let zf = version_at ssa tids.(1) zf in
   let edge = AI.add_word post ~key:zf ~data:(Ws.singleton Cbat_word.b1) in
   let out, _, _ =
     Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
       ~seeds:(Var.Set.singleton zf) edge blk
   in
-  out
+  out, ssa, tids.(1)
+
+(* The value of the base variable [v] in a hand-built environment. *)
+let plain_value (env : AI.t) (v : var) : Ws.t =
+  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  AI.find_word width env (Var.base v)
+
+(* The value of the base variable [v] in a refined edge state. *)
+let wr_value (ssa : sub term) (tid : tid) (out : AI.t) (v : var) : Ws.t =
+  let version = version_at ssa tid v in
+  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  AI.find_word width out version
 
 (* The [RBP - 8] cell address the write-site pins store and load. *)
 let wr_addr =
@@ -200,7 +217,7 @@ let tests : unit Alcotest.test list =
         in
         let sol5 = run_anchored sub5 in
         let cell5 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub5 sol5 body5)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub5) body5 frame_ptr) (iter_state_of sub5 sol5 body5)
         in
         check "BK-05"
           (not (Ws.is_top cell5) && not (Ws.elem (w32 10) cell5)));
@@ -214,7 +231,7 @@ let tests : unit Alcotest.test list =
         let m = memv "l3c1_m" in
         let sub1, body1, _ = mk_l3c1_loop ~extra_header_defs:[] ~pre_cf_defs:[] in
         let sol1 = run_anchored sub1 in
-        let cell1 = cell_at m frame_ptr (iter_state_of sub1 sol1 body1) in
+        let cell1 = cell_at m (version_at (ssa_form sub1) body1 frame_ptr) (iter_state_of sub1 sol1 body1) in
         check "BK-06" (bounded_above cell1 (w32 9)));
 
     pin "BK-07"
@@ -230,7 +247,7 @@ let tests : unit Alcotest.test list =
             ~pre_cf_defs:[ Def.create t (Bil.Int (Cbat_word.to_word (w32 42))) ]
         in
         let sol2 = run_anchored sub2 in
-        let cell2 = cell_at m frame_ptr (iter_state_of sub2 sol2 body2) in
+        let cell2 = cell_at m (version_at (ssa_form sub2) body2 frame_ptr) (iter_state_of sub2 sol2 body2) in
         check "BK-07" (Ws.is_bottom cell2));
 
     pin "BK-08"
@@ -245,7 +262,7 @@ let tests : unit Alcotest.test list =
             ~pre_cf_defs:[]
         in
         let sol3 = run_anchored sub3 in
-        let cell3 = cell_at m frame_ptr (iter_state_of sub3 sol3 body3) in
+        let cell3 = cell_at m (version_at (ssa_form sub3) body3 frame_ptr) (iter_state_of sub3 sol3 body3) in
         check "BK-08" (Ws.is_top cell3));
 
     pin "BK-09"
@@ -277,7 +294,8 @@ let tests : unit Alcotest.test list =
         let b_tid = tids4.(1) in
         let sol4 = run_anchored sub4 in
         let cell4 =
-          cell_at m4 frame_ptr (Graphlib.Std.Solution.get sol4 b_tid)
+          cell_at m4 (version_at (ssa_form sub4) b_tid frame_ptr)
+            (Graphlib.Std.Solution.get sol4 b_tid)
         in
         check "BK-09"
           ((not (Ws.is_top cell4))
@@ -300,7 +318,7 @@ let tests : unit Alcotest.test list =
         in
         let sol1 = run_anchored sub1 in
         let cell1 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub1 sol1 body1)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub1) body1 frame_ptr) (iter_state_of sub1 sol1 body1)
         in
         check "BK-11" (bounded_above cell1 (w32 3)));
 
@@ -315,7 +333,7 @@ let tests : unit Alcotest.test list =
         in
         let sol2 = run_anchored sub2 in
         let cell2 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub2 sol2 body2)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub2) body2 frame_ptr) (iter_state_of sub2 sol2 body2)
         in
         check "BK-12"
           ((not (Ws.is_top cell2))
@@ -336,7 +354,7 @@ let tests : unit Alcotest.test list =
         in
         let sol3 = run_anchored sub3 in
         let cell3 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub3 sol3 body3)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub3) body3 frame_ptr) (iter_state_of sub3 sol3 body3)
         in
         check "BK-13" (l3c2_in_high cell3 half (w32 0xFFFFFFFE)));
 
@@ -350,7 +368,7 @@ let tests : unit Alcotest.test list =
         in
         let sol4 = run_anchored sub4 in
         let cell4 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub4 sol4 body4)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub4) body4 frame_ptr) (iter_state_of sub4 sol4 body4)
         in
         check "BK-14" (bounded_above cell4 (w32 3)));
 
@@ -364,7 +382,7 @@ let tests : unit Alcotest.test list =
         in
         let sol5 = run_anchored sub5 in
         let cell5 =
-          cell_at (memv "l3c2_m") frame_ptr (iter_state_of sub5 sol5 body5)
+          cell_at (memv "l3c2_m") (version_at (ssa_form sub5) body5 frame_ptr) (iter_state_of sub5 sol5 body5)
         in
         check "BK-15" (bounded_above cell5 (w32 3)));
 
@@ -1325,7 +1343,7 @@ let tests : unit Alcotest.test list =
         in
         let sol1 = run_anchored sub1 in
         let cell1 =
-          cell_at m frame_ptr (iter_state_of sub1 sol1 body1)
+          cell_at m (version_at (ssa_form sub1) body1 frame_ptr) (iter_state_of sub1 sol1 body1)
         in
         check "BK-86" (bounded_above cell1 (w32 99)));
 
@@ -1439,7 +1457,7 @@ let tests : unit Alcotest.test list =
           | Error _ -> failwith "a4: the guard does not denote"
         in
         let body_cell =
-          cell_at (memv "a4_m") frame_ptr
+          cell_at (memv "a4_m") (version_at (ssa_form sub) body_tid frame_ptr)
             (Graphlib.Std.Solution.get sol body_tid)
         in
         check "BK-92.keeps" (Ws.elem (s_r32 0xFFFFFFFE) body_cell);
@@ -1484,7 +1502,8 @@ let tests : unit Alcotest.test list =
           | Ok ws -> ws
           | Error _ -> failwith "a4: the guard does not denote"
         in
-        let cell st = cell_at (memv "a4_m") frame_ptr st in
+        let cell st = cell_at (memv "a4_m")
+            (version_at (ssa_form sub) (Term.tid head) frame_ptr) st in
         check "BK-93.live" (Ws.elem Cbat_word.b0 cond_ws);
         check "BK-93.head-keeps" (Ws.elem (w32 4) (cell head_in));
         check "BK-93.body-excludes"
@@ -1525,7 +1544,7 @@ let tests : unit Alcotest.test list =
           mk_l3c6_storehead_loop ~nested:true ~seed:(Some (w32 0)) ~bound:(w32 2) in
         let sol = run_anchored sub in
         let cell =
-          cell_at (memv "l3c6_m") frame_ptr (iter_state_of sub sol head_tid) in
+          cell_at (memv "l3c6_m") (version_at (ssa_form sub) head_tid frame_ptr) (iter_state_of sub sol head_tid) in
         check "BK-98" (bounded_above cell (w32 2)));
 
     pin "BK-99"
@@ -1537,7 +1556,7 @@ let tests : unit Alcotest.test list =
           mk_l3c6_storehead_loop ~nested:false ~seed:(Some (w32 0)) ~bound:(w32 2) in
         let sol = run_anchored sub in
         let cell =
-          cell_at (memv "l3c6_m") frame_ptr (iter_state_of sub sol head_tid) in
+          cell_at (memv "l3c6_m") (version_at (ssa_form sub) head_tid frame_ptr) (iter_state_of sub sol head_tid) in
         check "BK-99" (bounded_above cell (w32 2)));
 
     (* ---------------------------------------------------------------- *)
@@ -1577,6 +1596,7 @@ let tests : unit Alcotest.test list =
               [] ]
         in
         let guard_tid = tids.(1) in
+        let ssa = ssa_form sub in
         let entry =
           AI.add_memory (anchored_entry ()) ~key:m
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
@@ -1586,11 +1606,12 @@ let tests : unit Alcotest.test list =
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv ssa in
         let guard_blk =
-          Term.enum blk_t sub |> Seq.to_list
+          Term.enum blk_t ssa |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
         in
+        let zf = version_at ssa guard_tid zf in
         let edge_env =
           AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
             ~data:(Ws.singleton Cbat_word.b1)
@@ -1604,7 +1625,7 @@ let tests : unit Alcotest.test list =
         check "BK-95.output-equal" (output_writes = 0);
         check "BK-95.input-none" (input_writes = 0);
         check "BK-95.row"
-          (Ws.precedes (AI.find_word 32 out (Var.base x))
+          (Ws.precedes (wr_value ssa guard_tid out x)
              (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 4))));
         (* The input site: the guard block defines x and u nowhere, so
            both facts hold at the entry, where each strictly narrows. *)
@@ -1667,11 +1688,14 @@ let tests : unit Alcotest.test list =
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
         in
-        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
+        let ssa = ssa_form sub in
+        let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv ssa in
         let guard_blk =
-          Term.enum blk_t sub |> Seq.to_list
+          Term.enum blk_t ssa |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard)
         in
+        let zf = version_at ssa guard zf in
+        let u = version_at ssa guard u in
         let out, _, _ =
           Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
             ~seeds:(Core.Set.union (Var.Set.singleton zf) (Var.Set.singleton u))
@@ -1682,9 +1706,9 @@ let tests : unit Alcotest.test list =
             guard_blk
         in
         check "BK-96.delivered"
-          (not (Ws.is_top (AI.find_word 32 out (Var.base x2))));
+          (not (Ws.is_top (wr_value ssa guard out x2)));
         check "BK-96.env-value"
-          (Ws.equal (AI.find_word 32 out (Var.base u)) (bk_iv32 ~lo:2 ~hi:5)));
+          (Ws.equal (wr_value ssa guard out u) (bk_iv32 ~lo:2 ~hi:5)));
 
     pin "BK-100"
       "a var rewritten after the def that receives its constraint keeps its \
@@ -1693,7 +1717,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let x = wr_v32 "w100_x" and y = wr_v32 "w100_y" and z = wr_v32 "w100_z" in
         let u = wr_v32 "w100_u" and zf = v1 "w100_zf" in
-        let out =
+        let out, ssa, tid =
           wr_refine "w100" (memv "w100_m") zf
             [ Def.create y (Bil.Var x);
               Def.create z (Bil.Var y);
@@ -1702,9 +1726,9 @@ let tests : unit Alcotest.test list =
                 (Bil.BinOp (Bil.SLT, Bil.Var z, Bil.Int (Cbat_word.to_word (w32 5)))) ]
         in
         check "BK-100.guarded"
-          (not (Ws.elem (w32 50) (AI.find_word 32 out (Var.base z))));
+          (not (Ws.elem (w32 50) (wr_value ssa tid out z)));
         check "BK-100.rewritten-kept"
-          (Ws.elem (w32 50) (AI.find_word 32 out (Var.base y))));
+          (Ws.elem (w32 50) (wr_value ssa tid out y)));
 
     pin "BK-101"
       "a cell stored after the load the guard reads keeps its edge value: \
@@ -1713,7 +1737,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let m = memv "w101_m" in
         let x = wr_v32 "w101_x" and u = wr_v32 "w101_u" and zf = v1 "w101_zf" in
-        let out =
+        let out, ssa, tid =
           wr_refine "w101" m zf
             [ Def.create x (Bil.Load (Bil.Var m, wr_addr, LittleEndian, `r32));
               Def.create m
@@ -1722,9 +1746,9 @@ let tests : unit Alcotest.test list =
                 (Bil.BinOp (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) ]
         in
         check "BK-101.guarded"
-          (not (Ws.elem (w32 50) (AI.find_word 32 out (Var.base x))));
+          (not (Ws.elem (w32 50) (wr_value ssa tid out x)));
         check "BK-101.rewritten-kept"
-          (Ws.elem (w32 50) (cell_at m frame_ptr out)));
+          (Ws.elem (w32 50) (cell_at m (version_at ssa tid frame_ptr) out)));
 
     pin "BK-102"
       "a store's cell takes its data's constraint: x is stored, the guard \
@@ -1733,7 +1757,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let m = memv "w102_m" in
         let x = wr_v32 "w102_x" and t = wr_v32 "w102_t" and zf = v1 "w102_zf" in
-        let out =
+        let out, ssa, tid =
           wr_refine "w102" m zf
             [ Def.create m
                 (Bil.Store (Bil.Var m, wr_addr, Bil.Var x, LittleEndian, `r32));
@@ -1741,7 +1765,8 @@ let tests : unit Alcotest.test list =
               Def.create zf
                 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
         in
-        check "BK-102" (bounded_above (cell_at m frame_ptr out) (w32 6)));
+        check "BK-102"
+          (bounded_above (cell_at m (version_at ssa tid frame_ptr) out) (w32 6)));
 
     pin "BK-103"
       "a store's cell overwritten later takes nothing from the first \
@@ -1750,7 +1775,7 @@ let tests : unit Alcotest.test list =
         let m = memv "w103_m" in
         let x = wr_v32 "w103_x" and u = wr_v32 "w103_u" in
         let t = wr_v32 "w103_t" and zf = v1 "w103_zf" in
-        let out =
+        let out, ssa, tid =
           wr_refine "w103" m zf
             [ Def.create m
                 (Bil.Store (Bil.Var m, wr_addr, Bil.Var x, LittleEndian, `r32));
@@ -1760,7 +1785,8 @@ let tests : unit Alcotest.test list =
               Def.create zf
                 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 7)))) ]
         in
-        check "BK-103" (Ws.elem (w32 50) (cell_at m frame_ptr out)));
+        check "BK-103"
+          (Ws.elem (w32 50) (cell_at m (version_at ssa tid frame_ptr) out)));
 
     pin "BK-104"
       "a guard on a loaded value narrows the load's address to the slots \
@@ -1775,7 +1801,7 @@ let tests : unit Alcotest.test list =
         let images =
           [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x400FL; img_bytes;
               img_slots = Core.Int64.Set.empty } ] in
-        let out =
+        let out, ssa, tid =
           Vsa.with_images images (fun () ->
               wr_refine "w104" m zf
                 [ Def.create i
@@ -1790,7 +1816,7 @@ let tests : unit Alcotest.test list =
                   Def.create zf
                     (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 20)))) ])
         in
-        let iv = AI.find_word 64 out (Var.base i) in
+        let iv = wr_value ssa tid out i in
         check "BK-104.kept" (Ws.elem (w64 0) iv && Ws.elem (w64 2) iv);
         check "BK-104.dropped" (not (Ws.elem (w64 3) iv)));
 
@@ -1872,7 +1898,7 @@ let tests : unit Alcotest.test list =
         let images =
           [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x401FL; img_bytes;
               img_slots = Core.Int64.Set.empty } ] in
-        let out =
+        let out, ssa, tid =
           Vsa.with_images images (fun () ->
               wr_refine "w107" m zf
                 [ Def.create i
@@ -1894,7 +1920,7 @@ let tests : unit Alcotest.test list =
                          Bil.Var x,
                          Bil.Int (Cbat_word.to_word (w32 20)) )) ])
         in
-        let iv = AI.find_word 64 out (Var.base i) in
+        let iv = wr_value ssa tid out i in
         check "BK-107.kept" (Ws.elem (w64 8) iv);
         check "BK-107.dropped-low" (not (Ws.elem (w64 0) iv));
         check "BK-107.dropped-high" (not (Ws.elem (w64 15) iv)));
@@ -1932,7 +1958,7 @@ let tests : unit Alcotest.test list =
               (Bil.Load (Bil.Var m, Bil.Var i, LittleEndian, `r32))
               produced
           in
-          AI.find_word 64 out (Var.base i)
+          plain_value out i
         in
         (* The per-singleton reference: six elements stay on the exact
            tier, so the filter decides each one alone. *)
@@ -2033,7 +2059,7 @@ let tests : unit Alcotest.test list =
             [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x400FL; img_bytes;
                 img_slots = Core.Int64.Set.of_list slots } ] in
           let addr k = Bil.Int (Cbat_word.to_word (w64 k)) in
-          let out =
+          let out, ssa, tid =
             Vsa.with_images images (fun () ->
                 wr_refine ("w112" ^ tag) m zf
                   ((if store then
@@ -2052,7 +2078,7 @@ let tests : unit Alcotest.test list =
                          (Bil.BinOp (Bil.EQ, Bil.Var x,
                                      Bil.Int (Cbat_word.to_word (w32 20)))) ]))
           in
-          let iv = AI.find_word 64 out (Var.base i) in
+          let iv = wr_value ssa tid out i in
           (Ws.elem (w64 0) iv, Ws.elem (w64 8) iv) in
         let pair = Alcotest.(pair bool bool) in
         Alcotest.check pair "BK-112.little" (true, false)
@@ -2147,11 +2173,9 @@ let tests : unit Alcotest.test list =
         let blk =
           Term.enum blk_t sub
           |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) head) in
-        let store = AI.create_scalars ~variables:[ x ]
-            ~blocks:[ (head, Var.Set.singleton x) ] ~seed:AI.top in
         let seed = Ws.singleton (w32 7) in
-        let base = AI.add_word (AI.enter_block store head AI.top) ~key:x ~data:seed in
-        let query () = AI.find_word 32 (AI.enter_block store head AI.top) x in
+        let base = AI.add_word AI.top ~key:x ~data:seed in
+        let query () = AI.find_word 32 base x in
         let before = query () in
         let rctx = mk_rctx ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub in
         let disabled =
