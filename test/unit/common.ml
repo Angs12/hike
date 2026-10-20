@@ -178,40 +178,50 @@ let ssa_form (sub : sub term) : sub term =
     Hashtbl.replace ssa_forms key s;
     s
 
-(* Is the sub already in the analysis's input form?  A sub that is, is
-   used as it is; one that is not, is SSA-constructed. *)
-let is_ssa (sub : sub term) : bool =
-  Term.enum blk_t sub
-  |> Seq.for_all ~f:(fun b -> Term.has_attr b Sm.ssa_tag)
-
 (* The version of the base variable [v] that block [tid] holds: the
    definition's own version, or the block's incoming phi. *)
 let version_at (ssa : sub term) (tid : tid) (v : var) : var =
   let blk = Term.find_exn blk_t ssa tid in
   Sm.version_at_end blk v
 
-(* The value of the base variable [v] in the block [tid]'s state: the
-   value it received. *)
-let value_at (sub : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
-  let sub = if is_ssa sub then sub else ssa_form sub in
-  let version = version_at sub tid v in
-  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
-  AI.find_word width (Graphlib.Std.Solution.get sol tid) version
-
-(* The value of the base variable [v] after the block [tid]'s
-   definitions. *)
-let value_after (sub : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
-  let ssa = if is_ssa sub then sub else ssa_form sub in
+(* The version the block receives: its incoming phi's left-hand side. *)
+let phi_version (ssa : sub term) (tid : tid) (v : var) : var option =
   let blk = Term.find_exn blk_t ssa tid in
-  let version = Sm.version_at_end blk v in
+  Term.enum phi_t blk
+  |> Seq.find_map ~f:(fun p ->
+      if Var.same (Var.base (Phi.lhs p)) v then Some (Phi.lhs p) else None)
+
+(* The version the block defines: its definition's left-hand side. *)
+let def_version (ssa : sub term) (tid : tid) (v : var) : var option =
+  let blk = Term.find_exn blk_t ssa tid in
+  Term.enum def_t blk
+  |> Seq.filter_map ~f:(fun d ->
+      if Var.same (Var.base (Def.lhs d)) v then Some (Def.lhs d) else None)
+  |> Seq.to_list
+  |> fun l -> match List.rev l with [] -> None | v :: _ -> Some v
+
+(* The value the block receives for the base variable [v].  A block's
+   state holds the versions it receives; a block with no phi for [v]
+   holds only the seeded base variables. *)
+let value_at (ssa : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
   let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  let key = match phi_version ssa tid v with Some version -> version | None -> v in
+  AI.find_word width (Graphlib.Std.Solution.get sol tid) key
+
+(* The value the base variable [v] has after the block's definitions:
+   the definition's own value, or the received one when the block does
+   not define it. *)
+let value_after (ssa : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.t =
+  let width = match Var.typ v with Type.Imm w -> w | _ -> 64 in
+  let blk = Term.find_exn blk_t ssa tid in
   let post =
     Vsa.Test_seam.denote_defs ~synth:Hike.Synth.empty blk
       (Graphlib.Std.Solution.get sol tid) in
-  AI.find_word width post version
+  match def_version ssa tid v with
+  | Some version -> AI.find_word width post version
+  | None -> value_at ssa sol tid v
 
 let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
-  let sub = if is_ssa sub then sub else ssa_form sub in
   Vsa.static_graph_vsa ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
@@ -220,7 +230,6 @@ let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
     ?callee ?resolved ?sub_lookup sub init
 
 let mk_rctx ~abi ~synth ?sub_lookup sub =
-  let sub = if is_ssa sub then sub else ssa_form sub in
   Vsa.Test_seam.mk_rctx ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
@@ -267,9 +276,8 @@ let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.call
 (* The production solve with every callee summarized, so it never
    pauses: the block environments, the rewritten sub and the grown
    block-address map. *)
-let solve_with_synth ~synth ?(ssa = true) ?(images = [])
+let solve_with_synth ~synth ?(images = [])
     ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) =
-  let sub = if ssa then Hike.Ssa.ssa_sub ~synth ~target sub else sub in
   match
     Hv.start target ~lookup:(fun _ -> None) ~images ~callee ~block_addrs
       ~synth
@@ -335,13 +343,13 @@ let run_chain_attrib ~synth ?spans (subs : sub term list) : program term =
 (* The fixtures' analysis facts: the subs' converged environments, plus
    the stamped subs the seam reads (the fixpoint's sweep tags every def
    with its before-env).  The bool reports a nonempty env set. *)
-let fixture_facts ~synth ?(ssa = true) (subs : sub term list) :
+let fixture_facts ~synth (subs : sub term list) :
     Hike.Kb.facts * sub term list * bool =
   let all_envs, stamped, ok, synth =
     Base.List.fold subs ~init:(Tid.Map.empty, [], true, synth)
       ~f:(fun (m, stamped, ok, synth) sub ->
         let envs, sub', _, synth =
-          solve_with_synth ~synth ~ssa ~callee:(callee_of ~synth (Program.create ~subs:[ sub ] ()))
+          solve_with_synth ~synth ~callee:(callee_of ~synth (Program.create ~subs:[ sub ] ()))
             (x86_target ()) sub
         in
         (Core.Map.merge m envs

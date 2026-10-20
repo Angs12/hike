@@ -19,7 +19,9 @@ let abi = Hike.Abi.x86_64_sysv
 (* [Abi.t] is built on demand; target facts need the harness [init]. *)
 let x86 () : Theory.Target.t = x86_target ()
 
-let arg_name (a : Arg.t) : string = Var.name (Arg.lhs a)
+(* The lane names are the SSA names; the base name is the variable the
+   lane carries. *)
+let arg_name (a : Arg.t) : string = Var.name (Var.base (Arg.lhs a))
 let arg_names (l : Arg.t list) : string list = Base.List.map l ~f:arg_name
 let is_ptr (a : Arg.t) : bool = Model.is_ptr_arg a
 
@@ -76,9 +78,9 @@ type use_kinds = {
 }
 
 (* The production type pass on signed SSA fixtures. *)
-let analyse ~synth ?(ssa = true) (subs : sub term list) =
+let analyse ~synth (subs : sub term list) =
   let target = x86 () in
-  let facts, stamped, _ = fixture_facts ~synth ~ssa subs in
+  let facts, stamped, _ = fixture_facts ~synth subs in
   let prog =
     Program.create ~subs:stamped ()
     |> Types.sign_program ~synth:facts.Hike.Kb.synth ~target
@@ -170,9 +172,9 @@ let gen_program (seed : int) (n : int) : sub term list =
       in
       fst (sub_of ~tid:(Tid.for_name (name i)) (name i) nodes))
 
-let use_kinds ~synth ?(ssa = true) (subs : sub term list) : use_kinds =
+let use_kinds ~synth (subs : sub term list) : use_kinds =
   let target = x86 () in
-  let facts, _, typed = analyse ~synth ~ssa subs in
+  let facts, _, typed = analyse ~synth subs in
   let defs name =
     Term.enum blk_t (sub_named typed name)
     |> Seq.concat_map ~f:(Term.enum def_t)
@@ -778,11 +780,11 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let sub = rewrite_one ~synth:Hike.Synth.empty sub in
-        let kinds = use_kinds ~synth:Hike.Synth.empty ~ssa:false [ sub ] in
+        let kinds = use_kinds ~synth:Hike.Synth.empty [ sub ] in
         check "TYPES-33 the address is a pointer" (kinds.is_ptr_def "types33" a);
         check "TYPES-33 the loop index is an integer"
           (not (kinds.is_ptr_def "types33" i));
-        let ir = emit_ir ~synth:Hike.Synth.empty ~ssa:false ~types:kinds.retype [ sub ] in
+        let ir = emit_ir ~synth:Hike.Synth.empty ~types:kinds.retype [ sub ] in
         check "TYPES-33 the store is a GEP off the stack base, no cast"
           (contains_substring ir "phi ptr [ %entry1,"
            && contains_substring ir "getelementptr i8, ptr %"
@@ -854,7 +856,7 @@ let tests : unit Alcotest.test list =
         check "TYPES-35 the index is an integer"
           (not (kinds.is_ptr_def "types35" k));
         let _, stamped, _ = fixture_facts ~synth [ sub ] in
-        let ir = emit_ir_spec ~synth ~ssa:false ~types:kinds.retype spec stamped in
+        let ir = emit_ir_spec ~synth ~types:kinds.retype spec stamped in
         check "TYPES-35 the address is a GEP off the module base, no inttoptr"
           (contains_substring ir "phi ptr [ getelementptr inbounds (i8, ptr @sec_comp_7"
            && contains_substring ir "getelementptr i8, ptr %"

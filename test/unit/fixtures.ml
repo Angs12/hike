@@ -36,12 +36,12 @@ let sub_jmp (sub : sub term) (i : int) (j : int) : jmp term =
   let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) i in
   List.nth (Term.enum jmp_t blk |> Seq.to_list) j
 
-(* One sub from nodes: a node is its defs plus out-edges, each edge a
-   (target index, jump maker) pair — the maker receives the target's
+(* One raw sub from nodes: a node is its defs plus out-edges, each edge
+   a (target index, jump maker) pair — the maker receives the target's
    tid. Node order is the sub's block order (the VSA reads its
    taken/fallthrough edge order from it); the tids come back in that
    order. *)
-let sub_of ?(tid = Tid.create ()) ?(args = []) (name : string)
+let raw_sub_of ?(tid = Tid.create ()) ?(args = []) (name : string)
     (nodes : (def term list * (int * (tid -> jmp term)) list) list) :
     sub term * tid array =
   let b0s = List.map (fun (defs, _) -> blk_of_defs defs) nodes in
@@ -55,6 +55,40 @@ let sub_of ?(tid = Tid.create ()) ?(args = []) (name : string)
   List.iter (Sub.Builder.add_arg sb) args;
   List.iter (Sub.Builder.add_blk sb) blks;
   (Sub.Builder.result sb, tids)
+
+(* The fixtures' target: the flag roles name the fixture flag vars
+   (Theory.Var.define is pure in (sort, name), so Var.same matches
+   them). *)
+let jump_target =
+  let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
+  Theory.Target.declare ~package:"test" "jump-flags" ~bits:64 ~byte:8
+    ~regs:Theory.Role.Register.[
+        [zero_flag], [flag (Var.name sysv.Hike.Abi.zero_flag)];
+        [carry_flag], [flag (Var.name sysv.Hike.Abi.carry_flag)];
+        [sign_flag], [flag (Var.name sysv.Hike.Abi.sign_flag)];
+        [overflow_flag], [flag (Var.name sysv.Hike.Abi.overflow_flag)];
+        [parity_flag], [flag (Var.name sysv.Hike.Abi.parity_flag)]]
+
+let run_anchored (sub : sub term) : Vsa.vsa_sol =
+  static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+
+(* The jump-compiled sub, as [run_anchored] runs it. *)
+let jump_compiled (sub : sub term) : sub term =
+  snd (Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub)
+
+(* The analysis's input form: the jump-compiled sub in SSA form.  The
+   pins work on this form from the start — there is no other form. *)
+let ssa_sub (raw : sub term) : sub term =
+  ssa_form (jump_compiled raw)
+
+(* One sub from nodes, in the analysis's input form: the pins see the
+   SSA sub the VSA consumes.  The block tids are the raw ones — the SSA
+   construction keeps them and adds the synthetic entry. *)
+let sub_of ?tid ?args (name : string)
+    (nodes : (def term list * (int * (tid -> jmp term)) list) list) :
+    sub term * tid array =
+  let raw, tids = raw_sub_of ?tid ?args name nodes in
+  (ssa_sub raw, tids)
 
 (* A one-entry sub over the defs, exiting through a real terminal
    block (CFG-honest: the Goto target is built first). *)
@@ -286,28 +320,6 @@ let bounded_above (ws : Ws.t) (maxv : Cbat_word.t) : bool =
    it).  The sub runs through the jump compiler first — the pipeline's
    reality: the analysis reads value comparisons, never flag idioms. *)
 
-(* The fixtures' target: the flag roles name the fixture flag vars
-   (Theory.Var.define is pure in (sort, name), so Var.same matches
-   them). *)
-let jump_target =
-  let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
-  Theory.Target.declare ~package:"test" "jump-flags" ~bits:64 ~byte:8
-    ~regs:Theory.Role.Register.[
-        [zero_flag], [flag (Var.name sysv.Hike.Abi.zero_flag)];
-        [carry_flag], [flag (Var.name sysv.Hike.Abi.carry_flag)];
-        [sign_flag], [flag (Var.name sysv.Hike.Abi.sign_flag)];
-        [overflow_flag], [flag (Var.name sysv.Hike.Abi.overflow_flag)];
-        [parity_flag], [flag (Var.name sysv.Hike.Abi.parity_flag)]]
-
-let run_anchored (sub : sub term) : Vsa.vsa_sol =
-  let _, sub = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub in
-  let sub = ssa_form sub in
-  static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
-
-(* The jump-compiled sub, as [run_anchored] runs it. *)
-let jump_compiled (sub : sub term) : sub term =
-  snd (Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target sub)
-
 (* Sub [name] of [subs] after SSA construction (the VSA's input form). *)
 let ssa_of_subs (subs : sub term list) (name : string) : sub term =
   let prog = Program.create ~subs () in
@@ -316,7 +328,7 @@ let ssa_of_subs (subs : sub term list) (name : string) : sub term =
   |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
   |> Base.Option.value_exn
 
-(* The VSA from the anchored entry on a sub already in SSA form. *)
+(* The VSA from the anchored entry on a sub in SSA form. *)
 let run_ssa_anchored (sub : sub term) : Vsa.vsa_sol =
   static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike_abi.x86_64_sysv sub
     (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
@@ -349,7 +361,7 @@ let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_o
 let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
   (* Gate-free (spec §2.1): every def is denoted. *)
   let sol = run_anchored sub in
-  let base = version_at (ssa_form sub) body_tid frame_ptr in
+  let base = version_at sub body_tid frame_ptr in
   iter_cell_of sub sol body_tid (cell_at (memv "l3a_m") base)
 
 (* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
@@ -457,7 +469,7 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (version_at (ssa_form sub) body_tid frame_ptr))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (version_at sub body_tid frame_ptr))
 
 (* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
 
@@ -525,7 +537,7 @@ let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (version_at (ssa_form sub) body_tid frame_ptr))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (version_at sub body_tid frame_ptr))
 
 (* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
 
@@ -536,7 +548,7 @@ let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (version_at (ssa_form sub) body_tid frame_ptr))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (version_at sub body_tid frame_ptr))
 
 (* L3c-6: the -O0 store-head loop — the counter's increment store lives
    in the WALKED head block (the do-while merge), the guard's bound is a
@@ -783,7 +795,7 @@ let mk_l39b5_loop () : sub term * tid =
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (version_at (ssa_form sub) body_tid frame_ptr))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (version_at sub body_tid frame_ptr))
 
 (* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
 
@@ -860,7 +872,7 @@ let mk_l6_rbp_loop () : sub term * tid =
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
-  cell_at (memv "l6_m") (version_at (ssa_form sub) body_tid frame_ptr)
+  cell_at (memv "l6_m") (version_at sub body_tid frame_ptr)
     (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
 
 (* The secondary guarded-refinement shapes: inline-arithmetic record
@@ -914,7 +926,7 @@ let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : B
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
-  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (version_at (ssa_form sub) body_tid frame_ptr))
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (version_at sub body_tid frame_ptr))
 
 (* Indexed-loop twin (C4a/R11): i := 0; body indexed store + inc; exit singleton store.
    The two tests differ only in the var-name prefix; the divergent pins stay in the tests. *)
@@ -1060,7 +1072,7 @@ let empty_spec : B2l.section_spec =
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) ?(verify = false) (spec : B2l.section_spec)
+let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(verify = false) (spec : B2l.section_spec)
     (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
@@ -1091,10 +1103,7 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) ?(verify = fal
         Base.List.fold layout.Hike.Stack_model.regions ~init:(storage synth Hike.Synth.Window)
           ~f:(fun synth r -> storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id))) in
   let synth, prog = Hike.Fp.run_program ~synth prog in
-  let prog =
-    if ssa then Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog
-    else prog
-  in
+  let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
   let prog = Hike.Split_blocks.normalize ~synth prog in
   let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
   (* The types pass runs on the SSA program; a fixture stamps its own. *)
@@ -1108,8 +1117,8 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(ssa = true) ?(verify = fal
   Llvm.dispose_context llvm_ctx;
   s
 
-let emit_ir ~synth ?types ?ssa (subs : sub term list) : string =
-  emit_ir_spec ~synth ?types ?ssa empty_spec subs
+let emit_ir ~synth ?types (subs : sub term list) : string =
+  emit_ir_spec ~synth ?types empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

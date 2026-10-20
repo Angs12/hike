@@ -28,7 +28,7 @@ let yv = Bil.Var y
 let tv = Bil.Var t
 
 let sub_of_defs_and_jmp (name : string) (defs : def term list) (cond : exp) : sub term =
-  let sub, _tids = sub_of name [ defs, [ (1, fun t -> mk_jmp_to t cond) ]; [], [] ] in
+  let sub, _tids = raw_sub_of name [ defs, [ (1, fun t -> mk_jmp_to t cond) ]; [], [] ] in
   sub
 
 (* The entry block of the compiled sub (the first block). *)
@@ -191,7 +191,7 @@ let tests : unit Alcotest.test list =
     (* the CFG is unchanged. *)
     pin "JMP-32" "CFG unchanged (3 blocks, targets intact)" (fun () ->
         let s, tids =
-          sub_of "t13_pair"
+          raw_sub_of "t13_pair"
             [
               ( cmp_defs (),
                 [ (2, fun t -> mk_jmp_to t (Bil.Var zf)); (1, fun t -> mk_jmp_to t v_not) ] );
@@ -226,7 +226,7 @@ let tests : unit Alcotest.test list =
        ZF differently, no unique reaching def at the block entry. *)
     pin "JMP-35" "ambiguous cross-block flag stays residual" (fun () ->
         let s, tids =
-          sub_of "t13_cross_amb"
+          raw_sub_of "t13_cross_amb"
             [
               [], [ (1, mk_goto); (2, mk_goto) ];
               [ Def.create zf (Bil.BinOp (Bil.EQ, w0_32, xv)) ], [ (3, mk_goto) ];
@@ -416,7 +416,7 @@ let tests : unit Alcotest.test list =
        into the unique predecessor. *)
     pin "JMP-48" "cross-block jbe compiles to x <= y and the flags die" (fun () ->
         let s, tids =
-          sub_of "t13_xjbe"
+          raw_sub_of "t13_xjbe"
             [
               ( [
                   Def.create t (Bil.BinOp (Bil.MINUS, xv, yv));
@@ -442,7 +442,7 @@ let tests : unit Alcotest.test list =
         let a = v1 "t13_a" and b = v1 "t13_b" and c = v1 "t13_c" and d = v1 "t13_d" in
         let bv v = Bil.Var v in
         let s, tids =
-          sub_of "t13_fjp"
+          raw_sub_of "t13_fjp"
             [
               ( [
                   Def.create pf (Bil.BinOp (Bil.OR, bv a, bv b));
@@ -490,7 +490,7 @@ let tests : unit Alcotest.test list =
        flags, so the walk stops at the call edge and the cond stays. *)
     pin "JMP-51" "flags set before a call stay residual after it" (fun () ->
         let s, tids =
-          sub_of "t13_xcall"
+          raw_sub_of "t13_xcall"
             [
               ( [ Def.create zf (Bil.BinOp (Bil.EQ, w0_64, xv)) ],
                 [ (1, fun post -> mk_call_jmp post (Tid.create ())) ] );

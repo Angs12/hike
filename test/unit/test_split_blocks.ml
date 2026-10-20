@@ -335,7 +335,7 @@ let tests : unit Alcotest.test list =
            = Base.List.length (Base.List.dedup_and_sort lhs ~compare:Var.compare));
         check "SBLK-09 versions travel with the call" versions_on_call;
         let ir =
-          emit_ir_spec ~synth:Hike.Synth.empty ~ssa:false ~verify:true
+          emit_ir_spec ~synth:Hike.Synth.empty ~verify:true
             empty_spec [ callee; after ]
         in
         let passed =

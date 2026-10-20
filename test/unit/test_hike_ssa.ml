@@ -137,12 +137,12 @@ let tests : unit Alcotest.test list =
   [
     pin "SSA-01" "a call site's return lanes mint versions on its jump"
       (fun () ->
-        let callee, _ = sub_of "@retcallee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "@retcallee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee (Arg.create ~intent:Out ret_reg (Var ret_reg))
         in
         let caller, _ =
-          sub_of "ret_caller"
+          raw_sub_of "ret_caller"
             [ [],
               [ (1,
                  fun t ->
@@ -297,7 +297,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-04" "a call return and bypass value meet in a join phi"
       (fun () ->
         let ret_reg = int_ret 0 in
-        let callee, _ = sub_of "ssa4_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "ssa4_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee
             (Arg.create ~intent:Out ret_reg (Bil.Var ret_reg))
@@ -421,7 +421,7 @@ let tests : unit Alcotest.test list =
         let target = x86_target () in
         let slot = v64 "ssa7_arg" in
         let synth = Hike.Synth.add Hike.Synth.empty slot (K_argument 6) in
-        let callee, _ = sub_of "ssa7_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "ssa7_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee (Arg.create ~intent:Out ret_reg (Var ret_reg))
         in
@@ -674,7 +674,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-16" "a changed read on the same jump tid is renamed and woken"
       (fun () ->
         let a = v64 "same_a" and b = v64 "same_b" in
-        let sub, _ = sub_of "same_jump"
+        let sub, _ = raw_sub_of "same_jump"
             [ [ Def.create a (int_exp 1); Def.create b (int_exp 2) ],
               [ (1, fun t -> mk_jmp_to t (guard a 1)); (2, mk_goto) ];
               [], [ (0, mk_ret) ]; [], [ (0, mk_ret) ] ] in
@@ -696,7 +696,7 @@ let tests : unit Alcotest.test list =
         let call target next = Jmp.create_call
             (Call.create ~target:(Direct target) ~return:(Direct next) ()) in
         let make tid defs target =
-          fst (sub_of ~tid (Tid.name tid)
+          fst (raw_sub_of ~tid (Tid.name tid)
                  [ defs, [ (1, call target) ]; [], [ (0, mk_ret) ] ]) in
         let sa = make a [] b in
         let sb = make b [ Def.create ret_reg (Bil.Var lane) ] a in
@@ -742,7 +742,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let v = int_ret 0 and out = callee_saved 0 and arg = int_param 0 in
         let sub, tids =
-          sub_of "ssa7"
+          raw_sub_of "ssa7"
             [ [], [ (1, fun t -> mk_jmp_to t (guard_lt arg 5)); (2, mk_goto) ];
               [ Def.create v (c64 1) ], [ (3, mk_goto) ];
               [ Def.create v (c64 2) ], [ (3, mk_goto) ];
@@ -758,6 +758,15 @@ let tests : unit Alcotest.test list =
           Printf.eprintf "DBG %s min=%s max=%s\n" name
             (match Ws.min_elem ws with Some w -> Cbat_word.to_string w | None -> "-")
             (match Ws.max_elem ws with Some w -> Cbat_word.to_string w | None -> "-") in
+        let ssa2 = ssa_form ssa in
+        let shape s' =
+          String.concat ";" (Seq.to_list (Term.enum blk_t s')
+            |> List.map (fun b ->
+                Printf.sprintf "[%s]" (String.concat ","
+                   (Seq.to_list (Term.enum def_t b) |> List.map (fun d -> Var.name (Def.lhs d)))))) in
+        Printf.eprintf "DBG same_tid=%b\n" (Tid.equal (Term.tid ssa) (Term.tid ssa2));
+        Printf.eprintf "DBG shape1=%s\n" (shape ssa);
+        Printf.eprintf "DBG shape2=%s\n" (shape ssa2);
         dbg "phi" (value_at ssa sol tids.(3) v);
         dbg "out" (value_after ssa sol tids.(3) out);
         check "SSA-10"
@@ -770,7 +779,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let i = callee_saved 1 and out = callee_saved 0 in
         let sub, tids =
-          sub_of "ssa8"
+          raw_sub_of "ssa8"
             [ [ Def.create i (c64 0) ], [ (1, mk_goto) ];
               [ Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, c64 1)) ],
               [ (1, fun t -> mk_jmp_to t (guard_lt i 10)); (2, mk_goto) ];
@@ -787,7 +796,7 @@ let tests : unit Alcotest.test list =
 
     pin "SSA-12" "the VSA across a call keeps the callee-saved register and the restored SP"
       (fun () ->
-        let callee, _ = sub_of "ssa9_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "ssa9_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee (Arg.create ~intent:Out ret_reg (Var ret_reg))
         in
@@ -795,7 +804,7 @@ let tests : unit Alcotest.test list =
         let d_out = Def.create out (Bil.BinOp (Bil.PLUS, Bil.Var rbx, c64 1)) in
         let d_sp = Def.create sp_copy (Bil.Var sp) in
         let caller, _ =
-          sub_of "ssa9"
+          raw_sub_of "ssa9"
             [ [ Def.create rbx (c64 5);
                 Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, c64 8)) ],
               [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
@@ -816,7 +825,7 @@ let tests : unit Alcotest.test list =
         let n = 12 in
         let step () = [ Def.create r (Bil.BinOp (Bil.PLUS, Bil.Var r, c64 1)) ] in
         let sub, tids =
-          sub_of "ssa10"
+          raw_sub_of "ssa10"
             ([ [ Def.create r (c64 0) ], [ (1, mk_goto) ] ]
              @ Base.List.init n ~f:(fun k -> step (), [ (k + 2, mk_goto) ])
              @ [ [ Def.create out (Bil.Var r) ], [ (n + 2, mk_goto) ];
@@ -844,7 +853,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-19" "single-predecessor inputs retain edge bounds without narrowing the other branch"
       (fun () ->
         let x = int_param 0 and y = callee_saved 0 and z = callee_saved 1 in
-        let sub, tids = sub_of "edge_parameter"
+        let sub, tids = raw_sub_of "edge_parameter"
             [ [], [ (1, fun t -> mk_jmp_to t (guard_lt x 5)); (3, mk_goto) ];
               [ Def.create y Bil.(var x + c64 1) ], [ (2, mk_goto) ];
               [], [ (0, mk_ret) ];
@@ -868,7 +877,7 @@ let tests : unit Alcotest.test list =
         let x = int_param 0 and y = callee_saved 0 in
         let low = Bil.Cast (Bil.LOW, 8, Bil.Var x) in
         let bound = Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 0x25)) in
-        let sub, tids = sub_of "phi_slice"
+        let sub, tids = raw_sub_of "phi_slice"
             [ [], [ (4, fun t -> mk_jmp_to t (Bil.BinOp (Bil.LT, bound, low))); (1, mk_goto) ];
               [], [ (2, mk_goto) ];
               [ Def.create y (Bil.Cast (Bil.UNSIGNED, 64, low)) ], [ (3, mk_goto) ];
@@ -887,7 +896,7 @@ let tests : unit Alcotest.test list =
         let x = int_ret 0 and mem = memv "phi_slot_mem" in
         let load addr = Def.create x (Bil.Load
             (Bil.Var mem, c64 addr, LittleEndian, `r64)) in
-        let sub, _ = sub_of "phi_slot"
+        let sub, _ = raw_sub_of "phi_slot"
             [ [load 0x1000], [(1, mk_goto)];
               [], [(0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var x))))] ] in
         let ssa = ssa_of sub in
@@ -897,7 +906,7 @@ let tests : unit Alcotest.test list =
         check "SSA-21 singleton phi"
           (Hike_transfer.slot_of_target ~synth:Hike.Synth.empty ~sub:ssa target = Some 0x1000L);
         let merged addr =
-          let sub, tids = sub_of "phi_slots"
+          let sub, tids = raw_sub_of "phi_slots"
               [ [], [(1, fun t -> mk_jmp_to t (guard (int_param 0) 0)); (2, mk_goto)];
                 [load 0x1000], [(3, mk_goto)];
                 [load addr], [(3, mk_goto)];
@@ -913,7 +922,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-22" "an entry backedge has separate initial and loop phi operands"
       (fun () ->
         let x = int_param 0 and y = callee_saved 0 in
-        let sub, tids = sub_of "entry_loop"
+        let sub, tids = raw_sub_of "entry_loop"
             [ [Def.create x Bil.(var x + c64 1)],
               [(0, fun t -> mk_jmp_to t (guard_lt x 3)); (1, mk_goto)];
               [Def.create y (Bil.Var x)], [(0, mk_ret)] ] in
@@ -933,7 +942,7 @@ let tests : unit Alcotest.test list =
     pin "SSA-23" "an entry backedge update keeps unrelated blocks' versions"
       (fun () ->
         let x = int_param 0 and y = callee_saved 0 and z = callee_saved 1 in
-        let sub, tids = sub_of "entry_update"
+        let sub, tids = raw_sub_of "entry_update"
             [ [ Def.create x Bil.(var x + c64 1) ],
               [ (0, fun t -> mk_jmp_to t (guard_lt x 3)); (1, mk_goto) ];
               [ Def.create y (Bil.Var x) ], [ (0, mk_ret) ] ] in
@@ -973,14 +982,14 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let kept = int_param 0 and dropped = int_param 1 and ret = int_ret 0 in
         let abi = Hike.Abi.of_target (x86_target ()) in
-        let callee, _ = sub_of "relane_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "relane_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Base.List.fold
             (Arg.create ~intent:In kept (Bil.Var kept)
              :: Base.List.map abi.Hike.Abi.return_regs ~f:(fun r ->
                     Arg.create ~intent:Out r (Bil.Var r)))
             ~init:callee ~f:(fun s a -> Term.append arg_t s a) in
-        let caller, tids = sub_of "relane_caller"
+        let caller, tids = raw_sub_of "relane_caller"
             [ [], [ (1, mk_goto) ];
               [], [ (2, fun t -> mk_call_jmp t (Term.tid callee)) ];
               [ Def.create (v64 "relane_use") (Bil.Var ret) ], [ (0, mk_ret) ] ] in
@@ -1015,7 +1024,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let ctr = callee_saved 0 and arg = int_param 0 and out = callee_saved 1 in
         let cond = v1 "ssa25_cond" in
-        let callee, _ = sub_of "ssa25_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee, _ = raw_sub_of "ssa25_callee" [ [], [ (0, mk_ret) ] ] in
         let callee =
           Term.append arg_t callee
             (Arg.create ~intent:Out ret_reg (Bil.Var ret_reg))
@@ -1138,7 +1147,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let unused = v64 "stamp_unused" and arg = int_param 0 in
         let out = callee_saved 0 and target = Tid.create () in
-        let sub, tids = sub_of "stamp_local"
+        let sub, tids = raw_sub_of "stamp_local"
             [ [ Def.create unused (int_exp 7); Def.create arg (int_exp 10) ],
               [ (1, mk_goto) ];
               [ Def.create arg (Bil.BinOp (Bil.PLUS, Bil.Var arg, int_exp 1));
