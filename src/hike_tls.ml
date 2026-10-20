@@ -41,15 +41,17 @@ let rewrite_program ~synth ~addr_bits ~(tls : Hike_spec.tls_spec option)
                 method offset original rendered =
                   match bounds original with
                   | Some (lo, hi) when Int64.equal lo hi -> int lo
-                  | Some (lo, hi) when own lo hi ->
-                    let t = Base.Option.value_exn tls in
-                    Bil.BinOp (Bil.PLUS,
-                      Bil.BinOp (Bil.MINUS, rendered, address t.tls_base),
-                      int t.tls_base)
-                  | Some (lo, hi) when native lo hi ->
-                    Bil.BinOp (Bil.MINUS, rendered, address 0L)
-                  | _ -> failwith
-                      "hike-tls: cannot recover an offset spanning program TLS and native TCB storage"
+                  | Some (lo, hi) -> (
+                    match tls with
+                    | Some t when own lo hi ->
+                      Bil.BinOp (Bil.PLUS,
+                        Bil.BinOp (Bil.MINUS, rendered, address t.tls_base),
+                        int t.tls_base)
+                    | _ when native lo hi ->
+                      Bil.BinOp (Bil.MINUS, rendered, address 0L)
+                    | _ -> failwith
+                        "hike-tls: cannot recover an offset spanning program TLS and native TCB storage")
+                  | None -> rendered
 
                 method! map_exp exp =
                   let rendered = super#map_exp exp in
