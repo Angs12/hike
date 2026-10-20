@@ -75,9 +75,6 @@ let tag_targets_block ~synth (blk : blk term) : blk term =
           | _ -> j)
       | _ -> j)
 
-let tag_targets ~synth (sub : sub term) : sub term =
-  Term.map blk_t sub ~f:(tag_targets_block ~synth)
-
 (* Every occurrence of a temp, defs and reads alike. *)
 let qualify_block ~synth (blk : blk term) : blk term =
   let qualify = qualify ~synth in
@@ -96,9 +93,6 @@ let qualify_block ~synth (blk : blk term) : blk term =
     ~phi:(fun p ->
         Phi.with_lhs (Phi.map_exp p ~f:m#map_exp) (qualify (Phi.lhs p)))
     blk
-
-let qualify_sub ~synth (sub : sub term) : sub term =
-  Term.map blk_t sub ~f:(qualify_block ~synth)
 
 let run_block ~synth (blk : blk term) : blk term =
   qualify_block ~synth (tag_targets_block ~synth blk)

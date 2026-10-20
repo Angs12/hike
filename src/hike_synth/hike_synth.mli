@@ -98,8 +98,6 @@ val add_environment : table -> var -> table
 (* — General operations: every question about a synthetic variable. — *)
 (* Transient synthetic values and the lifter's virtual temporaries. *)
 val is_temporary : table:table -> Var.t -> bool
-(* A base operand: a module address or a storage base, never a cell. *)
-val is_base_var : table -> var -> bool
 val is_memory_var : table -> var -> bool
 val is_address_var : table -> var -> bool
 val module_addr_of : table -> var -> int64 option
@@ -121,6 +119,5 @@ val storage_span :
   addr_bits:int -> storage -> lo:int64 -> hi:int64 -> table ->
   table * storage_span
 val span_of_storage : storage_span list -> storage -> storage_span option
-(* The canonical base and memory vars of a synthetic storage var. *)
-val base_var : table -> addr_bits:int -> var -> var option
+(* The canonical memory var of a synthetic storage var. *)
 val memory_var : table -> addr_bits:int -> var -> var option

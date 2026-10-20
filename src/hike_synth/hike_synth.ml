@@ -204,11 +204,6 @@ let classify tbl v =
     | K_accumulator | K_let _ | K_temporary _ -> Some Transient)
   | None -> None
 
-let is_base_var tbl v =
-  match classify tbl v with
-  | Some (Module_addr _ | Thread_addr _ | Storage _) -> true
-  | _ -> false
-
 (* Every var the table knows, with its classification: the emitter's
    one enumeration of the synthetic vocabulary. *)
 let bindings tbl =
@@ -268,10 +263,6 @@ let storage_span ~addr_bits storage ~lo ~hi tbl =
 
 let span_of_storage (spans : storage_span list) storage =
   Base.List.find spans ~f:(fun s -> equal_storage s.ss_storage storage)
-
-let base_var tbl ~addr_bits v =
-  Base.Option.map ~f:(var ~addr_bits)
-    (Base.Option.bind (resolve tbl v) ~f:base_kind)
 
 let memory_var tbl ~addr_bits v =
   Base.Option.map ~f:(var ~addr_bits)

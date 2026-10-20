@@ -241,12 +241,6 @@ let sign_program ~(synth : Hike_synth.table)
 
 module Vsa = Cbat_vsa
 
-let ptr_kind_of ~(facts : Hike_kb.facts) ~(blk : blk term) ?def (e : exp) :
-    bool =
-  match facts.Hike_kb.denote ~blk ?def e with
-  | Ok ws -> Vsa.WordSet.in_stack_segment ws
-  | Error _ -> false
-
 (* SP and the caller window hold addresses in every SSA version. *)
 let is_address_reg ~(facts : Hike_kb.facts) (v : var) : bool =
   Var.same v facts.Hike_kb.abi.Hike_abi.sp
