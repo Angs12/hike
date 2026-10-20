@@ -488,6 +488,75 @@ let tests : unit Alcotest.test list =
         check "CE-28"
           (AI.frame_escaped after_call
           && Ws.is_top (ce_reads m (-8L) after_call)));
+
+    (* The focused call test: one machine call with a result, a memory
+       effect, and an outgoing stack argument.  The result is a fresh
+       version the continuation receives, the outgoing argument hull is
+       the exact span of the stack stores, and the call clears that
+       hull while the cell above it survives. *)
+    pin "CE-30"
+      "a machine call with a result, a memory effect, and stack arguments"
+      (fun () ->
+        let m = memv "ce_focus_m" in
+        let result_m = memv "ce_focus_result_m" in
+        let sp = ce_abi.Hike_abi.sp in
+        let store off value =
+          Def.create m
+            (Bil.Store
+               (Bil.Var m,
+                Bil.BinOp (Bil.PLUS, Bil.Var sp,
+                           Bil.Int (Cbat_word.to_word (w64 off))),
+                Bil.Int (Cbat_word.to_word (w64 value)), LittleEndian, `r64))
+        in
+        (* The continuation stores the call's result: the return lane is
+           read there, so the SSA form mints it a fresh version. *)
+        let keep_result =
+          Def.create result_m
+            (Bil.Store
+               (Bil.Var result_m, Bil.Int (Cbat_word.to_word (w64 0x40)),
+                Bil.Var (int_ret 0), LittleEndian, `r64))
+        in
+        let callee = mk_selfloop_callee "ce_focus_callee" in
+        let raw, tids =
+          raw_sub_of "ce_focus_caller"
+            [ [ store 8 1; store 16 2 ],
+              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
+              [ keep_result ], [ (0, mk_ret) ] ]
+        in
+        (* The outgoing argument hull: the span of the stack stores. *)
+        let block = Base.List.hd_exn (Term.enum blk_t raw |> Seq.to_list) in
+        let env, memory_var = ce_raw_env () in
+        let memory = AI.find_memory ce_idx env memory_var in
+        let memory =
+          Base.List.fold [ (0x1008L, 4); (0x1010L, 5); (0x1018L, 6) ]
+            ~init:memory ~f:(fun memory (address, value) ->
+                Mem.add memory ~key:(ce_mkey address)
+                  ~data:(Mem.Val.create (Ws.singleton (w64 value)) LittleEndian))
+        in
+        let env = AI.add_memory env ~key:memory_var ~data:memory in
+        let stack_args =
+          Ce.stack_arg_ranges ~synth:Hike.Synth.empty ~abi:ce_abi ~block ~entry:env env in
+        let post =
+          Ce.transfer ~stack_args ~abi:ce_abi ~preserved:Core.Int.Set.empty
+            ~site:{ Ce.summary = None; read_lanes = [] } env in
+        (* The result: the continuation receives the call's return lane as
+           a fresh version. *)
+        let ssa = ssa_sub raw in
+        let cont = Term.find_exn blk_t ssa tids.(1) in
+        let result_phi =
+          Term.enum phi_t cont
+          |> Seq.filter_map ~f:(fun p ->
+              if Var.same (Var.base (Phi.lhs p)) (int_ret 0) then Some (Phi.lhs p)
+              else None)
+          |> Seq.to_list
+        in
+        check "CE-30"
+          (stack_args = [ (w64 0x1008, w64 0x1017) ]
+           && Ws.is_top (ce_reads memory_var 0x1010L post)
+           && Ws.equal (ce_reads memory_var 0x1018L post) (Ws.singleton (w64 6))
+           && (match result_phi with
+               | [ p ] -> Var.index p > 0
+               | _ -> false)));
   ]
 
 let () = run "call_effects" tests

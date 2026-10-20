@@ -143,27 +143,18 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes
     Cbat_runctx.rc_nonneg =
       (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
 
-(* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
-let preserved_of_sub ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
-    ~def_reads (s : sub term) :
-    Int.Set.t =
+(* Preserved registers: the convention's SP plus its callee-saved GPRs.
+
+   The scan for the synthesizer's temporaries is gone: on the SSA path
+   every one of them carries a version, and a versioned word keeps its
+   value across a call ([Cbat_ai_representation.top_words_except]) --
+   no call redefines a version.  The base lanes the convention names
+   are the ones a call can clobber. *)
+let preserved_of_sub ~(abi : Hike_abi.t) (_s : sub term) : Int.Set.t =
   let regs =
-    abi.Hike_abi.sp :: abi.Hike_abi.thread_pointer :: abi.Hike_abi.callee_saved
+    abi.Hike_abi.sp :: abi.Hike_abi.thread_pointer :: abi.callee_saved
     |> Var.Set.of_list in
-  let virt =
-    Term.enum blk_t s
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.fold ~init:Var.Set.empty ~f:begin fun acc d ->
-      let acc =
-        if Hike_synth.is_temporary ~table:synth (Def.lhs d)
-        then Core.Set.add acc (Var.base (Def.lhs d)) else acc in
-      def_reads d
-      |> Core.Set.fold ~init:acc ~f:begin fun acc v ->
-        if Hike_synth.is_temporary ~table:synth v
-        then Core.Set.add acc (Var.base v) else acc
-      end
-    end in
-  Cbat_var_id.intern_set (Core.Set.union regs virt)
+  Cbat_var_id.intern_set regs
 
 
 (* Per-sub static edge table: per (block, jmp) accumulated cond, in
@@ -447,7 +438,7 @@ let static_graph_vsa
     ~(synth : Hike_synth.table ref)
     (s : Sub.t) (init : vsa_sol) : vsa_sol =
   let s = normalize_round_with_synth ~synth s in
-  let preserved = preserved_of_sub ~abi ~synth:!synth ~def_reads s in
+  let preserved = preserved_of_sub ~abi s in
   let edge_conds = edge_conds_of s in
   let disabled_conds = disabled_conds_of ~edge_conds s in
   (* Pseudo-nodes never reach denotation. *)
