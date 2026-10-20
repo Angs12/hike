@@ -153,6 +153,14 @@ let tests : unit Alcotest.test list =
         let e = Bil.Concat (Bil.Cast (Bil.HIGH, 0, Bil.Var x), Bil.Var y) in
         check "CO-18" (Exp.equal (Hike.Coerce.coerce_exp e) (Bil.Var y)));
 
+    (* CO-21: an unknown-width concat operand is not a zero-width one —
+       the concat keeps both operands. *)
+    pin "CO-21" "an unknown-width concat operand stays" (fun () ->
+        let x = memv "co21_x" in
+        let y = v64 "co21_y" in
+        let e = Bil.Concat (Bil.Var x, Bil.Var y) in
+        check "CO-21" (Exp.equal (Hike.Coerce.coerce_exp e) e));
+
     (* A Let expression's value width is the body's width, independent of
        the temporary binder's width. *)
     pin "CO-20" "a Let rhs is coerced from the body width"

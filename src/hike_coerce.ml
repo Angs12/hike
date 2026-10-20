@@ -15,24 +15,35 @@ let is_compare : Bil.binop -> bool = function
   | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE -> true
   | _ -> false
 
-(* The exp's own width; 0 when undeterminable (then no coercion). *)
-let exp_width (e : exp) : int =
+(* The exp's own width; [None] when undeterminable (then no coercion).
+   A known zero width is [Some 0], distinct from an unknown width. *)
+let exp_width (e : exp) : int option =
   Hike_exp_fold.fold
     (fun e child ->
+      let both f a b =
+        match child a, child b with
+        | Some x, Some y -> Some (f x y)
+        | _ -> None
+      in
       match e with
-      | Bil.Int w -> Word.bitwidth w
-      | Bil.Var v -> (match Var.typ v with Type.Imm n -> n | _ -> 0)
-      | Bil.Cast (_, n, _) -> n
-      | Bil.Extract (hi, lo, _) -> Stdlib.max 0 (hi - lo + 1)
-      | Bil.Concat (a, b) -> child a + child b
-      | Bil.Load (_, _, _, s) -> Size.in_bits s
+      | Bil.Int w -> Some (Word.bitwidth w)
+      | Bil.Var v -> (match Var.typ v with Type.Imm n -> Some n | _ -> None)
+      | Bil.Cast (_, n, _) -> Some n
+      | Bil.Extract (hi, lo, _) -> Some (Stdlib.max 0 (hi - lo + 1))
+      | Bil.Concat (a, b) -> both ( + ) a b
+      | Bil.Load (_, _, _, s) -> Some (Size.in_bits s)
       | Bil.Store (_, _, data, _, _) -> child data
       | Bil.BinOp (op, a, b) ->
-          if is_compare op then 1 else Stdlib.max (child a) (child b)
+          if is_compare op then Some 1
+          else (
+            match child a, child b with
+            | Some x, Some y -> Some (Stdlib.max x y)
+            | Some x, None | None, Some x -> Some x
+            | None, None -> None)
       | Bil.UnOp (_, a) -> child a
       | Bil.Ite (_, a, _) -> child a
       | Bil.Let (_, _, body) -> child body
-      | Bil.Unknown (_, t) -> (match t with Type.Imm n -> n | _ -> 0))
+      | Bil.Unknown (_, t) -> (match t with Type.Imm n -> Some n | _ -> None))
     e
 
 (* The width a var declares; 0 when not an integer lane. *)
@@ -81,13 +92,15 @@ let narrow_literal (c : Bil.cast) (w : int) (to_ : int) (e : exp) : exp option =
 
 (* Coerce [e] to width [w] with the emitter's def-birth rule. *)
 let coerce_to (w : int) (e : exp) : exp =
-  let we = exp_width e in
-  if we = 0 || we = w then e
-  else if we > w then
-    match narrow_literal Bil.UNSIGNED we w e with
-    | Some lit -> lit
-    | None -> Bil.Cast (Bil.UNSIGNED, w, e)
-  else widen Bil.UNSIGNED w we e
+  match exp_width e with
+  | None | Some 0 -> e
+  | Some we ->
+    if we = w then e
+    else if we > w then
+      match narrow_literal Bil.UNSIGNED we w e with
+      | Some lit -> lit
+      | None -> Bil.Cast (Bil.UNSIGNED, w, e)
+    else widen Bil.UNSIGNED w we e
 
 let coerce_to_known (w : int) (e : exp) : exp =
   if w = 0 then e else coerce_to w e
@@ -99,9 +112,11 @@ class coercer = object(self)
   method! map_binop op e1 e2 =
     let e1 = self#map_exp e1 in
     let e2 = self#map_exp e2 in
-    let w1 = exp_width e1 and w2 = exp_width e2 in
-    if w1 = 0 || w2 = 0 || w1 = w2 then Bil.BinOp (op, e1, e2)
-    else
+    match exp_width e1, exp_width e2 with
+    | None, _ | _, None -> Bil.BinOp (op, e1, e2)
+    | Some w1, Some w2 when w1 = 0 || w2 = 0 || w1 = w2 ->
+        Bil.BinOp (op, e1, e2)
+    | Some w1, Some w2 ->
       let c = cast_kind op in
       (* A comparison of an exactly-representable wider literal retypes the
          literal down instead of casting the other operand; for every other
@@ -121,20 +136,23 @@ class coercer = object(self)
     let cond = self#map_exp cond in
     let yes = self#map_exp yes in
     let no = self#map_exp no in
-    let wy = exp_width yes and wn = exp_width no in
-    if wy = 0 || wn = 0 || wy = wn then Bil.Ite (cond, yes, no)
-    else
+    match exp_width yes, exp_width no with
+    | None, _ | _, None -> Bil.Ite (cond, yes, no)
+    | Some wy, Some wn when wy = 0 || wn = 0 || wy = wn ->
+        Bil.Ite (cond, yes, no)
+    | Some wy, Some wn ->
       let w = Stdlib.max wy wn in
       Bil.Ite (cond, widen Bil.UNSIGNED w wy yes, widen Bil.UNSIGNED w wn no)
 
-  (* A zero-width operand contributes no bits: the concat is the other
-     operand. *)
+  (* A known zero-width operand contributes no bits: the concat is the
+     other operand.  An unknown width keeps both operands. *)
   method! map_concat e1 e2 =
     let e1 = self#map_exp e1 in
     let e2 = self#map_exp e2 in
-    if exp_width e1 = 0 then e2
-    else if exp_width e2 = 0 then e1
-    else Bil.Concat (e1, e2)
+    match exp_width e1, exp_width e2 with
+    | Some 0, _ -> e2
+    | _, Some 0 -> e1
+    | _ -> Bil.Concat (e1, e2)
 
   method! map_store ~mem ~addr ~exp:data e s =
     let mem = self#map_exp mem in

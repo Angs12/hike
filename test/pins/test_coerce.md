@@ -16,4 +16,5 @@ VSA and the emitter read it.
 | CO-16 | A phi's values are born at the phi's declared width. | Drop `coerce_phi`. | CO-16 red: the value stays 32-bit. |
 | CO-17 | A Let binder's value is born at the binder's declared width. | Drop the `map_let` coercion. | CO-17 red: the bound value stays 64-bit under a 32-bit binder. |
 | CO-18 | A zero-width concat operand contributes no bits — the concat reduces to the other operand (the emitter's `exp_size` rule). | Drop the zero-width rule in `map_concat`. | CO-18 red: the concat keeps both operands. |
+| CO-21 | An unknown-width concat operand is not a zero-width one; only a proven zero drops. | Treat `None` like `Some 0` in `map_concat`. | CO-21 red: the unknown-width operand disappears. |
 | CO-20 | A `Let` expression has the width of its body; its binder only widths the bound value. | In `exp_width`, use the binder's declared width for `Let`. | CO-20 red: a narrow body under a wide binder escapes the def's lhs-width coercion. |
