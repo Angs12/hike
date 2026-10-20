@@ -50,6 +50,10 @@ module Split_blocks = Hike_split_blocks
     phi terms; call rets mint versions stamped per block. *)
 module Ssa = Hike_ssa
 
+(** Post-SSA dead-code elimination: unread target-flag and virtual
+    temporaries. *)
+module Dce = Hike_dce
+
 (** The width-coercion pass: every exp the later passes read is made
     width-honest once, so the VSA and the emitter read uniform widths. *)
 module Coerce = Hike_coerce

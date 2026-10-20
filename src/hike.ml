@@ -32,6 +32,7 @@ module Attribution = Hike_attribution
 module Kb = Hike_kb
 module Types = Hike_types
 module Ssa = Hike_ssa
+module Dce = Hike_dce
 module Bil2llvm = Bil2llvm
 
 let emit output_program proj =

@@ -60,7 +60,8 @@
   test_decode
   test_worklist
   test_drive
-  test_integration)
+  test_integration
+  test_dce)
  (modules :standard \ harness common fixtures verify_ssa test_ssa_verify test_clp_equiv)
  (libraries
   hike_test

@@ -807,12 +807,14 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
 let reads = function
   | `Def d -> def_reads d
   | `Phi p -> phi_reads p
+  | `Arg a -> Exp.free_vars (Arg.rhs a)
   | `Jmp j ->
     Core.Set.union (jmp_operand_reads j) (Var.Set.of_list (effects j).reads)
 
 let writes = function
   | `Def d -> def_writes d
   | `Phi p -> phi_writes p
+  | `Arg a -> Var.Set.singleton (Arg.lhs a)
   | `Jmp j -> Var.Set.of_list (effects j).writes
 
 let map_effects ~read ~write j =

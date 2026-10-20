@@ -173,7 +173,8 @@ let normalize_function context ~synth ~is_entry sub =
 
 let prepare_function context ~synth ~is_entry sub =
   let sub, synth = normalize_function context ~synth ~is_entry sub in
-  (Hike_ssa.ssa_sub ~synth ~target:context.target sub, synth)
+  let sub = Hike_ssa.ssa_sub ~synth ~target:context.target sub in
+  (Hike_dce.dce_sub ~synth ~target:context.target sub, synth)
 
 (* Keep normalized blocks whose claims did not change. New normalization
    can also change an existing block (for example a flag's backward slice),
@@ -200,4 +201,4 @@ let update_function context ~synth ~is_entry ~old raw =
         else blk
       | None -> blk) in
   let sub, woken = Hike_ssa.update_sub_woken ~synth ~target:context.target ~old sub in
-  (sub, synth, woken)
+  (Hike_dce.dce_sub ~synth ~target:context.target sub, synth, woken)

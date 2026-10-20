@@ -282,9 +282,11 @@ val effects : jmp term -> Term_effects.t
     distinguish it. *)
 val effects_opt : jmp term -> Term_effects.t option
 val reads :
-  [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
+  [< `Def of def term | `Phi of phi term | `Arg of arg term | `Jmp of jmp term ] ->
+  Var.Set.t
 val writes :
-  [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
+  [< `Def of def term | `Phi of phi term | `Arg of arg term | `Jmp of jmp term ] ->
+  Var.Set.t
 val prepare_effects :
   synth:Hike_synth.table -> abi:Abi.t -> callee:(Tid.t -> sub term option) -> sub term -> sub term
 val map_effects : read:(var -> var) -> write:(var -> var) -> jmp term -> jmp term
