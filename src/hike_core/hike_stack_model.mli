@@ -277,6 +277,10 @@ module Term_effects : sig
 end
 
 val effects : jmp term -> Term_effects.t
+(** The jmp's own effects, [None] when no pass has derived them.  The
+    [effects] default is a pre-SSA convenience; an SSA consumer must
+    distinguish it. *)
+val effects_opt : jmp term -> Term_effects.t option
 val reads :
   [ `Def of def term | `Phi of phi term | `Jmp of jmp term ] -> Var.Set.t
 val writes :

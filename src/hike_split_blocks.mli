@@ -4,8 +4,13 @@ open Bap.Std
   val materialize :
     facts:Hike_kb.facts -> program term -> Hike_synth.table * program term
 
-  val split_sub : synth:Hike_synth.table -> sub term -> sub term
-  val normalize : synth:Hike_synth.table -> program term -> program term
+  val split_sub :
+    synth:Hike_synth.table -> target:Bap_core_theory.Theory.Target.t ->
+    sub term -> sub term
+
+  val normalize :
+    synth:Hike_synth.table -> target:Bap_core_theory.Theory.Target.t ->
+    program term -> program term
 
   (** The BIR's free registers over its explicit edges, memory vars
       dropped. *)

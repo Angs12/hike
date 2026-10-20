@@ -123,7 +123,8 @@ let pass_variadic proj =
 
 let pass_split_blocks proj =
   let synth = (Hike_kb.facts ()).synth in
-  Project.map_program proj ~f:(Hike_split_blocks.normalize ~synth)
+  Project.map_program proj
+    ~f:(Hike_split_blocks.normalize ~synth ~target:(Project.target proj))
 
 (* The pass chain in order: the plugin registers each stage as a pass
    and [lift] runs them in sequence, so the two entries cannot drift. *)

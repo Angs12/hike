@@ -718,8 +718,10 @@ let call_effects ~abi ~callee j =
     { Term_effects.reads; writes }
   | _ -> { Term_effects.reads = []; writes = [] }
 
+let effects_opt j = Term.get_attr j effects_tag
+
 let effects j =
-  match Term.get_attr j effects_tag with
+  match effects_opt j with
   | Some effects -> effects
   | None ->
     let abi = Abi.x86_64_sysv in

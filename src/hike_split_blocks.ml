@@ -222,124 +222,38 @@ let compilable_series (jmps : jmp term list) : bool =
       | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
       | _ -> false)
 
-(* The pieces, and for each original jmp edge the piece that now holds
-   it: a successor phi's incoming names that piece, not the old block. *)
-let pieces ~synth (blk : blk term) : blk term list * (Tid.t * Tid.t) list =
-  match Term.enum jmp_t blk |> Seq.to_list with
-  | [] | [ _ ] -> ([ blk ], [])
-  | jmps ->
-      let built =
-        Base.List.map jmps ~f:(fun j ->
-            match Jmp.kind j with
-            | Call _ ->
-              let action =
-                let bindings =
-                  Term.enum def_t blk
-                  |> Seq.filter ~f:(fun d -> Model.is_call_arg synth (Def.lhs d))
-                  |> Seq.map ~f:(fun d -> Def.create (Def.lhs d) (Def.rhs d))
-                  |> Seq.to_list
-                in
-                let action =
-                  Blk.create ~defs:bindings
-                    ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
-                in
-                if Term.has_attr blk Model.ssa_tag then
-                  Term.set_attr action Model.ssa_tag ()
-                else action
-              in
-              (Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action))),
-               Some action)
-            | _ -> (j, None))
-      in
-      let selectors = Base.List.map built ~f:fst in
-      let actions = Base.List.filter_map built ~f:snd in
-      let tids = Term.tid blk ::
-                 Base.List.map (Base.List.tl_exn selectors) ~f:(fun _ -> Tid.create ()) in
-      let next_tids =
-        Base.List.map (Base.List.tl_exn tids) ~f:Option.some @ [ None ] in
-      let pieces =
-        Base.List.mapi (Base.List.zip_exn (Base.List.zip_exn selectors tids) next_tids)
-          ~f:(fun i ((j, tid), next) ->
-            let blk_i =
-              if Int.equal i 0 then
-                Term.filter jmp_t blk ~f:(fun _ -> false)
-                |> Term.filter def_t ~f:(fun d ->
-                     Base.List.is_empty actions || not (Model.is_call_arg synth (Def.lhs d)))
-                |> fun b -> Term.append jmp_t b j
-              else
-                let b = Blk.create ~tid ~jmps:[ j ] () in
-                if Term.has_attr blk Model.ssa_tag then
-                  Term.set_attr b Model.ssa_tag ()
-                else b
-            in
-            match next with
-            | Some next_tid ->
-              Term.append jmp_t blk_i (Jmp.create (Goto (Direct next_tid)))
-            | None -> blk_i)
-      in
-      let holders =
-        Base.List.map2_exn jmps (Base.List.zip_exn built tids)
-          ~f:(fun j ((_, action), tid) ->
-            let holder = Base.Option.value_map action ~default:tid ~f:Term.tid in
-            match Jmp.kind j with
-            | Goto (Direct t) -> [ (t, holder) ]
-            | Call c ->
-              (match Call.return c with
-               | Some (Direct t) -> [ (t, holder) ]
-               | _ -> [])
-            | _ -> [])
-        |> Base.List.concat
-      in
-      (pieces @ actions, holders)
-
-let split_sub ~synth (sub : sub term) : sub term =
-  let moved = ref [] in
-  let sub = Term.concat_map blk_t sub ~f:(fun blk ->
-      let jmps = Term.enum jmp_t blk |> Seq.to_list in
-      let needs_split =
-        Base.List.length jmps > 2
-        || (Base.List.length jmps > 1
-            && Base.List.exists jmps ~f:(fun j ->
-                   match Jmp.kind j with Call _ -> true | _ -> false))
-      in
-      if not needs_split then [ blk ]
-      else if compilable_series jmps then begin
-        let bs, holders = pieces ~synth blk in
-        moved := (Term.tid blk, holders) :: !moved;
-        bs
-      end
-      else begin
-        Hike_diag.warn "split-blocks: sub %s: block %s: unsupported multi-jmp series; left unsplit"
-          (Sub.name sub) (Tid.name (Term.tid blk));
-        [ blk ]
-      end)
+(* The block/jmp split rides the SSA edit session: each jmp becomes its
+   own piece, a call moves into an action block, and successor phi edges
+   are duplicated per holder.  A series with another jmp stays whole. *)
+let split_sub ~synth ~target (sub : sub term) : sub term =
+  let t0 =
+    Hike_ssa.Edit.start ~synth ~target ~callee:(fun _ -> None) sub
   in
-  (* Each successor phi's incoming from a split block becomes one
-     incoming per piece that holds an edge to it, all carrying the value. *)
-  Base.List.fold !moved ~init:sub ~f:(fun sub (orig, holders) ->
-      Base.List.map holders ~f:fst
-      |> Base.List.dedup_and_sort ~compare:Tid.compare
-      |> Base.List.fold ~init:sub ~f:(fun sub succ ->
-          match Term.find blk_t sub succ with
-          | None -> sub
-          | Some dst ->
-            let srcs =
-              Base.List.filter_map holders ~f:(fun (s, h) ->
-                  Base.Option.some_if (Tid.equal s succ) h)
-              |> Base.List.dedup_and_sort ~compare:Tid.compare
-            in
-            Term.update blk_t sub
-              (Term.map phi_t dst ~f:(fun phi ->
-                   Phi.of_list (Phi.lhs phi)
-                     (Phi.values phi
-                      |> Seq.to_list
-                      |> Base.List.concat_map ~f:(fun (s, e) ->
-                             if Tid.equal s orig then
-                               Base.List.map srcs ~f:(fun h -> (h, e))
-                             else [ (s, e) ]))))))
+  let t =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:t0 ~f:(fun t blk ->
+           let jmps = Term.enum jmp_t blk |> Seq.to_list in
+           let needs_split =
+             Base.List.length jmps > 2
+             || (Base.List.length jmps > 1
+                 && Base.List.exists jmps ~f:(fun j ->
+                        match Jmp.kind j with Call _ -> true | _ -> false))
+           in
+           if not needs_split then t
+           else if compilable_series jmps then
+             Hike_ssa.Edit.split_block t (Term.tid blk)
+               (Base.List.map jmps ~f:(fun j -> [ j ]))
+           else begin
+             Hike_diag.warn
+               "split-blocks: sub %s: block %s: unsupported multi-jmp series; left unsplit"
+               (Sub.name sub) (Tid.name (Term.tid blk));
+             t
+           end)
+  in
+  fst (Hike_ssa.Edit.finish t)
 
-let normalize ~synth (prog : program term) : program term =
-  Term.map sub_t prog ~f:(split_sub ~synth)
+let normalize ~synth ~target (prog : program term) : program term =
+  Term.map sub_t prog ~f:(split_sub ~synth ~target)
 
 (* The sub's free registers, read at its own entries over the BIR's
    explicit edges.  A split piece carries no defs; its entering edge is

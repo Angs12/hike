@@ -657,9 +657,11 @@ let update_sub_woken_analyzed ~(old : sub term) ~(c : ctx)
             (match Term.find jmp_t previous jmp with
              | None -> false
              | Some j ->
+                 (* Only a versioned write is an identity worth keeping;
+                    a version-0 name is a pre-SSA lane, not a definition. *)
                  Base.List.exists
                    (Model.effects j).Model.Term_effects.writes
-                   ~f:(Var.equal v))
+                   ~f:(fun w -> Var.equal v w && Var.index w > 0))
       in
       rename_versions ~mode ~floor ~preds_of:c.preds_of ~abi:c.abi
         ~preserve_phi ~preserve_def ~preserve_write
@@ -799,6 +801,270 @@ let relane_sub ~synth ~target ~callee sub =
     Term.map blk_t refreshed ~f:(fun b ->
         Term.filter phi_t b ~f:(fun p ->
             Core.Set.mem (needed b) (Var.base (Phi.lhs p))))
+
+(* The SSA edit session: a mutable builder over an SSA sub.  A pass that
+   restructures the BIR after construction calls these primitives instead
+   of rebuilding terms by hand; [finish] derives the new calls' lanes and
+   commits the whole edit through the update once.  [split_block] gives
+   every call its own block and rewires the successor phis per piece. *)
+module Edit = struct
+  type t = {
+    synth : Hike_synth.table;
+    target : Bap_core_theory.Theory.Target.t;
+    callee : Tid.t -> sub term option;
+    original : sub term;
+    mutable current : sub term;
+    (* New or retargeted call jmps: their lanes are derived at finish. *)
+    mutable derive : Tid.Set.t;
+    (* Moved call jmps that had no effects: derive only if still bare. *)
+    mutable bare : Tid.Set.t;
+    (* A block with a new renamable definition needs the update. *)
+    mutable mint : bool;
+  }
+
+  let start ~synth ~target ~callee sub =
+    { synth;
+      target;
+      callee;
+      original = sub;
+      current = sub;
+      derive = Tid.Set.empty;
+      bare = Tid.Set.empty;
+      mint = false }
+
+  let view t = t.current
+
+  let update_blk t tid f =
+    match Term.find blk_t t.current tid with
+    | None ->
+        failwith
+          (Printf.sprintf "Hike_ssa.Edit: no block %s" (Tid.name tid))
+    | Some b ->
+        t.current <- Term.update blk_t t.current (f b);
+        t
+
+  let append_jmp t blk j =
+    (match Jmp.kind j with
+     | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+     | _ -> ());
+    update_blk t blk (fun b -> Term.append jmp_t b j)
+
+  let replace_jmp t (old : jmp term) (j : jmp term) =
+    let old_tid = Term.tid old in
+    let found = ref false in
+    t.current <-
+      Term.map blk_t t.current ~f:(fun b ->
+          if Base.Option.is_none (Term.find jmp_t b old_tid) then b
+          else begin
+            found := true;
+            Term.map jmp_t b ~f:(fun x ->
+                if Tid.equal (Term.tid x) old_tid then j else x)
+          end);
+    if not !found then
+      failwith
+        (Printf.sprintf "Hike_ssa.Edit: no jmp %s" (Tid.name old_tid));
+    (match Jmp.kind j with
+     | Call _ -> t.derive <- Core.Set.add t.derive (Term.tid j)
+     | _ -> ());
+    t
+
+  let remove_jmp t tid =
+    t.current <-
+      Term.map blk_t t.current ~f:(fun b ->
+          Term.filter jmp_t b ~f:(fun j -> not (Tid.equal (Term.tid j) tid)));
+    t
+
+  let add_block t b =
+    let call_arg d = Model.is_call_arg t.synth (Def.lhs d) in
+    if (Term.enum phi_t b |> Seq.is_empty |> not)
+       || (Term.enum def_t b |> Seq.exists ~f:(fun d -> not (call_arg d)))
+    then t.mint <- true;
+    t.current <- Term.append blk_t t.current b;
+    t
+
+  let remove_block t tid =
+    t.current <-
+      Term.filter blk_t t.current ~f:(fun b ->
+          not (Tid.equal (Term.tid b) tid));
+    t
+
+  let tids_of js = Core.Set.of_list (module Tid) (Base.List.map js ~f:Term.tid)
+
+  (* The pieces and, per original edge, the block that now holds it:
+     every jmp must be a direct goto or a direct call.  The first piece
+     keeps the tid, phis and defs; a call moves into its own action block
+     with the call-arg defs.  Successor phi edges from the original block
+     are duplicated per holder. *)
+  let split_block t blk_tid groups =
+    match Term.find blk_t t.current blk_tid with
+    | None ->
+        failwith
+          (Printf.sprintf "Hike_ssa.Edit: no block %s" (Tid.name blk_tid))
+    | Some blk ->
+      let jmps = Term.enum jmp_t blk |> Seq.to_list in
+      let flat = Base.List.concat groups in
+      if not (Core.Set.equal (tids_of flat) (tids_of jmps)) then
+        failwith
+          (Printf.sprintf
+             "Hike_ssa.Edit: split of block %s does not cover its jmps"
+             (Tid.name blk_tid));
+      let edge_of j =
+        match Jmp.kind j with
+        | Goto (Direct target) -> `Goto target
+        | Call c -> (
+            match Call.return c with
+            | Some (Direct return) -> `Call return
+            | None -> `No_edge
+            | Some _ ->
+                failwith
+                  (Printf.sprintf
+                     "Hike_ssa.Edit: split of block %s: call %s has no \
+                      direct return"
+                     (Tid.name blk_tid) (Tid.name (Term.tid j))))
+        | _ ->
+            failwith
+              (Printf.sprintf
+                 "Hike_ssa.Edit: split of block %s: jmp %s is not a direct \
+                  goto or call"
+                 (Tid.name blk_tid) (Tid.name (Term.tid j)))
+      in
+      let ssa = Term.has_attr blk Model.ssa_tag in
+      let tag b = if ssa then Term.set_attr b Model.ssa_tag () else b in
+      let call_args =
+        Term.enum def_t blk
+        |> Seq.filter ~f:(fun d -> Model.is_call_arg t.synth (Def.lhs d))
+        |> Seq.to_list
+      in
+      let has_actions =
+        Base.List.exists flat ~f:(fun j ->
+            match Jmp.kind j with Call _ -> true | _ -> false)
+      in
+      let built =
+        Base.List.map groups ~f:(fun group ->
+            Base.List.map group ~f:(fun j ->
+                let edge = edge_of j in
+                match Jmp.kind j with
+                | Call _ ->
+                    let action =
+                      Blk.create ~defs:call_args
+                        ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ]
+                        ()
+                      |> tag
+                    in
+                    ( Jmp.create ~cond:(Jmp.cond j)
+                        (Goto (Direct (Term.tid action))),
+                      Some action,
+                      edge )
+                | _ -> (j, None, edge)))
+      in
+      let piece_tids =
+        Term.tid blk
+        :: Base.List.map (Base.List.tl_exn groups) ~f:(fun _ -> Tid.create ())
+      in
+      let pieces =
+        Base.List.mapi built ~f:(fun i group ->
+            let selectors = Base.List.map group ~f:(fun (j, _, _) -> j) in
+            let piece =
+              if Int.equal i 0 then
+                Term.filter jmp_t blk ~f:(Fun.const false)
+                |> Term.filter def_t ~f:(fun d ->
+                       (not has_actions)
+                       || not (Model.is_call_arg t.synth (Def.lhs d)))
+                |> fun b ->
+                Base.List.fold selectors ~init:b ~f:(Term.append jmp_t)
+                |> tag
+              else
+                Blk.create ~tid:(Base.List.nth_exn piece_tids i)
+                  ~jmps:selectors ()
+                |> tag
+            in
+            if i + 1 < Base.List.length built then
+              Term.append jmp_t piece
+                (Jmp.create
+                   (Goto
+                      (Direct
+                         (Base.List.nth_exn piece_tids (i + 1)))))
+            else piece)
+      in
+      let actions =
+        Base.List.concat_map built ~f:(fun group ->
+            Base.List.filter_map group ~f:(fun (_, action, _) -> action))
+      in
+      let holders =
+        Base.List.concat
+          (Base.List.mapi built ~f:(fun i group ->
+               Base.List.filter_map group ~f:(fun (_, action, edge) ->
+                   match edge with
+                   | `Call return ->
+                       Some
+                         (return, Term.tid (Base.Option.value_exn action))
+                   | `Goto target ->
+                       Some (target, Base.List.nth_exn piece_tids i)
+                   | `No_edge -> None)))
+      in
+      let base =
+        Term.filter blk_t t.current ~f:(fun b ->
+            not (Tid.equal (Term.tid b) blk_tid))
+      in
+      let current =
+        Base.List.fold (pieces @ actions) ~init:base ~f:(Term.append blk_t)
+      in
+      let current =
+        Term.map blk_t current ~f:(fun dst ->
+            let dst_tid = Term.tid dst in
+            let sources =
+              Base.List.filter_map holders
+                ~f:(fun (succ, holder) ->
+                    Base.Option.some_if (Tid.equal succ dst_tid) holder)
+              |> Base.List.dedup_and_sort ~compare:Tid.compare
+            in
+            Term.map phi_t dst ~f:(fun phi ->
+                let values =
+                  Phi.values phi |> Seq.to_list
+                  |> Base.List.concat_map ~f:(fun (src, e) ->
+                         if Tid.equal src blk_tid then
+                           Base.List.map sources ~f:(fun holder -> (holder, e))
+                         else [ (src, e) ])
+                in
+                Phi.of_list (Phi.lhs phi) values))
+      in
+      t.current <- current;
+      Base.List.iter actions ~f:(fun b ->
+          Term.enum jmp_t b
+          |> Seq.iter ~f:(fun j ->
+                 if Base.Option.is_none (Model.effects_opt j) then
+                   t.bare <- Core.Set.add t.bare (Term.tid j)));
+      t
+
+  let finish t =
+    if Base.phys_equal t.current t.original then (t.original, Tid.Set.empty)
+    else if (not t.mint) && Core.Set.is_empty t.derive
+            && Core.Set.is_empty t.bare
+    then (t.current, Tid.Set.empty)
+    else
+      let current =
+        if Core.Set.is_empty t.derive && Core.Set.is_empty t.bare then
+          t.current
+        else
+          let abi = Abi.of_target t.target in
+          let derived =
+            Model.prepare_effects ~synth:t.synth ~abi ~callee:t.callee t.current
+          in
+          Term.map blk_t t.current ~f:(fun b ->
+              let db = Term.find_exn blk_t derived (Term.tid b) in
+              Term.map jmp_t b ~f:(fun j ->
+                  let tid = Term.tid j in
+                  let want =
+                    Core.Set.mem t.derive tid
+                    || (Core.Set.mem t.bare tid
+                        && Base.Option.is_none (Model.effects_opt j))
+                  in
+                  if want then
+                    Base.Option.value (Term.find jmp_t db tid) ~default:j
+                  else j))
+      in
+      update_sub_woken ~synth:t.synth ~target:t.target ~old:t.original current
+end
 
 (* The SSA of a lifted sub: its calls read and write the machine
    convention and its returns the ABI's return lanes. *)

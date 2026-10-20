@@ -82,7 +82,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ];
               [], [] ]
         in
-        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub in
+        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) sub in
         check "SBLK-03"
           (tids_of sub = tids_of split
           && Base.List.length (blocks_of split) = 3));
@@ -105,7 +105,7 @@ let tests : unit Alcotest.test list =
         let split_holder = ref sub in
         let err =
           capture_stderr (fun () ->
-              split_holder := Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub)
+              split_holder := Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) sub)
         in
         check "SBLK-04"
           (contains_substring err "hike: split-blocks:"
@@ -132,7 +132,7 @@ let tests : unit Alcotest.test list =
                       Bil.Int (Cbat_word.to_word (w64 2)))) ],
               [ (0, mk_ret) ] ]
         in
-        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty sub in
+        let split = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) sub in
         let free =
           Hike.Split_blocks.free_regs ~synth:Hike.Synth.empty
             ~abi:Hike.Abi.x86_64_sysv split
@@ -289,7 +289,7 @@ let tests : unit Alcotest.test list =
                      |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "sb9")
                      |> Base.Option.value_exn in
         let before = find prog in
-        let after = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty before in
+        let after = Hike.Split_blocks.split_sub ~synth:Hike.Synth.empty ~target:(x86_target ()) before in
         let graph = Sub.to_graph after in
         let preds tid =
           Graphs.Tid.Node.preds tid graph |> Seq.to_list

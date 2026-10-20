@@ -1179,6 +1179,140 @@ let tests : unit Alcotest.test list =
                     check "SSA-26 boundary writes retain their version"
                       (Option.equal Var.equal
                          (Hike.Stack_model.boundary_write b v) (Some v))))));
+
+    pin "SSA-28"
+      "an Edit session derives a new call's lanes and wires its result"
+      (fun () ->
+        let arg = int_param 0 and ret = int_ret 0 in
+        let callee, _ = raw_sub_of "edit_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Term.append arg_t callee (Arg.create ~intent:Out ret (Bil.Var ret))
+          |> fun s ->
+          Term.append arg_t s (Arg.create ~intent:In arg (Bil.Var arg))
+        in
+        let caller, tids = raw_sub_of "edit_caller"
+            [ [], [ (1, mk_goto) ];
+              [ Def.create (v64 "edit_use") (Bil.Var ret) ], [ (0, mk_ret) ] ]
+        in
+        let ssa = ssa_of caller in
+        let before = Term.find_exn blk_t ssa tids.(0) in
+        let goto = Term.first jmp_t before |> Base.Option.value_exn in
+        let call =
+          Jmp.create ~cond:(Bil.Int (Word.one 1))
+            (Call
+               (Call.create ~return:(Direct tids.(1))
+                  ~target:(Direct (Term.tid callee)) ()))
+        in
+        let callee_of t =
+          Base.Option.some_if (Tid.equal t (Term.tid callee)) callee
+        in
+        let edit =
+          Hike.Ssa.Edit.start ~synth:Hike.Synth.empty ~target:(x86_target ())
+            ~callee:callee_of ssa
+        in
+        let edit = Hike.Ssa.Edit.remove_jmp edit (Term.tid goto) in
+        let edit = Hike.Ssa.Edit.append_jmp edit tids.(0) call in
+        let after, woken = Hike.Ssa.Edit.finish edit in
+        check "SSA-28 woken" (not (Core.Set.is_empty woken));
+        let call_blk = Term.find_exn blk_t after tids.(0) in
+        let call' =
+          Term.enum jmp_t call_blk
+          |> Seq.find_map ~f:(fun j ->
+                 Base.Option.some_if (Hike.Ssa.is_call_jmp j) j)
+          |> Base.Option.value_exn
+        in
+        let writes =
+          (Hike.Stack_model.effects call').Hike.Stack_model.Term_effects.writes
+        in
+        check "SSA-28 writes are versioned"
+          (not (Base.List.is_empty writes)
+           && Base.List.for_all writes ~f:(fun v -> Var.index v > 0));
+        check "SSA-28 result lane is a write"
+          (Base.List.exists writes ~f:(fun v -> Var.same v ret));
+        let succ = Term.find_exn blk_t after tids.(1) in
+        check "SSA-28 successor phi reads the mint"
+          (Term.enum phi_t succ
+          |> Seq.exists ~f:(fun p ->
+                 Var.same (Var.base (Phi.lhs p)) ret
+                 && Phi.values p
+                    |> Seq.exists ~f:(fun (src, e) ->
+                           Tid.equal src tids.(0)
+                           && match e with
+                              | Bil.Var v ->
+                                  Base.List.exists writes ~f:(Var.equal v)
+                              | _ -> false))));
+
+    pin "SSA-29"
+      "Edit.split_block gives a call its own block and rewires the successor phis"
+      (fun () ->
+        let ret = int_ret 0 and arg = int_param 0 in
+        let callee, _ = raw_sub_of "edit_split_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Term.append arg_t callee (Arg.create ~intent:Out ret (Bil.Var ret))
+          |> fun s ->
+          Term.append arg_t s (Arg.create ~intent:In arg (Bil.Var arg))
+        in
+        let caller, tids = raw_sub_of "edit_split_caller"
+            [ [], [ (1, mk_goto) ];
+              [], [ (2, fun t -> mk_call_jmp t (Term.tid callee));
+                    (2, mk_goto) ];
+              [ Def.create (v64 "edit_split_use") (Bil.Var ret) ], [ (0, mk_ret) ] ]
+        in
+        let ssa = ssa_of caller in
+        let blk = Term.find_exn blk_t ssa tids.(1) in
+        let js = Term.enum jmp_t blk |> Seq.to_list in
+        let call = Base.List.find_exn js ~f:Hike.Ssa.is_call_jmp in
+        let goto = Base.List.find_exn js ~f:(fun j -> not (Hike.Ssa.is_call_jmp j)) in
+        let edit =
+          Hike.Ssa.Edit.start ~synth:Hike.Synth.empty ~target:(x86_target ())
+            ~callee:(fun t ->
+              Base.Option.some_if (Tid.equal t (Term.tid callee)) callee)
+            ssa
+        in
+        let after, _ =
+          Hike.Ssa.Edit.finish
+            (Hike.Ssa.Edit.split_block edit tids.(1)
+               [ [ call ]; [ goto ] ])
+        in
+        let holder_of j =
+          Term.enum blk_t after
+          |> Seq.find_map ~f:(fun b ->
+                 Base.Option.some_if
+                   (Term.enum jmp_t b |> Seq.exists ~f:(fun x ->
+                        Tid.equal (Term.tid x) (Term.tid j)))
+                   (Term.tid b))
+        in
+        check "SSA-29 the call moved to its own block"
+          (match holder_of call, holder_of goto with
+           | Some a, Some g -> not (Tid.equal a g)
+           | _ -> false);
+        let call_holder =
+          Base.Option.value_exn (holder_of call)
+        in
+        let call' =
+          Term.find_exn blk_t after call_holder
+          |> fun b ->
+          Term.enum jmp_t b
+          |> Seq.find_map ~f:(fun j ->
+                 Base.Option.some_if
+                   (Tid.equal (Term.tid j) (Term.tid call)) j)
+          |> Base.Option.value_exn
+        in
+        let writes =
+          (Hike.Stack_model.effects call').Hike.Stack_model.Term_effects.writes
+        in
+        let succ = Term.find_exn blk_t after tids.(2) in
+        check "SSA-29 the successor keeps one incoming per holder"
+          (Term.enum phi_t succ
+          |> Seq.exists ~f:(fun p ->
+                 Var.same (Var.base (Phi.lhs p)) ret
+                 && Phi.values p
+                    |> Seq.exists ~f:(fun (src, e) ->
+                           Tid.equal src call_holder
+                           && match e with
+                              | Bil.Var v ->
+                                  Base.List.exists writes ~f:(Var.equal v)
+                              | _ -> false))));
   ]
 
 let () = run "hike_ssa" tests

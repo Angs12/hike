@@ -62,3 +62,36 @@ open Bap_core_theory
 
   (** The sub in pre-SSA form: base names, no phis, no version stamps. *)
   val unssa_sub : sub term -> sub term
+
+  (** A mutable edit session over an SSA sub.  Restructuring passes use
+      the primitives instead of rebuilding terms; [finish] derives the
+      new calls' lanes from [callee] and commits the whole edit through
+      one update.  Existing identities are preserved. *)
+  module Edit : sig
+    type t
+
+    val start :
+      synth:Hike_synth.table -> target:Theory.Target.t ->
+      callee:(Tid.t -> sub term option) -> sub term -> t
+
+    val view : t -> sub term
+
+    val append_jmp : t -> Tid.t -> jmp term -> t
+
+    val replace_jmp : t -> jmp term -> jmp term -> t
+
+    val remove_jmp : t -> Tid.t -> t
+
+    val add_block : t -> blk term -> t
+
+    val remove_block : t -> Tid.t -> t
+
+    (** Split a block into the given groups, one piece per group; a call
+        moves into its own action block and successor phi edges are
+        duplicated per holder. *)
+    val split_block : t -> Tid.t -> jmp term list list -> t
+
+    (** Commit the edit: derive the edited calls' lanes, mint versions,
+        rewire phis, and return the sub with the VSA invalidation set. *)
+    val finish : t -> sub term * Tid.Set.t
+  end
