@@ -131,7 +131,13 @@ let combine ~(or_ : bool) (u : atom) (v : atom) : exp option =
 let fold_binop op a b =
   match op, b with
   | (Bil.DIVIDE | Bil.SDIVIDE | Bil.MOD | Bil.SMOD), b when Word.is_zero b -> None
-  | _ -> Option.try_with (fun () -> Bil.Apply.binop op a b)
+  | _ -> (
+      match Option.try_with (fun () -> Bil.Apply.binop op a b) with
+      | Some _ as folded -> folded
+      | None ->
+        Hike_diag.debug ~tag:"hike-dbg-backsubst" (fun () ->
+            Printf.sprintf "binop %s did not fold" (Bil.string_of_binop op));
+        None)
 
 (* The connective chain of one operator, flattened. *)
 let rec chain (op : binop) (e : exp) : exp list =
@@ -334,7 +340,12 @@ let forms (g : graph) (b0 : blk term) (e : exp) : form list =
             else
               let e = simplify (subst lhs (Def.rhs d) e) in
               let substituted = Core.Set.add substituted lhs in
-              if size e > size_cap then (e, substituted, acc, defined, true)
+              if size e > size_cap then begin
+                Hike_diag.debug ~tag:"hike-dbg-backsubst" (fun () ->
+                    Printf.sprintf "size cap %d at %s" size_cap
+                      (Tid.name (Term.tid d)));
+                (e, substituted, acc, defined, true)
+              end
               else
                 let f =
                   { exp = e; blk; at = Some d; hops; pos = n - 1 - k;
