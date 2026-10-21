@@ -172,11 +172,17 @@ let define_set ~llvm_ctx md : Llvm.llvalue =
 (* The helpers, defined on first use: only a module with a runtime sub
    carries them. *)
 let helpers ~llvm_ctx md : Llvm.llvalue * Llvm.llvalue =
-  match Llvm.lookup_function enter_name md, Llvm.lookup_function set_name md with
-  | Some enter, Some set -> (enter, set)
-  | _ ->
-    let enter = define_enter ~llvm_ctx md ~reserve:runtime_stack_bytes in
-    (enter, define_set ~llvm_ctx md)
+  let enter =
+    match Llvm.lookup_function enter_name md with
+    | Some fn -> fn
+    | None -> define_enter ~llvm_ctx md ~reserve:runtime_stack_bytes
+  in
+  let set =
+    match Llvm.lookup_function set_name md with
+    | Some fn -> fn
+    | None -> define_set ~llvm_ctx md
+  in
+  (enter, set)
 
 let module_of b = Llvm.global_parent (Llvm.block_parent (Llvm.insertion_block b))
 
