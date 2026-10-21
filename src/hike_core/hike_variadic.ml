@@ -23,9 +23,15 @@ let is_construction ~(abi : Abi.t) ~(entry : int64)
   let word = abi.Abi.word in
   let a_base = Model.args_base ~entry ~word in
   let params = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs in
+  (* A failed denotation cannot prove the construction, so the sub stays
+     unstamped.  That is an ABI under-approximation, not a false variadic:
+     a false positive would change the emitted convention. *)
   let positions ~blk ~def (e : exp) : (int64 * int64) option =
     match denote ~blk ~def e with
-    | Error _ -> None
+    | Error err ->
+      Hike_diag.debug ~tag:"hike-dbg-variadic" (fun () ->
+          Printf.sprintf "denotation failed: %s" (Type.Error.to_string err));
+      None
     | Ok ws -> Model.positions_of_offsets ws
   in
   let in_frame ~blk ~def (e : exp) : bool =
