@@ -321,34 +321,10 @@ let canonical_ret (j : jmp term) : jmp term =
   else Jmp.with_cond ret_jmp (Jmp.cond j)
 
 let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
-    (j : jmp term) : jmp term list option =
-  match Jmp.kind j with
-  | Call c -> (
-      match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
-          Some [ canonical_ret j ]
-      | _ -> None)
-  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
-      Some [ canonical_ret j ]
-  | _ -> None
-
-(* Rebuilds [blk] replacing each jmp its classifier rewrites; a
-   classifier [None] keeps the jmp. *)
-let splice_jmps (blk : blk term)
-    ~(classify : jmp term -> jmp term list option) : blk term =
-  let js = Seq.to_list (Term.enum jmp_t blk) in
-  let decided =
-    Base.List.filter_map js ~f:(fun j ->
-        Base.Option.map (classify j) ~f:(fun js' -> (Term.tid j, js')))
-  in
-  match decided with
-  | [] -> blk
-  | _ ->
-      let rewr = Core.Map.of_alist_exn (module Tid) decided in
-      Term.concat_map jmp_t blk ~f:(fun j ->
-          match Core.Map.find rewr (Term.tid j) with
-          | Some js' -> js'
-          | None -> [ j ])
+    (j : jmp term) : jmp term =
+  match jump_target j with
+  | Some (Bil.Var v) when retaddr_read ~last_defs ~retaddr v -> canonical_ret j
+  | _ -> j
 
 (* The drain's one BIR change: the retaddr read becomes the canonical
    return edge.  The bounded dispatches materialize later, in
@@ -357,8 +333,7 @@ let splice_jmps (blk : blk term)
 let rewrite_jmps_once ~(retaddr : Tid.Set.t) (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       let last_defs = Vsa.last_defs blk in
-      splice_jmps blk
-        ~classify:(ret_rewrite ~last_defs ~retaddr))
+      Term.map jmp_t blk ~f:(ret_rewrite ~last_defs ~retaddr))
 
 (* Each block's follower in [sub]'s term order: the false edge of a
    conditional goto whose block has no explicit one. *)
@@ -416,26 +391,25 @@ let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
     let find_block t = Core.Map.find by_tid t in
     let all = Core.Set.of_list (module Tid) (Base.List.map blocks ~f:Term.tid) in
     let fall_tbl = fallthroughs sub in
-    let indirect_targets ~blk texp : Tid.Set.t option =
+    let indirect_targets ~blk texp : Tid.Set.t =
       let last_defs = Vsa.last_defs blk in
       match texp with
-      | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> Some Tid.Set.empty
+      | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> Tid.Set.empty
       | _ -> (
         match
           Base.Option.bind (Hike_transfer.slot_of_target ~synth ~index texp)
             ~f:(fun a -> Base.Option.some_if (Core.Set.mem foreign_slots a) a)
         with
-        | Some _ -> Some Tid.Set.empty
+        | Some _ -> Tid.Set.empty
         | None ->
           match case_words ~denote ~block_addrs ~last_defs ~blk texp with
-          | None -> Some all
+          | None -> all
           | Some ws ->
-            Some
-              (Base.List.fold ws ~init:Tid.Set.empty ~f:(fun acc w ->
-                   let a = Cbat_word.to_word w in
-                   match Core.Map.find block_addrs a with
-                   | Some t -> Core.Set.add acc t
-                   | _ -> acc)))
+            Base.List.fold ws ~init:Tid.Set.empty ~f:(fun acc w ->
+                let a = Cbat_word.to_word w in
+                match Core.Map.find block_addrs a with
+                | Some t -> Core.Set.add acc t
+                | _ -> acc))
     in
     let rec go seen blk =
       if Core.Set.mem seen (Term.tid blk) then seen
@@ -449,9 +423,7 @@ let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
               | None -> seen)
         in
         let indirect seen ~blk texp =
-          match indirect_targets ~blk texp with
-          | None -> Core.Set.union seen all
-          | Some extra -> follow_direct seen (Core.Set.to_list extra)
+          follow_direct seen (Core.Set.to_list (indirect_targets ~blk texp))
         in
         let seen =
           Base.List.fold js ~init:seen ~f:(fun seen j ->
