@@ -29,9 +29,9 @@ let qualify ~synth v =
 (* A mapped FP call's target names its operand width: the nearest
    preceding temp def in term order.  The sized spelling is the table's
    own, so no consumer resolves a width. *)
-let tag_targets_block ~synth (blk : blk term) : blk term =
+let tag_targets_block ~word_bits ~synth (blk : blk term) : blk term =
   let widths = ref Tid.Map.empty in
-  let cur = ref 64 in
+  let cur = ref word_bits in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
          match elt with
@@ -94,14 +94,14 @@ let qualify_block ~synth (blk : blk term) : blk term =
         Phi.with_lhs (Phi.map_exp p ~f:m#map_exp) (qualify (Phi.lhs p)))
     blk
 
-let run_block ~synth (blk : blk term) : blk term =
-  qualify_block ~synth (tag_targets_block ~synth blk)
+let run_block ~word_bits ~synth (blk : blk term) : blk term =
+  qualify_block ~synth (tag_targets_block ~word_bits ~synth blk)
 
-let run_program ~(synth : Hike_synth.table) (prog : program term) :
+let run_program ~word_bits ~(synth : Hike_synth.table) (prog : program term) :
     Hike_synth.table * program term =
   let cell = ref synth in
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
-        Term.map blk_t sub ~f:(run_block ~synth:cell))
+        Term.map blk_t sub ~f:(run_block ~word_bits ~synth:cell))
   in
   (!cell, prog)

@@ -54,7 +54,8 @@ let fp_fixture (intr : string) (w : int) : sub term =
          ([], [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ]) ])
 
 let fp_run (subs : sub term list) : Hike.Synth.table * program term =
-  Hike.Fp.run_program ~synth:Hike.Synth.empty (Program.create ~subs ())
+  Hike.Fp.run_program ~word_bits:64 ~synth:Hike.Synth.empty
+    (Program.create ~subs ())
 
 let fp_prog (subs : sub term list) : program term = snd (fp_run subs)
 
@@ -110,7 +111,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let sub = fp_fixture "intrinsic:forder_ieee754_binary" 80 in
         let refused =
-          match Hike.Fp.run_program ~synth:Hike.Synth.empty
+          match Hike.Fp.run_program ~word_bits:64 ~synth:Hike.Synth.empty
                   (Program.create ~subs:[ sub ] ()) with
           | _ -> false
           | exception Failure msg ->

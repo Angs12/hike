@@ -170,7 +170,8 @@ let production_input (proj : Project.t) : Hike.Synth.table * program term =
     |> Term.map sub_t ~f:compile
   in
   let synth, program = Hike.Split_mem.normalize ~synth:!synth program in
-  Hike.Fp.run_program ~synth (Hike.Coerce.coerce_program program)
+  Hike.Fp.run_program ~word_bits:addr_bits ~synth
+    (Hike.Coerce.coerce_program program)
 
 (* The analysis image set: never-written memory, relocated words resolved. *)
 let section_images (proj : Project.t) : Vsa.section_image list =

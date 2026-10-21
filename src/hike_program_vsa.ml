@@ -81,7 +81,7 @@ let normalize context ~synth program =
   in
   let synth, program = Hike_split_mem.normalize ~synth:!cell program in
   let program = Hike_coerce.coerce_program program in
-  Hike_fp.run_program ~synth program
+  Hike_fp.run_program ~word_bits:addr_bits ~synth program
 
 (* The rip tag is read once, here: a tagged literal naming a function
    entry or a data section becomes a module address, so every
@@ -146,7 +146,9 @@ let normalize_blocks context ~synth ~is_address (blocks : blk term list) :
     Base.List.map blocks ~f:(Hike_split_mem.split_block ~synth:cell)
   in
   let blocks = Base.List.map blocks ~f:Hike_coerce.coerce_block in
-  let blocks = Base.List.map blocks ~f:(Hike_fp.run_block ~synth:cell) in
+  let blocks =
+    Base.List.map blocks ~f:(Hike_fp.run_block ~word_bits:addr_bits ~synth:cell)
+  in
   let blocks =
     Base.List.map blocks
       ~f:(Hike_rip.prepare_block ~synth:cell ~addr_bits ~is_address)

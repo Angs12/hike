@@ -1102,7 +1102,7 @@ let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(verify = false) (spec : B2
       | Some layout ->
         Base.List.fold layout.Hike.Stack_model.regions ~init:(storage synth Hike.Synth.Window)
           ~f:(fun synth r -> storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id))) in
-  let synth, prog = Hike.Fp.run_program ~synth prog in
+  let synth, prog = Hike.Fp.run_program ~word_bits:64 ~synth prog in
   let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
   let prog = Hike.Split_blocks.normalize ~synth ~target:(x86_target ()) prog in
   let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
