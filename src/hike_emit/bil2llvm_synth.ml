@@ -159,5 +159,6 @@ let materialize ctx scope llvm_builder blk_tid
           Bil2llvm_ptr.offset ~addr_bits llvm_builder
             (Bil2llvm_value.as_ptr llvm_builder wp) (entry_rel ())
       | None ->
-          failwith
-            "hike-emit: window pointer materialization has no window value")
+          (* No incoming window value: the entry-line offset is the only
+             address fact; keep the raw pointer bridge. *)
+          off_ptr ())

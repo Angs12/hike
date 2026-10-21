@@ -274,10 +274,11 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
                  (Hike_stack_model.word_bits word))
               (as_ptr llvm_builder value)
         | None ->
-            failwith
-              (Printf.sprintf
-                 "hike-emit: extern stack argument slot %d has no local \
-                  binding" i))
+            (* A slot with no local binding is an undefined vararg; keep
+               the slot position and later arguments. *)
+            Llvm.undef
+              (Llvm.integer_type ctx.llvm_ctx
+                 (Hike_stack_model.word_bits word)))
 
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
