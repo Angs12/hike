@@ -839,7 +839,10 @@ let sign_run (proj : Project.t) : Project.t =
   let synth =
     match Hike_kb.facts_opt () with
     | Some facts -> facts.Hike_kb.synth
-    | None -> Hike_synth.empty
+    | None ->
+      Hike_diag.warn
+        "types: no discovery facts; signatures use an empty synthetic table";
+      Hike_synth.empty
   in
   Project.map_program proj ~f:(sign_program ~synth ~target)
 
@@ -848,5 +851,7 @@ let run (proj : Project.t) : Project.t =
   let mem_typ = mem_type_of_target (Project.target proj) in
   Project.map_program proj ~f:(fun prog ->
       match Hike_kb.facts_opt () with
-      | None -> prog
+      | None ->
+        Hike_diag.warn "types: no discovery facts; type pass skipped";
+        prog
       | Some facts -> type_program ~facts ~mem_typ prog)
