@@ -82,24 +82,7 @@ let split_block ~(synth : Hike_synth.table ref) (blk : blk term) : blk term =
 
 (* Identity unless a def needs splitting. *)
 let split_sub ~(synth : Hike_synth.table ref) (sub : sub term) : sub term =
-  (* One traversal decides; the map pass visits every block but splits
-     only the recorded offending set. *)
-  let offending =
-    Term.enum blk_t sub
-    |> Seq.filter_map ~f:(fun blk ->
-        let bad =
-          Term.enum def_t blk
-          |> Seq.exists ~f:(fun d -> Hike_stack_model.mem_node_count (Def.rhs d) > 1) in
-        if bad then Some (Term.tid blk) else None)
-    |> Seq.to_list
-  in
-  if Base.List.is_empty offending then sub
-  else
-    let offending = Tid.Set.of_list offending in
-    Term.map blk_t sub ~f:(fun blk ->
-        if Core.Set.mem offending (Term.tid blk) then
-          split_block ~synth blk
-        else blk)
+  Term.map blk_t sub ~f:(split_block ~synth)
 
 let normalize ~(synth : Hike_synth.table) (prog : program term) :
     Hike_synth.table * program term =
