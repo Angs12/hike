@@ -70,7 +70,7 @@ let rewrite_program ~synth ~addr_bits ~(tls : Hike_spec.tls_spec option)
                       (match tls with
                        | None -> native_value
                        | Some t ->
-                         let owned = Hike_synth_addr.base_plus
+                         let owned = Hike_synth_addr.base_plus ~addr_bits
                              (thread_addr t.tls_base)
                              ~rel:t.tls_base off in
                          if own lo hi then owned

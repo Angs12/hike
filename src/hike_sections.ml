@@ -1227,7 +1227,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
           ~default:false ~f:(fun (lo, hi) ->
             Hike_synth_addr.fits_span ~storages (Hike_synth.Stack id) lo hi)
         -> (
-        let folded = Hike_synth_addr.offset_of ~leaves addr in
+        let folded = Hike_synth_addr.offset_of ~addr_bits ~leaves addr in
 
         census
           (if Int.equal id Model.residue_id then
@@ -1239,7 +1239,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
               | Some _ -> "rw.access.region.folded"
               | None -> "rw.access.region.geom"));
         let f =
-          match Hike_synth_addr.span_base ~storages (Hike_synth.Stack id) folded with
+          match Hike_synth_addr.span_base ~addr_bits ~storages (Hike_synth.Stack id) folded with
           | Some a -> { fact with fr_addr = Some a }
           | None -> fact
         in
@@ -1258,7 +1258,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
            coordinate IS the entry-relative offset. *)
         let f =
           match
-            Hike_synth_addr.base_form ~leaves
+            Hike_synth_addr.base_form ~addr_bits ~leaves
               ~base:(window_var ()) ~rel:0L addr
           with
           | Some a -> { fact with fr_addr = Some a }
@@ -1328,7 +1328,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                      real bits, so a re-base here would
                      materialize the address twice. *)
                   match
-                    Hike_synth_addr.offset_of ~leaves (Def.rhs d)
+                    Hike_synth_addr.offset_of ~addr_bits ~leaves (Def.rhs d)
                   with
                   | Some (Bil.Int w) ->
                       census "rw.value.section";
@@ -1339,7 +1339,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                         with
                         | Ok k
                           when Stdlib.Int64.equal k c ->
-                            Hike_synth_addr.base_plus
+                            Hike_synth_addr.base_plus ~addr_bits
                               (sec_comp_ptr id)
                               ~rel:comp_lo (Bil.Int w)
                         | _ ->
@@ -1354,7 +1354,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                                       (Cbat_word.to_word
                                          (Cbat_word
                                             .of_int64
-                                            ~width:64
+                                            ~width:addr_bits
                                             comp_lo))
                                   ) )
                       in
@@ -1382,7 +1382,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                      && Stdlib.Int64.compare lo a_base >= 0
                      && window_param -> (
                   match
-                    Hike_synth_addr.base_form ~leaves
+                    Hike_synth_addr.base_form ~addr_bits ~leaves
                       ~base:(window_var ())
                       ~rel:0L (Def.rhs d)
                   with
@@ -1405,10 +1405,10 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                            lo hi
                     -> (
                       match
-                        Hike_synth_addr.span_base ~storages
+                        Hike_synth_addr.span_base ~addr_bits ~storages
                           (Hike_synth.Stack
                              (region_id_of_storage st))
-                          (Hike_synth_addr.offset_of ~leaves
+                          (Hike_synth_addr.offset_of ~addr_bits ~leaves
                              (Def.rhs d))
                       with
                       | Some rhs ->

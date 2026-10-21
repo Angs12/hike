@@ -19,7 +19,8 @@ type storage = {
    The helpers are weak, noinline definitions, so the optimizer reads
    only their attributes: [enter] returns a fresh 16-aligned object
    (noalias), and [set] publishes the cursor's address and nothing else
-   (it neither reads nor captures the frame). *)
+   (it neither reads nor captures the frame).  The helper ABI is
+   x86-64: pointers and mmap/munmap size_t operands are i64. *)
 
 (* The reservation per thread: a resource, not an analysis bound. *)
 let runtime_stack_bytes : int64 = 268_435_456L

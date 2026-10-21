@@ -13,22 +13,23 @@ module Model = Hike_stack_model
    displacement. *)
 type leaf = [ `Static of int64 | `Addr | `Int ]
 
-let w64 (k : int64) : exp =
-  Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 k))
+let word ~(addr_bits : int) (k : int64) : exp =
+  Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:addr_bits k))
 
 (* The entry-line arithmetic of an address exp: each [`Static] leaf
    folds to its constant, each [`Int] leaf (a value outside the stack
    segment) stays a runtime piece.  [None] when an address part is a
    pointer or invisible — the value then composes over its operands'
    own pointers. *)
-let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
+let offset_of ~(addr_bits : int) ~(leaves : leaf Var.Map.t) (e : exp) :
+    exp option =
   Hike_exp_fold.fold
     (fun e child ->
       match e with
       | Bil.Int _ -> Some e
       | Bil.Var v -> (
           match Core.Map.find leaves v with
-          | Some (`Static k) -> Some (w64 k)
+          | Some (`Static k) -> Some (word ~addr_bits k)
           | Some `Int -> Some e
           | Some `Addr | None -> None)
       | Bil.BinOp ((Bil.PLUS | Bil.MINUS) as op, a, b) -> (
@@ -42,7 +43,7 @@ let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
                   with
                   | Some (x', y') ->
                       Some
-                        (w64
+                        (word ~addr_bits
                            ((match op with
                              | Bil.PLUS -> Stdlib.Int64.add
                              | _ -> Stdlib.Int64.sub)
@@ -68,18 +69,21 @@ let offset_of ~(leaves : leaf Var.Map.t) (e : exp) : exp option =
 
 (* [base + (disp − rel)] with the displacement folded: a static
    displacement folds to a constant (the base itself at zero). *)
-let base_plus (base : var) ~(rel : int64) (disp : exp) : exp =
+let base_plus ~(addr_bits : int) (base : var) ~(rel : int64) (disp : exp) :
+    exp =
   match disp with
   | Bil.Int w -> (
       match Cbat_word.to_int64_opt (Cbat_word.of_word w) with
       | Some k ->
           let k = Stdlib.Int64.sub k rel in
           if Stdlib.Int64.equal k 0L then Bil.Var base
-          else Bil.BinOp (Bil.PLUS, Bil.Var base, w64 k)
+          else Bil.BinOp (Bil.PLUS, Bil.Var base, word ~addr_bits k)
       | None -> Bil.BinOp (Bil.PLUS, Bil.Var base, disp))
   | _ ->
       Bil.BinOp
-        (Bil.PLUS, Bil.Var base, Bil.BinOp (Bil.MINUS, disp, w64 rel))
+        ( Bil.PLUS,
+          Bil.Var base,
+          Bil.BinOp (Bil.MINUS, disp, word ~addr_bits rel) )
 
 (* Every var leaf's kind: a synthetic leaf's class is its kind's (a
    module address is an integer value, a stack storage's base is its
@@ -204,7 +208,12 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only ~synth mem addr ~size =
        emitter resolves it through the one component map. *)
     Base.Option.map (of_address ~synth ~addr_bits ~regions a)
       ~f:(fun (slot_mem, slot_index) ->
-        (mem, Bil.Load (Bil.Var slot_mem, slot_index, LittleEndian, `r64)))
+        ( mem,
+          Bil.Load
+            ( Bil.Var slot_mem,
+              slot_index,
+              LittleEndian,
+              Hike_abi.addr_size_of_bits addr_bits ) ))
   | addr_value -> (
     match owner, addr_value with
     | Some (Hike_synth.Global _ as storage), None ->
@@ -339,7 +348,7 @@ let rewrite_storage ~(synth : Hike_synth.table ref) ~(addr_bits : int)
         Hike_synth.record synth
           (Hike_synth.mint_base ~addr_bits (Hike_synth.Slot i)) in
       let addr =
-        base_plus slot ~rel:0L
+        base_plus ~addr_bits slot ~rel:0L
           (Bil.Int
              (Cbat_word.to_word
                 (Cbat_word.of_int64 ~width:addr_bits
@@ -349,18 +358,19 @@ let rewrite_storage ~(synth : Hike_synth.table ref) ~(addr_bits : int)
 
 (* The folded storage form: a storage span's base var plus an
    already-folded displacement. *)
-let span_base ~(storages : Hike_synth.storage_span list) storage
-    (disp : exp option) : exp option =
+let span_base ~(addr_bits : int) ~(storages : Hike_synth.storage_span list)
+    storage (disp : exp option) : exp option =
   Base.Option.bind (Hike_synth.span_of_storage storages storage)
     ~f:(fun s ->
       Base.Option.map disp
-        ~f:(base_plus s.Hike_synth.ss_base
+        ~f:(base_plus ~addr_bits s.Hike_synth.ss_base
               ~rel:(Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base)))
 
 (* The same, folding the value's leaves first. *)
-let base_form ~(leaves : leaf Var.Map.t) ~(base : var) ~(rel : int64)
-    (e : exp) : exp option =
-  Base.Option.map (offset_of ~leaves e) ~f:(base_plus base ~rel)
+let base_form ~(addr_bits : int) ~(leaves : leaf Var.Map.t) ~(base : var)
+    ~(rel : int64) (e : exp) : exp option =
+  Base.Option.map (offset_of ~addr_bits ~leaves e)
+    ~f:(base_plus ~addr_bits base ~rel)
 
 (* Whether [lo, hi] lies inside the storage's allocated span. *)
 let fits_span ~(storages : Hike_synth.storage_span list) storage
