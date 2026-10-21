@@ -29,6 +29,7 @@ type t = {
   zero_flag : var;
   sign_flag : var;
   overflow_flag : var;
+  aux_flag : var option;         (* the target's auxiliary flag, when named *)
   flag_regs : var list;          (* the arithmetic flags: call-clobbered,
                                     undefined at sub entry *)
   word : int;                    (* target word size in bytes *)
@@ -74,6 +75,7 @@ let x86_64_sysv : t =
     zero_flag = zf;
     sign_flag = sf;
     overflow_flag = ovf;
+    aux_flag = Some af;
     flag_regs = [ cf; pf; af; zf; sf; ovf ];
     word = 8;
     page_size = 4096L;
@@ -188,6 +190,11 @@ let overflow_flag target =
 let is_primary_target (t : Theory.Target.t) : bool =
   Theory.Target.matches t "x86_64-gnu-elf"
 
+(* BAP has no auxiliary-flag role; the primary target names AF in its
+   convention record. *)
+let aux_flag_of_target (t : Theory.Target.t) : var option =
+  if is_primary_target t then x86_64_sysv.aux_flag else None
+
 let pc target =
   Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
 
@@ -214,6 +221,7 @@ let of_target (target : Theory.Target.t) : t =
     zero_flag = zero_flag target;
     sign_flag = sign_flag target;
     overflow_flag = overflow_flag target;
+    aux_flag = x86_64_sysv.aux_flag;
     flag_regs = x86_64_sysv.flag_regs;
     word = Theory.Target.bits target / 8;
     page_size = x86_64_sysv.page_size;

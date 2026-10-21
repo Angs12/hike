@@ -12,13 +12,14 @@ open Bap_core_theory
 open Core
 module B = Hike_backsubst
 
-(* The status flags, identified by the target's register roles. *)
+(* The status flags, identified by the target's register roles plus the
+   convention's named auxiliary flag (BAP exposes no role for it). *)
 let flag_vars (target : Theory.Target.t) : var list =
   let role r = Option.map ~f:Var.reify (Theory.Target.reg target r) in
   let open Theory.Role.Register in
   List.filter_opt
     [ role zero_flag; role carry_flag; role sign_flag; role overflow_flag;
-      role parity_flag ]
+      role parity_flag; Hike_abi.aux_flag_of_target target ]
 
 let is_flag (flags : var list) (v : var) : bool = List.exists flags ~f:(Var.same v)
 
