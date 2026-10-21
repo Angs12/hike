@@ -310,11 +310,15 @@ type site =
 let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     extra:Var.Set.t -> used:Var.Set.t -> ptr_facts =
   let layout =
-    Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
-      ~default:
-        { Hike_stack_model.Sub_layout.regions = [];
-          window_param = false;
-          runtime_residue = false }
+    match Term.get_attr sub Hike_stack_model.layout_tag with
+    | Some layout -> layout
+    | None ->
+      Hike_diag.warn
+        "types: sub %s has no layout; pointer storage is empty"
+        (Tid.name (Term.tid sub));
+      { Hike_stack_model.Sub_layout.regions = [];
+        window_param = false;
+        runtime_residue = false }
   in
   let word = facts.Hike_kb.abi.Hike_abi.word in
   let rec spine (e : exp) =
@@ -352,7 +356,7 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
   let is_addr_width (d : def term) : bool =
     match Var.typ (Def.lhs d) with
     | Type.Imm n -> Int.equal n addr_width
-    | _ -> true
+    | _ -> false
   in
   (* A model memory-state var is storage, never a pointer value. *)
   let is_value_var v =
@@ -367,7 +371,7 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
     let load_word =
       match Hike_stack_model.addr_of_rhs (Def.rhs d) with
       | Some (_, size) -> Int.equal (Size.in_bytes size) word
-      | None -> true
+      | None -> true (* no memory node: an ordinary value *)
     in
     is_value_var (Def.lhs d)
     && Base.Option.is_none (Hike_stack_model.store_data_of_rhs (Def.rhs d))
@@ -458,7 +462,10 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
   let site_of d (e : exp) : site =
     match (e, Core.Map.find blk_of_def (Term.tid d)) with
     | Bil.Var v, _ -> Lone v
-    | _, None -> Spine []
+    | _, None ->
+      failwith
+        (Printf.sprintf "types: def %s is not in the sub"
+           (Tid.name (Term.tid d)))
     | _, Some blk ->
         let vs = spine e in
         (* The denotation keys on the base register: its value in the
