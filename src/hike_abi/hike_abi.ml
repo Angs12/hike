@@ -138,7 +138,9 @@ let is_interrupt_name (n : string) : bool =
 (* Argument registers in convention order: integer, then vector. *)
 let param_regs (t : t) : var list = t.int_param_regs @ t.vector_param_regs
 
-(* The machine size word for [bits]-bit addresses. *)
+(* The coarse machine size word for [bits]-bit addresses: exact for 32
+   and 64, a nearest-size choice otherwise.  Callers that need an exact
+   width carry it separately. *)
 let addr_size_of_bits (bits : int) : [> `r32 | `r64 ] =
   if bits <= 32 then `r32 else `r64
 
