@@ -3,4 +3,4 @@
  (public_name hike.hike_stack_bounds)
  (wrapped false)
  (modules hike_stack_bounds)
- (libraries hike_abi cbat_vsa_domain bap bitvec core))
+ (libraries cbat_vsa_domain bap core))

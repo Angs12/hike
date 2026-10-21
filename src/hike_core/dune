@@ -16,7 +16,6 @@
  (libraries
   bap
   bap-core-theory
-  bitvec
   core
   llvm
   hike.hike_abi
