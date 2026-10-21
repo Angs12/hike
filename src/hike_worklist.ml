@@ -943,9 +943,8 @@ and solve_to_fix ?state t frame e ~sub ~resolved ~synth ~seed ~wake :
 
 (* The initial body's construction: normalize, SSA, DCE, explicit
    fallthroughs from the pre-install term order, one solve with site
-   materialization, then the canonical return/prune pass and one warm
-   continuation if that pass woke a block.  No resolution-event loop and
-   no part of this path runs after the freeze. *)
+   materialization, then the canonical return/prune pass.  That pass is
+   term-only, so the solution stands and nothing is re-solved. *)
 and solve_initial t frame (e : entry) (raw : sub term) :
     sub term * (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * Hike_vsa.solution *
     Tid.t Addr.Map.t * Hike_synth.table =
@@ -982,33 +981,10 @@ and solve_initial t frame (e : entry) (raw : sub term) :
     let m = Hike_vsa.normalize_round ~synth:cell materialized in
     (m, !cell)
   in
-  let sub', woken =
-    Hike_ssa.update_sub_woken ~synth ~target:ctx.target ~old:sub materialized
-  in
-  let s =
-    if Core.Set.is_empty woken then s
-    else begin
-      let g = Sub.to_graph sub' in
-      let reaches_successor =
-        Core.Set.exists woken ~f:(fun b ->
-            Graphs.Tid.Node.succs b g |> Seq.exists ~f:(fun s ->
-                (not (Tid.equal s Graphs.Tid.start))
-                && not (Tid.equal s Graphs.Tid.exit)))
-      in
-      if not reaches_successor then s
-      else begin
-        let seed, wake =
-          Hike_vsa.warm_seed ~abi ~sub:sub' ~woken ~old:sub sol
-        in
-        let state =
-          Vsa.state_with_sol s.Hike_vsa.state seed
-          |> fun st -> Vsa.state_with_sub st sub'
-        in
-        solve_to_fix ~state t frame e ~sub:sub' ~resolved:Tid.Map.empty
-          ~synth ~seed:(Some seed) ~wake
-      end
-    end
-  in
+  (* The completion pass rewrites terminal jmps and removes unreachable
+     blocks; defs, phis and their SSA names are untouched, so the warm
+     solution still keys the surviving blocks.  No re-solve. *)
+  let sub' = materialized in
   let sol = s.Hike_vsa.sol in
   let sub', synth =
     let cell = ref synth in
