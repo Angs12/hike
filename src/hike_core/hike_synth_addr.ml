@@ -78,7 +78,12 @@ let base_plus ~(addr_bits : int) (base : var) ~(rel : int64) (disp : exp) :
           let k = Stdlib.Int64.sub k rel in
           if Stdlib.Int64.equal k 0L then Bil.Var base
           else Bil.BinOp (Bil.PLUS, Bil.Var base, word ~addr_bits k)
-      | None -> Bil.BinOp (Bil.PLUS, Bil.Var base, disp))
+      | None ->
+        (* Not an int64 immediate: keep the word subtraction. *)
+        Bil.BinOp
+          ( Bil.PLUS,
+            Bil.Var base,
+            Bil.BinOp (Bil.MINUS, disp, word ~addr_bits rel) ))
   | _ ->
       Bil.BinOp
         ( Bil.PLUS,
@@ -215,6 +220,7 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only ~synth mem addr ~size =
               LittleEndian,
               Hike_abi.addr_size_of_bits addr_bits ) ))
   | addr_value -> (
+    (* Each [None] below means "leave the original access untouched". *)
     match owner, addr_value with
     | Some (Hike_synth.Global _ as storage), None ->
       (* A module-backed storage owns the whole range: subtract its
