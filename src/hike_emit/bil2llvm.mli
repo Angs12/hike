@@ -17,29 +17,6 @@ val native_fp_op : string -> native_fp option
 (** The sub's LLVM name (tid-name sanitization). *)
 val sanitize_name : string -> string
 
-(** One owner of a byte range of a section: a component or a gap run.
-    [own_id] is the component id ([None] for a gap run). *)
-type sec_owner = Bil2llvm_env.sec_owner = {
-  own_id : int option;
-  own_lo : int64;               (* native byte range [own_lo, own_hi] *)
-  own_hi : int64;
-  base : Llvm.llvalue;
-  (* The component's emission decision (components only). *)
-  typed_w : int;                (* bytes per element: 8/4/2/1 *)
-}
-
-
-(** One section of the emitted module: the base global, the native
-    span, the byte image, and the byte-exact owner tiling.  Empty
-    [owners] = the identity (the one big array in [base]). *)
-type section = Bil2llvm_env.section = {
-  base : Llvm.llvalue;
-  min_addr : word;
-  max_addr : word;
-  bytes : Bytes.t option;
-  owners : sec_owner list;
-}
-
 (** The section vocabulary: the model's [sec], whose data sections
     carry the section table. *)
 type section_type = Bil2llvm_env.section_type
@@ -57,11 +34,6 @@ type sec_meta = Hike_stack_model.sec_meta = {
 
 (** The section spec: one definition, owned by [Hike_spec]. *)
 type section_spec = Hike_spec.section_spec
-
-(** Constructs the sections from the spec.  Gap-run names draw from
-    one counter across sections, consumed in the fixed tiling order. *)
-val build_sections :
-  Llvm.llcontext -> Llvm.llmodule -> section_spec -> Bil2llvm_env.section list
 
 (** The emission entry: builds the sections from [spec], then runs
     signature collection and body emission over [prog].  Output is

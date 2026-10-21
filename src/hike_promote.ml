@@ -20,6 +20,8 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
     (sub : sub term) : (site_binding list * blk term) Tid.Map.t =
   Model.site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
 
+(* Test-only view without the block terms; production uses
+   [site_bindings_of_sub_with_blocks]. *)
 let site_bindings_of_sub ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)

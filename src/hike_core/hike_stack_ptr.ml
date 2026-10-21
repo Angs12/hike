@@ -65,6 +65,8 @@ let define_free ~llvm_ctx md ~total ~cur ~base =
   weak_noinline llvm_ctx free;
   let b = Llvm.builder_at_end llvm_ctx (Llvm.entry_block free) in
   let m = Llvm.build_load ptr base "" b in
+  (* The thread-exit unmap has no recovery path: a failed munmap leaks
+     the region rather than trapping in the destructor. *)
   ignore
     (Llvm.build_call munmap_ty munmap
        [| m; Llvm.const_of_int64 i64 total false |] "" b);
@@ -97,6 +99,7 @@ let define_enter ~llvm_ctx md ~reserve : Llvm.llvalue =
   let block name = Llvm.append_block llvm_ctx name enter in
   let b = Llvm.builder_at_end llvm_ctx (Llvm.entry_block enter) in
   let init = block "init" and fail = block "fail" and ok = block "ok" in
+  let guard = block "guard" in
   let reg = block "register" and join = block "join" in
   let c = Llvm.build_load ptr cur "cur" b in
   let first = Llvm.build_icmp Llvm.Icmp.Eq c (Llvm.const_null ptr) "first" b in
@@ -119,10 +122,18 @@ let define_enter ~llvm_ctx md ~reserve : Llvm.llvalue =
   ignore (Llvm.build_call trap_ty trap [||] "" b);
   ignore (Llvm.build_unreachable b);
   Llvm.position_at_end ok b;
-  ignore
-    (Llvm.build_call mprotect_ty mprotect
-       [| m; Llvm.const_of_int64 i64 guard_bytes false; Llvm.const_int i32 0 |]
-       "" b);
+  (* A failed guard-page mprotect makes the probe unsound; trap like the
+     mmap failure instead of running without the guard. *)
+  let mp =
+    Llvm.build_call mprotect_ty mprotect
+      [| m; Llvm.const_of_int64 i64 guard_bytes false; Llvm.const_int i32 0 |]
+      "" b
+  in
+  let bad_guard =
+    Llvm.build_icmp Llvm.Icmp.Ne mp (Llvm.const_int i32 0) "bad_guard" b
+  in
+  ignore (Llvm.build_cond_br bad_guard fail guard b);
+  Llvm.position_at_end guard b;
   let top =
     Llvm.build_gep (Llvm.i8_type llvm_ctx) m
       [| Llvm.const_of_int64 i64 total false |] "top" b
@@ -133,11 +144,13 @@ let define_enter ~llvm_ctx md ~reserve : Llvm.llvalue =
     Llvm.build_icmp Llvm.Icmp.Ne atexit (Llvm.const_null ptr) "have" b in
   ignore (Llvm.build_cond_br have reg join b);
   Llvm.position_at_end reg b;
+  (* A libc without __cxa_thread_atexit_impl skips the cleanup: the
+     region stays mapped until process exit. *)
   ignore
     (Llvm.build_call atexit_ty atexit [| free; Llvm.const_null ptr; free |] "" b);
   ignore (Llvm.build_br join b);
   Llvm.position_at_end join b;
-  let v = Llvm.build_phi [ (c, entry_bb); (top, ok); (top, reg) ] "v" b in
+  let v = Llvm.build_phi [ (c, entry_bb); (top, guard); (top, reg) ] "v" b in
   let aligned =
     Llvm.build_call mask_ty mask
       [| v; Llvm.const_of_int64 i64 (Int64.of_int (-Abi.stack_align)) true |]

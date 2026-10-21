@@ -276,7 +276,8 @@ let split_sub ?(update = true) ~synth ~target (sub : sub term) : sub term =
 let normalize ~synth ~target (prog : program term) : program term =
   Term.map sub_t prog ~f:(split_sub ~synth ~target)
 
-(* The sub's free registers, read at its own entries over the BIR's
+(* Test-only liveness seam: production reads [Hike_ssa.free_regs_ssa].
+   The sub's free registers, read at its own entries over the BIR's
    explicit edges.  A split piece carries no defs; its entering edge is
    the previous piece's explicit Goto, so liveness does not transport a
    target's live set to the sub entry. *)

@@ -8,7 +8,7 @@ open Bil2llvm_ptr
 
 (* PT_TLS owns its byte range; the TCB belongs to the native runtime. *)
 type tls_class =
-  | Tls_block of int64           (* the block's byte index *)
+  | Tls_block of int64           (* the PT_TLS block's native offset *)
   | Tls_tp of int64              (* the real thread pointer's offset *)
   | Tls_tp_exp of exp            (* the dynamic offset; the pointer reads 0 *)
   | Not_tls
@@ -31,8 +31,7 @@ let tls_classify ctx (addr : exp) : tls_class =
     match !(ctx.tls) with
     | Some (_, tls) when o >= tls.tls_base
                         && o < Int64.add tls.tls_base tls.tls_memsz ->
-      Tls_block (Int64.add (Int64.sub o tls.tls_base)
-                   (Int64.of_int tls.tls_prefix))
+      Tls_block o
     | _ -> Tls_tp o)
 
 (* The real thread pointer: the native runtime's own value. *)
@@ -211,19 +210,9 @@ and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
 
 and tls_ptr ctx scope llvm_builder blk_tid cls =
   let addr_bits = ctx.addr_bits in
-  let i64 n = Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) n false in
   match cls with
-  | Tls_block idx ->
-    let block, _ = Base.Option.value_exn !(ctx.tls) in
-    let fty = Llvm.function_type ctx.ptr_ty [| ctx.ptr_ty |] in
-    let f =
-      Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
-    in
-    let base = Llvm.build_call fty f [| block |] "tls_addr" llvm_builder in
-    Bil2llvm_ptr.offset ~addr_bits llvm_builder base (i64 idx)
-  | Tls_tp off ->
-    Bil2llvm_ptr.offset ~addr_bits llvm_builder
-      (thread_pointer ctx llvm_builder) (i64 off)
+  | Tls_block off | Tls_tp off ->
+    Bil2llvm_env.tls_addr ctx llvm_builder ~off
   | Tls_tp_exp e ->
     let off = as_int ctx llvm_builder
         (create_exp ctx scope llvm_builder blk_tid e) in

@@ -35,7 +35,8 @@ type site_binding = {
   sb_def : def term;
 }
 
-(** The per-block store-to-call-slot correspondence. *)
+(** Test-only view without block terms; production uses
+    [site_bindings_of_sub_with_blocks] internally. *)
 val site_bindings_of_sub :
   word:int ->
   sp:var ->

@@ -68,7 +68,9 @@ let names_stack_line (t : t) : bool =
   | Rip _ | Fs -> false
 
 (* The program's section map: the section each module address lies in.
-   Installed once per program from the loaded image. *)
+   Installed once per program from the loaded image.  This is the
+   recorded exception to ADR 0014's ctx law: it is process-global and
+   tests reset it explicitly. *)
 module Regions = struct
   let spans : (Hike_section.t * int64 * int64) list ref = ref []
 

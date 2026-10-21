@@ -599,6 +599,36 @@ let finish_call scope llvm_builder fallthrough =
       ignore (Llvm.build_br bb llvm_builder)
   | None -> ignore (Llvm.build_unreachable llvm_builder)
 
+(* One TLS address: a PT_TLS-block offset indexes the emitted block via
+   [llvm.threadlocal.address]; any other offset uses the real thread
+   pointer.  The memory and synth lanes share this selection. *)
+let tls_addr ctx llvm_builder ~(off : int64) : Llvm.llvalue =
+  let i64 n = Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) n false in
+  let gep p n =
+    Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) p [| i64 n |] "" llvm_builder
+  in
+  let thread_pointer () =
+    let fty = Llvm.function_type ctx.ptr_ty [||] in
+    let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
+    Llvm.build_call fty f [||] "hike_tp" llvm_builder
+  in
+  match !(ctx.tls) with
+  | Some (block, tls)
+    when Int64.compare off tls.Hike_spec.tls_base >= 0
+         && Int64.compare off
+              (Int64.add tls.Hike_spec.tls_base tls.Hike_spec.tls_memsz)
+            < 0 ->
+      let fty = Llvm.function_type ctx.ptr_ty [| ctx.ptr_ty |] in
+      let f =
+        Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
+      in
+      let p = Llvm.build_call fty f [| block |] "tls_addr" llvm_builder in
+      gep p
+        (Int64.add
+           (Int64.sub off tls.Hike_spec.tls_base)
+           (Int64.of_int tls.Hike_spec.tls_prefix))
+  | _ -> gep (thread_pointer ()) off
+
 let trap_name = "llvm.trap"
 
 let create_interrupt ctx llvm_builder =
