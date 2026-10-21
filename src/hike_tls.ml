@@ -55,6 +55,23 @@ let rewrite_program ~synth ~addr_bits ~(tls : Hike_spec.tls_spec option)
 
                 method! map_exp exp =
                   let rendered = super#map_exp exp in
+                  let resolve ~lo ~hi ~off =
+                    let native_value = Bil.BinOp (Bil.PLUS, address 0L, off) in
+                    match tls with
+                    | None -> native_value
+                    | Some t ->
+                      let owned = Hike_synth_addr.base_plus ~addr_bits
+                          (thread_addr t.tls_base)
+                          ~rel:t.tls_base off in
+                      if own lo hi then owned
+                      else if native lo hi then native_value
+                      else Bil.Ite
+                          (Bil.BinOp (Bil.AND,
+                             Bil.BinOp (Bil.SLE, int t.tls_base, off),
+                             Bil.BinOp (Bil.SLT, off,
+                               int (Int64.add t.tls_base t.tls_memsz))),
+                           owned, native_value)
+                  in
                   match bounds exp with
                   | Some (lo, hi) when Int64.equal lo hi -> address lo
                   | Some (lo, hi) -> (
@@ -66,22 +83,11 @@ let rewrite_program ~synth ~addr_bits ~(tls : Hike_spec.tls_spec option)
                         | Some _ -> self#offset original rendered
                         | None -> rendered in
                       let off = Bil.BinOp (op, operand a a', operand b b') in
-                      let native_value = Bil.BinOp (Bil.PLUS, address 0L, off) in
-                      (match tls with
-                       | None -> native_value
-                       | Some t ->
-                         let owned = Hike_synth_addr.base_plus ~addr_bits
-                             (thread_addr t.tls_base)
-                             ~rel:t.tls_base off in
-                         if own lo hi then owned
-                         else if native lo hi then native_value
-                         else Bil.Ite
-                             (Bil.BinOp (Bil.AND,
-                                Bil.BinOp (Bil.SLE, int t.tls_base, off),
-                                Bil.BinOp (Bil.SLT, off,
-                                  int (Int64.add t.tls_base t.tls_memsz))),
-                              owned, native_value))
-                    | _ -> rendered)
+                      resolve ~lo ~hi ~off
+                    | _ ->
+                      (* A non-additive FS value is still a value: its
+                         rendered form gives the TP-relative offset. *)
+                      resolve ~lo ~hi ~off:(self#offset exp rendered))
                   | None -> (
                     match exp, rendered with
                     | Bil.BinOp (Bil.MINUS, a, b), Bil.BinOp (_, a', b')
