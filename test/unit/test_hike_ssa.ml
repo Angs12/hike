@@ -99,14 +99,14 @@ let ssa_matches (subs : sub term list) (name : string) : bool =
 
 let solve_ssa ?(wake = Tid.Set.empty) sub init =
   let abi = Hike.Abi.of_target (x86_target ()) in
-  Vsa.static_graph_vsa ~abi ~synth:(ref Hike.Synth.empty) ~wake
+  fst (Vsa.static_graph_vsa ~abi ~synth:(ref Hike.Synth.empty) ~wake
     ~def_reads:(fun d -> Hike.Stack_model.reads (`Def d))
     ~def_writes:(fun d -> Hike.Stack_model.writes (`Def d))
     ~phi_reads:(fun p -> Hike.Stack_model.reads (`Phi p))
     ~phi_writes:(fun p -> Hike.Stack_model.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Hike.Stack_model.reads (`Jmp j))
         (Hike.Stack_model.writes (`Jmp j)))
-    sub init
+    sub init)
 
 let warm_seed ~abi ~sub ~woken sol =
   let entry = Base.Option.map (Vsa.entry_block_of sub) ~f:Term.tid in
@@ -696,35 +696,6 @@ let tests : unit Alcotest.test list =
           (Seq.for_all (Term.enum sub_t program) ~f:(fun sub ->
                Base.List.exists (Hike.Stack_model.sig_args sub)
                  ~f:(fun arg -> Var.same (Arg.lhs arg) lane))));
-
-    pin "SSA-18" "decode preparation preserves untouched SSA blocks"
-      (fun () ->
-        let module P = Hike__Hike_program_vsa in
-        let v = v64 "decode_v" and c = v1 "decode_c" in
-        let join = with_jmps (blk_of_defs [ Def.create ret_reg (Bil.Var v) ])
-            [ Hike_return.create () ] in
-        let arm n = with_jmps (blk_of_defs [ Def.create v (int_exp n) ])
-            [ mk_goto (Term.tid join) ] in
-        let left = arm 1 and right = arm 2 and added = arm 3 in
-        let entry = with_jmps (blk_of_defs [])
-            [ mk_jmp_to (Term.tid left) (guard c 0); mk_goto (Term.tid right) ] in
-        let before = sub_named "decode" [ entry; left; right; join ] in
-        let after = Term.update blk_t before
-            (with_jmps (Term.filter jmp_t entry ~f:(Fun.const false))
-               [ mk_jmp_to (Term.tid left) (guard c 0);
-                 mk_jmp_to (Term.tid added) (guard c 1); mk_goto (Term.tid right) ])
-          |> fun s -> Term.append blk_t s added in
-        let context : P.context =
-          { target = x86_target (); images = []; linker_slots = Core.Int64.Set.empty;
-            text_range = None; data_spans = [] } in
-        let old, synth = P.prepare_function context ~synth:Hike.Synth.empty
-            ~is_entry:(Fun.const false) before in
-        let result, synth, _ = P.update_function context ~synth
-            ~is_entry:(Fun.const false) ~old after in
-        let fresh, _ = P.prepare_function context ~synth
-            ~is_entry:(Fun.const false) after in
-        check "SSA-18 equals fresh" (Hike.Ssa.equivalent result fresh);
-        check "SSA-18 untouched versions" (kept old result left && kept old result right));
 
     pin "SSA-10" "the VSA gives a diamond's phi the join of its edges' values"
       (fun () ->

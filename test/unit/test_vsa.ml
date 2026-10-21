@@ -371,48 +371,38 @@ let tests : unit Alcotest.test list =
           (Ws.equal (AI.find_word 64 post (Sm.version_at_end blk r)) (Ws.singleton (w64 0x2d))));
 
     pin "VSA-68"
-      "a solve paused on a callee past the entry block resumes to the cold \
-       solve's result"
+      "a call summary at the denote site flows without a pause"
       (fun () ->
-        let rsi = int_param 1 and rcx = int_param 3 and rbx = callee_saved 0 in
+        let rsi = int_param 1 and rbx = callee_saved 0 in
         let k n = Bil.int (Word.of_int64 ~width:64 n) in
         let callee_tid = Tid.create () in
         let sub, tids =
           sub_of "caller"
             [ ([ Def.create rsi (k 5L) ], [ (1, mk_goto) ]);
-              ([ Def.create rcx (k 7L) ],
-               [ (2, fun t -> mk_call_jmp t callee_tid) ]);
+              ([], [ (2, fun t -> mk_call_jmp t callee_tid) ]);
               ([ Def.create rbx Bil.(var rsi + k 1L);
                  Def.create sp Bil.(var sp + k 8L) ],
                [ (0, mk_ret) ]) ] in
-        (* [sub_of] hands the analysis's input form: the SSA sub. *)
         let writes_rcx =
           Vsa.Call_effects.Summary
-            (Some (Cbat_var_id.intern_set (Var.Set.singleton rcx))) in
+            (Some (Cbat_var_id.intern_set (Var.Set.singleton (int_param 3)))) in
         let solve ~callee =
-          Hv.start (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
-            ~callee ~block_addrs:(Core.Map.empty (module Addr))
-            ~synth:Hike.Synth.empty
-            ~foreign_slots:Core.Int64.Set.empty sub in
-        let resume p ~callee =
-          Hv.resume (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
-            ~callee ~foreign_slots:Core.Int64.Set.empty p in
-        match solve ~callee:(fun _ -> Vsa.Call_effects.Blocked) with
-        | Hv.Done _ -> check "VSA-68.paused" false
-        | Hv.Paused p ->
-          check "VSA-68.blocked" (Core.Set.equal (Hv.blocked p) (Tid.Set.singleton callee_tid));
-          match resume p ~callee:(fun _ -> writes_rcx), solve ~callee:(fun _ -> writes_rcx) with
-          | Hv.Done { envs = warm; sub = warm_sub; _ }, Hv.Done { envs = cold; _ } ->
-            check "VSA-68.equal"
-              (Core.Map.equal (fun (a, b) (c, d) -> AI.equal a c && AI.equal b d) warm cold);
-            check "VSA-68.flowed"
-              (match Core.Map.find warm tids.(2) with
-               | Some (_, post) ->
-                 Ws.equal (AI.find_word 64 post
-                     (Sm.version_at_end (Term.find_exn blk_t warm_sub tids.(2)) rbx))
-                   (Ws.singleton (w64 6))
-               | None -> false)
-          | _ -> check "VSA-68.done" false);
+          Hv.solve (x86_target ()) ~lookup:(fun _ -> None) ~images:[]
+            ~callee ~synth:Hike.Synth.empty ~sub
+            ~foreign_slots:Core.Int64.Set.empty ~resolved:Tid.Map.empty
+            ~seed:None ~wake:Tid.Set.empty in
+        let envs s =
+          fst (Hv.stamp ~images:[] ~synth:s.Hv.synth ~sol:s.Hv.sol s.Hv.sub) in
+        match solve ~callee:(fun _ -> writes_rcx) with
+        | Hv.Solved s ->
+          let e = envs s in
+          check "VSA-68.flowed"
+            (match Core.Map.find e tids.(2) with
+             | Some (_, post) ->
+               Ws.equal (AI.find_word 64 post
+                   (Sm.version_at_end (Term.find_exn blk_t s.Hv.sub tids.(2)) rbx))
+                 (Ws.singleton (w64 6))
+             | None -> false));
 
     (* Slices: a guard on bits of a variable survives to the next read of
        the same bits; the variable's own word keeps today's hull. *)
@@ -535,13 +525,13 @@ let tests : unit Alcotest.test list =
                 [ (3, fun t -> mk_jmp_to t Bil.(var x <> int (Word.zero 64)));
                   (3, mk_goto) ];
               [], [ (0, mk_ret) ] ] in
-        let sol = Vsa.static_graph_vsa ~abi:sysv ~synth:(ref Hike.Synth.empty)
+        let sol = fst (Vsa.static_graph_vsa ~abi:sysv ~synth:(ref Hike.Synth.empty)
             ~def_reads:(fun d -> Sm.reads (`Def d))
             ~def_writes:(fun d -> Sm.writes (`Def d))
             ~phi_reads:(fun p -> Sm.reads (`Phi p))
             ~phi_writes:(fun p -> Sm.writes (`Phi p))
             ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
-            ~wake:(Tid.Set.singleton tids.(1)) sub (Vsa.init_sol ~abi:sysv sub) in
+            ~wake:(Tid.Set.singleton tids.(1)) sub (Vsa.init_sol ~abi:sysv sub)) in
         check "VSA-77 unreachable continuation"
           (AI.equal (in_state sol tids.(2)) AI.bottom));
 
@@ -899,6 +889,8 @@ let tests : unit Alcotest.test list =
           (Ws.is_top (AI.find_word 64 delivered input));
         check "VSA-87 absent variable reads top"
           (Ws.is_top (AI.find_word 64 delivered (v64 "readonly_missing"))));
+
+
   ]
 
 let () = run "vsa" tests

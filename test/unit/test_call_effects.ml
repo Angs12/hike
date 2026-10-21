@@ -173,12 +173,13 @@ let tests : unit Alcotest.test list =
              let callee t = Ce.Summary
                  (if Tid.equal t callee_tid then Some writes else None) in
              let env = AI.add_word AI.top ~key:target ~data:value in
-             match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env (Bil.Var target) with
-             | Ce.Summary actual ->
-               check "callee's written registers"
-                 (Base.Option.equal Core.Int.Set.equal
-                    (if known then Some writes else None) actual)
-             | _ -> Alcotest.fail "expected a callee summary"))
+             let (Ce.Summary actual) =
+               Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env
+                 (Bil.Var target)
+             in
+             check "callee's written registers"
+               (Base.Option.equal Core.Int.Set.equal
+                  (if known then Some writes else None) actual)))
        [ "known singleton", Ws.singleton (w64 0x5000), true;
          "multiple targets", Ws.of_list ~width:64 [ w64 0x5000; w64 0x9000 ], false;
          "foreign singleton", Ws.singleton (w64 0x9000), false;

@@ -60,14 +60,14 @@ let materialised ~word_bits ~synth ~envs sub : (Tid.t * int64 list) list =
                   [ (Term.tid d, words) ]))
 
 let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
-  Vsa.static_graph_vsa ~abi
+  fst (Vsa.static_graph_vsa ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Model.reads (`Def d))
     ~def_writes:(fun d -> Model.writes (`Def d))
     ~phi_reads:(fun p -> Model.reads (`Phi p))
     ~phi_writes:(fun p -> Model.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Model.reads (`Jmp j)) (Model.writes (`Jmp j)))
-    ?callee ?resolved ?sub_lookup sub init
+    ?callee ?resolved ?sub_lookup sub init)
 
 (* A probe's callees: a sub of [prog] writes the registers its own defs
    write; any other target writes anything. *)
@@ -79,14 +79,16 @@ let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.call
 (* The production solve of one sub with every callee summarized. *)
 let solve ~synth ~callee target (sub : sub term) =
   let sub = Hike.Ssa.ssa_sub ~synth ~target sub in
+  let block_addrs = Addr.Map.empty in
   match
-    Hike.Vsa.start target ~lookup:(fun _ -> None) ~images:[] ~callee
-      ~block_addrs:Addr.Map.empty
+    Hike.Vsa.solve target ~lookup:(fun _ -> None) ~images:[] ~callee
       ~synth
-      ~foreign_slots:Core.Int64.Set.empty sub
+      ~foreign_slots:Core.Int64.Set.empty ~sub
+      ~resolved:Tid.Map.empty ~seed:None ~wake:Tid.Set.empty
   with
-  | Hike.Vsa.Done { envs; sub; block_addrs; synth; _ } -> (envs, sub, block_addrs, synth)
-  | Hike.Vsa.Paused _ -> failwith "probe: a callee is blocked"
+  | Hike.Vsa.Solved { sol; synth } ->
+    let envs, sub' = Vsa.stamp_envs_of_sol ~synth ~sol sub in
+    (envs, sub', block_addrs, synth)
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
    Each probe owns its per-sub report; this seam owns project loading and

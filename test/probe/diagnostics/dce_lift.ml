@@ -36,12 +36,17 @@ let diff by_tid before after =
 
 let solve_ssa ~synth ~callee target sub =
   match
-    Hike.Vsa.start target ~lookup:(fun _ -> None) ~images:[] ~callee
-      ~block_addrs:Addr.Map.empty ~synth
-      ~foreign_slots:Core.Int64.Set.empty sub
+    Hike.Vsa.solve target ~lookup:(fun _ -> None) ~images:[] ~callee
+      ~synth ~sub
+      ~foreign_slots:Core.Int64.Set.empty ~resolved:Tid.Map.empty
+      ~seed:None ~wake:Tid.Set.empty
   with
-  | Hike.Vsa.Done { envs; sub; synth; _ } -> (envs, sub, synth)
-  | Hike.Vsa.Paused _ -> failwith "dce probe: a callee is blocked"
+  | Hike.Vsa.Solved s ->
+    let envs, solved =
+      Hike.Vsa.stamp ~images:[] ~synth:s.Hike.Vsa.synth ~sol:s.Hike.Vsa.sol
+        s.Hike.Vsa.sub
+    in
+    (envs, solved, s.Hike.Vsa.synth)
 
 let flag_cone ~abi removed_defs =
   let by_lhs : (var, def term) Core.Hashtbl.t = Core.Hashtbl.create (module Var) in

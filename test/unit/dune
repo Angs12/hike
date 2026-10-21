@@ -42,6 +42,10 @@
   test_bil2llvm
   test_emit_fp
   test_jump
+  test_dispatch
+  test_dispatch_call
+  test_dispatch_install
+  test_dispatch_jump
   test_coerce
   test_resolve
   test_rip

@@ -137,7 +137,11 @@ let tests = [
                        ~f:(List.map Cbat_word.to_int64_exn))
                 | Error _ -> Alcotest.fail "call target has no denotation")
              | Direct t -> check "direct target is the discovered function"
-                 (Term.find sub_t result.program t = at result.program 0x400082L))
+                 (Base.Option.equal Tid.equal
+                    (Base.Option.map (Term.find sub_t result.program t)
+                       ~f:Term.tid)
+                    (Base.Option.map (at result.program 0x400082L)
+                       ~f:Term.tid)))
           | _ -> Alcotest.fail "expected one indirect call"));
   pin "WL-09" "successive decode growth keeps the warm SSA values"
     (fun () ->

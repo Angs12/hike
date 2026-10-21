@@ -224,12 +224,12 @@ let value_after (ssa : sub term) (sol : Vsa.vsa_sol) (tid : tid) (v : var) : Ws.
   | None -> value_at ssa sol tid v
 
 let static_graph_vsa ~abi ~synth ?callee ?resolved ?sub_lookup sub init =
-  Vsa.static_graph_vsa ~abi
+  fst (Vsa.static_graph_vsa ~abi
     ~synth:(ref synth)
     ~def_reads:(fun d -> Sm.reads (`Def d)) ~def_writes:(fun d -> Sm.writes (`Def d))
     ~phi_reads:(fun p -> Sm.reads (`Phi p)) ~phi_writes:(fun p -> Sm.writes (`Phi p))
     ~jmp_reads:(fun j -> Core.Set.union (Sm.reads (`Jmp j)) (Sm.writes (`Jmp j)))
-    ?callee ?resolved ?sub_lookup sub init
+    ?callee ?resolved ?sub_lookup sub init)
 
 let mk_rctx ~abi ~synth ?sub_lookup sub =
   Vsa.Test_seam.mk_rctx ~abi
@@ -280,13 +280,42 @@ let callee_of ~synth (prog : program term) (tid : Tid.t) : Vsa.Call_effects.call
    block-address map. *)
 let solve_with_synth ~synth ?(images = [])
     ?(block_addrs = Addr.Map.empty) ~callee target (sub : sub term) =
-  match
-    Hv.start target ~lookup:(fun _ -> None) ~images ~callee ~block_addrs
-      ~synth
-      ~foreign_slots:Core.Int64.Set.empty sub
-  with
-  | Hv.Done { envs; sub; block_addrs; synth; _ } -> (envs, sub, block_addrs, synth)
-  | Hv.Paused _ -> Alcotest.fail "solve: a fixture callee is blocked"
+  let abi = Hike.Abi.of_target target in
+  let foreign_slots = Core.Int64.Set.empty in
+  let sub = Hike.Cfg_complete.materialize_fallthroughs sub in
+  let s =
+    match
+      Hv.solve target ~lookup:(fun _ -> None) ~images ~callee
+        ~synth ~foreign_slots ~sub ~resolved:Tid.Map.empty ~seed:None
+        ~wake:Tid.Set.empty
+    with
+    | Hv.Solved s -> s
+  in
+  let retaddr =
+    Hike.Cfg_complete.retaddr_defs ~abi ~synth:s.synth ~sol:s.sol sub
+  in
+  let materialized =
+    Hike.Cfg_complete.materialize ~sol:s.sol ~synth:s.synth
+      ~block_addrs ~foreign_slots ~retaddr sub
+  in
+  let sub', woken =
+    Hike.Ssa.update_sub_woken ~synth:s.synth ~target:target
+      ~old:sub materialized
+  in
+  let s =
+    if Core.Set.is_empty woken then s
+    else begin
+      let seed, wake = Hv.warm_seed ~abi ~sub:sub' ~woken s.sol in
+      match
+        Hv.solve target ~lookup:(fun _ -> None) ~images ~callee
+          ~synth:s.synth ~foreign_slots ~sub:sub'
+          ~resolved:Tid.Map.empty ~seed:(Some seed) ~wake
+      with
+      | Hv.Solved s' -> s'
+    end
+  in
+  let envs, sub' = Hv.stamp ~images ~synth:s.synth ~sol:s.sol sub' in
+  (envs, sub', block_addrs, s.synth)
 
 let solve ~synth ?images ?block_addrs ~callee target sub =
   let envs, sub, addrs, _ =
