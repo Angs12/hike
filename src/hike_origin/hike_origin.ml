@@ -1,6 +1,6 @@
 (* The runtime origin of a relative value: the concrete pointer the
-   offsets are measured from.  One origin per value; the algebra's
-   cross-origin rule materialises a mixed computation to a plain value.
+   offsets are measured from.  One origin per relative leaf; a mixed
+   computation keeps each leaf's origin and may have no single origin.
    A value with no origin is no [Rel] at all. *)
 
 open Bap.Std

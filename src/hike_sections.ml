@@ -147,7 +147,8 @@ type member = {
 
 (* A stack region id keys a per-sub alloca, a data region id a
    module-wide global (a whole span is one data region served by the
-   section's image global); the residue is the stack's fallback alloca. *)
+   section's image global); the residue is the stack's fallback storage
+   (a bounded alloca or the runtime stack). *)
 type storage =
   | Stack_region of int
   | Stack_residue
@@ -730,7 +731,7 @@ let finalize_tree ~(word : int) ~(entry : int64)
 #endif
   let ret_lo = entry in
   let ret_hi = Stdlib.Int64.pred (Stdlib.Int64.add entry (Stdlib.Int64.of_int word)) in
-  (* The residue (id 0) is the stack's fallback region.  A whole span
+  (* The residue (id 0) is the stack's fallback storage.  A whole span
      is one data region — every range in it shares the span's id;
      carved ranges mint an id each, per sub (stack) / module-wide
      (data, minting from 0). *)
@@ -827,7 +828,7 @@ let owning_data_binding (tree : data_tree) (c : int64) :
 let storage_of_range (tree : range_storage Tree.t) (r : range) :
     range_storage option =
   (* The rewrite's hottest query; the tree's lookup yields the
-     containing (or nearest) entries, of which the first decides. *)
+     containing entry, which decides. *)
   match Seq.hd (Tree.lookup tree r.lo) with
   | Some (_, v) -> Some v
   | None -> None
@@ -941,10 +942,7 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
            let tid = Term.tid sub in
-           let tree =
-             Core.Map.find sub_trees tid
-             |> Base.Option.value ~default:Tree.empty
-           in
+           let tree = Core.Map.find_exn sub_trees tid in
            Term.enum blk_t sub
            |> Seq.concat_map ~f:(Term.enum def_t)
            |> Seq.fold ~init:acc ~f:(fun acc d ->
@@ -1030,7 +1028,7 @@ let stamp_tags (c : ctx) (sub : sub term) : sub term =
             ~f:(fun t -> Hike_def_slots.set_sec_tag t d)))
 
 (* The layout is the fold of the finalized tree: an unserved member
-   fails loudly.  The residue (id 0) is the fallback alloca, sized to
+   fails loudly.  The residue (id 0) is the fallback storage, sized to
    the reach its def-backed members PROVE: an escape member (no def) is
    a claim about the callee's reach and never sizes it. *)
 let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
@@ -1306,19 +1304,8 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
           match Model.singleton_i64 ws with
           | None -> census "rw.value.raw"; acc
           | Some c -> (
-              let at_slot =
-                Base.List.exists spans ~f:(fun sp ->
-                    equal_sec sp.ds_sec
-                      (point Rodata c).p_sec
-                    && Base.List.exists sp.ds_slots
-                         ~f:(fun sl ->
-                           Stdlib.Int64.equal sl c))
-              in
-              match
-                (at_slot,
-                 owning_data_binding data c)
-              with
-              | false, Some (id, comp_lo) -> (
+              match owning_data_binding data c with
+              | Some (id, comp_lo) -> (
                   (* A pure constant address materializes
                      at this def: the component's pointer
                      base plus its own constant.  A value
@@ -1364,7 +1351,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                   | _ ->
                       census "rw.value.section.carried";
                       acc)
-              | _ -> census "rw.value.raw"; acc))
+              | None -> census "rw.value.raw"; acc))
       | Ok ws -> (
           (* The routing of an address value: at/above
              the args base it names the caller's window
@@ -1419,7 +1406,7 @@ let def_facts ~(synth : Hike_synth.table ref) ~(word : int) ~(entry : int64)
                       | None ->
                           census "rw.value.region.unfoldable";
                           acc)
-                  | Some _ -> census "rw.value.window"; acc
+                  | Some _ -> acc
                   | None -> census "rw.value.raw"; acc)
               | _ -> census "rw.value.raw"; acc))
   in

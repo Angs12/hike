@@ -6,10 +6,6 @@ module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_ptr
 open Bil2llvm_exp
-open Bil2llvm_section
-
-let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
-  Hike_def_slots.sec_tag def
 
 (* The access's value: a memory node's load/store, or an arithmetic
    pointer rebased to its storage.  [ptr_cell]: the def's whole value is
@@ -231,7 +227,7 @@ let lower_cursor ctx scope llvm_builder blk_tid def res =
 let create_def ctx scope blk_tid llvm_builder sub_tid def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
-  let def_tag = find_def_tag def in
+  let def_tag = Hike_def_slots.sec_tag def in
   let ptr = is_ptr_var ctx var in
   let ptr_cell = ptr && (match exp with Bil.Load _ -> true | _ -> false) in
   let res =

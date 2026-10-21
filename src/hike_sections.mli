@@ -191,10 +191,6 @@ val attribute :
 (** The ownership query: the finalized binding owning [r]. *)
 val storage_of_range : range_storage Tree.t -> range -> range_storage option
 
-(** The section space predicates: data sections vs the sub-local
-    stack/arg spaces. *)
-(** The def's memory access: (address, width in bytes, stores?). *)
-
 (** Stamps the ctx's slim tags onto the sub's defs (a term mapper). *)
 val stamp_tags : ctx -> sub term -> sub term
 

@@ -99,8 +99,8 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
     as_int ctx llvm_builder
       (match Core.Map.find temp_defs av with
        | Some d ->
-           mem_access ctx scope llvm_builder blk_tid (find_def_tag d) d
-             (Def.rhs d)
+           mem_access ctx scope llvm_builder blk_tid
+             (Hike_def_slots.sec_tag d) d (Def.rhs d)
        | None -> create_exp ctx scope llvm_builder blk_tid (Bil.Var av))
   in
   let w_of = Bil2llvm_int.width in
@@ -167,7 +167,9 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
             llvm_builder
         in
         Llvm.build_bitcast d lane_ty "" llvm_builder
-    | FHLT -> assert false
+    | FHLT ->
+        (* Unreachable: the outer match handles halt before this arm. *)
+        assert false
   in
   (* Ret temps bind the call's written version: the SSA
      pass minted one per call, so every read downstream resolves. *)

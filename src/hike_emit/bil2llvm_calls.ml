@@ -75,10 +75,11 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
          | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot ctx.synth (Arg.lhs arg) then
         let i =
-          Base.Option.value ~default:0
-            (Base.List.findi slot_args
-               ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
-               |> Base.Option.map ~f:fst)
+          Base.List.findi slot_args
+            ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
+          |> Base.Option.value_exn
+               ~message:"call argument is not a slot argument"
+          |> fst
         in
         slot_ptr i
       else if extern && is_fp_param ctx (Arg.lhs arg) then
@@ -286,9 +287,8 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
   | Some fallthrough -> finish_call scope llvm_builder (Some fallthrough)
   | None -> if emit_unreachable then finish_call scope llvm_builder None)
 
-(* An indirect site with an unresolved target: the pointer lands in
-   a promoted target's thunk (via address rendering), else the
-   target's existing convention. *)
+(* An indirect call: a resolved pointer lands in a promoted target's
+   thunk (via address rendering), else the target's existing convention. *)
 let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
   let icall_tid = indirect_call_tid in
   let call = call_exn j in
@@ -593,7 +593,7 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
              (Exp.to_string target)))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
-(* Marker calls retain only their continuation; fences emit their exact ordering. *)
+(* Fences emit their exact ordering; legacy lock markers are refused. *)
 let create_atomic_intrinsic_call ctx scope llvm_builder ~sub_tid name call =
   (match Abi.strip_at name with
    | "intrinsic:x86:lock" | "intrinsic:x86:unlock" ->

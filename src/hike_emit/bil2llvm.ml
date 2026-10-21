@@ -1,5 +1,6 @@
 (* LLVM emitter core: declarations, blocks, subs, sigs, entry.
-   The lanes live in bil2llvm_{env,section,exp,mem,fp,calls}.
+   The lanes live in
+   bil2llvm_{env,section,exp,memory,fp,calls,phi,atomic,int,ptr,value,synth}.
    The emission state is two values: the run ctx and one sub_scope
    per sub, opened and dropped by [emit_program]'s body loop. *)
 
@@ -209,7 +210,7 @@ let build_entry_block ctx scope llvm_builder fr sub =
   exit_entry scope llvm_builder sub
 
 (* Creates the LLVM blocks: one per BIR block plus the entry. *)
-let create_blocks ctx scope llvm_ctx blks fn sub =
+let create_blocks ctx scope llvm_ctx blks fn =
   insert_bb scope Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals scope Graphs.Tid.start;
   Seq.iter blks ~f:(fun blk ->
@@ -257,7 +258,7 @@ let create_sub ctx scope sub =
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
-    create_blocks ctx scope llvm_ctx blks fn sub;
+    create_blocks ctx scope llvm_ctx blks fn;
     load_ssa_blocks scope blks;
     (* The lock-marker brackets' plan, before any body emits. *)
     scope.atomic_plan := Bil2llvm_access.plan_atomics sub;

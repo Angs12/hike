@@ -6,7 +6,6 @@ open Bap.Std
 module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_exp
-open Bil2llvm_access
 
 (* A BIR phi renders as the LLVM phi of its own lhs.  The type is the
    lhs's: the type pass makes a phi with a pointer incoming a pointer. *)

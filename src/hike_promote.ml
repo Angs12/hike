@@ -147,10 +147,7 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
     ~(resolved : Tid.t option Tid.Map.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
-  let tree =
-    Core.Map.find ctx.sub_trees (Term.tid sub)
-    |> Core.Option.value ~default:Sections.Tree.empty
-  in
+  let tree = Core.Map.find_exn ctx.sub_trees (Term.tid sub) in
   let arity = Sections.slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
@@ -250,10 +247,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   in
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
-        let sites, resolved =
-          Core.Map.find sides (Term.tid sub)
-          |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
-        in
+        let sites, resolved = Core.Map.find_exn sides (Term.tid sub) in
         rewrite_sub ~synth ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx
           ~sites ~resolved
           ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))

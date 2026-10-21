@@ -35,9 +35,6 @@ type site_binding = {
   sb_def : def term;
 }
 
-(** The promoted slot count of a finalized tree: the highest Arg_slot
-    cell index + 1; 0 when the tree names none. *)
-
 (** The per-block store-to-call-slot correspondence. *)
 val site_bindings_of_sub :
   word:int ->
@@ -46,10 +43,6 @@ val site_bindings_of_sub :
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   sub term ->
   site_binding list Tid.Map.t
-
-(** The promoted slots' arity: one per word cell the tree's Arg_slot
-    members name, derived from each member's own address — the binding is
-    never the unit. *)
 
 (** The per-sub rewrite driver: promotion, the storage rewrite, and
     the layout stamp. *)
