@@ -18,4 +18,5 @@ exact-equality assertion fails under that inversion.
 | HSB-15 | `full_bounds`: a swapped hull spans the whole scope | drop the `lo > hi` arm (fall through to the direction tests) | pin FAILs: `(10, -10)` no longer returns `(flo, cei)` |
 | HSB-19 | `escape_extent`: a plain value (no `stack_offsets`) yields `None` | return `Some (floor, args_ceiling)` in the `None` arm of `stack_offsets` | pin FAILs: plain sets now answer a scope hull |
 | HSB-25 | `key_extent`: a finite stack value keeps its exact offset extrema | return `(zero, ones)` for the finite `stack_offsets` arm | pin FAILs: `-8` becomes the full key line |
+| HSB-35 | `key_extent`: a TOP/unknown set spans the whole key line, while bottom has no extent | return `None` for the no-extrema arm | pin FAILs: TOP no longer covers the line |
 | HSB-34 | `caller_window_bytes = 65536L` | change the literal | pin FAILs: the capacity constant changes |

@@ -75,22 +75,24 @@ let key_extent ~(width : int) (ws : Ws.t) :
     else if Ws.is_circular ws then (zero, ones)
     else (lo, hi)
   in
-  match Ws.stack_offsets ws with
-  | Some offs -> (
-      match Clp.Pieces.min_elem offs, Clp.Pieces.max_elem offs with
-      | Some lo, Some hi -> Some (clamp lo hi)
-      | _ -> Some (zero, ones))
-  | None -> (
-      match Ws.stack_bounds ws with
-      | Some (lo, hi) ->
-          Some
-            (clamp
-               (Cbat_word.of_int64 ~width lo)
-               (Cbat_word.of_int64 ~width hi))
-      | None -> (
-          match Ws.min_elem ws, Ws.max_elem ws with
-          | Some lo, Some hi -> Some (clamp lo hi)
-          | _ -> None))
+  if Ws.is_bottom ws then None
+  else
+    match Ws.stack_offsets ws with
+    | Some offs -> (
+        match Clp.Pieces.min_elem offs, Clp.Pieces.max_elem offs with
+        | Some lo, Some hi -> Some (clamp lo hi)
+        | _ -> Some (zero, ones))
+    | None -> (
+        match Ws.stack_bounds ws with
+        | Some (lo, hi) ->
+            Some
+              (clamp
+                 (Cbat_word.of_int64 ~width lo)
+                 (Cbat_word.of_int64 ~width hi))
+        | None -> (
+            match Ws.min_elem ws, Ws.max_elem ws with
+            | Some lo, Some hi -> Some (clamp lo hi)
+            | _ -> Some (zero, ones)))
 
 (* The window extension's capacity; a real SysV window never needs more. *)
 let caller_window_bytes : int64 = 65536L
