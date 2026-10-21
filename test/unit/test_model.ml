@@ -1,8 +1,6 @@
 (* The model/producer surface pins: the composed producer end-to-end, the
    layout from the finalized tree, stack-to-locals fission, the emitter's
-   alloca shapes, the printable-run rule, and the Abi/Kb domains.  One
-   Alcotest group per pin; each pin builds its own fixture, so no state
-   crosses pins. *)
+   alloca shapes, the printable-run rule, and the Abi/Kb domains. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -27,7 +25,6 @@ let tp_offset_equal (a : Hike.Stack_model.tp_offset) (b : Hike.Stack_model.tp_of
   | Tp_nonlinear, Tp_nonlinear -> true
   | Tp_based x, Tp_based y -> Base.Option.equal Int64.equal x y
   | _ -> false
-
 
 (* The def with the given tid in the sub. *)
 let def_of_tid (sub : sub term) (dtid : tid) : def term option =
@@ -92,9 +89,6 @@ let tests : unit Alcotest.test list =
     (* Lane A: the producer record (the composed producer end-to-end). *)
     (* Lane B: the layout from the finalized tree ([layout_of_tree]). *)
 
-
-
-
     pin "MOD-10"
       "PR-B3: a plain-TOP identity member forces the residue region and selects the runtime stack"
       (fun () ->
@@ -123,18 +117,7 @@ let tests : unit Alcotest.test list =
            && Base.List.exists l2.Sm.regions
                 ~f:(fun { Sm.r_id = id; _ } -> Int.equal id 0)));
 
-
-
     (* Lane C: stack-to-locals fission. *)
-
-
-
-
-
-
-
-
-
 
     pin "MOD-17"
       "PR-C3: an Args access converts to the caller's slot pointer (the access's own cell)"
@@ -260,45 +243,6 @@ let tests : unit Alcotest.test list =
                | Type.Mem _ -> true
                | _ -> false)));
 
-    pin "MOD-19"
-      "PR-C4: the compiled guard is a value comparison — no memory node rides a cond"
-      (fun () ->
-        let c4_st = mk_store 16L 7 `r64 in
-        let c4_t = v64 "pr_c4_t" in
-        let c4_ld =
-          Def.create c4_t
-            (Bil.Load (Bil.Var pr_c_m, minus_addr sp 16L, LittleEndian, `r64))
-        in
-        let c4_zf = abi_zf in
-        let c4_flag =
-          Def.create c4_zf
-            (Bil.BinOp
-               ( Bil.EQ,
-                 Bil.Var c4_t,
-                 Bil.Int (Cbat_word.to_word (w64 0)) ))
-        in
-        let c4_pre, _ =
-          sub_of "pr_c4_cond"
-            [ [ c4_st; c4_ld; c4_flag ],
-              [ (2, fun t -> mk_jmp_to t (Bil.Var c4_zf)); (1, mk_goto) ];
-              [], [ (0, mk_ret) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, c4 = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target c4_pre in
-        let has_load (e : exp) : bool =
-          let vis =
-            object
-              inherit [ bool ] Exp.visitor
-              method! visit_load ~mem:_ ~addr:_ _ _ _ = true
-            end
-          in
-          vis#visit_exp e false
-        in
-        check "MOD-19"
-          (Term.enum blk_t c4
-          |> Seq.concat_map ~f:(Term.enum jmp_t)
-          |> Seq.for_all ~f:(fun j -> not (has_load (Jmp.cond j)))));
-
     pin "MOD-20" "PR-C4: the load def converts to the region mem and the guard reads its temp"
       (fun () ->
         let c4_st = mk_store 16L 7 `r64 in
@@ -323,6 +267,9 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let _, c4 = Hike.Jump.compile_sub ~synth:Hike.Synth.empty jump_target c4_pre in
+        check "compiled conditions contain no memory reads"
+          (Term.enum blk_t c4 |> Seq.concat_map ~f:(Term.enum jmp_t)
+           |> Seq.for_all ~f:(fun j -> Sm.mem_node_count (Jmp.cond j) = 0));
         let c4' = rewrite_one ~synth:Hike.Synth.empty c4 in
         check_bound "MOD-20" (def_of_tid c4' (Term.tid c4_ld)) (fun d ->
             match Def.rhs d with
@@ -339,25 +286,6 @@ let tests : unit Alcotest.test list =
 
     (* Lane D: the emitter's alloca shapes — the VLA lane, the SP Slot /
        stack_0 anchoring per storage class, and the frame-request clamp. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     (* Lane E: the register/convention facts (Hike_abi, ADR 0008: SP is the
        only stack-semantics register, fp an ordinary callee-saved GPR) and
@@ -409,10 +337,6 @@ let tests : unit Alcotest.test list =
              [ abi.Abi.zero_flag; abi.Abi.carry_flag; abi.Abi.sign_flag;
                abi.Abi.overflow_flag; abi.Abi.parity_flag ]
              ~f:(Abi.is_flag_reg abi)));
-
-
-
-
 
     pin "MOD-37" "PR-E1: a non-primary target is refused"
       (fun () ->

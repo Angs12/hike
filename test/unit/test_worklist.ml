@@ -12,16 +12,10 @@ let at (prog : program term) (a : int64) : sub term option =
 
 let calls (sub : sub term) : Call.t list =
   Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum jmp_t)
-  |> Seq.filter_map ~f:(fun j -> match Jmp.kind j with Call c -> Some c | _ -> None)
+  |> Seq.filter_map ~f:(fun j ->
+      if Hike_return.is_jmp j then None
+      else match Jmp.kind j with Call c -> Some c | _ -> None)
   |> Seq.to_list
-
-(* Every call to a sub of [prog] comes back. *)
-let returns_after_every_call prog sub =
-  List.for_all (fun c ->
-      match Call.target c with
-      | Direct t when Term.find sub_t prog t <> None -> Call.return c <> None
-      | _ -> true)
-    (calls sub)
 
 let lift code = with_binary code (fun p -> (Hike.Drive.run p).program)
 
@@ -42,8 +36,18 @@ let tests = [
       let prog =
         lift "\xe8\x01\x00\x00\x00\xc3\x85\xff\x74\x05\xe8\x01\x00\x00\x00\xc3\
               \xe8\xf1\xff\xff\xff\xc3" in
-      check_bound "WL-02.f" (at prog 0x40007eL) (returns_after_every_call prog);
-      check_bound "WL-02.g" (at prog 0x400088L) (returns_after_every_call prog));
+      let f = at prog 0x40007eL |> Base.Option.value_exn in
+      let g = at prog 0x400088L |> Base.Option.value_exn in
+      let check_call caller callee =
+        match calls caller with
+        | [ call ] ->
+          check "recursive call reaches its callee"
+            (Call.target call = Direct (Term.tid callee));
+          check_bound "recursive call returns within its caller" (Call.return call)
+            (function Direct t -> Term.find blk_t caller t <> None | Indirect _ -> false)
+        | _ -> Alcotest.fail "expected one call in each recursive function" in
+      check_call f g;
+      check_call g f);
 
   pin "WL-03" "a block two functions reach gets one tid per function" (fun () ->
       (* call f; call g; ret; f: jmp L; g: jmp L; L: ret *)
@@ -93,7 +97,15 @@ let tests = [
   pin "WL-06" "both arms of a conditional survive discovery" (fun () ->
       (* test edi,edi; je +6; mov eax,42; ret; xor eax,eax; ret *)
       let prog = lift "\x85\xff\x74\x06\xb8\x2a\x00\x00\x00\xc3\x31\xc0\xc3" in
-      check_bound "WL-06" (at prog 0x400078L) (fun s -> Term.length blk_t s >= 3));
+      check_bound "WL-06" (at prog 0x400078L) (fun s ->
+          let block a = Term.enum blk_t s |> Seq.find_exn ~f:(starts_at a) in
+          let entry = block 0x400078L in
+          let taken = block 0x400082L and fallthrough = block 0x40007cL in
+          let targets = Term.enum jmp_t entry
+            |> Seq.filter_map ~f:(fun j -> match Jmp.kind j with
+                | Goto (Direct t) -> Some t | _ -> None)
+            |> Seq.to_list in
+          List.mem (Term.tid taken) targets && List.mem (Term.tid fallthrough) targets));
 
   pin "WL-07" "a resolved indirect jump's target is a block of its function" (fun () ->
       (* lea rax,[rip+2]; jmp rax; mov eax,42; ret *)
@@ -104,9 +116,29 @@ let tests = [
 
   pin "WL-08" "a resolved indirect call's destination is a function" (fun () ->
       (* lea rax,[rip+3]; call rax; ret; mov eax,42; ret *)
-      let prog =
-        lift "\x48\x8d\x05\x03\x00\x00\x00\xff\xd0\xc3\xb8\x2a\x00\x00\x00\xc3" in
-      check "WL-08" (at prog 0x400082L <> None));
+      with_binary "\x48\x8d\x05\x03\x00\x00\x00\xff\xd0\xc3\xb8\x2a\x00\x00\x00\xc3"
+        (fun project ->
+          let result = Hike.Drive.run project in
+          let caller = at result.program 0x400078L |> Base.Option.value_exn in
+          check "destination is a discovered function" (at result.program 0x400082L <> None);
+          let block = Term.enum blk_t caller
+            |> Seq.find_exn ~f:(fun b -> Seq.exists (Term.enum jmp_t b)
+                ~f:(fun j -> not (Hike_return.is_jmp j)
+                    && match Jmp.kind j with Call _ -> true | _ -> false)) in
+          match calls caller with
+          | [ call ] ->
+            check "call retains its return edge" (Call.return call <> None);
+            (match Call.target call with
+             | Indirect target ->
+               (match result.facts.Hike.Kb.denote ~blk:block target with
+                | Ok value -> Alcotest.(check (option (list int64)))
+                    "call target denotes the discovered entry" (Some [ 0x400082L ])
+                    (Base.Option.map (Cbat_vsa.WordSet.enumerate ~cap:1 value)
+                       ~f:(List.map Cbat_word.to_int64_exn))
+                | Error _ -> Alcotest.fail "call target has no denotation")
+             | Direct t -> check "direct target is the discovered function"
+                 (Term.find sub_t result.program t = at result.program 0x400082L))
+          | _ -> Alcotest.fail "expected one indirect call"));
   pin "WL-09" "successive decode growth keeps the warm SSA values"
     (fun () ->
       (* eax := 7; jump to add 1; jump to add 1; ret. Each indirect

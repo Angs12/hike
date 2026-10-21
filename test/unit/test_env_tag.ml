@@ -1,7 +1,5 @@
-(* Env Tag pins: the stamp round-trip, absence, slot survival through
-   def rewrites, the seam's gate-free answers, and the sweep's fold
-   alignment.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins. *)
+(* Definition queries use the state before that definition. Rewrites retain
+   existing states; newly introduced definitions have no analysis state. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -22,80 +20,49 @@ let promote_rewrite_synth (facts : Hike.Kb.facts) (sub : sub term) :
     Hike.Synth.table * sub term =
   let prog = Program.create ~subs:[ sub ] () in
   let ctx =
-    Hike.Sections.attribute ~facts ~word:8
-      ~entry:Hike.Stack_model.segment_base ~spans:[] prog
+    Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
+      ~spans:[] prog
   in
   let synth, prog =
-    Hike.Promote.rewrite_program ~word:8
-      ~entry:Hike.Stack_model.segment_base ~facts ~spans:[] ~ctx
-      prog
+    Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base
+      ~facts ~spans:[] ~ctx prog
   in
   (synth, Term.first sub_t prog |> Base.Option.value_exn)
 
-let promote_rewrite facts sub = snd (promote_rewrite_synth facts sub)
-
-let tests : unit Alcotest.test list =
+let tests =
   [
-    (* Env1: the stamp round-trip and the pointer payload. *)
-    pin "ENV-01" "a def outside the boundary has no Env Tag" (fun () ->
-        let v = v64 "et_v" in
-        let d = Def.create v (Bil.Int (Cbat_word.to_word (w64 5))) in
-        check "ENV-01" (Option.is_none (Vsa.env_tag d)));
-
-
-
-
-
-    (* Env3: the sweep stamps each def with the env its own transfer
-       reads — the chain advances through [denote_def] and the final env
-       is the block post. *)
-    pin "ENV-06" "the first def's tag is the block pre" (fun () ->
-        let x = v64 "et_x" in
-        let y = v64 "et_y" in
+    case "definition queries follow the block's transfer order" (fun () ->
+        let x = v64 "et_x" and y = v64 "et_y" in
         let dx = Def.create x (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let dy =
-          Def.create y
-            (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 1))))
+        let dy = Def.create y Bil.(var x + int (Cbat_word.to_word (w64 1))) in
+        let facts, sub =
+          fixture_facts_sub ~synth:Hike.Synth.empty
+            (straight_sub "et_chain" [ dx; dy ])
         in
-        let sub = straight_sub "et_chain" [ dx; dy ] in
-        let envs, sub', _ =
-          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
+        let block = Term.first blk_t sub |> Base.Option.value_exn in
+        let dx = find_def sub (Term.tid dx)
+        and dy = find_def sub (Term.tid dy) in
+        let pre, _ = Core.Map.find_exn facts.envs (Term.tid block) in
+        check_bound "first definition receives the block pre-state"
+          (Vsa.env_tag dx) (AI.equal pre);
+        let x = Def.lhs dx and y = Def.lhs dy in
+        let query ?def value =
+          match facts.denote ~blk:block ?def (Bil.Var value) with
+          | Ok value -> value
+          | Error _ -> Alcotest.fail "definition query failed"
         in
-        let blk = Term.first blk_t sub' |> Base.Option.value_exn in
-        let pre, _ = Core.Map.find_exn envs (Term.tid blk) in
-        let dx' = find_def sub' (Term.tid dx) in
-        let tag_dx = Vsa.env_tag dx' in
-        check "ENV-06"
-          (match tag_dx with Some e -> AI.equal e pre | None -> false));
-
-    pin "ENV-07" "the second def's tag is the first transfer's product" (fun () ->
-        let x = v64 "et_x" in
-        let y = v64 "et_y" in
-        let dx = Def.create x (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let dy =
-          Def.create y
-            (Bil.BinOp (Bil.PLUS, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 1))))
-        in
-        let sub = straight_sub "et_chain" [ dx; dy ] in
-        let _, sub', _ =
-          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ sub ] ()) sub
-        in
-        let dx' = find_def sub' (Term.tid dx) in
-        let dy' = find_def sub' (Term.tid dy) in
-        let tag_dx = Vsa.env_tag dx' in
-        let tag_dy = Vsa.env_tag dy' in
-        check "ENV-07"
-          (match (tag_dx, tag_dy) with
-          | Some e1, Some e2 -> AI.equal e2 (Vsa.Test_seam.denote_def ~synth:Hike.Synth.empty dx' e1)
-          | _ -> false));
-
-
-
+        check_ws "x before its definition" (Ws.top 64) (query ~def:dx x);
+        check_ws "x after its definition"
+          (Ws.singleton (w64 7))
+          (query ~def:dy x);
+        check_ws "y after both definitions" (Ws.singleton (w64 8)) (query y));
     (* The seam's gate-free answers, crossed through [facts.denote]. *)
-    pin "ENV-09" "a memory-bearing query on a tagged def answers in its tag env"
+    case "a memory-bearing query on a tagged def answers in its tag env"
       (fun () ->
         let facts0 =
-          Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
+          Kb.build
+            ~lookup:(fun _ -> None)
+            ~block_envs:Tid.Map.empty
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:(x86_target ())
         in
@@ -135,18 +102,17 @@ let tests : unit Alcotest.test list =
            with
           | Ok ws -> Ws.equal ws (Ws.singleton (Cbat_word.of_int ~width:32 7))
           | Error _ -> false));
-
     (* Env5: an untagged def answers TOP even when the record's pre binds
        the queried var. *)
-    pin "ENV-10" "an untagged def answers TOP (minted after the boundary)"
-      (fun () ->
+    case "an untagged def answers TOP (minted after the boundary)" (fun () ->
         let x = v64 "ets_x" in
         let y = v64 "ets_y" in
         let pre5 = mk_env [ (x, Ws.singleton (w64 5)) ] in
         let blk5 = blk_of_defs [ Def.create y (Bil.Var x) ] in
         let d5 = Term.first def_t blk5 |> Base.Option.value_exn in
         let facts5 =
-          Kb.build ~lookup:(fun _ -> None)
+          Kb.build
+            ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk5) (pre5, pre5))
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:(x86_target ())
@@ -155,15 +121,15 @@ let tests : unit Alcotest.test list =
           (match facts5.denote ~blk:blk5 ~def:d5 (Bil.Var x) with
           | Ok ws -> Ws.is_top ws
           | Error _ -> false));
-
     (* Env6: a no-def query evaluates in the block's post state. *)
-    pin "ENV-11" "a no-def query evaluates in the post state" (fun () ->
+    case "a no-def query evaluates in the post state" (fun () ->
         let x = v64 "ets_x" in
         let pre6 = mk_env [ (x, Ws.singleton (w64 1)) ] in
         let post6 = mk_env [ (x, Ws.singleton (w64 2)) ] in
         let blk6 = blk_of_defs [] in
         let facts6 =
-          Kb.build ~lookup:(fun _ -> None)
+          Kb.build
+            ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk6) (pre6, post6))
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:(x86_target ())
@@ -172,125 +138,61 @@ let tests : unit Alcotest.test list =
           (match facts6.denote ~blk:blk6 (Bil.Var x) with
           | Ok ws -> Ws.equal ws (Ws.singleton (w64 2))
           | Error _ -> false));
-
-    (* Env7: the VSA_DEBUG differential's invariant on a multi-def block —
-       every def-level query's tag answer equals the raw replay. *)
-
-
-    (* The promote path: [Hike.Promote.rewrite_program] maps the stamped
-       sub and mints the hike_argN defs; a mapped-but-surviving def still
-       answers from its tag, a minted def from TOP. *)
-    pin "ENV-13" "the promote rewrite actually rewrote the surviving def"
+    case "promotion preserves existing states and leaves new arguments untagged"
       (fun () ->
         let m = memv "etp_m" in
-        let x = v64 "etp_x" in
-        let dx = Def.create x (Bil.Int (Cbat_word.to_word (w64 7))) in
         let store =
           Def.create m
             (Bil.Store
                ( Bil.Var m,
                  Bil.BinOp
-                   ( Bil.PLUS,
-                     Bil.Var sp,
-                     Bil.Int (Cbat_word.to_word (w64 16)) ),
+                   (Bil.PLUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 16))),
                  Bil.Int (Cbat_word.to_word (w64 9)),
                  LittleEndian,
                  `r64 ))
         in
         let sub, _ =
           sub_of "etp_promote"
-            [ [ dx; store ],
-              [ (1,
-                 fun t ->
-                   Jmp.create
-                     (Call
-                        (Call.create ~return:(Direct t)
-                           ~target:(Indirect (Bil.Var (v64 "etp_tptr")))
-                           ()))) ];
-              [], [ (0, mk_ret) ] ]
+            [
+              ( [ store ],
+                [
+                  ( 1,
+                    fun t ->
+                      Jmp.create
+                        (Call
+                           (Call.create ~return:(Direct t)
+                              ~target:(Indirect (Bil.Var (v64 "etp_tptr")))
+                              ())) );
+                ] );
+              ([], [ (0, mk_ret) ]);
+            ]
         in
-        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
-        let sub'' = promote_rewrite facts sub' in
-        let store'' = find_def sub'' (Term.tid store) in
-        check "ENV-13"
-          (not (Exp.equal (Def.rhs store'') (Def.rhs store))));
-
-    pin "ENV-14" "the promote rewrite keeps a mapped def's Env Tag"
-      (fun () ->
-        let m = memv "etp_m" in
-        let x = v64 "etp_x" in
-        let dx = Def.create x (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.PLUS,
-                     Bil.Var sp,
-                     Bil.Int (Cbat_word.to_word (w64 16)) ),
-                 Bil.Int (Cbat_word.to_word (w64 9)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let sub, _ =
-          sub_of "etp_promote"
-            [ [ dx; store ],
-              [ (1,
-                 fun t ->
-                   Jmp.create
-                     (Call
-                        (Call.create ~return:(Direct t)
-                           ~target:(Indirect (Bil.Var (v64 "etp_tptr")))
-                           ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
-        let sub'' = promote_rewrite facts sub' in
-        let store'' = find_def sub'' (Term.tid store) in
-        check "ENV-14" (Base.Option.is_some (Vsa.env_tag store'')));
-
-
-
-    (* Env9: the fresh hike_argN def carries no tag and answers TOP. *)
-    pin "ENV-16" "the minted hike_argN def has no Env Tag" (fun () ->
-        let m = memv "etp_m" in
-        let x = v64 "etp_x" in
-        let dx = Def.create x (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.PLUS,
-                     Bil.Var sp,
-                     Bil.Int (Cbat_word.to_word (w64 16)) ),
-                 Bil.Int (Cbat_word.to_word (w64 9)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let sub, _ =
-          sub_of "etp_promote"
-            [ [ dx; store ],
-              [ (1,
-                 fun t ->
-                   Jmp.create
-                     (Call
-                        (Call.create ~return:(Direct t)
-                           ~target:(Indirect (Bil.Var (v64 "etp_tptr")))
-                           ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let facts, sub' = fixture_facts_sub ~synth:Hike.Synth.empty sub in
-        let synth, sub'' = promote_rewrite_synth facts sub' in
-        let arg =
-          Term.enum def_t (Term.first blk_t sub'' |> Base.Option.value_exn)
-          |> Seq.find ~f:(fun d ->
+        let facts, before = fixture_facts_sub ~synth:Hike.Synth.empty sub in
+        let synth, after = promote_rewrite_synth facts before in
+        let old_store = find_def before (Term.tid store) in
+        let new_store = find_def after (Term.tid store) in
+        check "store was rewritten"
+          (not (Exp.equal (Def.rhs old_store) (Def.rhs new_store)));
+        check "rewritten store retains the same state"
+          (match (Vsa.env_tag old_store, Vsa.env_tag new_store) with
+          | Some old, Some current -> AI.equal old current
+          | _ -> false);
+        let block = Term.first blk_t after |> Base.Option.value_exn in
+        let arguments =
+          Term.enum def_t block
+          |> Seq.filter ~f:(fun d ->
               Hike.Stack_model.is_call_arg synth (Def.lhs d))
+          |> Seq.to_list
         in
-        check_bound "ENV-16" arg (fun d ->
-            Base.Option.is_none (Vsa.env_tag d)));
-
-
+        match arguments with
+        | [ arg ] -> (
+            check "new argument has no analysis state"
+              (Option.is_none (Vsa.env_tag arg));
+            match facts.denote ~blk:block ~def:arg (Def.rhs arg) with
+            | Ok value ->
+                check_ws "new argument query is unknown" (Ws.top 64) value
+            | Error _ -> Alcotest.fail "new argument query failed")
+        | _ -> Alcotest.fail "expected one outgoing stack argument");
   ]
 
-let () = run "env_tag" tests
+let () = run "env_tag" [ ("queries", tests) ]

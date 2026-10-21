@@ -251,15 +251,9 @@ let mk_caller_alias () : caller_alias_fixture =
 
 (* -O0 prologue (rbp := RSP) + load + overlapping store. Returns (def_rbp, def_store, sub). *)
 
-
-
-
-
-
 (* One-path heap shapes: the use-store's address joins to TOP. *)
 
 (* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, def_use, sub). *)
-
 
 let mk_high0_cast_sub () : var * Program.t * sub term * tid =
   let rax = Var.create ~is_virtual:false ~fresh:false "rax" (Type.Imm 64) in
@@ -1066,56 +1060,76 @@ let mk_cond_sub nm defs cond_var =
               Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var cond_var, Bil.Int (Cbat_word.to_word (w64 0))))
                 (Goto (Direct (Tid.create ())))) ] ])
 
-(* Emitter fixtures (moved verbatim from test_bil2llvm.ml). *)
+(* Emitter fixtures. *)
 let empty_spec : B2l.section_spec =
   { spec_comps = []; spec_whole = []; spec_word = 8;
     spec_sections = []; spec_tls = None;
     spec_relative = []; spec_externals = [] }
 
-let emit_ir_spec ~synth ?(types = fun prog -> prog) ?(verify = false) (spec : B2l.section_spec)
-    (subs : sub term list) : string =
+let with_emitted_module ~synth ?(types = fun prog -> prog)
+    (spec : B2l.section_spec) (subs : sub term list) f =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
-  (* The completion names each block's successors, as the pipeline does
-     (ADR 0024). *)
-  let subs =
-    Base.List.map subs ~f:Hike.Cfg_complete.materialize_fallthroughs
-  in
-  let prog = Program.create ~subs () in
-  (* The FP pass qualifies the temp widths, as the pipeline does; the
-     types pass writes each sub's signature onto its [arg] terms; the
-     SSA pass materializes the phis the emitter renders. *)
-  let prog = Hike.Atomic.normalize ~addr_bits:64 prog in
-  let synth = Hike.Synth.union (top_facts ()).Hike.Kb.synth synth in
-  (* A fixture's storage declarations create their canonical variables. *)
-  let storage synth storage =
-    let synth, _ = Hike.Synth.mint_base ~addr_bits:64 storage synth in
-    fst (Hike.Synth.mint_bytes ~addr_bits:64 storage synth)
-  in
-  let synth = Base.List.fold spec.spec_comps ~init:synth
-      ~f:(fun synth c -> storage synth (Hike.Synth.Global c.Hike.Stack_model.comp_id)) in
-  let synth = Base.List.fold spec.spec_whole ~init:synth
-      ~f:(fun synth (id, _, _) -> storage synth (Hike.Synth.Global id)) in
-  let synth = Base.List.fold subs ~init:synth ~f:(fun synth sub ->
-      match Term.get_attr sub Hike.Stack_model.layout_tag with
-      | None -> synth
-      | Some layout ->
-        Base.List.fold layout.Hike.Stack_model.regions ~init:(storage synth Hike.Synth.Window)
-          ~f:(fun synth r -> storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id))) in
-  let synth, prog = Hike.Fp.run_program ~word_bits:64 ~synth prog in
-  let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
-  let prog = Hike.Split_blocks.normalize ~synth ~target:(x86_target ()) prog in
-  let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
-  (* The types pass runs on the SSA program; a fixture stamps its own. *)
-  let prog = types prog in
-  B2l.emit_program llvm_ctx llvm_module
-    ~target:(x86_target ()) ~addr_bits:64
-    ~symtab:None ~synth:synth spec prog;
-  if verify then Base.Option.iter (Llvm_analysis.verify_module llvm_module) ~f:failwith;
-  let s = Llvm.string_of_llmodule llvm_module in
-  Llvm.dispose_module llvm_module;
-  Llvm.dispose_context llvm_ctx;
-  s
+  Fun.protect
+    ~finally:(fun () ->
+      Llvm.dispose_module llvm_module;
+      Llvm.dispose_context llvm_ctx)
+    (fun () ->
+      (* Name fallthrough successors before emission (ADR 0024). *)
+      let subs =
+        Base.List.map subs ~f:Hike.Cfg_complete.materialize_fallthroughs
+      in
+      let prog = Program.create ~subs () in
+      (* Run the production normalization, SSA and signature passes. *)
+      let prog = Hike.Atomic.normalize ~addr_bits:64 prog in
+      let synth = Hike.Synth.union (top_facts ()).Hike.Kb.synth synth in
+      (* A fixture's storage declarations create their canonical variables. *)
+      let storage synth storage =
+        let synth, _ = Hike.Synth.mint_base ~addr_bits:64 storage synth in
+        fst (Hike.Synth.mint_bytes ~addr_bits:64 storage synth)
+      in
+      let synth =
+        Base.List.fold spec.spec_comps ~init:synth ~f:(fun synth c ->
+            storage synth (Hike.Synth.Global c.Hike.Stack_model.comp_id))
+      in
+      let synth =
+        Base.List.fold spec.spec_whole ~init:synth ~f:(fun synth (id, _, _) ->
+            storage synth (Hike.Synth.Global id))
+      in
+      let synth =
+        Base.List.fold subs ~init:synth ~f:(fun synth sub ->
+            match Term.get_attr sub Hike.Stack_model.layout_tag with
+            | None -> synth
+            | Some layout ->
+                Base.List.fold layout.Hike.Stack_model.regions
+                  ~init:(storage synth Hike.Synth.Window) ~f:(fun synth r ->
+                    storage synth (Hike.Synth.Stack r.Hike.Stack_model.r_id)))
+      in
+      let synth, prog = Hike.Fp.run_program ~word_bits:64 ~synth prog in
+      (* Fixtures may already be SSA; construction consumes base names. *)
+      let prog = Term.map sub_t prog ~f:Hike.Ssa.unssa_sub in
+      let prog = Hike.Ssa.ssa_program ~synth ~target:(x86_target ()) prog in
+      let prog =
+        Hike.Split_blocks.normalize ~synth ~target:(x86_target ()) prog
+      in
+      let prog = Hike.Types.sign_program ~synth ~target:(x86_target ()) prog in
+      (* The types pass runs on the SSA program; a fixture stamps its own. *)
+      let prog = types prog in
+      B2l.emit_program llvm_ctx llvm_module ~target:(x86_target ())
+        ~addr_bits:64 ~symtab:None ~synth spec prog;
+      Base.Option.iter
+        (Llvm_analysis.verify_module llvm_module)
+        ~f:Alcotest.fail;
+      f llvm_module)
+
+let emit_ir_spec ~synth ?types spec subs =
+  with_emitted_module ~synth ?types spec subs Llvm.string_of_llmodule
+
+let llvm_instructions llvm_module =
+  Llvm.fold_left_functions (fun instructions fn ->
+      Llvm.fold_left_blocks (fun instructions block ->
+          Llvm.fold_left_instrs (fun instructions insn -> insn :: instructions)
+            instructions block) instructions fn) [] llvm_module
 
 let emit_ir ~synth ?types (subs : sub term list) : string =
   emit_ir_spec ~synth ?types empty_spec subs

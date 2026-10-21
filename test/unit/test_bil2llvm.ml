@@ -1,7 +1,5 @@
 (* Emitter pins (hike-convlir / Bil2llvm): the textual IR the emitter
-   produces over hand-built BIR, plus the section-tiling algebra.  One
-   Alcotest group per pin; each pin builds its own fixture, so no state
-   crosses pins. *)
+   produces over hand-built BIR, plus the section-tiling algebra. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -28,6 +26,18 @@ let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
   in
   Hike.Promote.promote_sub ~synth:(ref Hike.Synth.empty) ~addr_bits:64 ~abi:Hike.Abi.x86_64_sysv
     (mk_facts ()) sub
+
+let has_opcode opcode value =
+  match Llvm.classify_value value with
+  | Llvm.ValueKind.Instruction actual -> actual = opcode
+  | _ -> false
+
+let instructions opcode llvm_module =
+  List.filter (has_opcode opcode) (llvm_instructions llvm_module)
+
+let calls_named name value =
+  has_opcode Llvm.Opcode.Call value
+  && Llvm.value_name (Llvm.operand value (Llvm.num_operands value - 1)) = name
 
 (* Phi lines with exactly two incomings. *)
 (* The types pass's retype for a fixture: every SSA version of [ptrs]
@@ -68,10 +78,8 @@ let tests : unit Alcotest.test list =
   [
     (* SCOPE: undef-read diagnostics stay with the sub that reads the lane. *)
 
-
     (* UNDEF: reading a never-defined register warns and the value
        becomes a frozen undef. *)
-
 
     (* FRZ: the never-defined register's frozen entry value — two reads
        of the same lane observe the SAME freeze. *)
@@ -121,7 +129,6 @@ let tests : unit Alcotest.test list =
     (* SLOT-CHANNEL: the callee's k-th slot parameter binds the caller's
        [call_arg k] def BY MINTED-VAR IDENTITY, not block def order. *)
 
-
     (* SP-RESTORE: the direct call rebinds sp to post-push + 8. *)
     pin "EMIT-06" "the call-pushed word rides the continuation phi"
       (fun () ->
@@ -160,22 +167,17 @@ let tests : unit Alcotest.test list =
     (* SP-RESTORE: the regioned twin's return edge restores too — the
        store and the reload at [SP+8] hit the same cell. *)
 
-
     (* CAST: a tagged stack store whose DATA is a narrower cast keeps the
        zext/trunc at the store. *)
-
 
     (* GOLDEN: the substring-complete golden (one singleton slot + one
        fission region + the anchor residue). *)
 
-
     (* ANCHOR-RESIDUE: the anchor is built for arbitrary frame geometry,
        the layout tag set directly. *)
 
-
     (* FP-GPR: the emitter never invents a register value for a
        never-defined RBP read (ADR 0008). *)
-
 
     (* PHI-EDGES: one incoming per RENDERED edge. *)
     pin "EMIT-12" "a duplicated edge's identical incomings and the single edge both fold — no two-incoming i64 phi survives either variant"
@@ -299,21 +301,32 @@ let tests : unit Alcotest.test list =
             spec_tls = Some { tls_lo = 0x3dd0L; tls_memsz = 0x18L; tls_align = 8;
                               tls_base = -0x18L; tls_prefix = 0; tls_image = Bytes.empty } }
         in
-        let ir = emit_ir_spec ~synth:Hike.Synth.empty spec [ sub ] in
-        check "EMIT-14"
-          (contains_substring ir "@hike_tls_block = thread_local global"
-           (* the own-range cells: memsz 0x18, offsets -8/-10 land at
-              +0x10/+0x8 in the block *)
-           && contains_substring ir "getelementptr i8, ptr %tls_addr, i64 16"
-           && contains_substring ir "getelementptr i8, ptr %tls_addr1, i64 8"
-           && contains_substring ir "store i64 111"
-           && contains_substring ir "store i64 222"
-           (* fs:0 is the self pointer: the loaded value IS the real
-              thread pointer, never a block cell *)
-           && contains_substring ir "getelementptr i8, ptr %hike_tp, i64 0"
-           (* the canary slot loads through the real thread pointer *)
-           && contains_substring ir "i64 40"
-           && contains_substring ir "load i64"));
+        with_emitted_module ~synth:Hike.Synth.empty spec [ sub ] (fun llvm_module ->
+            let block = Llvm.lookup_global "hike_tls_block" llvm_module
+              |> Base.Option.value_exn in
+            check "TLS storage is thread local" (Llvm.is_thread_local block);
+            let gep intrinsic offset pointer =
+              has_opcode Llvm.Opcode.GetElementPtr pointer
+              && Llvm.num_operands pointer = 2
+              && Llvm.int64_of_const (Llvm.operand pointer 1) = Some offset
+              && calls_named intrinsic (Llvm.operand pointer 0) in
+            let stores = instructions Llvm.Opcode.Store llvm_module in
+            Alcotest.(check int) "two stores" 2 (List.length stores);
+            List.iter (fun (value, offset) ->
+                let store = List.find (fun store ->
+                    Llvm.int64_of_const (Llvm.operand store 0) = Some value) stores in
+                let pointer = Llvm.operand store 1 in
+                check (Printf.sprintf "store %Ld reaches TLS offset %Ld" value offset)
+                  (gep "llvm.threadlocal.address.p0" offset pointer
+                   && Llvm.operand (Llvm.operand pointer 0) 0 = block))
+              [ 111L, 16L; 222L, 8L ];
+            let loads = instructions Llvm.Opcode.Load llvm_module in
+            List.iter (fun offset ->
+                check (Printf.sprintf "load at thread pointer + %Ld" offset)
+                  (List.exists (fun load ->
+                       Llvm.integer_bitwidth (Llvm.type_of load) = 64
+                       && gep "llvm.thread.pointer" offset (Llvm.operand load 0)) loads))
+              [ 0L; 40L ]));
 
     pin "EMIT-63" "FS origins resolve loaded and spilled TLS pointers before emission"
       (fun () ->
@@ -349,16 +362,14 @@ let tests : unit Alcotest.test list =
            | _ -> false);
         let ir = emit_ir_spec ~synth { empty_spec with spec_tls = tls } [sub] in
         check "TLS pointers materialize through the emitted block"
-          (contains_substring ir "@llvm.threadlocal.address(ptr @hike_tls_block)");
+          (contains_substring ir "@llvm.threadlocal.address.p0(ptr @hike_tls_block)");
         check "thread address constants never become signature inputs"
           (not (contains_substring ir "i64 %hike_thread_")));
 
     (* ROWS-COUNT: the resolved dispatch's emitter views — one incoming
        per rendered edge. *)
 
-
     (* TILE-OWNER/SPAN/COVER/TYPE: the two-component span's tiling. *)
-
 
     (* T6-TEXT: text is a section row — a constant image-backed section. *)
 
@@ -501,31 +512,23 @@ let tests : unit Alcotest.test list =
           && not (contains_substring ir "ptrtoint")
           && not (contains_substring ir "getelementptr")));
 
-
-
     (* TILE-RESIDUE: the run counter is module-wide and consumes in the
        fixed tiling order (data before rodata). *)
 
-
     (* TILE-IDENTITY/BSS: the identity shapes keep no owners. *)
-
 
     (* TILE-ORDER: the output follows the spec's order, absent sections
        skipped. *)
 
-
     (* NB: the materialized dispatch's N-branch chain lowering. *)
-
 
     (* PHI-EDGE: the rendered-edge law — one incoming per rendered
        predecessor, and the module is valid LLVM. *)
-
 
     (* PHI-EDGE / call fallthrough: a call whose block does not track SP
        still records its fallthrough edge.  The return block's phi must
        not be empty (llc rejects a phi with predecessors but no
        incomings); this is the coreutils `wc`-class shape. *)
-
 
     (* A divide-by-zero trap lifts as a direct goto to the interrupt
        sub, not a call.  The goto must render as the interrupt handler,
@@ -545,9 +548,6 @@ let tests : unit Alcotest.test list =
         check "EMIT-25" (contains_substring ir "llvm.trap"));
 
     (* A terminal direct call has a machine-level return path. *)
-
-
-
 
     pin "EMIT-28"
       "an indirect tail with no enumerated destinations is a loud failure — \
@@ -595,20 +595,15 @@ let tests : unit Alcotest.test list =
         in
         check "EMIT-42" loud);
 
-
-
     (* LGUARD: the lone guarded goto — the split shape — renders its
        false edge to the term-order successor and records it, so the
        successor's phis carry the incoming. *)
 
-
     (* ENTRYPIECE: after an entry-block split, the original entry tid
        stays the emitted entry (fresh piece ids sort above it). *)
 
-
     (* BIRPHI: the SSA pass materializes the join's phi; the emitter
        renders it — one incoming per source block, the def's value. *)
-
 
     (* The splitter leaves a non-compilable series alone; reaching the
        emitter with it is a loud failure, never a silent render. *)
@@ -800,17 +795,25 @@ let tests : unit Alcotest.test list =
                 [ [addr;value], [(1,mk_marker (Tid.for_name
                     (Printf.sprintf "intrinsic:x86:atomic_%s_%d" op bits)))];
                   [], [(0,mk_ret)] ] in
-            let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
-            check (Printf.sprintf "EMIT-47.%s.%d" op bits)
-              (contains_substring ir ("atomicrmw " ^ op ^ " ptr")
-               && contains_substring ir (Printf.sprintf "i%d 3 seq_cst" bits)
-               && not (contains_substring ir " = load ")
-               && not (contains_substring ir " store i")
-               && not (contains_substring ir "intrinsic:x86:atomic")))
+            with_emitted_module ~synth:Hike.Synth.empty empty_spec [ sub ] (fun llvm_module ->
+                match instructions Llvm.Opcode.AtomicRMW llvm_module with
+                | [ atomic ] ->
+                  let text = Llvm.string_of_llvalue atomic in
+                  check (Printf.sprintf "%s at %d bits" op bits)
+                    (contains_substring text ("atomicrmw " ^ op ^ " ")
+                     && contains_substring text "seq_cst");
+                  Alcotest.(check int) "operand width" bits
+                    (Llvm.integer_bitwidth (Llvm.type_of (Llvm.operand atomic 1)));
+                  Alcotest.(check (option int64)) "input" (Some 3L)
+                    (Llvm.int64_of_const (Llvm.operand atomic 1));
+                  check "no duplicated plain memory effect"
+                    (instructions Llvm.Opcode.Load llvm_module = []
+                     && instructions Llvm.Opcode.Store llvm_module = [])
+                | effects -> Alcotest.failf "expected one atomic effect, got %d" (List.length effects)))
             ["add";"sub";"and";"or";"xor";"xchg"])
           [8;16;32;64]);
 
-    pin "EMIT-48" "the atomic old result feeds later register and flag uses"
+    pin "EMIT-48" "the atomic old result reaches the subsequent store"
       (fun () ->
         let m = memv "atomic_result" in
         let old = Hike.Atomic.lane "old" 64 in
@@ -820,15 +823,17 @@ let tests : unit Alcotest.test list =
               [(1,mk_marker (Tid.for_name "intrinsic:x86:atomic_add_64"))];
               [Def.create m (Bil.Store (Bil.Var m,Bil.Int (atomic_w 0x2010),
                   Bil.Var old,LittleEndian,`r64))], [(0,mk_ret)] ] in
-        let ir = emit_ir ~synth:Hike.Synth.empty [sub] in
-        let carried = Core.String.split_lines ir
-          |> Base.List.find ~f:(fun line -> contains_substring line "= phi i64 [ %xold,") in
-        check "EMIT-48"
-          (contains_substring ir "i64 7 seq_cst"
-           && Base.Option.exists carried ~f:(fun line ->
-               let lhs = Core.String.lsplit2_exn line ~on:'=' |> fst |> Core.String.strip in
-               contains_substring ir ("store i64 " ^ lhs ^ ","))
-           && not (contains_substring ir " = load ")));
+        with_emitted_module ~synth:Hike.Synth.empty empty_spec [ sub ] (fun llvm_module ->
+            match instructions Llvm.Opcode.AtomicRMW llvm_module,
+                  instructions Llvm.Opcode.Store llvm_module with
+            | [ atomic ], [ store ] ->
+              let stored = Llvm.operand store 0 in
+              check "stored value comes from the atomic old result"
+                (stored = atomic
+                 || (has_opcode Llvm.Opcode.PHI stored
+                     && List.exists (fun (value, _) -> value = atomic) (Llvm.incoming stored)));
+              check "no separate load" (instructions Llvm.Opcode.Load llvm_module = [])
+            | _ -> Alcotest.fail "expected one atomic update and one result store"));
 
     pin "EMIT-50" "a register xchg carries no markers and stays plain"
       (fun () ->
@@ -943,7 +948,7 @@ let tests : unit Alcotest.test list =
               [(1, mk_goto); (2, mk_goto)];
               [], [(0, mk_ret)];
               [], [(0, mk_ret)] ] in
-        ignore (emit_ir_spec ~verify:true ~synth:Hike.Synth.empty empty_spec [sub]));
+        ignore (emit_ir_spec ~synth:Hike.Synth.empty empty_spec [sub]));
 
     pin "EMIT-46"
       "the entry's declaration carries the ABI entry symbol, not the decoded tid name"

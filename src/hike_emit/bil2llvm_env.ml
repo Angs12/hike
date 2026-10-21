@@ -620,7 +620,7 @@ let tls_addr ctx llvm_builder ~(off : int64) : Llvm.llvalue =
             < 0 ->
       let fty = Llvm.function_type ctx.ptr_ty [| ctx.ptr_ty |] in
       let f =
-        Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
+        Llvm.declare_function "llvm.threadlocal.address.p0" fty ctx.llvm_module
       in
       let p = Llvm.build_call fty f [| block |] "tls_addr" llvm_builder in
       gep p

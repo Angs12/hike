@@ -1,6 +1,5 @@
 (* Image pins: the relocated-word substitution, PT_TLS, and the
-   never-written ranges the analysis images are restricted to.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins. *)
+   never-written ranges the analysis images are restricted to. *)
 
 open Bap.Std
 open Hike_test.Harness

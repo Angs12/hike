@@ -1,5 +1,4 @@
-(* Jump-compiler pins.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins. *)
+(* Jump-compiler pins. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -97,62 +96,16 @@ let tests : unit Alcotest.test list =
   [
     (* jz over cmp, inline diff: (x−y)=0 folds to x=y. *)
 
-
-
-
     (* the counter-loop shape (F1), reuse form: tmp := i−k; ZF := 0 =
        t; jnz → t != 0 — the var REUSED, never re-substituted. *)
 
-
-
-
-
-
     (* the unsigned borrow family. *)
-
-
-
 
     (* the ADD-carry CF shape: the carry as the LT-shaped fact (d <u a). *)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     (* the signed family over the sub shapes. *)
 
-
-
-
-
-
-
-
     (* test a,b; jz → (x&y) = 0 (the conjunction kept, constant-right). *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     (* RESIDUAL: the signed family over a test group whose OF def is
        MISSING (cross-block OF): no OF fact, no OF ≡ 0 fact → the identity. *)
@@ -165,9 +118,7 @@ let tests : unit Alcotest.test list =
 
     (* FOLD: cmp x,0 — (x−0)=0 folds; jnz → x != 0. *)
 
-
     (* FOLD: a−a → the constant-true cond. *)
-
 
     (* WIDTH-MINIMAL: 32-bit operands compare at 32 bits (the zero
        constant rides the operand width). *)
@@ -186,7 +137,6 @@ let tests : unit Alcotest.test list =
         check "JMP-30" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, x32v, y32v))));
 
     (* BOTH jmps of a block compile. *)
-
 
     (* the CFG is unchanged. *)
     pin "JMP-32" "CFG unchanged (3 blocks, targets intact)" (fun () ->
@@ -218,9 +168,6 @@ let tests : unit Alcotest.test list =
 
     (* CROSS-BLOCK: the flag def lives in a predecessor — the unique
        reaching definition at the block entry serves the facts. *)
-
-
-
 
     (* RESIDUAL: an AMBIGUOUS cross-block flag — two predecessors define
        ZF differently, no unique reaching def at the block entry. *)
@@ -285,18 +232,9 @@ let tests : unit Alcotest.test list =
         in
         let s = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
         let s' = compile_sub s in
-        check "JMP-38" (Exp.equal (jmp_cond_of s') cf_or_zf));
-
-    pin "JMP-39" "inc/dec defs untouched (no drop)" (fun () ->
-        let incdec_defs =
-          [
-            Def.create t (Bil.BinOp (Bil.PLUS, xv, Bil.Int (Word.one 64)));
-            Def.create zf (Bil.BinOp (Bil.EQ, w0_32, tv));
-          ]
-        in
-        let s = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
-        let s' = compile_sub s in
-        check "JMP-39" (Int.equal (Base.List.length (defs_of s')) 2));
+        check "condition stays residual" (Exp.equal (jmp_cond_of s') cf_or_zf);
+        check "definitions stay intact"
+          (List.equal Def.equal (defs_of s') (defs_of s)));
 
     (* the single REACHING def: two ZF defs in one block — every cond
        reads the LAST (all defs precede all jmps; the first is a dead
@@ -311,8 +249,6 @@ let tests : unit Alcotest.test list =
         let s = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-40" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, yv, w0_64))));
-
-
 
     (* unconditional jumps untouched. *)
     pin "JMP-42" "unconditional untouched: the condition and the defs survive" (fun () ->

@@ -1,5 +1,4 @@
-(* Call-effects pass pins.  One Alcotest group per pin; each pin builds its
-   own state, so no state crosses pins. *)
+(* Call-effects pass pins. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -164,58 +163,28 @@ let tests : unit Alcotest.test list =
 
     (* A trap with a bounded RSP keeps the frame like any call. *)
 
-
-    (* A singleton target naming a lifted sub reads its summary. *)
-    pin "CE-08" "a singleton target naming a lifted sub reads its summary" (fun () ->
-        let tgt = v64 "ce_tgt" in
-        let sub_tid = Tid.create () in
-        let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
-        let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
-        let bounded =
-          AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x5000))
-        in
-        check "CE-08"
-          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:bounded (Bil.Var tgt) with
-          | Ce.Summary (Some ws) -> Core.Int.Set.equal ws gs
-          | _ -> false));
-
-    (* An unbounded target resolves to nothing. *)
-    pin "CE-09" "an unbounded target resolves to nothing" (fun () ->
-        let tgt = v64 "ce_tgt" in
-        let sub_tid = Tid.create () in
-        let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
-        let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
-        let spread =
-          AI.add_word AI.top ~key:tgt
-            ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ])
-        in
-        check "CE-09"
-          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:spread (Bil.Var tgt) with
-          | Ce.Summary None -> true
-          | _ -> false));
-
-    (* A foreign singleton resolves to nothing. *)
-    pin "CE-10" "a foreign singleton resolves to nothing" (fun () ->
-        let tgt = v64 "ce_tgt" in
-        let sub_tid = Tid.create () in
-        let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
-        let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
-        let callee t = Ce.Summary (if Tid.equal t sub_tid then Some gs else None) in
-        let foreign =
-          AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x9000))
-        in
-        check "CE-10"
-          (match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env:foreign (Bil.Var tgt) with
-          | Ce.Summary None -> true
-          | _ -> false));
+    ("indirect callees",
+     List.map (fun (name, value, known) ->
+         case name (fun () ->
+             let target = v64 "callee_target" in
+             let callee_tid = Tid.create () in
+             let writes = ids1 (List.hd ce_abi.Hike_abi.caller_saved_gprs) in
+             let lookup a = if Int64.equal a 0x5000L then Some callee_tid else None in
+             let callee t = Ce.Summary
+                 (if Tid.equal t callee_tid then Some writes else None) in
+             let env = AI.add_word AI.top ~key:target ~data:value in
+             match Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env (Bil.Var target) with
+             | Ce.Summary actual ->
+               check "callee's written registers"
+                 (Base.Option.equal Core.Int.Set.equal
+                    (if known then Some writes else None) actual)
+             | _ -> Alcotest.fail "expected a callee summary"))
+       [ "known singleton", Ws.singleton (w64 0x5000), true;
+         "multiple targets", Ws.of_list ~width:64 [ w64 0x5000; w64 0x9000 ], false;
+         "foreign singleton", Ws.singleton (w64 0x9000), false;
+         "unknown target", Ws.top 64, false ]);
 
     (* A preserved word keeps its value-set. *)
-
 
     (* A non-preserved word is TOPed. *)
     pin "CE-12" "a non-preserved word is TOPed" (fun () ->

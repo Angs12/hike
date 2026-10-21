@@ -69,9 +69,6 @@ let direct_call_target (j : jmp term) : tid option =
 let tests : unit Alcotest.test list =
   [
 
-
-
-
     pin "SBLK-03" "single-jmp and jmp-free blocks pass through untouched"
       (fun () ->
         let flag = v64 "sb3_flag" in
@@ -351,7 +348,7 @@ let tests : unit Alcotest.test list =
            emission runs over the pre-SSA program: the pipeline's own
            split, the one the terms above describe. *)
         let ir =
-          emit_ir_spec ~synth:Hike.Synth.empty ~verify:true
+          emit_ir_spec ~synth:Hike.Synth.empty
             empty_spec [ callee; caller ]
         in
         (* The IR's blocks: a label line opens one. *)

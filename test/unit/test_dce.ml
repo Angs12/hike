@@ -1,87 +1,77 @@
-(* The narrow DCE rule: only target flags and virtual temporaries are
-   candidates; every named non-flag value and memory access stays. *)
-
 open Bap.Std
-open Bap_core_theory
 open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
 
-let target = x86_target ()
-let synth = Hike.Synth.empty
+let eliminate sub =
+  let target = x86_target () and synth = Hike.Synth.empty in
+  let ssa = ssa_of_subs [ sub ] (Sub.name sub) in
+  let result = Hike.Dce.dce_sub ~synth ~target ssa in
+  Hike_test.Verify_ssa.sub ~synth ~target ~what:"dead-code elimination" result;
+  result
 
-let ssa_of sub = ssa_of_subs [ sub ] (Sub.name sub)
-
-let removed sub dce v =
-  let in_sub s =
-    Term.enum blk_t s
-    |> Seq.exists ~f:(fun b ->
-           Term.enum def_t b |> Seq.exists ~f:(fun d -> Var.same (Def.lhs d) v))
+let check_definitions expected sub =
+  let actual =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
+    |> Seq.to_list
   in
-  in_sub sub && not (in_sub dce)
+  let variables = Alcotest.(list (testable Var.pp Var.equal)) in
+  Alcotest.check variables "remaining definitions"
+    (List.sort Var.compare expected)
+    (List.sort Var.compare actual)
 
-let kept sub v =
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun b ->
-         Term.enum def_t b |> Seq.exists ~f:(fun d -> Var.same (Def.lhs d) v))
-
-let tests : unit Alcotest.test list =
+let tests =
   [
-    pin "DCE-01"
-      "unread flags and virtuals go; named and memory defs stay"
+    case "dead flag chains disappear; named values, loads and stores remain"
       (fun () ->
-        let abi = Hike.Abi.of_target target in
-        let virt = Var.create ~is_virtual:true "dce_virt" (Type.Imm 64) in
-        let named = v64 "dce_named" in
-        let mem = memv "dce_mem" in
-        let zf = abi.Hike.Abi.zero_flag in
-        let sub =
-          let b = Blk.Builder.create () in
-          Blk.Builder.add_def b
-            (Def.create virt
-               (Bil.BinOp (Bil.XOR, Bil.Var (int_param 0), Bil.Var (int_param 1))));
-          Blk.Builder.add_def b
-            (Def.create zf
-               (Bil.BinOp (Bil.EQ, Bil.Var virt, Bil.Var (int_param 2))));
-          Blk.Builder.add_def b
-            (Def.create named
-               (Bil.BinOp (Bil.XOR, Bil.Var (int_param 0), Bil.Var (int_param 3))));
-          Blk.Builder.add_def b
-            (Def.create mem
-               (Bil.Store
-                  (Bil.Var mem, Bil.Var (int_param 0), Bil.Var (int_param 1),
-                   LittleEndian, `r64)));
-          ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
-          Blk.Builder.result b
+        let abi = Hike.Abi.of_target (x86_target ()) in
+        let temporary =
+          Var.create ~is_virtual:true "dead_temporary" (Type.Imm 64)
         in
-        let sub =
-          let sb = Sub.Builder.create ~name:"dce1" () in
-          Sub.Builder.add_blk sb sub;
-          Sub.Builder.result sb
+        let loaded = Var.create ~is_virtual:true "unread_load" (Type.Imm 64) in
+        let named = v64 "unread_named" and memory = memv "memory" in
+        let sub, _ =
+          raw_sub_of "dead_chain"
+            [
+              ( [
+                  Def.create temporary
+                    Bil.(var (int_param 0) lxor var (int_param 1));
+                  Def.create abi.Hike.Abi.zero_flag
+                    Bil.(var temporary = var (int_param 2));
+                  Def.create named
+                    Bil.(var (int_param 0) lxor var (int_param 3));
+                  Def.create loaded
+                    (Bil.Load
+                       ( Bil.Var memory,
+                         Bil.Var (int_param 0),
+                         LittleEndian,
+                         `r64 ));
+                  Def.create memory
+                    (Bil.Store
+                       ( Bil.Var memory,
+                         Bil.Var (int_param 0),
+                         Bil.Var (int_param 1),
+                         LittleEndian,
+                         `r64 ));
+                ],
+                [ (0, mk_ret) ] );
+            ]
         in
-        let ssa = ssa_of sub in
-        let dce = Hike.Dce.dce_sub ~synth ~target ssa in
-        Hike_test.Verify_ssa.sub ~synth ~target ~what:"DCE-01" dce;
-        check "DCE-01"
-          (removed ssa dce virt && removed ssa dce zf
-          && not (removed ssa dce named) && kept dce named
-          && not (removed ssa dce mem) && kept dce mem));
-
-    pin "DCE-02" "a flag read by a jump condition stays"
-      (fun () ->
-        let abi = Hike.Abi.of_target target in
-        let zf = abi.Hike.Abi.zero_flag in
-        let sub, _ = raw_sub_of "dce2"
-            [ [ Def.create zf
-                  (Bil.BinOp (Bil.EQ, Bil.Var (int_param 0), Bil.Var (int_param 1))) ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Var zf)); (2, mk_goto) ];
-              [], [ (0, mk_ret) ];
-              [], [ (0, mk_ret) ] ]
+        check_definitions [ named; loaded; memory ] (eliminate sub));
+    case "a flag used by a conditional branch remains" (fun () ->
+        let flag = (Hike.Abi.of_target (x86_target ())).Hike.Abi.zero_flag in
+        let sub, _ =
+          raw_sub_of "live_flag"
+            [
+              ( [ Def.create flag Bil.(var (int_param 0) = var (int_param 1)) ],
+                [ (1, fun t -> mk_jmp_to t (Bil.Var flag)); (2, mk_goto) ] );
+              ([], [ (0, mk_ret) ]);
+              ([], [ (0, mk_ret) ]);
+            ]
         in
-        let ssa = ssa_of sub in
-        let dce = Hike.Dce.dce_sub ~synth ~target ssa in
-        Hike_test.Verify_ssa.sub ~synth ~target ~what:"DCE-02" dce;
-        check "DCE-02" (not (removed ssa dce zf) && kept dce zf));
+        check_definitions [ flag ] (eliminate sub));
   ]
 
-let () = run "dce" tests
+let () = run "dead-code elimination" [ ("liveness", tests) ]

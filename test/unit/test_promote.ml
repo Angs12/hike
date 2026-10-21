@@ -1,8 +1,7 @@
 (* Stack-arg promotion pins: the promotion-fact derivation through the REAL
    fixpoint ([Hike.Vsa.fixpoint] / [fixture_ctx]), the promotion as a BIR
    rewrite ([Hike.Promote.promote_sub] / [rewrite_program]), and the
-   promotion's emitted shape.  One Alcotest group per pin; each pin builds
-   its own fixture, so no state crosses pins. *)
+   promotion's emitted shape. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -20,105 +19,6 @@ let plus_addr sp (off : int64) : exp =
 let stamp ~synth (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   Hike.Ssa.ssa_sub ~synth:!synth ~target:(x86_target ()) sub
   |> Hike.Promote.promote_sub ~synth ~addr_bits:64 ~abi:Hike.Abi.x86_64_sysv facts
-
-(* Family 8: stack-arg promotion emission.  A promoted callee (two proven
-   slots) and two callers — one resolved indirect site with the outgoing
-   stores the slots feed, one unresolvable.  Returns the callee and the
-   emitted IR for each caller. *)
-(* Computed once: every pin reads the same emitted IR, nothing
-   mutates the fixture. *)
-let t4_fixture_ref = Lazy.from_fun (fun () ->
-let t4_fixture () : sub term * string * string =
-  let m = memv "prom_m" in
-  let rsp = sp in
-  let slot0 = ivar64 "hike_slot0" in
-  let slot1 = ivar64 "hike_slot1" in
-  let synth = ref (Hike.Synth.add
-      (Hike.Synth.add Hike.Synth.empty slot0 (K_slot 0)) slot1 (K_slot 1)) in
-  let acc = v64 "prom_acc" in
-  let rdi = int_param 0 in
-  let rsi = int_param 1 in
-  let ld0 =
-    Def.create (v64 "prom_ld0")
-      (Bil.Load (Bil.Var m, Bil.Var slot0, LittleEndian, `r64))
-  in
-  let callee, _ =
-    sub_of "prom_callee"
-      [ [ ld0;
-          Def.create acc
-            (Bil.BinOp (Bil.PLUS, Bil.Var rdi,
-                        Bil.BinOp (Bil.PLUS, Bil.Var rsi,
-                                   Bil.BinOp (Bil.PLUS, Bil.Var slot0, Bil.Var slot1)))) ],
-        [ (1, mk_goto) ];
-        [], [ (0, mk_ret) ] ]
-  in
-  (* The callee's address is taken (the caller's pointer site), so it
-     escapes through the loader word below and earns its public face. *)
-  let next = ref 0x1000L in
-  let callee =
-    Term.map blk_t callee ~f:(fun b ->
-        let a = !next in
-        next := Int64.add !next 0x10L;
-        Term.set_attr b address (Addr.of_int64 a))
-  in
-  let escape_spec =
-    { empty_spec with spec_relative = [ (0x5000L, 0x1000L) ] }
-  in
-  let store1 =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 24))),
-           Bil.Int (Cbat_word.to_word (w64 7)),
-           LittleEndian,
-           `r64 ))
-  in
-  let store2 =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 32))),
-           Bil.Int (Cbat_word.to_word (w64 9)),
-           LittleEndian,
-           `r64 ))
-  in
-  let caller, _ =
-    sub_of "prom_caller"
-      [ [ store1; store2 ],
-        [ (1, fun t -> Jmp.create (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Var (v64 "prom_tptr"))) ()))) ];
-        [], [ (0, mk_ret) ] ]
-  in
-  let j = sub_jmp caller 0 0 in
-  let callee_facts : Hike.Promote.facts = mk_facts ~prom_arity:2 () in
-  let caller_facts : Hike.Promote.facts =
-    mk_facts
-      ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some (Term.tid callee)))
-      ()
-  in
-  let callee = stamp ~synth callee_facts callee in
-  let caller = stamp ~synth caller_facts caller in
-  let ir = emit_ir_spec ~synth:!synth escape_spec [ caller; callee ] in
-  let caller2, _ =
-    sub_of "prom_caller2"
-      [ [],
-        [ (1,
-           fun t ->
-             Jmp.create
-               (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Var (v64 "prom_tptr2"))) ()))) ];
-        [], [ (0, mk_ret) ] ]
-  in
-  let j2 = sub_jmp caller2 0 0 in
-  let caller2_facts : Hike.Promote.facts =
-    mk_facts ~prom_resolved:(Tid.Map.singleton (Term.tid j2) None) ()
-  in
-  let caller2 = stamp ~synth caller2_facts caller2 in
-  let ir2 = emit_ir_spec ~synth:!synth escape_spec [ caller2; callee ] in
-  (callee, ir, ir2)
-in
-t4_fixture ())
-
-(* Every pin reads the one computed fixture. *)
-let t4_fixture () = Lazy.force t4_fixture_ref
 
 (* Family 9: the promotion as a BIR rewrite — the sub's structure is the
    emitter's only input. *)
@@ -214,7 +114,6 @@ let prwc_mk_defs () : def term * def term * def term * def term * def term * var
            LittleEndian,
            `r64 )),
     gp_args )
-
 
 (* Family RW: the one address map — a below-entry frame whose carved
    regions and reloaded pointers route every address def to its
@@ -360,7 +259,6 @@ let rw_accesses_named (sub : sub term) (name : string) : def term list =
          | None -> false)
   |> Seq.to_list
 
-
 (* The caller-window fixture: a callee whose above-entry (Args) read
    crosses slot cells (write-closed, never an Arg_slot) and a pure
    window-value def. *)
@@ -389,7 +287,6 @@ let rw_window () : Hike.Synth.table * sub term =
              LittleEndian, `r64 )) ]
   in
   rewrite_one_synth ~synth:Hike.Synth.empty (straight_sub "rw_window" defs)
-
 
 (* The lifted va_list construction: the incoming GP parameter registers
    stored into the frame (the reg_save_area) beside a pointer at/above
@@ -430,7 +327,6 @@ let rw_variadic ~(overflow : bool) () : sub term =
                Bil.Var p, LittleEndian, `r64 )) ]
   in
   straight_sub "rw_variadic" (regs @ overflow_defs)
-
 
 (* The section-constant fixture: a def whose value is a .rodata
    constant address; the span owns it, so the value takes the
@@ -531,7 +427,6 @@ let pr_ssa_retarget (ssa : sub term) (call_blk : Tid.t) (target : Tid.t) :
   in
   (before, Term.find_exn blk_t after call_blk)
 
-
 (* Every read of a versioned var has a definition, and no var is defined
    twice, except the un-renamed model storage the rewrite repoints defs to. *)
 let ssa_valid ~synth (sub : sub term) : bool * bool =
@@ -565,58 +460,56 @@ let ssa_valid ~synth (sub : sub term) : bool * bool =
 
 let tests : unit Alcotest.test list =
   [
-    (* PR-01: the promoted signature carries the register lanes then the
-       positional slots. *)
-
-
-    (* PR-02: the resolved site is a DIRECT call through the promoted
-       signature; the unpassed slots stay undef. *)
-
-
-    (* PR-03: the memory-convention twin is internal. *)
-
-
-    (* PR-04: the twin's synthetic indirect convention carries the window
-       base, never SP. *)
-    pin "PR-04"
-      "the twin carries the synthetic indirect convention (the window base, never SP)"
-      (fun () ->
-        let _, ir, _ = t4_fixture () in
-        check_ir "PR-04"
-          ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
-          ^ "i64 %R9, i256 %YMM0, i256 %YMM1, i256 %YMM2, i256 %YMM3, "
-          ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, i64 %RAX, "
-          ^ "ptr %hike_window)")
-          ir);
-
-    (* PR-05: the twin unpacks the window slots into the promoted body. *)
-
-
-    (* PR-06: the twin reads the slots through the window pointer. *)
-
-
-    (* PR-07: the unresolved site takes the pointer call through the
-       synthetic signature. *)
-
-
-    (* PR-08: the pointer call never lands on the promoted body directly. *)
-    pin "PR-08" "the pointer call never lands on the promoted body directly" (fun () ->
-        let _, _, ir2 = t4_fixture () in
-        check "PR-08" (not (contains_substring ir2 "call { i64, i64 } @prom_callee(")));
-
-    (* PR-09: the synthetic indirect signature carries the window base. *)
-    pin "PR-09" "the synthetic indirect signature carries the window base" (fun () ->
-        let _, _, ir2 = t4_fixture () in
-        check_ir "PR-09"
-          "@indirect_call(i64, i64, i64, i64, i64, i64, i256, i256, i256, i256, \
-           i256, i256, i256, i256, i64, ptr)"
-          ir2);
-
-    (* PR-10: the sub gains its promoted parameter as a real BIR arg. *)
-
-
-    (* PR-11: the sub keeps its tid through the arg-term rewrite. *)
-
+    ("indirect convention", [ case "indirect calls and wrappers agree on slot pointers" (fun () ->
+        let mem = memv "prom_mem" in
+        let slot0 = ivar64 "hike_slot0" and slot1 = ivar64 "hike_slot1" in
+        let synth = ref (Hike.Synth.add
+            (Hike.Synth.add Hike.Synth.empty slot0 (K_slot 0)) slot1 (K_slot 1)) in
+        let callee, _ = sub_of "prom_callee"
+            [ [ Def.create (int_ret 0) (Bil.Load (Bil.Var mem, Bil.Var slot0, LittleEndian, `r64));
+                Def.create (v64 "slot_use") (Bil.Var slot1) ], [ (0, mk_ret) ] ] in
+        let callee = Term.map blk_t callee ~f:(fun b ->
+            Term.set_attr b address (Addr.of_int64 0x1000L)) in
+        let callee = stamp ~synth (mk_facts ~prom_arity:2 ()) callee in
+        let caller, _ = sub_of "unknown_caller"
+            [ [], [ (1, fun t -> Jmp.create (Call (Call.create ~return:(Direct t)
+                  ~target:(Indirect (Bil.Var (v64 "unknown_target"))) ()))) ];
+              [], [ (0, mk_ret) ] ] in
+        let caller = stamp ~synth (mk_facts ()) caller in
+        let spec = { empty_spec with spec_relative = [ 0x5000L, 0x1000L ] } in
+        with_emitted_module ~synth:!synth spec [ caller; callee ] (fun llvm_module ->
+            let name = Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee)) in
+            let find name = Llvm.lookup_function name llvm_module |> Base.Option.value_exn in
+            let body = find name and wrapper = find (name ^ "_hike_thunk") in
+            let window = Llvm.param wrapper (Array.length (Llvm.params wrapper) - 1) in
+            check "window parameter is a pointer" (Llvm.classify_type (Llvm.type_of window) = Llvm.TypeKind.Pointer);
+            check "wrapper has no stack pointer argument"
+              (not (Array.exists (fun p -> Llvm.value_name p = Var.name sp) (Llvm.params wrapper)));
+            let instructions fn = Llvm.fold_left_blocks (fun acc block ->
+                Llvm.fold_left_instrs (fun acc insn -> insn :: acc) acc block) [] fn in
+            let calls fn = List.filter (fun v -> Llvm.instr_opcode v = Llvm.Opcode.Call) (instructions fn) in
+            let called call = Llvm.operand call (Llvm.num_operands call - 1) in
+            let forwarded = match List.filter (fun call -> called call = body) (calls wrapper) with
+              | [ call ] -> call | _ -> Alcotest.fail "wrapper must call the promoted body once" in
+            let offsets = List.init (Llvm.num_arg_operands forwarded) (Llvm.operand forwarded)
+              |> List.filter_map (fun arg -> match Llvm.classify_value arg with
+                  | Llvm.ValueKind.Instruction Llvm.Opcode.GetElementPtr
+                    when Llvm.num_operands arg = 2 && Llvm.operand arg 0 = window ->
+                    Llvm.int64_of_const (Llvm.operand arg 1)
+                  | _ -> None) |> List.sort Int64.compare in
+            Alcotest.(check (list int64)) "forwarded slot addresses"
+              [ Cu.slot_offset ~word:8 0; Cu.slot_offset ~word:8 1 ] offsets;
+            check "wrapper forwards addresses without loading slots"
+              (not (List.exists (fun v -> Llvm.instr_opcode v = Llvm.Opcode.Load) (instructions wrapper)));
+            let caller = find (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid caller))) in
+            match calls caller with
+            | [ call ] ->
+              check "unknown pointer does not call the promoted body directly" (called call <> body);
+              let params = Llvm.params wrapper in
+              Alcotest.(check int) "indirect convention arity" (Array.length params) (Llvm.num_arg_operands call);
+              Array.iteri (fun i param -> check "matching convention parameter type"
+                  (Llvm.type_of param = Llvm.type_of (Llvm.operand call i))) params
+            | _ -> Alcotest.fail "expected one indirect call")) ]);
 
     (* PR-12: an identity access keeps its tag through the stamp. *)
     pin "PR-12" "an identity access keeps its tag through the stamp" (fun () ->
@@ -649,16 +542,6 @@ let tests : unit Alcotest.test list =
         let keep_sub = Hike.Sections.stamp_tags keep_ctx keep_sub0 in
         let keep_def = Base.Option.value_exn (t10_find_def keep_sub (Term.tid keep)) in
         check "PR-12" (Ds.sec_tag keep_def <> None));
-
-    (* PR-13: the call-arg def is bound right after the storing def. *)
-
-
-    (* PR-14: the call-arg def reads the storing def's written bytes (7). *)
-
-
-    (* PR-15: the proven incoming-slot read promotes — the read's cell is
-       Arg_slot 0 in the finalized tree (arity 1, no window). *)
-
 
     (* PR-16: the return-address cell ([RSP+0] load) dies into the retaddr
        set — it never forces a window parameter. *)
@@ -828,10 +711,6 @@ let tests : unit Alcotest.test list =
            | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) ->
                Cu.region_ptr_id_of synth b = Some 1
            | _ -> false));
-
-    (* PR-24: the emitter lowers the rewritten address as the storage's
-       own alloca (or one GEP) — never a re-derived offset. *)
-
 
     (* PR-26: the residue's accesses and values take the same base +
        displacement form as a region's — the escaped cell write-closes
@@ -1041,16 +920,6 @@ let tests : unit Alcotest.test list =
         let synth, sub' = rewrite_one_synth ~synth:Hike.Synth.empty sub in
         let ir = emit_ir ~synth [ sub' ] in
         check_ir "PR-35" "ptr %hike_slot0" ir);
-
-    (* PR-36: the twin forwards the window GEP'd at the slot — a pointer,
-       never a loaded value. *)
-    pin "PR-36" "the twin forwards the window slot pointer (no load)"
-      (fun () ->
-        let _, ir, _ = t4_fixture () in
-        check_ir "PR-36"
-          ("getelementptr i8, ptr %hike_window, i64 "
-          ^ Int64.to_string (Cu.slot_offset ~word:8 0))
-          ir);
 
     (* PR-37: the lifted va_list construction — the reg-save spills
        beside the above-entry overflow pointer — stamps the sub

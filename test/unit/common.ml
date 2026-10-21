@@ -78,11 +78,14 @@ module Clp = struct
   let extract = P.extract
   let cast = P.cast
   let concat = P.concat
+  let pp = P.pp
 end
 module Ex = Clp.Exact
 
 module Wo = Cbat_word
 module Ws = Cbat_clp_set_composite
+
+let check_ws = Alcotest.check (Alcotest.testable Ws.pp Ws.equal)
 
 (* Wrapped BIR-fixpoint library; siblings re-exported by cbat_vsa.mli. *)
 module AI = Cbat_vsa.AI
@@ -147,7 +150,6 @@ let int_ret n = Base.List.nth_exn sysv.Hike.Abi.return_regs n
 let callee_saved n = Base.List.nth_exn sysv.Hike.Abi.callee_saved n
 let thread_pointer = sysv.Hike.Abi.thread_pointer
 let frame_ptr = sysv.Hike.Abi.frame_pointer
-
 
 let abi_cf = sysv.Hike.Abi.carry_flag
 let abi_pf = sysv.Hike.Abi.parity_flag
@@ -392,7 +394,5 @@ let rewrite_one_synth ~synth (sub : sub term) : Hike.Synth.table * sub term =
   let result = run_chain_attrib_result ~synth [ sub ] in
   (result.facts.Hike.Kb.synth,
    Term.first sub_t result.program |> Base.Option.value_exn)
-
-
 
 (* Full-range 64-bit word; [w64] takes a native int. *)

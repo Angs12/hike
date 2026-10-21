@@ -2,9 +2,7 @@
    section projection, the finalized trees' storage rule, the visitor's
    collection (escapes, TOP members, separate sub scopes), the slim-tag
    stamping, the data components, and the Sections-owned regression
-   pins (narrow store, escapes, regions, fp-GPR value proof).  One
-   Alcotest group per pin; each pin builds its own fixture, so no state
-   crosses pins. *)
+   pins (narrow store, escapes, regions, fp-GPR value proof). *)
 
 open Bap.Std
 open Bap_core_theory
@@ -19,7 +17,6 @@ module Tag = Hike.Sections.Tag
 let entry = Hike.Stack_model.segment_base
 
 (* An int64 word (the plain denotation literal). *)
-
 
 let portion_eq (p : A.portion) (sec : A.sec) (lo : int64) (hi : int64) =
   A.equal_sec p.A.pt_sec sec && Int64.equal p.A.pt_lo lo
@@ -243,17 +240,6 @@ let tests : unit Alcotest.test list =
   [
     (* S01/S02/S03: the normalization and projection table. *)
 
-
-
-
-
-
-
-
-
-
-
-
     pin "SEC-07"
       "AT1-S02: bottom claims like a failed query - no tag, full-range portions"
       (fun () ->
@@ -290,10 +276,6 @@ let tests : unit Alcotest.test list =
           (let _, ps = rd_spans (Ws.top 64) in
            Base.List.for_all ps ~f:(fun p ->
                match p.A.pt_sec with S.Stack | S.Args -> true | _ -> false)));
-
-
-
-
 
     pin "SEC-13"
       "AT1-S02: an overflowed unsigned expansion saturates at the top, never a wrapped short range"
@@ -411,18 +393,9 @@ let tests : unit Alcotest.test list =
                portion_eq p S.Data 0x403CL 0x403FL && not p.A.pt_elig
            | _ -> false));
 
-
-
     (* The collection and the storage rule over real fixtures. *)
 
-
-
-
-
-
-
-
-    pin "SEC-27" "AT1-TOPW: the TOP write and the known read share Frame storage"
+    pin "SEC-27" "an unknown write claims its own stack and arguments without affecting another function"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
@@ -442,61 +415,14 @@ let tests : unit Alcotest.test list =
         in
         let other = straight_sub "at_other" [ def_rbp; load_at m rbp 8L 64 ] in
         let ctx = tree_ctx [ subw; other ] in
-        check "SEC-27"
-          (match storage_at ctx subw S.Stack (pos (-8L)) (pos (-1L)) with
-           | Some A.Stack_residue -> true
-           | _ -> false));
-
-    pin "SEC-28" "AT1-TOPW: the TOP write also claims the Args space (Window)"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let u = v64 "at_u" in
-        let known = load_at m rbp 8L 64 in
-        let top_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Var u,
-                 Bil.Int (Cbat_word.to_word (w64 42)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let subw =
-          straight_sub "at_topwrite" [ def_rbp; known; top_store ]
-        in
-        let other = straight_sub "at_other" [ def_rbp; load_at m rbp 8L 64 ] in
-        let ctx = tree_ctx [ subw; other ] in
-        check "SEC-28"
-          (match storage_at ctx subw S.Args (pos 8L) Stdlib.Int64.max_int with
-           | Some A.Stack_residue -> true
-           | _ -> false));
-
-    pin "SEC-29" "AT1-SCOPE: a different sub's tree keeps its own Region"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let u = v64 "at_u" in
-        let known = load_at m rbp 8L 64 in
-        let top_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Var u,
-                 Bil.Int (Cbat_word.to_word (w64 42)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let subw =
-          straight_sub "at_topwrite" [ def_rbp; known; top_store ]
-        in
-        let other = straight_sub "at_other" [ def_rbp; load_at m rbp 8L 64 ] in
-        let ctx = tree_ctx [ subw; other ] in
-        check "SEC-29"
-          (match storage_at ctx other S.Stack (pos (-8L)) (pos (-1L)) with
-           | Some (A.Stack_region 1) -> true
-           | _ -> false));
-
+        let expect label sub space lo hi storage =
+          check label (storage_at ctx sub space lo hi = Some storage) in
+        expect "unknown write shares the known stack cell" subw S.Stack
+          (pos (-8L)) (pos (-1L)) A.Stack_residue;
+        expect "unknown write also claims arguments" subw S.Args
+          (pos 8L) Stdlib.Int64.max_int A.Stack_residue;
+        expect "another function retains separate storage" other S.Stack
+          (pos (-8L)) (pos (-1L)) (A.Stack_region 1));
 
 
     pin "SEC-31" "AT1-ESC: the escaped extent's component takes Frame storage"
@@ -570,8 +496,6 @@ let tests : unit Alcotest.test list =
                    Base.List.exists rs.A.members ~f:(fun mm ->
                        Option.is_none mm.A.m_def && mm.A.m_identity))));
 
-
-
     pin "SEC-34" "AT1-RET: the retaddr bytes' component takes Frame storage"
       (fun () ->
         let m, _rsp, _rbp = mem_rbp () in
@@ -586,13 +510,7 @@ let tests : unit Alcotest.test list =
            | Some A.Stack_residue -> true
            | _ -> false));
 
-
-
-
-
-
-
-    pin "SEC-38" "AT1-ARGS: a stored cell is a slot too (the pointer convention)"
+    pin "SEC-38" "stored arguments and their neighbours keep separate slots"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
@@ -603,26 +521,11 @@ let tests : unit Alcotest.test list =
             [ def_rbp; a_full; st_plus m rbp 8L 64; a_cell1 ]
         in
         let ctx6 = tree_ctx [ sub6 ] in
-        check "SEC-38"
-          (match storage_at ctx6 sub6 S.Args (pos 8L) (pos 15L) with
-           | Some A.Arg_slot -> true
-           | _ -> false));
-
-    pin "SEC-39" "AT1-ARGS: the neighboring cell is its own slot"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let a_full = ld_plus m rbp 8L 64 in
-        let a_cell1 = ld_plus m rbp 16L 64 in
-        let sub6 =
-          straight_sub "at_args_store"
-            [ def_rbp; a_full; st_plus m rbp 8L 64; a_cell1 ]
-        in
-        let ctx6 = tree_ctx [ sub6 ] in
-        check "SEC-39"
-          (match storage_at ctx6 sub6 S.Args (pos 16L) (pos 23L) with
-           | Some A.Arg_slot -> true
-           | _ -> false));
+        List.iter (fun (lo, hi) ->
+            check (Printf.sprintf "argument slot [%Ld,%Ld]" lo hi)
+              (match storage_at ctx6 sub6 S.Args (pos lo) (pos hi) with
+               | Some A.Arg_slot -> true | _ -> false))
+          [ 8L, 15L; 16L, 23L ]);
 
     (* Stamping: the tags land on the defs' values (present BEFORE any
        removal test). *)
@@ -683,7 +586,6 @@ let tests : unit Alcotest.test list =
            | _ -> false));
 
     (* T3: the data rows of the storage rule. *)
-
 
     pin "SEC-44" "AT3-DATA: the resolved-proved in-span read's Global component is its word range"
       (fun () ->
@@ -780,8 +682,6 @@ let tests : unit Alcotest.test list =
         check "SEC-53"
           (to_floor (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8)));
 
-
-
     (* The Sections-owned regression pins. *)
     pin "SEC-55"
       "C1: the narrow r16 store converts to the region mem, keeping its address and width"
@@ -833,31 +733,20 @@ let tests : unit Alcotest.test list =
                | _ -> false)
            | None -> false));
 
-    pin "SEC-56" "C3: pre-call the caller-frame cell [RSP-8] holds {0xAA} (non-vacuous pin)"
-      (fun () ->
-        let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
-        let st = st_pre fx.es_sub fx.es_blk1 in
-        check "SEC-56"
-          (Ws.equal (read64 fx.es_m st (-8L)) (Ws.singleton (w64 0xAA))));
-
-    pin "SEC-57" "C3: pre-call the outgoing slot [RSP+16] holds {0xBB} (non-vacuous pin)"
-      (fun () ->
-        let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
-        let st = st_pre fx.es_sub fx.es_blk1 in
-        check "SEC-57"
-          (Ws.equal (read64 fx.es_m st (-16L)) (Ws.singleton (w64 0xBB))));
-
     pin "SEC-58"
       "C3: the stack address read in RDI clears the whole retained caller frame"
       (fun () ->
         let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
+        let before = st_pre fx.es_sub fx.es_blk1 in
+        check_ws "caller cell before the call" (Ws.singleton (w64 0xAA))
+          (read64 fx.es_m before (-8L));
+        check_ws "outgoing cell before the call" (Ws.singleton (w64 0xBB))
+          (read64 fx.es_m before (-16L));
         let sol = run_anchored fx.es_sub in
         let post_ai = Graphlib.Std.Solution.get sol fx.es_post_tid in
         check "SEC-58"
           (Ws.is_top (read64 fx.es_m post_ai (-8L))
           && Ws.is_top (read64 fx.es_m post_ai (-16L))));
-
-
 
     pin "SEC-60" "C4b: the widened member's component takes Frame storage, never Region"
       (fun () ->
@@ -881,12 +770,6 @@ let tests : unit Alcotest.test list =
                | Some rs -> rs.A.storage = A.Stack_residue
                | None -> false)
            | None -> false));
-
-
-
-
-
-
 
     pin "SEC-65"
       "R12: a Region binding of occupied span 8 bytes allocates 16 (aligned once, no width factor)"
@@ -1075,10 +958,6 @@ let tests : unit Alcotest.test list =
         check "SEC-66"
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
           = Some (A.Stack_region 1)));
-
-
-
-
 
     pin "SEC-69"
       "a runtime-sized allocation is ordinary stack arithmetic: its stores claim the stack down to the floor, so the sub selects the runtime stack and the frame cells share the residue"

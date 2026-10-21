@@ -1,4 +1,4 @@
-(* The unit harness: BAP initialization, Alcotest wiring (one group per pin),
+(* The unit harness: BAP initialization, Alcotest wiring,
    the assertion vocabulary, stderr capture, and the reset bracket that keeps
    tests deterministic. *)
 
@@ -32,13 +32,16 @@ let with_timeout (secs : int) (f : unit -> unit) : unit =
       Sys.set_signal Sys.sigalrm old)
     f
 
+let case ?(timeout = 300) desc f =
+  Alcotest.test_case desc `Quick (fun () -> with_timeout timeout f)
+
 (* One Alcotest group per pin id: the group name is the stable, filterable id
    (`<suite>.exe test '<ID>'`), the case string is the human description.
    Alcotest records a raised exception as a failure and runs the next group, so
    one broken fixture never hides the rest of the module. *)
-let pin ?(timeout = 300) (id : string) (desc : string) (f : unit -> unit) :
+let pin ?timeout (id : string) (desc : string) (f : unit -> unit) :
     unit Alcotest.test =
-  (id, [ Alcotest.test_case desc `Quick (fun () -> with_timeout timeout f) ])
+  (id, [ case ?timeout desc f ])
 
 let run (name : string) (tests : unit Alcotest.test list) : unit =
   init ();

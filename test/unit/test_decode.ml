@@ -53,7 +53,7 @@ let tests = [
           let returning = lift true and noreturn = lift false in
           check "DEC-02.returning.blocks" (Term.length blk_t returning = 2);
           check "DEC-02.returning.call"
-            (List.for_all (fun c -> Call.return c <> None) (calls_of returning));
+            (match calls_of returning with [ c ] -> Call.return c <> None | _ -> false);
           check "DEC-02.noreturn.blocks" (Term.length blk_t noreturn = 1);
           check "DEC-02.noreturn.call"
             (match calls_of noreturn with
