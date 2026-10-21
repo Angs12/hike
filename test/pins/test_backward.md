@@ -26,14 +26,14 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-03 | The LSHIFT inverse retains every wrapped class satisfying the guard: `x << 2 <u 40` admits `0..9`, `0x40000000..0x40000009`, and the other two classes. | Treat left shift as non-wrapping division. | A valid high class disappears. |
 | BK-04 | L3a TIMES over an unbounded operand is the identity (sound stop); the cell is TOP, never BOTTOM. | Invert the stop: make the TIMES arm return a bounded hull or bottom. | BK-04 (`is_top` false). |
 | BK-05 | L3a NEQ guard is doubt: `cmp_inverse` leaves the env for NEQ. | Make the NEQ case walk the complement (`neq_complement`) instead of `env`. | BK-05 (`Ws.is_top` false). |
-| BK-06 | L3c1-1 flag record: `Hike.Jump.compile_sub`'s `cross_guard`/`plan_block` recovers `CF := SLT(t,10)` from a bare `when CF`. | In `hike_jump.ml`, make `plan_block` return `[]` (no flag rewrite) so the guard stays `Bil.Var cf`. | BK-06 (cell stays top). |
+| BK-06 | L3c1-1 flag record: `Hike.Jump.compile_sub`'s backward `forms` walk substitutes the flag defs and `acceptable` rejects a flag-reading form, recovering `SLT(t,10)` from a bare `when CF`. | In `hike_jump.ml`, make `flag_vars` return `[]` so the flag var stays in the cond. | BK-06 (cell stays top). |
 | BK-07 | L3c1-2 a redefinition of the compared operand makes the guard constant-false; the taken edge is dead (`Ws.is_bottom`). | Make `read_def` position-insensitive (return the load def even when a later def redefines the operand). | BK-07 (cell is refined, not bottom). |
 | BK-08 | L3c1-3 a non-comparison flag redefinition invalidates the record (`extract_facts` returns `None`). | Treat `Bil.Unknown` as a fact-producing rhs in `extract_facts`. | BK-08 (cell refines). |
 | BK-09 | L3c1-4 multi-def base: the per-block producer subtraction yields the EXACT body-IN window `[1,10]`. | Run the walk raw: `walk_block ~raw:true` (skip the producer subtraction). | BK-09 (wider join; 11 ∈). |
 | BK-11 | L3c2-1 `constraint_row` SLT gates on `provably_nonneg` (the seeded counter). | Force `provably_nonneg = false` in `constraint_row`. | BK-11 (two-piece row; `bounded_above … 3` false). |
 | BK-12 | L3c2-2 the two-piece SLT total row for an unproven operand. | Drop the `total_row` fallback in `guard_row` for SLT (return `None`). | BK-12 (cell top). |
 | BK-13 | L3c2-3 `c >= half` SLT/SLE single high interval. | Drop the `if c >= half` branch in `constraint_row`. | BK-13 (`l3c2_in_high` false). |
-| BK-14 | L3c2-4 flag-indirected signed guard (record + signed row). | As BK-06 (`plan_block = []`). | BK-14. |
+| BK-14 | L3c2-4 flag-indirected signed guard: the backward `forms` walk substitutes the flag defs, then the signed relation row bounds the cell. | As BK-06 (`flag_vars = []`). | BK-14. |
 | BK-15 | L3c2-5 trace-exact cell refinement with no RBP prologue def (`constrain_cell_on_trace`). | Make `constrain_cell_on_trace` the identity (`fun ~env … -> env`). | BK-15. |
 | BK-16 | L3c3-1 PLUS-HULL: the circular hull `{−1} ∪ [0,8]` on `t`. | As BK-01 (PLUS arm identity). | BK-16. |
 | BK-18 | L3c3-2b seeded operand: the guard's signed row bounds `t`, so the exact TIMES slice applies. | Drop the TIMES slice in `operand_constraints` (return `None,None` for TIMES). | BK-18. |
@@ -52,11 +52,11 @@ inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell me
 | BK-33 | L3c5-4 an Unknown condition keeps the env unchanged (never asserts). | Make `inverse_denote`'s `Bil.Unknown` arm return `AI.bottom`. | BK-33 (`AI.equal` false). |
 | BK-35 | L-3b partition: the iterate view vs the exit view hold different cells. | Drop the trace-taken view (union the body IN state with the exit state). | BK-35 (exit cell loses `{8}` / iterate cell top). |
 | BK-37 | B-1 an interrupt edge is an unknown external callee: RSP anchor kept, `rdi` topped. | Make the `Int` edge drop the caller frame (whole-memory top). | BK-37 (RSP anchor lost). |
-| BK-38 | L-B1 jcc decoder: the `jle` compound guard recovers SLE(c=3). | In `hike_jump.ml`, drop the `join`/`eval_bexp` OR-of-ZF-and-sign recovery. | BK-38 (cell top). |
+| BK-38 | L-B1 jcc decoder: the `jle` compound guard recovers SLE(c=3) through `Hike_backsubst.forms` and the relation combine. | In `hike_backsubst.ml`, make `forms` return only the start form (no backward substitution). | BK-38 (cell top). |
 | BK-39 | L-B2 the `jl` compound guard emits SLT. | Drop the `signed_item`/xor-core recovery. | BK-39. |
 | BK-40 | L-B3 the `ja` guard emits UGT (`~(CF|ZF)`). | Drop the CF complement (`rel_complement`) handling. | BK-40. |
-| BK-41 | L-B4 the same-comparison gate rejects a mixed second-cmp group (cell top). | Relax the same-comparison gate in `plan_block` to accept the mixed group. | BK-41 (`Ws.is_top` false). |
-| BK-42 | L-B5 the record path (bare `when CF`, unique load def) survives. | As BK-06 (`plan_block = []`). | BK-42. |
+| BK-41 | L-B4 the relation combine rejects a mixed second-comparison group (cell top). | Relax `Hike_backsubst.combine` to combine mismatched orientations/signedness. | BK-41 (`Ws.is_top` false). |
+| BK-42 | L-B5 the record path (bare `when CF`, unique load def) survives through the backward `forms` walk. | As BK-06 (`flag_vars = []`). | BK-42. |
 | BK-43 | L-D2 the wide-bound counter's non-negativity survives widening (max ≤ 63). | Drop the landmark-directed widening's non-negativity carry (`Cbat_landmarks`). | BK-43 (`bounded_above … 63` false). |
 | BK-44 | E1-1 the ON-path matched-pair `+word` RSP restore keeps the loop header at `{0x1000}`. | In `cbat_call_effects.ml`, delete the matched-pair restore arm. | BK-44 (RSP drifts by 8 per call). |
 | BK-45 | E1-2 straight-line call: the continuation RSP is exactly `{0x2000}`. | As BK-44. | BK-45 (RSP `{0x1ff8}`). |

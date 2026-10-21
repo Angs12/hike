@@ -2,7 +2,7 @@
 
 | id | behavior |
 |---|---|
-| RIP-01 | Tagged values become stable address variables; loads and stores use component memory and byte indices through `Hike_synth.rewrite_def`. Analysis facts survive, unclassified and untagged bits stay exact, and resolution is idempotent. |
+| RIP-01 | Tagged values become stable address variables; loads and stores use component memory and byte indices through `Hike_synth_addr.rewrite_def`. Analysis facts survive, unclassified and untagged bits stay exact, and resolution is idempotent. |
 | RIP-02 | Nested synthetic variables enter the shared table, denote singleton module addresses (in their section when the program's section map holds them), contribute no signature inputs, and preserve linker-slot target recognition. |
 | RIP-03 | A resolved address value and access render through the same owning section global and byte index. |
 | RIP-04 | A function pointer guard and a relocated data word render the same public function face. |
