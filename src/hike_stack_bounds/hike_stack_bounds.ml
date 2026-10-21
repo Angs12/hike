@@ -65,8 +65,9 @@ let escape_extent ~(entry : int64) (ws : Ws.t) : (int64 * int64) option =
    descending reaches the floor, a finite set keeps its extrema, and a
    wrapped, circular, or top set spans the whole line, never a swapped
    hull. *)
-let key_extent (ws : Ws.t) : (Cbat_word.t * Cbat_word.t) option =
-  let zero = Cbat_word.zero 64 and ones = Cbat_word.ones 64 in
+let key_extent ~(width : int) (ws : Ws.t) :
+    (Cbat_word.t * Cbat_word.t) option =
+  let zero = Cbat_word.zero width and ones = Cbat_word.ones width in
   let clamp lo hi =
     if not Cbat_word.(lo <= hi) then (zero, ones)
     else if Ws.is_ascending ws then (lo, ones)
@@ -84,8 +85,8 @@ let key_extent (ws : Ws.t) : (Cbat_word.t * Cbat_word.t) option =
       | Some (lo, hi) ->
           Some
             (clamp
-               (Cbat_word.of_int64 ~width:64 lo)
-               (Cbat_word.of_int64 ~width:64 hi))
+               (Cbat_word.of_int64 ~width lo)
+               (Cbat_word.of_int64 ~width hi))
       | None -> (
           match Ws.min_elem ws, Ws.max_elem ws with
           | Some lo, Some hi -> Some (clamp lo hi)

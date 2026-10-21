@@ -30,8 +30,9 @@ let indirect_callee ~(synth : Hike_synth.table) ~(lookup : int64 -> Tid.t option
 (* Segment-relative bounds of a stack value; None when no bound exists.
    [key_extent] is the shared key-space clamp — the same rule the
    sections' attribution uses. *)
-let range_of (ws : WordSet.t) : (Cbat_word.t * Cbat_word.t) option =
-  Hike_stack_bounds.key_extent ws
+let range_of ~(width : int) (ws : WordSet.t) :
+    (Cbat_word.t * Cbat_word.t) option =
+  Hike_stack_bounds.key_extent ~width ws
 
 (* The call block's bounded outgoing stack-argument hull.  The slot test
    is shared with promotion: only a singleton stack store beginning at a
@@ -62,7 +63,7 @@ let stack_arg_ranges ~(synth : Hike_synth.table) ~(abi : Hike_abi.t) ~(block : b
                   when Option.is_some
                          (Hike_stack_model.call_arg_slot ~word:abi.Hike_abi.word
                             ~call_sp ~start) ->
-                  (match range_of address with
+                  (match range_of ~width:word_bits address with
                    | None -> acc
                    | Some (lo, hi) ->
                      let extra =

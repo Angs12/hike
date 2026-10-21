@@ -106,7 +106,9 @@ let tests : unit Alcotest.test list =
     pin "HSB-25" "key_extent: a finite stack value keeps its exact offset extrema"
       (fun () ->
         check "HSB-25"
-          (some_pair_w (Hsb.key_extent (Ws.stack_word_i64 (-8L))) (wof64 (-8L), wof64 (-8L))));
+          (some_pair_w
+             (Hsb.key_extent ~width:64 (Ws.stack_word_i64 (-8L)))
+             (wof64 (-8L), wof64 (-8L))));
 
 
 

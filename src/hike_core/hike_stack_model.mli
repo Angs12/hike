@@ -55,7 +55,8 @@ val full_bounds :
   Cbat_clp_set_composite.t -> flo:int64 -> cei:int64 -> int64 -> int64 -> int64 * int64
 val escape_extent :
   entry:int64 -> Cbat_clp_set_composite.t -> (int64 * int64) option
-val key_extent : Cbat_clp_set_composite.t -> (Cbat_word.t * Cbat_word.t) option
+val key_extent :
+  width:int -> Cbat_clp_set_composite.t -> (Cbat_word.t * Cbat_word.t) option
 
 val args_base : entry:int64 -> word:int -> int64
 val stack_top : entry:int64 -> word:int -> int64
