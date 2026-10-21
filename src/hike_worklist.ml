@@ -2,9 +2,9 @@
    explored from BAP's decode, its callees are solved before it, and its
    body is lifted, linked and solved; its summary is published once and
    never revised.  A recursive cycle is solved jointly from the
-   optimistic side until no member's summary changes.  A solve that
-   reaches an unsolved callee pauses and resumes once the callee is
-   final. *)
+   optimistic side until no member's summary changes.  Indirect targets
+   are materialized in the solve's own fan-out: there is no pause/resume
+   and no post-drain growth. *)
 
 open Bap.Std
 open Bap_core_theory
