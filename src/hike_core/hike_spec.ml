@@ -2,7 +2,10 @@
    [Hike_kb] and the emitter can share it without depending on each
    other. *)
 
-(* Variant-II TLS layout from PT_TLS, including the first-byte alignment. *)
+(* Variant-II TLS layout from PT_TLS, including the first-byte alignment.
+   [tls_lo] is the segment-line address of the first TLS byte; [tls_base]
+   is the TP-relative offset of that byte (negative when the block sits
+   below TP), and [tls_prefix] is the alignment padding before the image. *)
 type tls_spec = {
   tls_lo : int64;
   tls_memsz : int64;

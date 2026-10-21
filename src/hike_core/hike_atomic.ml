@@ -8,6 +8,8 @@ type op = Add | Sub | And | Or | Xor | Xchg | Cmpxchg | Neg
 let is_cmpxchg = function Cmpxchg -> true | _ -> false
 let is_neg = function Neg -> true | _ -> false
 
+(* The x86 atomic vocabulary: the intrinsic name carries one of these
+   fixed widths, so this is a name table, not a target-fact query. *)
 let operations =
   [ Add, "add"; Sub, "sub"; And, "and"; Or, "or"; Xor, "xor";
     Xchg, "xchg"; Cmpxchg, "cmpxchg"; Neg, "neg" ]

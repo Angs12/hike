@@ -37,7 +37,9 @@ let conversion_rows : (string * native_fp * int option) list =
 (* One row per mapped intrinsic name, with the operand width it names.
    The unsized spellings ([_binary]) carry none: the lifter picks the
    width per instruction, and [hike-fp] rewrites the target to the sized
-   spelling before any consumer reads it. *)
+   spelling before any consumer reads it.  The table intentionally keeps
+   both [forder_rne] and bare [forder] spellings plus the runtime-boundary
+   rows; the duplicates are compatibility, not dead data. *)
 let native_fp_table : (string * native_fp * int option) list =
   [ ("intrinsic:fmul_rne_ieee754_binary_64", FMUL, Some 64);
     ("intrinsic:fmul_rne_ieee754_binary_32", FMUL, Some 32);

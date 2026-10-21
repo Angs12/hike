@@ -692,7 +692,8 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t)
              (Term.attrs a')
    end)#map_sub sub
 
-(* Every direct call of [sub], in order, with its block. *)
+(* Every direct call of [sub], in order, with its block.  Indirect calls
+   name no callee contract today; this is the seam to extend if they do. *)
 let fold_direct_calls (sub : sub term) ~(init : 'a)
     ~(f : 'a -> blk term -> Tid.t -> 'a) : 'a =
   Term.enum blk_t sub
