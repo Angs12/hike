@@ -35,6 +35,8 @@ type storage =
 type lane = Input | Output
 
 let mem_type addr_bits =
+  if addr_bits <= 0 then
+    failwith "hike_synth: memory type has no address width";
   Hike_abi.mem_type ~addr_bits
 
 let var ~addr_bits kind =
