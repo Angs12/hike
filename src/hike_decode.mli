@@ -47,8 +47,9 @@ val transfers_only : Block.t -> bool
 (** The block of [cfg] that starts at [addr]. *)
 val block_at : Graphs.Cfg.t -> Addr.t -> Block.t option
 
-(** The body: a call block's fallthrough stays only when [keep_fall]
-    accepts it; then only what [entry] reaches stays. *)
+(** Keeps only the body [entry] reaches. Calls [keep_fall] once per
+    reached call, before following its edges; a false answer removes
+    its fallthrough. Unreached calls never invoke the callback. *)
 val trim : Graphs.Cfg.t -> entry:Block.t -> keep_fall:(Block.t -> bool) -> Graphs.Cfg.t
 
 (** The body lifted by BAP's sub lifter under [tid] and [name]. *)

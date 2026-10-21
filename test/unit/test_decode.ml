@@ -102,6 +102,28 @@ let tests = [
                 (Disasm.Driver.is_subroutine state (addr target)))
             [ 0x40007aL; 0x40007bL ])) ]);
 
+  ("call reachability", [ case "summary requests follow reachable calls once, including loops" (fun () ->
+      let verify code keep expected_blocks expected_calls =
+        with_binary code (fun project ->
+            let _, cfg, entry = candidate project (addr 0x400078L) in
+            let calls = ref [] in
+            let trimmed = D.trim cfg ~entry ~keep_fall:(fun block ->
+                let address = Word.to_int64_exn (Block.addr block) in
+                calls := address :: !calls;
+                keep address) in
+            Alcotest.(check (list int64)) "retained blocks" expected_blocks (starts trimmed);
+            Alcotest.(check (list int64)) "summary request order" expected_calls (List.rev !calls)) in
+      (* call g; call h; ret; g: ret; h: ret *)
+      let chain = "\xe8\x06\x00\x00\x00\xe8\x02\x00\x00\x00\xc3\xc3\xc3" in
+      verify chain (fun _ -> true)
+        [ 0x400078L; 0x40007dL; 0x400082L ] [ 0x400078L; 0x40007dL ];
+      verify chain (fun _ -> false) [ 0x400078L ] [ 0x400078L ];
+      verify chain (fun address -> address = 0x400078L)
+        [ 0x400078L; 0x40007dL ] [ 0x400078L; 0x40007dL ];
+      (* call g; jmp entry; g: ret *)
+      verify "\xe8\x02\x00\x00\x00\xeb\xf9\xc3" (fun _ -> true)
+        [ 0x400078L; 0x40007dL ] [ 0x400078L ]) ]);
+
 ]
 
 let () = run "decode" tests

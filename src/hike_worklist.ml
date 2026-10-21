@@ -356,9 +356,8 @@ and stub_symbol (blk : Block.t) : string option =
 (* The body's local closure: lift, solve, and while the solve resolves
    new dispatch destinations, decode them and lift again. *)
 and body ?previous t frame e cfg blk : final =
-  let keep_fall = walk t frame cfg blk in
   let raw =
-    D.trim cfg ~entry:blk ~keep_fall
+    D.trim cfg ~entry:blk ~keep_fall:(call_returns t frame)
     |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
     |> link t frame |> claim t e |> arm t
   in
@@ -371,30 +370,13 @@ and body ?previous t frame e cfg blk : final =
     Function f
   end
 
-(* The callee-first walk: each reached call's destinations are solved
-   before its fallthrough is followed, and the fallthrough is kept only
-   when one of them may return. *)
-and walk t frame cfg (entry : Block.t) : Block.t -> bool =
-  let returns blk =
-    match D.dests blk with
-    | [] -> true
-    | labels ->
-      Base.List.map labels ~f:(target_summary t frame)
-      |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
-  in
-  let rec go (seen, kept) b =
-    if Core.Set.mem seen b then (seen, kept)
-    else
-      let fall = (not (D.is_call b)) || returns b in
-      let kept = if fall then Core.Set.add kept b else kept in
-      Graphs.Cfg.Node.outputs b cfg
-      |> Seq.fold ~init:(Core.Set.add seen b, kept) ~f:(fun acc edge ->
-          match Graphs.Cfg.Edge.label edge with
-          | `Fall when not fall -> acc
-          | _ -> go acc (Graphs.Cfg.Edge.dst edge))
-  in
-  let _, kept = go (Block.Set.empty, Block.Set.empty) entry in
-  Core.Set.mem kept
+(* Every reached callee is solved before deciding whether its call returns. *)
+and call_returns t frame blk =
+  match D.dests blk with
+  | [] -> true
+  | labels ->
+    Base.List.map labels ~f:(target_summary t frame)
+    |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
 
 and target_summary t frame (label : Tid.t) : S.t =
   match D.dest label with

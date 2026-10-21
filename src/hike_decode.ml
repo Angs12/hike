@@ -115,24 +115,23 @@ let transfers_only (blk : Block.t) : bool =
 let block_at (cfg : Graphs.Cfg.t) (addr : Addr.t) : Block.t option =
   Graphs.Cfg.nodes cfg |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) addr)
 
-(* The body: a call block's fallthrough stays only when [keep_fall]
-   accepts it (the callee may return), then only what [entry] reaches
-   stays. *)
+(* Reach calls in execution order, asking for their summaries before
+   following their fallthroughs. Unreached calls need no summary. *)
 let trim (cfg : Graphs.Cfg.t) ~(entry : Block.t) ~(keep_fall : Block.t -> bool) :
     Graphs.Cfg.t =
-  let cut =
-    Graphs.Cfg.edges cfg
-    |> Seq.fold ~init:cfg ~f:(fun g e ->
-        let src = Graphs.Cfg.Edge.src e in
-        match Graphs.Cfg.Edge.label e with
-        | `Fall when is_call src && not (keep_fall src) -> Graphs.Cfg.Edge.remove e g
-        | _ -> g)
+  let rec walk (reached, cut) block =
+    if Core.Set.mem reached block then (reached, cut)
+    else
+      let reached = Core.Set.add reached block in
+      let fall = not (is_call block) || keep_fall block in
+      Graphs.Cfg.Node.outputs block cfg
+      |> Seq.fold ~init:(reached, cut) ~f:(fun ((reached, cut) as acc) edge ->
+          match Graphs.Cfg.Edge.label edge with
+          | `Fall when not fall -> (reached, Graphs.Cfg.Edge.remove edge cut)
+          | _ -> walk acc (Graphs.Cfg.Edge.dst edge))
   in
-  let reached =
-    Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) ~init:Block.Set.empty
-      ~f:Core.Set.add cut entry
-  in
-  Graphs.Cfg.nodes cut
+  let reached, cut = walk (Block.Set.empty, cfg) entry in
+  Graphs.Cfg.nodes cfg
   |> Seq.fold ~init:cut ~f:(fun g b ->
       if Core.Set.mem reached b then g else Graphs.Cfg.Node.remove b g)
 
