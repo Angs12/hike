@@ -100,7 +100,14 @@ let empty : table = Var.Map.empty
 (* The creating pass records each synthetic var with its kind, keyed by
    the base var (an SSA version resolves to its base). *)
 let add (tbl : table) (v : Var.t) (k : kind) : table =
-  Core.Map.set tbl ~key:(Var.base v) ~data:k
+  let key = Var.base v in
+  match Core.Map.find tbl key with
+  | Some old when old = k -> tbl
+  | Some _ ->
+    failwith
+      (Printf.sprintf "hike_synth: conflicting classification for %s"
+         (Var.name key))
+  | None -> Core.Map.set tbl ~key ~data:k
 
 let resolve (tbl : table) (v : Var.t) : kind option =
   Core.Map.find tbl (Var.base v)
@@ -141,7 +148,12 @@ let add_environment tbl v = add tbl v (K_environment v)
 let mem tbl v = Core.Map.mem tbl (Var.base v)
 
 let union (a : table) (b : table) : table =
-  Core.Map.merge_skewed a b ~combine:(fun ~key:_ x _ -> x)
+  Core.Map.merge_skewed a b ~combine:(fun ~key x y ->
+      if x = y then x
+      else
+        failwith
+          (Printf.sprintf "hike_synth: conflicting classification for %s"
+             (Var.name key)))
 
 (* The vars the program still names, plus the target's registers and
    caller window (finite facts, kept whole). *)
@@ -156,8 +168,12 @@ let restrict_to_program (tbl : table) (prog : program term) : table =
    end)#run prog
     (Core.Map.filter tbl ~f:(function K_environment _ | K_window -> true | _ -> false))
 
+(* Virtual vars are the lifter's temporaries even when the table does
+   not record them; a recorded kind still wins for a real var. *)
 let is_temporary ~table v =
-  Var.is_virtual v || match resolve table v with
+  Var.is_virtual v
+  ||
+  match resolve table v with
   | Some (K_temporary _ | K_accumulator | K_let _) -> true
   | _ -> false
 
