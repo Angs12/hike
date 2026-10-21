@@ -231,23 +231,22 @@ let arm_tag : int64 Value.Tag.t =
 
 let arm_word (j : jmp term) : int64 option = Term.get_attr j arm_tag
 
+(* Unarmed words still belong to the indirect fallback. *)
+let remaining_words (blk : blk term) (words : Cbat_word.t list) : Cbat_word.t list =
+  let armed = Term.enum jmp_t blk |> Seq.filter_map ~f:arm_word |> Seq.to_list
+      |> Core.Int64.Set.of_list in
+  Base.List.filter words ~f:(fun word ->
+      not (Base.Option.value_map (Cbat_word.to_int64_opt word) ~default:false
+             ~f:(Core.Set.mem armed)))
+
 (* The case blocks of a complete dispatch: every word names an in-sub
    block, or the series would drop live cases. *)
 let resolved_cases ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) (texp : exp) : tid list option =
-  (* An armed word's edge is its arm, entered under its guard. *)
-  let armed =
-    Term.enum jmp_t blk |> Seq.filter_map ~f:arm_word |> Seq.to_list
-    |> Core.Int64.Set.of_list
-  in
   Base.Option.bind (case_words ~denote ~block_addrs ~last_defs ~blk texp)
     ~f:(fun words ->
-      let words =
-        Base.List.filter words ~f:(fun w ->
-            not (Base.Option.value_map (Cbat_word.to_int64_opt w) ~default:false
-                   ~f:(Core.Set.mem armed)))
-      in
+      let words = remaining_words blk words in
       let cases =
         Base.List.filter_map words ~f:(fun w ->
             match Core.Map.find block_addrs (Cbat_word.to_word w) with

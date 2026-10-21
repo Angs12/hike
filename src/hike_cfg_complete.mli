@@ -95,6 +95,9 @@ open Bap.Std
 (** The destination word a dispatch arm tests, if [j] is one. *)
 val arm_word : jmp term -> int64 option
 
+(** The destination words not covered by the block's existing arms. *)
+val remaining_words : blk term -> Cbat_word.t list -> Cbat_word.t list
+
 (** Each indirect transfer gains, before it, one arm per destination word
     ([dests]) naming the start of one of the sub's blocks: a direct goto
     guarded by [target = word] over model addresses.  The transfer stays

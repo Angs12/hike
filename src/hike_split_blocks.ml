@@ -147,12 +147,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) :
         | Ok (Type.Imm n) -> n
         | _ -> failwith "hike: dispatch: the target is not a word"
       in
-      let armed = Base.List.filter_map arms ~f:Hike_cfg_complete.arm_word in
-      let rest =
-        Base.List.filter d.Hike_cfg_complete.words ~f:(fun w ->
-            not (Base.Option.value_map (Cbat_word.to_int64_opt w) ~default:false
-                   ~f:(fun w -> Base.List.mem armed w ~equal:Int64.equal)))
-      in
+      let rest = Hike_cfg_complete.remaining_words blk d.Hike_cfg_complete.words in
       let tested a =
         let w = Word.of_int64 ~width:bits (Base.Option.value_exn (Hike_cfg_complete.arm_word a)) in
         Jmp.with_cond a
