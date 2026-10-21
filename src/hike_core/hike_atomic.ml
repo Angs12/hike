@@ -72,9 +72,14 @@ let normalize ~addr_bits program =
             (* The producer captures the pure effective address before its input
                lanes. Keep its expression visible to TLS/storage attribution. *)
             let address_lane = lane "address" addr_bits in
-            let addr = Term.enum def_t blk |> Seq.fold
-                ~init:(Bil.Var address_lane) ~f:(fun addr d ->
-                    if Var.same (Def.lhs d) address_lane then Def.rhs d else addr) in
+            let addr =
+              match
+                Term.enum def_t blk
+                |> Seq.find ~f:(fun d -> Var.same (Def.lhs d) address_lane)
+              with
+              | Some d -> Def.rhs d
+              | None -> failwith "hike: atomic intrinsic has no address lane"
+            in
             let old = lane "old" bits in
             let fresh = Var.create ~is_virtual:true "atomic_new" (Type.Imm bits) in
             let old_e = Bil.Var old in
