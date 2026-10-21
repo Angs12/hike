@@ -101,7 +101,11 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
        | Some d ->
            mem_access ctx scope llvm_builder blk_tid
              (Hike_def_slots.sec_tag d) d (Def.rhs d)
-       | None -> create_exp ctx scope llvm_builder blk_tid (Bil.Var av))
+       | None ->
+           (* A versioned operand may be defined outside this block; the
+              SSA binding is the authority.  An unbound temp freezes
+              undef. *)
+           create_exp ctx scope llvm_builder blk_tid (Bil.Var av))
   in
   let w_of = Bil2llvm_int.width in
   let result =
@@ -174,7 +178,15 @@ let create_native_fp_call ctx scope llvm_builder blk_tid blk call op =
   (* Ret temps bind the call's written version: the SSA
      pass minted one per call, so every read downstream resolves. *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
-      let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in
+      let rw =
+        match Var.typ ret with
+        | Type.Imm w -> w
+        | _ ->
+            failwith
+              (Printf.sprintf
+                 "hike-emit: FP return temp %s is not an immediate lane"
+                 (Var.name ret))
+      in
       let r_lane =
         coerce_int_width llvm_ctx llvm_builder
           ~bits:(Bil2llvm_int.width result) result rw in

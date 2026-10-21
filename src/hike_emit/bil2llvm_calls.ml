@@ -8,6 +8,17 @@ open Bil2llvm_exp
 open Bil2llvm_fp
 open Bil2llvm_access
 
+(* The caller-window cell of slot [i]: the window GEP'd at the slot's
+   own byte offset.  The call lane and the thunk share it. *)
+let slot_gep ctx llvm_builder window i =
+  let off =
+    Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
+      (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i)
+      false
+  in
+  Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) window [| off |] ""
+    llvm_builder
+
 (* The main-role sub is the module's C entry, whatever the decode named it. *)
 let is_main_role ctx (sub_tid : tid) : bool =
   match Core.Map.find ctx.sub_of sub_tid with
@@ -26,6 +37,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
      window). *)
   let window_ptr () =
     match !(scope.cur_frame) with
+    | None ->
+        failwith "hike-emit: call in a sub with no active frame"
     | Some _ -> (
         let sp_ver =
           match lane_version scope blk_tid ctx.sp with
@@ -34,11 +47,9 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         in
         match get_ptr_offset scope sp_ver with
         | Some off ->
-          Some
-            (Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
-               Hike_stack_model.Ptr_residue off)
-        | None -> Some (as_ptr llvm_builder (lane_value ctx scope blk_tid ctx.sp)))
-    | None -> None
+            Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
+              Hike_stack_model.Ptr_residue off
+        | None -> as_ptr llvm_builder (lane_value ctx scope blk_tid ctx.sp))
   in
   (* Slot parameter i binds the block's [call_arg i] def; both names
      derive from the index, so the binding is order-independent.  A slot
@@ -51,17 +62,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
     with
     | Some v -> as_ptr llvm_builder v
-    | None -> (
-        match window_ptr () with
-        | None -> Llvm.undef (Llvm.pointer_type ctx.llvm_ctx)
-        | Some w ->
-          let off =
-            Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
-              (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i)
-              false
-          in
-          Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w [| off |] ""
-            llvm_builder)
+    | None -> slot_gep ctx llvm_builder (window_ptr ()) i
   in
   Base.List.map args ~f:(fun arg ->
       (* Resolve each lane from the block's versioned reads, including
@@ -69,10 +70,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       let exp = lane_exp scope blk_tid (Arg.rhs arg) in
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
-      then
-        (match window_ptr () with
-         | Some w -> w
-         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+      then window_ptr ()
       else if Hike_stack_model.is_arg_slot ctx.synth (Arg.lhs arg) then
         let i =
           Base.List.findi slot_args
@@ -253,24 +251,33 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
     |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
         Core.Set.add acc (Def.lhs d))
   in
-  let rec slots i acc =
-    let v = Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i in
-    if Core.Set.mem defined_vars v then
-      match get_local scope blk_tid v with
-      | Some value ->
-          (* The call-arg def is the caller's slot ADDRESS; the vararg
-             is the value stored there. *)
-          let loaded =
+  (* The defined call-arg slots must be contiguous from zero: a hole
+     would silently drop every later vararg. *)
+  let arity =
+    Core.Set.fold defined_vars ~init:(-1) ~f:(fun arity v ->
+        if Hike_stack_model.is_call_arg ctx.synth v then
+          match Hike_synth.index_of ctx.synth v with
+          | Some i -> Stdlib.max arity i
+          | None -> arity
+        else arity)
+  in
+  if arity < 0 then []
+  else
+    Base.List.init (arity + 1) ~f:(fun i ->
+        let v = Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i in
+        match get_local scope blk_tid v with
+        | Some value ->
+            (* The call-arg def is the caller's slot ADDRESS; the vararg
+               is the value stored there. *)
             Bil2llvm_memory.load_ptr llvm_builder
               (Llvm.integer_type ctx.llvm_ctx
                  (Hike_stack_model.word_bits word))
               (as_ptr llvm_builder value)
-          in
-          slots (i + 1) (loaded :: acc)
-      | None -> acc
-    else List.rev acc
-  in
-  slots 0 []
+        | None ->
+            failwith
+              (Printf.sprintf
+                 "hike-emit: extern stack argument slot %d has no local \
+                  binding" i))
 
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
@@ -338,7 +345,11 @@ let thunk_eligible ctx (sub_tid : tid) : bool =
    parameters and forwards the register lanes.  Internal linkage: the
    consumer's optimizer inlines it where the call site resolves. *)
 let create_thunk ctx (sub_tid : tid) =
-  if not (thunk_eligible ctx sub_tid) then ()
+  if not (thunk_eligible ctx sub_tid) then
+    failwith
+      (Printf.sprintf
+         "hike-emit: escaped sub %s cannot be reached through the synthetic \
+          convention" (Tid.name sub_tid))
   else
   let llvm_ctx = ctx.llvm_ctx in
   let llvm_module = ctx.llvm_module in
@@ -382,14 +393,9 @@ let create_thunk ctx (sub_tid : tid) =
   let window = Llvm.param fn (Base.List.length twin_args - 1) in
   let slot_vals =
     Base.List.init arity ~f:(fun i ->
-        let off =
-          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-            (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
-        in
         (* The slot lane is the caller's cell address: the twin
            forwards the window GEP'd at the slot. *)
-        Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
-          builder)
+        slot_gep ctx builder window i)
   in
   (* Forwards [sub]'s own parameter order: each register lane by name
      from the twin's convention, each slot as the window GEP'd at its

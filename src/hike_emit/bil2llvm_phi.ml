@@ -56,20 +56,22 @@ let fill ctx scope blks =
                        (Tid.name src)
                        (Tid.name (Term.tid (Seq.hd_exn blks))))
               in
-              let copies =
+              let term =
                 match Llvm.block_terminator src_bb with
-                | None -> 0
-                | Some term ->
-                  Array.fold_left (fun n bb ->
-                      if Stdlib.(bb = get_bb scope tid) then n + 1 else n)
-                    0 (Llvm.successors term)
+                | Some term -> term
+                | None ->
+                    failwith
+                      (Printf.sprintf
+                         "hike-emit: phi incoming source %s has no terminator"
+                         (Tid.name src))
+              in
+              let copies =
+                Array.fold_left (fun n bb ->
+                    if Stdlib.(bb = get_bb scope tid) then n + 1 else n)
+                  0 (Llvm.successors term)
               in
               if copies > 0 then begin
-              let src_b =
-                match Llvm.block_terminator src_bb with
-                | Some t -> Llvm.builder_before ctx.llvm_ctx t
-                | None -> Llvm.builder_at_end ctx.llvm_ctx src_bb
-              in
+              let src_b = Llvm.builder_before ctx.llvm_ctx term in
               let value =
                 match exp with
                 | Bil.Var v -> (

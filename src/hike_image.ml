@@ -77,6 +77,8 @@ let external_references (proj : Project.t) : (int64 * string) list =
 let get_bias (proj : Project.t) : int64 =
   match ogre_rows proj Image.Scheme.bias with
   | b :: _ -> b
+  (* A loader projection without a bias row is a non-PIE image; its
+     addresses are already virtual addresses. *)
   | [] -> 0L
 
 (* The image's entry address, biased like every memory address. *)

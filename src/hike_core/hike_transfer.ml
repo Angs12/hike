@@ -20,7 +20,9 @@ let index_of_sub (sub : sub term) : index =
           Core.Map.set m ~key:(Phi.lhs p)
             ~data:(Phi.values p |> Seq.map ~f:snd |> Seq.to_list)) in
       Term.enum def_t blk |> Seq.fold ~init:m ~f:(fun m d ->
-          Core.Map.set m ~key:(Def.lhs d) ~data:[Def.rhs d]))
+          Core.Map.update m (Def.lhs d) ~f:(function
+            | Some rhs -> rhs @ [ Def.rhs d ]
+            | None -> [ Def.rhs d ])))
 
 (* Var-links resolved through [index]; [seen] keeps a copy cycle from
    looping. *)

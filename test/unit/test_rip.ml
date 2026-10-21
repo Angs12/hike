@@ -75,7 +75,36 @@ let tests = [
          (Base.Option.equal Int64.equal
             (Hike_transfer.slot_of_target ~synth:table
                (Bil.Load (Bil.Var (memv "rip_linker"), Bil.Var address, LittleEndian, `r64)))
-            (Some 0x2000L)));
+            (Some 0x2000L));
+       let multi_defs rhs =
+         fst
+           (raw_sub_of "rip_multi"
+              [ [ Def.create (v64 "rip_multi_addr") (int rhs);
+                  Def.create (v64 "rip_multi_addr") (int rhs) ],
+                [ (1, mk_goto) ];
+                [], [ (0, mk_ret) ] ])
+       in
+       check "agreeing definitions keep the slot"
+         (Base.Option.equal Int64.equal
+            (Hike_transfer.slot_of_target ~synth:table
+               ~sub:(multi_defs 0x2000L)
+               (Bil.Load
+                  (Bil.Var (memv "rip_linker_multi"), Bil.Var (v64 "rip_multi_addr"),
+                   LittleEndian, `r64)))
+            (Some 0x2000L));
+       check "conflicting definitions refuse the slot"
+         (Base.Option.is_none
+            (Hike_transfer.slot_of_target ~synth:table
+               ~sub:
+                 (fst
+                    (raw_sub_of "rip_multi_conflict"
+                       [ [ Def.create (v64 "rip_multi_addr") (int 0x2000L);
+                           Def.create (v64 "rip_multi_addr") (int 0x3000L) ],
+                         [ (1, mk_goto) ];
+                         [], [ (0, mk_ret) ] ]))
+               (Bil.Load
+                  (Bil.Var (memv "rip_linker_multi"), Bil.Var (v64 "rip_multi_addr"),
+                   LittleEndian, `r64)))));
   pin "RIP-03" "resolved section values and accesses emit through the owning global"
     (fun () ->
        let meta = { B2l.sm_type = Hike.Stack_model.Data; sm_access = Hike_section.Writable;

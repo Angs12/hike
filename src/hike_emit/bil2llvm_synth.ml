@@ -136,7 +136,8 @@ let materialize ctx scope llvm_builder blk_tid
     match !(scope.cur_frame) with
     | Some fr -> fr.entry_line
     | None ->
-        Llvm.const_of_int64 (ctx.i64_ty) Hike_stack_model.segment_base false
+        failwith
+          "hike-emit: pointer materialization has no active sub frame"
   in
   let entry_rel () = Llvm.build_sub off entry "entry_rel" llvm_builder in
   let rel_off rel =
@@ -151,7 +152,15 @@ let materialize ctx scope llvm_builder blk_tid
     match storage_base_of_id scope ~addr_bits id with
     | Some (base, rel) ->
       Bil2llvm_ptr.offset ~addr_bits llvm_builder base (rel_off rel)
-    | None -> off_ptr ()
+    | None when Int.equal id Hike_stack_model.residue_id ->
+        (* The caller window has no local residue in a frame that never
+           names one; keep the entry-line pointer bridge. *)
+        off_ptr ()
+    | None ->
+        failwith
+          (Printf.sprintf
+             "hike-emit: pointer materialization has no storage for region %d"
+             id)
   in
   match storage with
   | Hike_stack_model.Ptr_region id -> region_ptr id
@@ -162,4 +171,6 @@ let materialize ctx scope llvm_builder blk_tid
       | Some wp ->
           Bil2llvm_ptr.offset ~addr_bits llvm_builder
             (Bil2llvm_value.as_ptr llvm_builder wp) (entry_rel ())
-      | None -> off_ptr ())
+      | None ->
+          failwith
+            "hike-emit: window pointer materialization has no window value")

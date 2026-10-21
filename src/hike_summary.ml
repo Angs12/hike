@@ -62,6 +62,8 @@ let of_solved ~(abi : Hike_abi.t) ~(synth : Hike_synth.table)
   let reachable blk =
     match Core.Map.find envs (Term.tid blk) with
     | Some (pre, _) -> not (Vsa.AI.equal pre Vsa.AI.bottom)
+    (* [envs] is the converged solve: an absent block is unreachable, not
+       unknown. *)
     | None -> false
   in
   (* Only reachable blocks denote, so their states exist. *)

@@ -147,7 +147,7 @@ let rec atomic_ptr ctx scope llvm_builder blk_tid mem addr =
       let index =
         as_int ctx llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
       in
-      Bil2llvm_memory.component_ptr ctx llvm_builder mv index
+      Some (Bil2llvm_memory.component_ptr ctx llvm_builder mv index)
     | _ -> None
   in
   match component with

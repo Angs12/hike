@@ -12,9 +12,14 @@ let store_ptr llvm_builder value ptr =
   value
 
 let component_ptr ctx llvm_builder v index =
-  Base.Option.map (Bil2llvm_synth.memory_value ctx v) ~f:(fun base ->
+  match Bil2llvm_synth.memory_value ctx v with
+  | Some base ->
       Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| index |] ""
-        llvm_builder)
+        llvm_builder
+  | None ->
+      failwith
+        (Printf.sprintf
+           "hike-emit: memory var %s has no component binding" (Var.name v))
 
 let const_load ctx llvm_builder addr ty ~fallback =
   match section_of_addr ctx.address addr with

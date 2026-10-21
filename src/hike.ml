@@ -39,22 +39,15 @@ let emit output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   let target = Project.target proj in
-  let abi = Abi.of_target target in
-  let word = abi.Abi.word in
   let addr_bits = Theory.Target.bits target in
   let facts = Hike_kb.facts () in
   let spec =
     match facts.Hike_kb.spec with
     | Some spec -> spec
     | None ->
-        (* No attribution ran: the sections emit with no components. *)
-        let bias = Hike_image.get_bias proj in
-        let relative = Hike_image.relative_values proj ~bias in
-        let externals = Hike_image.external_references proj in
-        let meta = Hike_sections.sec_meta ~word proj in
-        Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
-          ~tls:(Hike_image.tls_spec proj)
-          ~relative ~externals
+        failwith
+          "hike-emit: no section spec installed; run Hike.lift before \
+           Hike.emit"
   in
   let prog = Project.program proj in
   Bil2llvm.emit_program llvm_ctx llvm_module

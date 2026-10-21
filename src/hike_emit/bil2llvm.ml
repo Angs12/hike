@@ -120,7 +120,7 @@ let create_control_flow ctx scope llvm_builder blk sub =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
-    (* Def-only blocks still need a terminator. *)
+    (* Completion can leave a def-only sink (EMIT-12 pins the return). *)
     create_return ctx scope tid llvm_builder sub
   else
   match cf_type control_flow with
@@ -263,10 +263,17 @@ let create_sub ctx scope sub =
     (* The lock-marker brackets' plan, before any body emits. *)
     scope.atomic_plan := Bil2llvm_access.plan_atomics sub;
     let layout =
-      Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
-        ~default:{ Hike_stack_model.Sub_layout.regions = [];
-                   window_param = false;
-                   runtime_residue = false }
+      match Term.get_attr sub Hike_stack_model.layout_tag with
+      | Some layout -> layout
+      | None ->
+#ifdef VSA_DEBUG
+          Hike_diag.warn
+            "hike-emit: sub %s has no layout tag; using an empty layout"
+            (Tid.name (Term.tid sub));
+#endif
+          { Hike_stack_model.Sub_layout.regions = [];
+            window_param = false;
+            runtime_residue = false }
     in
     let { Hike_stack_ptr.storages; runtime_top } =
       Hike_stack_ptr.build_frame ~llvm_ctx ~llvm_builder

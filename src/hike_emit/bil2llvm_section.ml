@@ -30,19 +30,36 @@ let lookup_native_fn ctx llvm_module v =
   match by_start () with
   | Some fn -> Some fn
   | None ->
-  if
-    not (Core.Set.mem ctx.native_starts v)
-    && not (Core.Map.mem ctx.sub_starts v)
-  then None
-  else Base.Option.bind ctx.symtab ~f:(fun symtab ->
-      Base.Option.bind
-        (Symtab.find_by_start symtab (Word.of_int64 ~width:ctx.addr_bits v))
-        ~f:(fun (name, _, _) ->
-          let fn = Llvm.lookup_function name llvm_module in
-          Base.Option.map fn ~f:(fun f ->
-              Base.Option.value
-                (Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name)
-                ~default:f)))
+    if
+      not (Core.Set.mem ctx.native_starts v)
+      && not (Core.Map.mem ctx.sub_starts v)
+    then None
+    else
+      let name =
+        Base.Option.bind ctx.symtab ~f:(fun symtab ->
+            Base.Option.map
+              (Symtab.find_by_start symtab
+                 (Word.of_int64 ~width:ctx.addr_bits v))
+              ~f:(fun (name, _, _) -> sanitize_name name))
+      in
+      let fn =
+        Base.Option.bind name ~f:(fun name ->
+            Llvm.lookup_function name llvm_module)
+      in
+      match fn with
+      | Some f ->
+          Some
+            (Base.Option.value
+               (Base.Option.bind name ~f:(fun name ->
+                    Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name))
+               ~default:f)
+      | None ->
+          failwith
+            (Printf.sprintf
+               "hike-emit: native start %Lx has no emitted function%s" v
+               (match name with
+                | Some name -> " (" ^ name ^ ")"
+                | None -> ""))
 
 (* The one emission address index: the section tiling and each section's
    owner tiling, keyed by base for a closest-key lookup, plus the
@@ -93,16 +110,22 @@ let owner_of (index : address_index) section (addr_i64 : int64) :
   let key = Word.to_int64_exn section.min_addr in
   match Core.Map.find index.owners key with
   | None -> identity
-  | Some owners ->
-      Base.Option.value
-        (Base.Option.bind
-           (Core.Map.closest_key owners `Less_or_equal_to addr_i64)
-           ~f:(fun (_, o) ->
-               Base.Option.some_if
-                 (Int64.compare o.own_lo addr_i64 <= 0
-                  && Int64.compare addr_i64 o.own_hi <= 0)
-                 (o.base, o.own_lo)))
-        ~default:identity
+  | Some owners -> (
+      match
+        Base.Option.bind
+          (Core.Map.closest_key owners `Less_or_equal_to addr_i64)
+          ~f:(fun (_, o) ->
+              Base.Option.some_if
+                (Int64.compare o.own_lo addr_i64 <= 0
+                 && Int64.compare addr_i64 o.own_hi <= 0)
+                (o.base, o.own_lo))
+      with
+      | Some owner -> owner
+      | None ->
+          failwith
+            (Printf.sprintf
+               "hike-emit: section %Lx owner tiling does not cover %Lx" key
+               addr_i64))
 
 (* The one address map: a function start to its function, a section
    byte to its owning global (owners tile byte-exactly, so every

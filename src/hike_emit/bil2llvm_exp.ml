@@ -237,14 +237,12 @@ and plain_store ctx scope llvm_builder blk_tid mem addr data =
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let d = create_exp ctx scope llvm_builder blk_tid data in
   (match mem with
-   | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-     match
-       Bil2llvm_memory.component_ptr ctx llvm_builder mv
-         (as_int ctx llvm_builder a)
-     with
-     | Some p ->
+   | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv ->
+       let p =
+         Bil2llvm_memory.component_ptr ctx llvm_builder mv
+           (as_int ctx llvm_builder a)
+       in
        ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p)
-     | None -> raw_store ctx llvm_builder d a)
    | _ -> raw_store ctx llvm_builder d a);
   d
 
@@ -253,13 +251,12 @@ and plain_load ?(ptr_cell = false) ctx scope llvm_builder blk_tid mem
   let a = create_exp ctx scope llvm_builder blk_tid addr in
   let raw () = raw_load ~ptr_cell ctx llvm_builder size a in
   match mem with
-  | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-    match
-      Bil2llvm_memory.component_ptr ctx llvm_builder mv
-        (as_int ctx llvm_builder a)
-    with
-    | Some p -> load_cell ctx llvm_builder ~ptr:ptr_cell size p
-    | None -> raw ())
+  | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv ->
+      let p =
+        Bil2llvm_memory.component_ptr ctx llvm_builder mv
+          (as_int ctx llvm_builder a)
+      in
+      load_cell ctx llvm_builder ~ptr:ptr_cell size p
   | _ -> raw ()
 
 (* One memory node: the address is a pointer (a stack value) or an
@@ -279,7 +276,12 @@ and storage_access ?(ptr_cell = false) ?(is_window = false)
       | Some off ->
           Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
             Hike_stack_model.Ptr_window off
-      | None -> as_ptr llvm_builder (create_exp ctx scope llvm_builder blk_tid addr)
+      | None -> (
+          match create_exp ctx scope llvm_builder blk_tid addr with
+          | Bil2llvm_value.Ptr p -> p
+          | Bil2llvm_value.Int _ ->
+              failwith
+                "hike-emit: unfoldable window address lowered to an integer")
     else
       (* The address value is the pointer: a rewritten def's value
          already points into its storage, and a reloaded base holds a
@@ -317,23 +319,13 @@ and sec_comp_access ?(ptr_cell = false) ctx scope llvm_builder blk_tid exp
       | Some d -> create_exp ctx scope llvm_builder blk_tid d
       | None -> assert false
     in
-    match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
-    | Some p ->
-      if store then begin
-        let d = stored () in
-        ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p);
-        d
-      end
-      else load_cell ctx llvm_builder ~ptr:ptr_cell size p
-    | None ->
-      (* Unknown component: the generic memory path, unremapped. *)
-      let a = Bil2llvm_value.Int idx in
-      if store then begin
-        let d = stored () in
-        raw_store ctx llvm_builder d a;
-        d
-      end
-      else raw_load ~ptr_cell ctx llvm_builder size a
+    let p = Bil2llvm_memory.component_ptr ctx llvm_builder mv idx in
+    if store then begin
+      let d = stored () in
+      ignore (Bil2llvm_memory.store_ptr llvm_builder (Bil2llvm_value.ll d) p);
+      d
+    end
+    else load_cell ctx llvm_builder ~ptr:ptr_cell size p
   in
   emit_with_marker ctx scope llvm_builder blk_tid (marker_of_size ctx size) ~emit
     ~rewrite:(rewrite_mem_node exp addr size)
