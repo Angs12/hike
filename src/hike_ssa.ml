@@ -142,7 +142,10 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
            let v = Def.lhs d in
            if Var.index v > 0 then set_name v);
     Term.enum jmp_t blk |> Seq.iter ~f:(fun j ->
-        Base.List.iter (Model.effects j).Model.Term_effects.writes ~f:set_name);
+        match Jmp.kind j with
+        | Call _ ->
+          Base.List.iter (Model.effects j).Model.Term_effects.writes ~f:set_name
+        | Goto _ | Ret _ | Int _ -> ());
     blk
   in
   let full_blk blk =
@@ -173,9 +176,12 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
     let blk =
       Term.map jmp_t blk ~f:(fun j ->
           Model.map_effects ~read:Fun.id ~write:(fun v ->
-              let version = new_name v in
-              set_name version;
-              version) j)
+              match Jmp.kind j with
+              | Call _ ->
+                let version = new_name v in
+                set_name version;
+                version
+              | Goto _ | Ret _ | Int _ -> v) j)
     in
     Term.set_attr blk ssa_tag ()
   in
@@ -213,10 +219,13 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
                   |> Model.map_effects ~read:lookup ~write:Fun.id) in
               let blk = Term.map jmp_t blk ~f:(fun j ->
                   Model.map_effects ~read:Fun.id ~write:(fun v ->
-                      if Var.index v = 0 && renamable v
-                         && not (preserve_write tid (Term.tid j) v) then begin
-                        let v = new_name v in set_name v; v
-                      end else (set_name v; v)) j) in
+                      match Jmp.kind j with
+                      | Goto _ | Ret _ | Int _ -> v
+                      | Call _ ->
+                        if Var.index v = 0 && renamable v
+                           && not (preserve_write tid (Term.tid j) v) then begin
+                          let v = new_name v in set_name v; v
+                        end else (set_name v; v)) j) in
               Term.set_attr blk ssa_tag ()
         in
         record tid;
@@ -678,6 +687,598 @@ let update_sub_woken ~(synth : Hike_synth.table)
 let update_sub ~synth ~target ~old sub =
   fst (update_sub_woken ~synth ~target ~old sub)
 
+let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
+    ~(target : Bap_core_theory.Theory.Target.t) ~(sp : var)
+    ~(old : sub term) ~(blocks : blk term list)
+    ~(edges : (Tid.t * Tid.t) list)
+    ~(operands : (Tid.t * Tid.t * var * exp) list)
+    ~(new_phis : (Tid.t * var list) list) : sub term * Tid.Set.t =
+  if Base.List.is_empty blocks && Base.List.is_empty edges
+     && Base.List.is_empty new_phis
+  then (old, Tid.Set.empty)
+  else begin
+    let abi = Abi.of_target target in
+    let pc = Abi.pc target in
+    let window = Model.hike_window_var ~word:abi.Abi.word in
+    let renamable (v : var) =
+      not (Model.is_mem v)
+      && not (Model.is_model_storage synth v)
+      && not (Hike_synth.is_address_var synth v)
+      && not (Var.same v pc)
+      && not (Var.same v window)
+      && not (Model.is_arg_slot synth (Var.base v))
+      && not (Model.is_call_arg synth (Var.base v))
+    in
+    let is_new =
+      let tids =
+        Base.List.map blocks ~f:Term.tid |> Core.Set.of_list (module Tid)
+      in
+      fun tid -> Core.Set.mem tids tid
+    in
+    let new_block_edges =
+      Base.List.concat_map blocks ~f:(fun b ->
+          let src = Term.tid b in
+          Term.enum jmp_t b
+          |> Seq.filter_map ~f:(fun j ->
+                 match Jmp.kind j with
+                 | Goto (Direct t) -> Some (src, t)
+                 | Call c -> (
+                     match Call.return c with
+                     | Some (Direct t) -> Some (src, t)
+                     | _ -> None)
+                 | Int (_, t) -> Some (src, t)
+                 | _ -> None)
+          |> Seq.to_list)
+    in
+    let edges =
+      Base.List.fold (edges @ new_block_edges) ~init:[]
+        ~f:(fun acc ((s, d) as e) ->
+            if Base.List.exists acc ~f:(fun (s', d') ->
+                   Tid.equal s s' && Tid.equal d d')
+            then acc else e :: acc)
+      |> Base.List.rev
+    in
+    let old_block tid = Term.find blk_t old tid in
+    (* Prepare only the new blocks' effects.  The return lane set comes
+       from the old sub's signature; calls keep the ABI convention. *)
+    let outgoing =
+      abi.Abi.sp
+      :: (Model.sig_rets old
+          |> Base.List.concat_map ~f:(fun arg ->
+                 Exp.free_vars (Arg.rhs arg) |> Core.Set.to_list))
+    in
+    let blocks =
+      Base.List.map blocks ~f:(fun b ->
+          let prepared =
+            Term.enum jmp_t b
+            |> Seq.for_all ~f:(fun j ->
+                   Base.Option.is_some (Model.effects_opt j))
+          in
+          if prepared then b
+          else
+            Model.prepare_block_effects ~synth ~abi
+              ~callee:(fun _ -> None) ~outgoing b)
+    in
+    let new_block =
+      Core.Map.of_alist_exn (module Tid)
+        (Base.List.map blocks ~f:(fun b -> (Term.tid b, b)))
+    in
+    let preds =
+      Base.List.fold edges ~init:Tid.Map.empty ~f:(fun m (s, d) ->
+          if not (is_new d) then m
+          else
+            match Core.Map.find m d with
+            | None -> Core.Map.set m ~key:d ~data:[ s ]
+            | Some ps ->
+              if Base.List.mem ps s ~equal:Tid.equal then m
+              else Core.Map.set m ~key:d ~data:(ps @ [ s ]))
+    in
+    let sources_of tid =
+      Base.Option.value (Core.Map.find preds tid) ~default:[]
+    in
+    let has_preds tid =
+      Base.Option.value_map (Core.Map.find preds tid) ~default:false
+        ~f:(fun ps -> not (Base.List.is_empty ps))
+    in
+    let phi_bases b =
+      Term.enum phi_t b
+      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc p ->
+             Core.Set.add acc (Var.base (Phi.lhs p)))
+    in
+    let defines b =
+      let add acc v = Core.Set.add acc (Var.base v) in
+      let defs =
+        Term.enum def_t b
+        |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d -> add acc (Def.lhs d))
+      in
+      Term.enum jmp_t b
+      |> Seq.fold ~init:defs ~f:(fun acc j ->
+             Core.Set.fold (Model.writes (`Jmp j)) ~init:acc ~f:add)
+    in
+    let local_uses b =
+      let defined = ref Var.Set.empty in
+      let need = ref Var.Set.empty in
+      let read v =
+        let base = Var.base v in
+        if renamable base && not (Core.Set.mem !defined base) then
+          need := Core.Set.add !need base
+      in
+      Blk.elts b
+      |> Seq.iter ~f:(function
+             | `Def d ->
+               Core.Set.iter (Model.reads (`Def d)) ~f:read;
+               defined := Core.Set.add !defined (Var.base (Def.lhs d))
+             | `Jmp j -> Core.Set.iter (Model.reads (`Jmp j)) ~f:read
+             | `Phi _ -> ());
+      !need
+    in
+    (* Local live-in for new blocks. *)
+    (* An OLD target's live-in bases are its value reads (defs, phi
+       values, and jmp expressions), not the ABI/effect lanes of a call
+       or return: those are call-convention facts, not mergeable SSA
+       values. *)
+    let value_live_bases b =
+      let defined = ref Var.Set.empty in
+      let need = ref Var.Set.empty in
+      let read v =
+        let base = Var.base v in
+        if renamable base && not (Core.Set.mem !defined base) then
+          need := Core.Set.add !need base
+      in
+      Term.enum phi_t b |> Seq.iter ~f:(fun p ->
+          defined := Core.Set.add !defined (Var.base (Phi.lhs p)));
+      Term.enum def_t b |> Seq.iter ~f:(fun d ->
+          Core.Set.iter (Model.reads (`Def d)) ~f:read;
+          defined := Core.Set.add !defined (Var.base (Def.lhs d)));
+      Term.enum jmp_t b |> Seq.iter ~f:(fun j ->
+          Core.Set.iter (Exp.free_vars (Jmp.cond j)) ~f:read;
+          let exps =
+            match Jmp.kind j with
+            | Goto (Indirect e) | Ret (Indirect e) -> [ e ]
+            | Call c ->
+              (match Call.target c with Indirect e -> [ e ] | Direct _ -> [])
+              @ (match Call.return c with
+                 | Some (Indirect e) -> [ e ]
+                 | Some (Direct _) | None -> [])
+            | Int _ | Goto (Direct _) | Ret (Direct _) -> []
+          in
+          Base.List.iter exps ~f:(fun e ->
+              Core.Set.iter (Exp.free_vars e) ~f:read));
+      !need
+    in
+    let needs =
+      Base.List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
+          let tid = Term.tid b in
+          if has_preds tid then
+            Core.Map.set m ~key:tid ~data:(local_uses b)
+          else m)
+      |> ref
+    in
+    (* An old target that gains an edge and has no phi for a base it
+       reads now has two predecessors with independent definitions of
+       that base: add the missing phi (operands are filled from every
+       predecessor below). *)
+    let implicit_phis =
+      Base.List.fold edges ~init:Tid.Map.empty ~f:(fun m (_, dst) ->
+          if is_new dst then m
+          else
+            match old_block dst with
+            | None -> m
+            | Some target ->
+              let bases =
+                Core.Set.diff (value_live_bases target) (phi_bases target)
+              in
+              if Core.Set.is_empty bases then m
+              else
+                Core.Map.update m dst ~f:(function
+                  | None -> bases
+                  | Some previous -> Core.Set.union previous bases))
+    in
+    let new_phis =
+      new_phis
+      @ Base.List.map (Core.Map.to_alist implicit_phis)
+          ~f:(fun (tid, bases) -> (tid, Core.Set.to_list bases))
+    in
+    let declared =
+      Base.List.fold new_phis ~init:Tid.Map.empty ~f:(fun m (tid, bases) ->
+          let bases =
+            Core.Set.of_list (module Var) (Base.List.map bases ~f:Var.base)
+          in
+          match Core.Map.find m tid with
+          | None -> Core.Map.set m ~key:tid ~data:bases
+          | Some previous ->
+            Core.Map.set m ~key:tid ~data:(Core.Set.union previous bases))
+    in
+    let target_needs tid target =
+      Core.Set.union (phi_bases target)
+        (Base.Option.value (Core.Map.find declared tid) ~default:Var.Set.empty)
+    in
+    let add_need tid demand =
+      let previous =
+        Base.Option.value (Core.Map.find !needs tid) ~default:Var.Set.empty
+      in
+      let fresh = Core.Set.diff demand previous in
+      if Core.Set.is_empty fresh then false
+      else begin
+        needs := Core.Map.set !needs ~key:tid
+            ~data:(Core.Set.union previous fresh);
+        true
+      end
+    in
+    (* A new block's edge to an existing target carries that target's phi
+       bases; a base the block does not define becomes its live-in. *)
+    Base.List.iter blocks ~f:(fun b ->
+        let tid = Term.tid b in
+        if has_preds tid then
+          Base.List.iter edges ~f:(fun (src, dst) ->
+              if Tid.equal src tid && not (is_new dst) then
+                match old_block dst with
+                | None -> ()
+                | Some target ->
+                  ignore (add_need tid
+                            (Core.Set.diff (target_needs dst target)
+                               (defines b)))));
+    let queue = Core.Queue.create () in
+    let enqueue tid = Core.Queue.enqueue queue tid in
+    Base.List.iter blocks ~f:(fun b ->
+        if has_preds (Term.tid b) then enqueue (Term.tid b));
+    let rec drain () =
+      match Core.Queue.dequeue queue with
+      | None -> ()
+      | Some target ->
+        let need =
+          Base.Option.value (Core.Map.find !needs target)
+            ~default:Var.Set.empty
+        in
+        Base.List.iter (sources_of target) ~f:(fun pred ->
+            if is_new pred && has_preds pred then
+              let defs =
+                match Core.Map.find new_block pred with
+                | Some b -> defines b
+                | None -> Var.Set.empty
+              in
+              if add_need pred (Core.Set.diff need defs) then enqueue pred);
+        drain ()
+    in
+    drain ();
+    (* The SP a machine-call predecessor restores is a phi at the new
+       block, not a value that block passes further back. *)
+    Base.List.iter blocks ~f:(fun b ->
+        let tid = Term.tid b in
+        if has_preds tid
+           && Base.List.exists (sources_of tid) ~f:(fun p ->
+                  let block =
+                    match Core.Map.find new_block p with
+                    | Some nb -> Some nb
+                    | None -> old_block p
+                  in
+                  (match block with
+                   | Some b ->
+                     Term.enum jmp_t b |> Seq.exists ~f:machine_call
+                   | None ->
+                     failwith
+                       (Printf.sprintf
+                          "Hike_ssa.update_sub_blocks: predecessor %s is not a block"
+                          (Tid.name p))))
+        then
+          let previous =
+            Base.Option.value (Core.Map.find !needs tid)
+              ~default:Var.Set.empty
+          in
+          needs := Core.Map.set !needs ~key:tid
+              ~data:(Core.Set.add previous sp));
+    let nums = Core.Hashtbl.create (module Var) in
+    Base.List.iter (high_water old) ~f:(fun (k, n) ->
+        Core.Hashtbl.set nums ~key:k ~data:n);
+    let note v =
+      if Var.index v > 0 then
+        Core.Hashtbl.update nums (Var.base v) ~f:(function
+          | Some k when k >= Var.index v -> k
+          | _ -> Var.index v)
+    in
+    Base.List.iter blocks ~f:(fun b ->
+        Blk.elts b
+        |> Seq.iter ~f:(fun t ->
+               Core.Set.iter (Model.reads t) ~f:note;
+               Core.Set.iter (Model.writes t) ~f:note));
+    let new_name base =
+      let k =
+        match Core.Hashtbl.find nums base with
+        | Some k -> k + 1
+        | None -> 1
+      in
+      Core.Hashtbl.set nums ~key:base ~data:k;
+      Var.with_index base k
+    in
+    (* Missing phis on existing targets are named first, in target-tid
+       order, so the version sequence is deterministic. *)
+    let sub = ref old in
+    let gained = ref Tid.Set.empty in
+    let added =
+      Base.List.sort new_phis ~compare:(fun (a, _) (b, _) -> Tid.compare a b)
+      |> Base.List.concat_map ~f:(fun (tid, bases) ->
+             match Term.find blk_t !sub tid with
+             | None ->
+               failwith
+                 (Printf.sprintf
+                    "Hike_ssa.update_sub_blocks: new_phis target %s is not a block"
+                    (Tid.name tid))
+             | Some target ->
+               let bases =
+                 Base.List.sort (Base.List.dedup_and_sort bases
+                                   ~compare:Var.compare) ~compare:Var.compare
+               in
+               let existing = phi_bases target in
+               let bases =
+                 Base.List.filter bases ~f:(fun b ->
+                     not (Core.Set.mem existing b))
+               in
+               if Base.List.is_empty bases then []
+               else begin
+                 let phis, lhs_of =
+                   Base.List.fold bases ~init:([], Var.Map.empty)
+                     ~f:(fun (phis, lhs_of) base ->
+                         let lhs = new_name base in
+                         (Phi.of_list lhs [] :: phis,
+                          Core.Map.set lhs_of ~key:base ~data:lhs))
+                 in
+                 let phis = Base.List.rev phis in
+                 let target =
+                   Term.filter phi_t target ~f:(Fun.const false)
+                   |> fun b -> Base.List.fold phis ~init:b ~f:(Term.append phi_t)
+                 in
+                 let target =
+                   Term.map def_t target ~f:(fun d ->
+                       let rhs =
+                         (object
+                           inherit Exp.mapper
+                           method! map_sym v =
+                             if Var.index v = 0 then
+                               match Core.Map.find lhs_of (Var.base v) with
+                               | Some lhs -> lhs
+                               | None -> v
+                             else v
+                         end)#map_exp (Def.rhs d)
+                       in
+                       Def.with_rhs d rhs)
+                 in
+                 let map_var v =
+                   if Var.index v = 0 then
+                     match Core.Map.find lhs_of (Var.base v) with
+                     | Some lhs -> lhs
+                     | None -> v
+                   else v
+                 in
+                 let map =
+                   (object
+                     inherit Exp.mapper
+                     method! map_sym v = map_var v
+                   end)#map_exp
+                 in
+                 let target =
+                   Term.map jmp_t target ~f:(fun j ->
+                       Jmp.map_exp j ~f:map
+                       |> Model.map_effects ~read:map_var ~write:Fun.id)
+                 in
+                 sub := Term.update blk_t !sub target;
+                 gained := Core.Set.add !gained tid;
+                 Base.List.map bases ~f:(fun b ->
+                     (tid, (b, Core.Map.find_exn lhs_of b)))
+               end)
+    in
+    let renamed = Base.List.map blocks ~f:(fun b ->
+        let tid = Term.tid b in
+        let names = ref Var.Map.empty in
+        let set v = names := Core.Map.set !names ~key:(Var.base v) ~data:v in
+        let lookup v =
+          if Var.index v = 0 then
+            Base.Option.value (Core.Map.find !names (Var.base v)) ~default:v
+          else v
+        in
+        let substitute =
+          (object
+            inherit Exp.mapper
+            method! map_sym z = lookup z
+          end)#map_exp
+        in
+        let bases =
+          Base.Option.value (Core.Map.find !needs tid)
+            ~default:Var.Set.empty
+        in
+        let phis =
+          Core.Set.fold bases ~init:[] ~f:(fun acc base ->
+              let lhs = new_name base in
+              set lhs;
+              Phi.of_list lhs [] :: acc)
+          |> Base.List.rev
+        in
+        let b =
+          Term.filter phi_t b ~f:(Fun.const false)
+          |> fun b -> Base.List.fold phis ~init:b ~f:(Term.append phi_t)
+        in
+        let b =
+          Term.map def_t b ~f:(fun d ->
+              let d = Def.with_rhs d (substitute (Def.rhs d)) in
+              if renamable (Def.lhs d) then begin
+                let lhs = new_name (Var.base (Def.lhs d)) in
+                set lhs;
+                Def.with_lhs d lhs
+              end else d)
+        in
+        let b =
+          Term.map jmp_t b ~f:(fun j ->
+              Jmp.map_exp ~f:substitute j
+              |> Model.map_effects ~read:lookup ~write:Fun.id)
+        in
+        let b =
+          Term.map jmp_t b ~f:(fun j ->
+              Model.map_effects ~read:Fun.id ~write:(fun v ->
+                  let version = new_name (Var.base v) in
+                  set version;
+                  version) j)
+        in
+        (tid, (Term.set_attr b ssa_tag (), !names)))
+    in
+    let renamed = Core.Map.of_alist_exn (module Tid) renamed in
+    let block_of tid =
+      match Core.Map.find renamed tid with
+      | Some (b, _) -> Some b
+      | None -> old_block tid
+    in
+    let output tid base =
+      match Core.Map.find renamed tid with
+      | Some (_, names) ->
+        Base.Option.value (Core.Map.find names base) ~default:base
+      | None -> (
+          match old_block tid with
+          | None -> base
+          | Some b ->
+            let found = ref None in
+            Term.enum phi_t b |> Seq.iter ~f:(fun p ->
+                if Var.same (Var.base (Phi.lhs p)) base then
+                  found := Some (Phi.lhs p));
+            Term.enum def_t b |> Seq.iter ~f:(fun d ->
+                if Var.same (Var.base (Def.lhs d)) base then
+                  found := Some (Def.lhs d));
+            Term.enum jmp_t b |> Seq.iter ~f:(fun j ->
+                if not (Core.Set.mem skip_effects (Term.tid j)) then
+                  Base.List.iter (Model.effects j).Model.Term_effects.writes
+                    ~f:(fun w ->
+                      if Var.same (Var.base w) base then found := Some w));
+            Base.Option.value !found ~default:base)
+    in
+    let machine tid =
+      Base.Option.value_map (block_of tid) ~default:false ~f:(fun b ->
+          Term.enum jmp_t b |> Seq.exists ~f:machine_call)
+    in
+    let operand ~dst src base =
+      match Base.List.find operands ~f:(fun (s, d, b, _) ->
+                Tid.equal s src && Tid.equal d dst && Var.same b base) with
+      | Some (_, _, _, exp) -> exp
+      | None ->
+        let name = output src base in
+        if Var.same base sp && machine src then
+          Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
+        else Bil.Var name
+    in
+    let new_blocks =
+      Base.List.map blocks ~f:(fun b ->
+          let tid = Term.tid b in
+          let b, _ = Core.Map.find_exn renamed tid in
+          let incoming =
+            Base.List.fold edges ~init:[] ~f:(fun acc (src, dst) ->
+                if Tid.equal dst tid
+                   && not (Base.List.mem acc src ~equal:Tid.equal)
+                then acc @ [ src ] else acc)
+          in
+          Term.map phi_t b ~f:(fun p ->
+              let base = Var.base (Phi.lhs p) in
+              Phi.of_list (Phi.lhs p)
+                (Base.List.map incoming ~f:(fun src ->
+                     (src, operand ~dst:tid src base)))))
+    in
+    let sub =
+      Base.List.fold new_blocks ~init:!sub ~f:(fun sub b ->
+          Term.append blk_t sub b)
+    in
+    let sub =
+      Base.List.fold edges ~init:sub ~f:(fun sub (src, dst) ->
+          if is_new dst then sub
+          else
+            match Term.find blk_t sub dst with
+            | None ->
+              failwith
+                (Printf.sprintf
+                   "Hike_ssa.update_sub_blocks: edge target %s is not a block"
+                   (Tid.name dst))
+            | Some target ->
+              let changed = ref false in
+              let target' =
+                Term.map phi_t target ~f:(fun p ->
+                    let base = Var.base (Phi.lhs p) in
+                    let values = Phi.values p |> Seq.to_list in
+                    let exp = operand ~dst src base in
+                    match Base.List.find values ~f:(fun (s, _) ->
+                              Tid.equal s src) with
+                    | Some (_, previous) ->
+                      if Exp.equal previous exp then p
+                      else begin
+                        changed := true;
+                        Phi.of_list (Phi.lhs p)
+                          (Base.List.map values ~f:(fun (s, e) ->
+                               if Tid.equal s src then (s, exp) else (s, e)))
+                      end
+                    | None ->
+                      changed := true;
+                      gained := Core.Set.add !gained dst;
+                      Phi.of_list (Phi.lhs p) (values @ [ (src, exp) ]))
+              in
+              if !changed then Term.update blk_t sub target' else sub)
+    in
+    (* A newly added phi needs operands from every predecessor the target
+       already had, not just the new edge. *)
+    let sub =
+      Base.List.fold added ~init:sub ~f:(fun sub (tid, (base, lhs)) ->
+          match Term.find blk_t sub tid with
+          | None ->
+            failwith
+              (Printf.sprintf
+                 "Hike_ssa.update_sub_blocks: added-phi target %s is not a block"
+                 (Tid.name tid))
+          | Some target ->
+            let others =
+              Term.enum phi_t target
+              |> Seq.filter ~f:(fun p -> not (Var.equal (Phi.lhs p) lhs))
+              |> Seq.concat_map ~f:(fun p ->
+                     Phi.values p |> Seq.map ~f:fst)
+              |> Seq.to_list
+            in
+            let edges_to =
+              Base.List.filter_map edges ~f:(fun (src, dst) ->
+                  Base.Option.some_if (Tid.equal dst tid) src)
+            in
+            let sources =
+              Base.List.fold (others @ edges_to) ~init:[]
+                ~f:(fun acc s ->
+                    if Base.List.mem acc s ~equal:Tid.equal then acc
+                    else acc @ [ s ])
+            in
+            let target' =
+              Term.map phi_t target ~f:(fun p ->
+                  if not (Var.equal (Phi.lhs p) lhs) then p
+                  else
+                    Phi.of_list lhs
+                      (Base.List.map sources ~f:(fun src ->
+                           (src, operand ~dst:tid src base))))
+            in
+            Term.update blk_t sub target')
+    in
+    let woken =
+      Base.List.fold blocks ~init:!gained ~f:(fun acc b ->
+          Core.Set.add acc (Term.tid b))
+    in
+    (* Freeze every old block that is neither a new block nor an old
+       target of the batch.  The wiring pass above may have rebuilt an
+       identical or re-dordered phi; restore the exact old term. *)
+    let touched_old =
+      Base.List.fold edges ~init:Tid.Set.empty ~f:(fun acc (_, dst) ->
+          if is_new dst then acc else Core.Set.add acc dst)
+      |> fun s ->
+      Base.List.fold new_phis ~init:s ~f:(fun acc (tid, _) ->
+          Core.Set.add acc tid)
+    in
+    let sub =
+      Term.map blk_t sub ~f:(fun b ->
+          let tid = Term.tid b in
+          if is_new tid || Core.Set.mem touched_old tid then b
+          else Base.Option.value (old_block tid) ~default:b)
+    in
+    let sub = Term.set_attr sub high_water_tag (Core.Hashtbl.to_alist nums) in
+    (sub, woken)
+  end
+
+
+
 (* Under SSA the sub's input lanes are its index-0 reads: every
    versioned read is dominated by its def.  The model's memory vars and
    storage bases are not lanes; a Mem-typed pointer value is. *)
@@ -776,8 +1377,22 @@ let relane_sub ~synth ~target ~callee sub =
   let refreshed = refresh_calls ~synth ~abi ~callee ~select:is_call_jmp sub in
   let changed_writes = Term.enum blk_t refreshed |> Seq.exists ~f:(fun b ->
       Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
-          let before = Term.find_exn blk_t sub (Term.tid b)
-            |> fun b -> Term.find_exn jmp_t b (Term.tid j) in
+          let before =
+            match Term.find blk_t sub (Term.tid b) with
+            | None ->
+              failwith
+                (Printf.sprintf
+                   "hike-ssa: refreshed block %s is not in the input sub"
+                   (Tid.name (Term.tid b)))
+            | Some b ->
+              (match Term.find jmp_t b (Term.tid j) with
+               | Some j -> j
+               | None ->
+                 failwith
+                   (Printf.sprintf
+                      "hike-ssa: block %s has no input jmp %s"
+                      (Tid.name (Term.tid b)) (Tid.name (Term.tid j))))
+          in
           not (Core.Set.equal (Model.writes (`Jmp before)) (Model.writes (`Jmp j))))) in
   let sub' = with_entry ~old:sub refreshed in
   let c = analyze ~synth ~target (unssa_sub sub') in

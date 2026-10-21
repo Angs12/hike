@@ -55,6 +55,21 @@ open Bap_core_theory
     synth:Hike_synth.table -> target:Theory.Target.t -> old:sub term ->
     sub term -> sub term
 
+  (** [update_sub_blocks ~old ~blocks ~edges ~operands ~new_phis] is
+      the new-block/new-edge update.  Existing blocks are immutable;
+      only [blocks], the target phis of [edges], and [new_phis] are
+      written.  Direct edges inside [blocks] come from their jmps;
+      [edges] are the extra pair edges.  Returns the sub and the exact
+      wake set: the new blocks plus the old targets whose phis changed. *)
+  val update_sub_blocks :
+    skip_effects:Tid.Set.t ->
+    synth:Hike_synth.table -> target:Theory.Target.t -> sp:var ->
+    old:sub term -> blocks:blk term list ->
+    edges:(Tid.t * Tid.t) list ->
+    operands:(Tid.t * Tid.t * var * exp) list ->
+    new_phis:(Tid.t * var list) list ->
+    sub term * Tid.Set.t
+
   (** [update_sub] with the conservative VSA invalidation region. *)
   val update_sub_woken :
     synth:Hike_synth.table -> target:Theory.Target.t -> old:sub term ->

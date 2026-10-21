@@ -79,20 +79,23 @@ let decr_some uses s =
 
 (* The dead fixed point: remove every candidate whose left side has no
    remaining read, then subtract what the removed term read. *)
-let dead_fixed_point ~synth ~abi ~target (sub : sub term) =
+let dead_fixed_point ?(only = fun _ -> true) ~synth ~abi ~target
+    (sub : sub term) =
   let uses = use_counts sub in
   let candidates : (var, [ `Def of def term | `Phi of phi term ]) Core.Hashtbl.t =
     Core.Hashtbl.create (module Var) in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun b ->
-         Term.enum def_t b
-         |> Seq.iter ~f:(fun d ->
-                if def_candidate ~synth ~abi ~target d then
-                  Core.Hashtbl.set candidates ~key:(def_lhs d) ~data:(`Def d));
-         Term.enum phi_t b
-         |> Seq.iter ~f:(fun p ->
-                if phi_candidate ~synth ~abi ~target p then
-                  Core.Hashtbl.set candidates ~key:(phi_lhs p) ~data:(`Phi p)));
+         if only (Term.tid b) then begin
+           Term.enum def_t b
+           |> Seq.iter ~f:(fun d ->
+                  if def_candidate ~synth ~abi ~target d then
+                    Core.Hashtbl.set candidates ~key:(def_lhs d) ~data:(`Def d));
+           Term.enum phi_t b
+           |> Seq.iter ~f:(fun p ->
+                  if phi_candidate ~synth ~abi ~target p then
+                    Core.Hashtbl.set candidates ~key:(phi_lhs p) ~data:(`Phi p))
+         end);
   let removed = ref [] in
   let changed = ref true in
   while !changed do
@@ -144,3 +147,27 @@ let dce_sub ~(synth : Hike_synth.table) ~(target : Theory.Target.t)
           in
           Term.filter phi_t b ~f:(fun p ->
               not (Core.Set.mem dead (phi_lhs p))))
+
+(* The post-Finalize variant: candidates only in the created blocks, use
+   counts over the whole sub.  Old blocks are never DCE'd again. *)
+let dce_blocks ~(synth : Hike_synth.table) ~(target : Theory.Target.t)
+    ~(blocks : Tid.Set.t) (sub : sub term) : sub term =
+  if Core.Set.is_empty blocks then sub
+  else
+    let abi = Abi.of_target target in
+    let removed_defs, removed_phis, dead =
+      dead_fixed_point ~only:(fun tid -> Core.Set.mem blocks tid)
+        ~synth ~abi ~target sub
+    in
+    if Base.List.is_empty removed_defs && Base.List.is_empty removed_phis then
+      sub
+    else
+      Term.map blk_t sub ~f:(fun b ->
+          if not (Core.Set.mem blocks (Term.tid b)) then b
+          else
+            let b =
+              Term.filter def_t b ~f:(fun d ->
+                  not (Core.Set.mem dead (def_lhs d)))
+            in
+            Term.filter phi_t b ~f:(fun p ->
+                not (Core.Set.mem dead (phi_lhs p))))

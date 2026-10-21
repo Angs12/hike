@@ -1,5 +1,5 @@
-(* The VSA: the pausable fused solve and the def-origin stamp — the
-   producer's public surface. *)
+(* The VSA: the pausable, in-place-growing solver and the def-origin
+   stamp — the producer's public surface. *)
 open Bap.Std
 open Bap_core_theory
 
@@ -26,59 +26,58 @@ open Bap_core_theory
 
   type lookup_fn = int64 -> Tid.t option
 
-  (** The solver retains the matching body, seed and wake set until resume. *)
-  type paused
+  (** The site materializer seam.  The callback owns target
+      enumeration/validation and any lifting/solving; the solver installs
+      the returned transfer in the source block and delivers its new case
+      edges in the current fan-out. *)
+  type materialize_transfer = Cbat_vsa.materialize_transfer
 
-  (** The callees whose final summaries this solve needs. *)
-  val blocked : paused -> Tid.Set.t
-
-  (** The canonical body and its seed stay paired across decoder growth. *)
-  type continuation = private {
-    canonical : sub term;
-    seed : Cbat_vsa.vsa_sol;
-  }
-
-  type completed = {
-    envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t;
-    sub : sub term;
-    block_addrs : Tid.t Addr.Map.t;
+  (** A converged solve: the solution the worklist resolves from, the
+      table its replay grew, and the persisted state a warm restart
+      reuses. *)
+  type solution = {
+    sol : Cbat_vsa.vsa_sol;
     synth : Hike_synth.table;
-    continuation : continuation;
+    state : Cbat_vsa.run_state;
+    sub : sub term;
   }
 
-  type outcome = Done of completed | Paused of paused
+  type outcome = Solved of solution
 
-  (** The fused solve under [callee]: phases of solve + resolution
-      growth, pausing when a reachable call's callee is [Blocked]. *)
-  val start :
+  (** One solve pass under [callee], optionally on a persisted state.
+      [resolved] is the extra-edge set, [seed] the warm solution, and
+      [wake] the blocks whose phi set changed (an external restart). *)
+  val solve :
+    ?state:Cbat_vsa.run_state ->
+    ?materialize_transfer:materialize_transfer ->
     Theory.Target.t ->
     lookup:lookup_fn ->
     images:section_image list ->
     callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
-    block_addrs:Tid.t Addr.Map.t ->
+    foreign_slots:Core.Int64.Set.t ->
+    sub:sub term ->
+    resolved:Tid.Set.t Tid.Map.t ->
     synth:Hike_synth.table ->
-    foreign_slots:Core.Int64.Set.t ->
-    sub term ->
+    seed:Cbat_vsa.vsa_sol option ->
+    wake:Tid.Set.t ->
     outcome
 
-  (** Continues a completed solve after incremental SSA/decode growth. *)
-  val restart :
-    Theory.Target.t -> lookup:lookup_fn -> images:section_image list ->
-    callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
-    block_addrs:Tid.t Addr.Map.t -> synth:Hike_synth.table ->
-    foreign_slots:Core.Int64.Set.t ->
-    previous:continuation -> woken:Tid.Set.t ->
-    sub term -> outcome
+  (** A warm seed: the old solution, with [woken] blocks' successors
+      re-queued.  A woken entry re-reads the ABI seed. *)
+  val warm_seed :
+    abi:Hike_abi.t -> sub:sub term -> woken:Tid.Set.t -> ?old:sub term ->
+    Cbat_vsa.vsa_sol -> Cbat_vsa.vsa_sol * Tid.Set.t
 
-  (** Continues a paused solve from its seed under the new [callee]. *)
-  val resume :
-    Theory.Target.t ->
-    lookup:lookup_fn ->
-    images:section_image list ->
-    callee:(Tid.t -> Cbat_vsa.Call_effects.callee) ->
-    foreign_slots:Core.Int64.Set.t ->
-    paused ->
-    outcome
+  (** The boundary stamp under the solve's image bracket. *)
+  val stamp :
+    images:section_image list -> synth:Hike_synth.table ->
+    sol:Cbat_vsa.vsa_sol -> sub term ->
+    (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term
+
+  (** The construction-time round-down normalization, run on the initial
+      body and on a batch's created blocks. *)
+  val normalize_round :
+    synth:Hike_synth.table ref -> sub term -> sub term
 
   (** The persistent registers a sub's defs write (partial defs at
       their base register). *)

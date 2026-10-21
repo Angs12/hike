@@ -144,8 +144,6 @@ type t = {
   (* The symtab entries, discovered roots, materialised code words and
      resolved jump destinations, with each address's decode role. *)
   frontier : frontier;
-  (* The provided destinations, by dispatch instruction. *)
-  mutable dests : Core.Int64.Set.t Core.Int64.Map.t;
   entries : (int64, entry) Core.Hashtbl.t;
   by_tid : (Tid.t, entry) Core.Hashtbl.t;
   (* External and intrinsic targets: name and summary. *)
@@ -175,6 +173,62 @@ let label_for_name t name =
 let is_entry t (a : int64) : bool =
   Core.Hashtbl.mem t.entries a
   || Disasm.Driver.is_subroutine t.state (Addr.of_int64 a)
+
+(* The one enumeration cap for dispatch targets: jumps here and calls in
+   the same worklist path share it.  A larger set is TOP. *)
+let dispatch_cap = 1024
+
+(* The entry role in a decode state the caller has not installed yet; the
+   discovery tables and the decode must agree during validation. *)
+let is_entry_in t (state : Disasm.Driver.state) (a : int64) : bool =
+  Core.Hashtbl.mem t.entries a
+  || Disasm.Driver.is_subroutine state (Addr.of_int64 a)
+
+(* The frontier's decode entries are the symtab's entries and every
+   discovered root; the scan's promise must carry all of them. *)
+let rescan t =
+  t.state <- D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
+
+(* The frontier roots a full scan would record that [state] does not
+   yet: in a code region, neither a subroutine nor rejected as data. *)
+let pending_roots t state =
+  Base.List.filter (frontier_roots t.frontier) ~f:(fun a ->
+      let w = Addr.of_int64 a in
+      D.in_code t.proj a
+      && (not (Disasm.Driver.is_subroutine state w))
+      && not (Disasm.Driver.is_data state w))
+
+(* [state] with every pending frontier root decoded as a subroutine. *)
+let with_pending_roots t state =
+  match pending_roots t state with
+  | [] -> state
+  | starts ->
+      D.resume ~subroutines:true t.proj ~file:t.file
+        ~roots:(frontier_roots t.frontier) state ~starts
+
+(* A resumed state stands only if no frontier root is left pending: each
+   is now a subroutine or was rejected as data. *)
+let settled t state = Base.List.is_empty (pending_roots t state)
+
+(* New roots change the decode only where they and their reach lie:
+   resume from every pending root as a subroutine.  A root outside the
+   code regions has no effect on a scan; the resumed state stands only if
+   every other root is a subroutine or was rejected as data, else the
+   whole binary is scanned again. *)
+let rescan_roots t =
+  let resumed = with_pending_roots t t.state in
+  let kept = settled t resumed in
+#ifdef VSA_DEBUG
+  let full = D.scan t.proj ~file:t.file ~roots:(frontier_roots t.frontier) in
+  Printf.eprintf "hike-dbg-rescan: roots=%d resume=%s equal=%b subs=%b\n%!"
+    (List.length (pending_roots t t.state)) (if kept then "kept" else "fallback")
+    (Disasm.Driver.equal resumed full)
+    (Core.Set.equal (Disasm.Driver.subroutines resumed)
+       (Disasm.Driver.subroutines full));
+  t.state <- (if kept then resumed else full)
+#else
+  if kept then t.state <- resumed else rescan t
+#endif
 
 (* ---- targets ---- *)
 
@@ -330,7 +384,7 @@ and close_cycle t (head : entry) ~publish : unit =
 
 (* ---- one function ---- *)
 
-and build ?previous t frame (e : entry) : final =
+and build t frame (e : entry) : final =
   let entry = Addr.of_int64 e.addr in
   let cfg =
     D.function_cfg ~file:t.file t.state ~entry ~is_entry:(fun a ->
@@ -341,7 +395,7 @@ and build ?previous t frame (e : entry) : final =
   | Some blk -> (
     match stub_symbol blk with
     | Some name -> Alias (symbol t name)
-    | None -> body ?previous t frame e cfg blk)
+    | None -> body t frame e cfg blk)
 
 (* A stub: an entry block whose one instruction transfers to exactly
    one external symbol (the loader binds it; decision 10). *)
@@ -353,30 +407,44 @@ and stub_symbol (blk : Block.t) : string option =
     | _ -> None)
   | _ -> None
 
-(* The body's local closure: lift, solve, and while the solve resolves
-   new dispatch destinations, decode them and lift again. *)
-and body ?previous t frame e cfg blk : final =
+(* The body's local closure: lift, solve, and the growth loop. *)
+and body t frame e cfg blk : final =
+  let keep_fall = walk t frame cfg blk in
   let raw =
-    D.trim cfg ~entry:blk ~keep_fall:(call_returns t frame)
+    D.trim cfg ~entry:blk ~keep_fall
     |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
-    |> link t frame |> claim t e |> arm t
+    |> link t frame |> claim t e
   in
-  let f, continuation = solve ?previous t frame raw in
-  if learn_dests t cfg f then build ~previous:continuation t frame e
-  else begin
-    frontier_add_found t.frontier (code_words t f);
-    if t.refused then
-      frontier_add_found t.frontier (materialised_words t f);
-    Function f
-  end
+  let f = solve_body t frame e raw in
+  frontier_add_found t.frontier (code_words t f);
+  if t.refused then
+    frontier_add_found t.frontier (materialised_words t f);
+  Function f
 
-(* Every reached callee is solved before deciding whether its call returns. *)
-and call_returns t frame blk =
-  match D.dests blk with
-  | [] -> true
-  | labels ->
-    Base.List.map labels ~f:(target_summary t frame)
-    |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
+(* The callee-first walk: each reached call's destinations are solved
+   before its fallthrough is followed, and the fallthrough is kept only
+   when one of them may return. *)
+and walk t frame cfg (entry : Block.t) : Block.t -> bool =
+  let returns blk =
+    match D.dests blk with
+    | [] -> true
+    | labels ->
+      Base.List.map labels ~f:(target_summary t frame)
+      |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
+  in
+  let rec go (seen, kept) b =
+    if Core.Set.mem seen b then (seen, kept)
+    else
+      let fall = (not (D.is_call b)) || returns b in
+      let kept = if fall then Core.Set.add kept b else kept in
+      Graphs.Cfg.Node.outputs b cfg
+      |> Seq.fold ~init:(Core.Set.add seen b, kept) ~f:(fun acc edge ->
+          match Graphs.Cfg.Edge.label edge with
+          | `Fall when not fall -> acc
+          | _ -> go acc (Graphs.Cfg.Edge.dst edge))
+  in
+  let _, kept = go (Block.Set.empty, Block.Set.empty) entry in
+  Core.Set.mem kept
 
 and target_summary t frame (label : Tid.t) : S.t =
   match D.dest label with
@@ -468,36 +536,387 @@ and claim t (e : entry) (sub : sub term) : sub term =
           Core.Hashtbl.set t.owner ~key:tid ~data:e.addr));
   sub
 
-(* Each dispatch gains one arm per destination the solves resolved. *)
-and arm t (sub : sub term) : sub term =
-  let dests j =
-    match Term.get_attr j address with
-    | None -> []
-    | Some a ->
-      Base.Option.value_map (Core.Map.find t.dests (Word.to_int64_exn a))
-        ~default:[] ~f:Core.Set.to_list
-  in
-  Hike_cfg_complete.arm_dispatches ~dests sub
+(* ---- the solve/grow loop ---- *)
 
-(* The solve, paused at each unsolved callee until it is solved. *)
-and solve ?previous t frame (raw : sub term) : func * Hike_vsa.continuation =
+and block_addrs_of (sub : sub term) : Tid.t Addr.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Addr.Map.empty ~f:(fun m b ->
+      match Term.get_attr b address with
+      | None -> m
+      | Some a ->
+        (match Core.Map.find m a with
+         | Some tid when Tid.equal tid (Term.tid b) -> m
+         | Some tid ->
+           failwith
+             (Printf.sprintf
+                "hike-grow: two blocks at address %s (%s, %s)"
+                (Addr.to_string a) (Tid.name tid) (Tid.name (Term.tid b)))
+         | None -> Core.Map.set m ~key:a ~data:(Term.tid b)))
+
+and lookup_addr t (a : int64) : Tid.t option =
+  if is_entry t a then Some (entry_of t a).tid else None
+
+(* An indirect call target in a code region is a function entry even when
+   no symbol or earlier transfer named it.  The VSA calls [callee] on this
+   entry and recursively solves it at the call site. *)
+and lookup_call_target t (a : int64) : Tid.t option =
+  if is_entry t a || D.in_code t.proj a then Some (entry_of t a).tid
+  else None
+
+(* Decode the resolved addresses so the target's body is reachable.
+   [lift_target] owns the block assertion: the driver cannot record a
+   non-entry case target as a block without also making it a subroutine. *)
+and preview_decoded t (addrs : int64 list) : Disasm.Driver.state option =
+  if Base.List.is_empty addrs then Some t.state
+  else begin
+    let starts = Base.List.dedup_and_sort addrs ~compare:Int64.compare in
+    let resumed =
+      D.resume t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
+        t.state ~starts
+      |> with_pending_roots t
+    in
+    Base.Option.some_if (settled t resumed) resumed
+  end
+
+(* The resolved target's own decoded body, rooted at the target.  The
+   worklist-only decode state stays here; the runner sees a closure. *)
+and lift_target_in t (state : Disasm.Driver.state) (e : entry) (addr : int64) :
+    sub term option =
+  let entry = Addr.of_int64 addr in
+  let cfg =
+    D.function_cfg ~file:t.file state ~entry ~is_entry:(fun a ->
+        is_entry_in t state (Word.to_int64_exn a))
+  in
+  match D.block_at cfg entry with
+  | None -> None
+  | Some blk ->
+    let cfg = D.trim cfg ~entry:blk ~keep_fall:(fun _ -> true) in
+    (try Some (D.lift ~file:t.file ~tid:e.tid ~name:e.name blk cfg)
+     with _ -> None)
+
+(* The exact direct block edges of one block's transfers: a goto/return
+   names its successor, a call's return is the continuation, and a trap
+   names its own target. *)
+and direct_block_edges (b : blk term) : (Tid.t * Tid.t) list =
+  let src = Term.tid b in
+  Term.enum jmp_t b
+  |> Seq.filter_map ~f:(fun j ->
+      match Jmp.kind j with
+      | Goto (Direct t) | Ret (Direct t) | Int (_, t) -> Some (src, t)
+      | Call c -> (
+        match Call.return c with
+        | Some (Direct t) -> Some (src, t)
+        | Some (Indirect _) | None -> None)
+      | Goto (Indirect _) | Ret (Indirect _) -> None)
+  |> Seq.to_list
+
+(* The site materializer for an indirect jump or call: enumerate the
+   target set from the source post-state, validate every word and every
+   target without mutating anything, then commit discovery/lifting and
+   return the sub view VSA installs.  A rejected set returns [None] and
+   leaves the decode, sub, frontier and entries untouched. *)
+and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
+ fun ~state ~source ~blk ~jmp ~env ->
+  let target_kind =
+    match Jmp.kind jmp with
+    | Goto (Indirect _) -> Some `Jump
+    | Call c -> (
+      match Call.target c with
+      | Indirect _ when Option.is_some (Call.return c) -> Some `Call
+      | Indirect _ -> Some `Jump
+      | Direct _ -> None)
+    | _ -> None
+  in
+  match target_kind with
+  | None -> None
+  | Some kind -> begin
+    let sub = Vsa.state_sub state in
+    let sol = Vsa.state_sol state in
+    let synth = Vsa.state_synth state in
+    let block_addrs = block_addrs_of sub in
+    let rip_address a =
+      is_entry t a
+      || Base.List.exists t.context.data_spans ~f:(fun span ->
+             Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
+             && Int64.unsigned_compare a span.Hike_sections.ds_hi <= 0)
+    in
+    let last_defs = Vsa.last_defs blk in
+    let index = Hike_transfer.index_of_sub sub in
+    let retaddr =
+      Hike_cfg_complete.retaddr_defs ~abi:t.abi ~synth ~sol sub
+    in
+    let texp =
+      Hike_cfg_complete.dispatch_target ~synth ~last_defs ~retaddr ~index
+        ~foreign_slots:t.context.linker_slots jmp
+    in
+    match texp with
+    | None -> None
+    | Some texp -> (
+      (* Replay from the solve's own states: the defs have no boundary
+         env tags yet, and the source's post-state is only [env]. *)
+      let denote ~blk ?def exp =
+        Vsa.solve_denote ~synth
+          ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk)) ~blk ?def exp
+      in
+      match
+        Hike_cfg_complete.case_words ~cap:dispatch_cap ~denote ~block_addrs
+          ~last_defs ~blk texp
+      with
+      | None | Some [] -> None
+      | Some words -> (
+        match
+          Base.Option.all
+            (Base.List.map words ~f:Cbat_word.to_int64_opt)
+        with
+        | None -> None
+        | Some addrs ->
+          if not (Base.List.for_all addrs ~f:(D.in_code t.proj)) then None
+          else begin
+            let starts =
+              Base.List.dedup_and_sort addrs ~compare:Int64.compare
+            in
+            match preview_decoded t starts with
+            | None -> None
+            | Some decoded ->
+              let is_entry_at a = is_entry_in t decoded a in
+              let lifted =
+                Base.List.map addrs ~f:(fun a ->
+                    (a, lift_target_in t decoded e a))
+              in
+              if Base.List.exists lifted ~f:(fun (_, f) -> Option.is_none f)
+              then None
+              else begin
+                match kind with
+                | `Call ->
+                  (* ---- validation passed; commit ---- *)
+                  t.state <- decoded;
+                  frontier_add_roots t.frontier addrs;
+                  let synth = Vsa.state_synth state in
+                  let targets =
+                    Base.List.map2_exn words addrs ~f:(fun w a ->
+                        let en = entry_of t a in
+                        ignore (summary t frame en);
+                        let tid =
+                          match en.status with
+                          | Final (Alias x) -> x
+                          | Fresh | Open _ | Final _ -> en.tid
+                        in
+                        (w, tid))
+                  in
+                  let synth =
+                    if Base.phys_equal t.synth synth then synth
+                    else begin
+                      (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
+                        t.synth;
+                      t.synth
+                    end
+                  in
+                  (* The source rewrite and its SSA finalization happen here:
+                     VSA installs the already-rewritten sub and only
+                     refreshes its facts, plan and ordering. *)
+                  let source_blk = Term.find_exn blk_t sub source in
+                  let false_target =
+                    if Hike_stack_model.is_true_cond (Jmp.cond jmp) then None
+                    else Hike_cfg_complete.term_follower sub source
+                  in
+                  let rewritten, trap =
+                    Vsa.Dispatch.rewrite_source
+                      { Vsa.Dispatch.base = None; targets; sub }
+                      ~kind:Vsa.Dispatch.Call ~blk:source_blk ~jmp
+                      ~is_intra:(fun _ -> false) ~false_target
+                  in
+                  let working = Term.update blk_t sub rewritten in
+                  let working =
+                    match trap with
+                    | Some b -> Term.append blk_t working b
+                    | None -> working
+                  in
+                  let delta =
+                    Hike_cfg_complete.materialize_site
+                      ~target:t.context.target ~abi:t.abi
+                      ~callee_tid:(fun tid -> callee_tid t frame tid)
+                      ~rip_address ~claim:(claim t e) ~synth ~block_addrs
+                      ~old:sub ~working ~cases:[]
+                      ~edges:(direct_block_edges rewritten)
+                  in
+                  let built_synth = delta.Hike_cfg_complete.delta_synth in
+                  if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
+                    (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
+                      built_synth;
+                  Some
+                    { Vsa.Dispatch.base = None; targets;
+                      sub = delta.Hike_cfg_complete.delta_sub }
+                | `Jump ->
+                (* ---- validation passed; commit ---- *)
+                t.state <- decoded;
+                let site =
+                  match Term.get_attr jmp address with
+                  | Some a -> Some (Word.to_int64_exn a)
+                  | None ->
+                    Base.Option.map (Term.get_attr blk address)
+                      ~f:Word.to_int64_exn
+                in
+                Base.Option.iter site ~f:(fun site ->
+                    Base.List.iter addrs ~f:(fun a ->
+                        D.provide_dest ~file:t.file ~site a));
+                let entry_addrs =
+                  Base.List.filter addrs ~f:is_entry_at
+                in
+                let case_addrs =
+                  Base.List.filter addrs ~f:(fun a ->
+                      not (is_entry_at a))
+                in
+                Base.List.iter case_addrs ~f:(frontier_add_jump t.frontier);
+                Base.List.iter entry_addrs ~f:(fun a ->
+                    frontier_add_roots t.frontier [ a ]);
+                let fragments =
+                  Base.List.fold lifted ~init:Core.Int64.Map.empty
+                    ~f:(fun m (a, f) ->
+                      match f with
+                      | Some frag -> Core.Map.set m ~key:a ~data:frag
+                      | None -> m)
+                in
+                let allocated = ref Core.Int64.Map.empty in
+                let block_tid a =
+                  match Core.Map.find block_addrs (Addr.of_int64 a) with
+                  | Some tid -> tid
+                  | None -> (
+                    match Core.Map.find !allocated a with
+                    | Some tid -> tid
+                    | None ->
+                      let tid = Tid.create () in
+                      allocated :=
+                        Core.Map.set !allocated ~key:a ~data:tid;
+                      tid)
+                in
+                let cases =
+                  Base.List.map case_addrs ~f:(fun a ->
+                      (a, block_tid a, Core.Map.find_exn fragments a))
+                in
+                (* A function-entry target is discovered/solved once; an
+                   already-Final entry is only read.  An alias arm names
+                   its external symbol, like every linked call. *)
+                let entry_tids =
+                  Base.List.fold entry_addrs ~init:Core.Int64.Map.empty
+                    ~f:(fun m a ->
+                      let en = entry_of t a in
+                      ignore (summary t frame en);
+                      let tid =
+                        match en.status with
+                        | Final (Alias x) -> x
+                        | _ -> en.tid
+                      in
+                      Core.Map.set m ~key:a ~data:tid)
+                in
+                let target_tid a =
+                  if is_entry_at a then
+                    Core.Map.find_exn entry_tids a
+                  else
+                    match Core.Map.find block_addrs (Addr.of_int64 a) with
+                    | Some tid -> tid
+                    | None -> Core.Map.find_exn !allocated a
+                in
+                let targets =
+                  Base.List.map2_exn words addrs ~f:(fun w a ->
+                      (w, target_tid a))
+                in
+                let synth = Vsa.state_synth state in
+                (* A table base is bound at its site in the pre-rewrite
+                   source; another block is frozen, so such a base falls
+                   back to equality guards.  The binding is part of the
+                   rewrite the builder finalizes. *)
+                let base, pre_sub, synth =
+                  match
+                    Hike_cfg_complete.dispatch_words ~cap:dispatch_cap ~denote
+                      ~graph:(Hike_backsubst.graph_of_sub sub) ~block_addrs
+                      ~last_defs ~blk texp
+                  with
+                  | None | Some { Hike_cfg_complete.base = None; _ } ->
+                    (None, sub, synth)
+                  | Some { base = Some b; _ } -> (
+                    match b.Hike_cfg_complete.site with
+                    | None ->
+                      ( Some
+                          { Vsa.Dispatch.summand = b.summand;
+                            values = b.values },
+                        sub, synth )
+                    | Some f
+                      when Tid.equal (Term.tid f.blk) source -> (
+                      match Type.infer b.summand with
+                      | Ok (Type.Imm bits) ->
+                        let src_blk = Term.find_exn blk_t sub source in
+                        let at_present =
+                          match f.at with
+                          | None -> true
+                          | Some d ->
+                            Option.is_some
+                              (Term.find def_t src_blk (Term.tid d))
+                        in
+                        if not at_present then (None, sub, synth)
+                        else begin
+                          let cell = ref synth in
+                          let v =
+                            Hike_synth.record cell
+                              (Hike_synth.mint_fresh ~bits
+                                 Hike_synth.Binding)
+                          in
+                          let d = Def.create v b.summand in
+                          let src_blk =
+                            match f.at with
+                            | Some at ->
+                              Term.prepend def_t
+                                ~before:(Term.tid at) src_blk d
+                            | None -> Term.append def_t src_blk d
+                          in
+                          ( Some
+                              { Vsa.Dispatch.summand = Bil.Var v;
+                                values = b.values },
+                            Term.update blk_t sub src_blk, !cell )
+                        end
+                      | Ok _ | Error _ -> (None, sub, synth))
+                    | Some _ -> (None, sub, synth))
+                in
+                let source_blk = Term.find_exn blk_t pre_sub source in
+                let false_target =
+                  if Hike_stack_model.is_true_cond (Jmp.cond jmp) then None
+                  else Hike_cfg_complete.term_follower sub source
+                in
+                let case_tids =
+                  Core.Set.of_list (module Tid)
+                    (Base.List.map cases ~f:(fun (_, tid, _) -> tid))
+                in
+                let rewritten, _trap =
+                  Vsa.Dispatch.rewrite_source
+                    { Vsa.Dispatch.base; targets; sub = pre_sub }
+                    ~kind:Vsa.Dispatch.Jump ~blk:source_blk ~jmp
+                    ~is_intra:(fun tid -> Core.Set.mem case_tids tid)
+                    ~false_target
+                in
+                let working = Term.update blk_t pre_sub rewritten in
+                let delta =
+                  Hike_cfg_complete.materialize_site
+                    ~target:t.context.target ~abi:t.abi
+                    ~callee_tid:(fun tid -> callee_tid t frame tid)
+                    ~rip_address ~claim:(claim t e) ~synth ~block_addrs
+                    ~old:sub ~working ~cases
+                    ~edges:(direct_block_edges rewritten)
+                in
+                let built_sub = delta.Hike_cfg_complete.delta_sub in
+                let built_synth = delta.Hike_cfg_complete.delta_synth in
+                if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
+                  (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
+                    built_synth;
+                Some { Vsa.Dispatch.base; targets; sub = built_sub }
+              end
+          end))
+    end
+
+(* One solve, resuming through blocked callees until the caller's
+   summaries are final.  A persisted state continues the same solve. *)
+and solve_to_fix ?state t frame e ~sub ~resolved ~synth ~seed ~wake :
+    Hike_vsa.solution =
   let ctx = t.context in
-  let sub, synth, woken = match previous with
-    | None ->
-      let sub, synth = Hike_program_vsa.prepare_function ctx
-          ~synth:t.synth ~is_entry:(is_entry t) raw in
-      (sub, synth, Tid.Set.empty)
-    | Some continuation -> Hike_program_vsa.update_function ctx ~synth:t.synth
-        ~is_entry:(is_entry t) ~old:continuation.Hike_vsa.canonical raw
-  in
-  t.synth <- synth;
-  let block_addrs =
-    Term.enum blk_t sub
-    |> Seq.filter_map ~f:(fun b ->
-        Base.Option.map (Term.get_attr b address) ~f:(fun a -> (a, Term.tid b)))
-    |> Seq.to_list |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
-  in
-  let lookup a = if is_entry t a then Some (entry_of t a).tid else None in
+  let lookup a = lookup_call_target t a in
   let known tid =
     match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
     | Some (_, s), _ -> `Symbol s
@@ -510,39 +929,174 @@ and solve ?previous t frame (raw : sub term) : func * Hike_vsa.continuation =
     | `Unknown -> Summary None
     | `Entry e -> (
       match e.status with
-      | Fresh -> Blocked
+      | Fresh -> Summary (summary t frame e).written
       | Open index -> Summary (read_open t frame e index).written
       | Final f -> Summary (final_summary t f).written)
   in
   let images = ctx.images and foreign_slots = ctx.linker_slots in
-  let rec run = function
-    | Hike_vsa.Done completed -> completed
-    | Paused p ->
-      Core.Set.iter (Hike_vsa.blocked p) ~f:(fun tid ->
-          ignore (summary t frame (Core.Hashtbl.find_exn t.by_tid tid)));
-      run (Hike_vsa.resume ctx.target ~lookup ~images ~callee ~foreign_slots p)
+  let (Hike_vsa.Solved s) =
+    Hike_vsa.solve ?state ~materialize_transfer:(materialize_dispatch t frame e)
+      ctx.target ~lookup ~images ~callee ~foreign_slots ~sub ~resolved ~synth
+      ~seed ~wake
   in
-  let { Hike_vsa.envs; sub = solved; block_addrs; synth; continuation } =
-    run (match previous with
-        | None -> Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs
-            ~foreign_slots ~synth:t.synth sub
-        | Some previous -> Hike_vsa.restart ctx.target ~lookup ~images ~callee ~block_addrs
-            ~foreign_slots ~synth:t.synth ~previous ~woken sub)
+  s
+
+(* The initial body's construction: normalize, SSA, DCE, explicit
+   fallthroughs from the pre-install term order, one solve with site
+   materialization, then the canonical return/prune pass and one warm
+   continuation if that pass woke a block.  No resolution-event loop and
+   no part of this path runs after the freeze. *)
+and solve_initial t frame (e : entry) (raw : sub term) :
+    sub term * (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * Hike_vsa.solution *
+    Tid.t Addr.Map.t * Hike_synth.table =
+  let ctx = t.context in
+  let abi = t.abi in
+  let sub, synth =
+    Hike_program_vsa.prepare_function ctx ~synth:t.synth
+      ~is_entry:(is_entry t) raw
   in
-  t.synth <- synth;
+  let sub, synth =
+    let cell = ref synth in
+    let sub = Hike_vsa.normalize_round ~synth:cell sub in
+    (sub, !cell)
+  in
+  (* The fallthrough pass reads the pre-install term order: an installed
+     source's guard chain is not an ordinary conditional jmp. *)
+  let sub = Hike_cfg_complete.materialize_fallthroughs sub in
+  let s =
+    solve_to_fix t frame e ~sub ~resolved:Tid.Map.empty ~synth ~seed:None
+      ~wake:Tid.Set.empty
+  in
+  (* A site materialization installs arms and new blocks in the same
+     solve; the completion pass reads that view, not the pre-solve one. *)
+  let solved = s.Hike_vsa.sub in
+  let sol = s.Hike_vsa.sol and synth = s.Hike_vsa.synth in
+  let block_addrs = block_addrs_of solved in
+  let retaddr = Hike_cfg_complete.retaddr_defs ~abi ~synth ~sol solved in
+  let materialized =
+    Hike_cfg_complete.materialize ~sol ~synth ~retaddr
+      ~block_addrs ~foreign_slots:ctx.linker_slots solved
+  in
+  let materialized, synth =
+    let cell = ref synth in
+    let m = Hike_vsa.normalize_round ~synth:cell materialized in
+    (m, !cell)
+  in
+  let sub', woken =
+    Hike_ssa.update_sub_woken ~synth ~target:ctx.target ~old:sub materialized
+  in
+  let s =
+    if Core.Set.is_empty woken then s
+    else begin
+      let g = Sub.to_graph sub' in
+      let reaches_successor =
+        Core.Set.exists woken ~f:(fun b ->
+            Graphs.Tid.Node.succs b g |> Seq.exists ~f:(fun s ->
+                (not (Tid.equal s Graphs.Tid.start))
+                && not (Tid.equal s Graphs.Tid.exit)))
+      in
+      if not reaches_successor then s
+      else begin
+        let seed, wake =
+          Hike_vsa.warm_seed ~abi ~sub:sub' ~woken ~old:sub sol
+        in
+        let state =
+          Vsa.state_with_sol s.Hike_vsa.state seed
+          |> fun st -> Vsa.state_with_sub st sub'
+        in
+        solve_to_fix ~state t frame e ~sub:sub' ~resolved:Tid.Map.empty
+          ~synth ~seed:(Some seed) ~wake
+      end
+    end
+  in
+  let sol = s.Hike_vsa.sol in
+  let sub', synth =
+    let cell = ref synth in
+    let sub' = Hike_vsa.normalize_round ~synth:cell sub' in
+    (sub', !cell)
+  in
+  let envs, stamped =
+    Hike_vsa.stamp ~images:ctx.images ~synth ~sol sub'
+  in
+  (* The initial SSA/materialization normalized the terms; refresh one
+     facts pass before the freeze, keeping the same run context. *)
+  let state =
+    Vsa.state_with_sub s.Hike_vsa.state stamped
+    |> fun st -> Vsa.state_with_synth st synth
+  in
+  (stamped, envs,
+   { Hike_vsa.sol; synth; state; sub = stamped },
+   block_addrs_of stamped, synth)
+
+(* The post-initial solve: the same persisted state, one solve entry.
+   Site materialization is the only growth trigger; the worklist owns it
+   through [materialize_dispatch]. *)
+and solve_body t frame (e : entry) (raw : sub term) : func =
+  let sub, envs, initial, _block_addrs, _synth =
+    solve_initial t frame e raw
+  in
+  let abi = t.abi in
+  let lookup a = lookup_call_target t a in
+  let known tid =
+    match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
+    | Some (_, s), _ -> `Symbol s
+    | None, Some en -> `Entry en
+    | None, None -> `Unknown
+  in
+  let callee tid : Vsa.Call_effects.callee =
+    match known tid with
+    | `Symbol s -> Summary s.written
+    | `Unknown -> Summary None
+    | `Entry en -> (
+      match en.status with
+      | Fresh -> Summary (summary t frame en).written
+      | Open index -> Summary (read_open t frame en index).written
+      | Final f -> Summary (final_summary t f).written)
+  in
+  let images = t.context.images in
+  let foreign_slots = t.context.linker_slots in
+  let (Hike_vsa.Solved solved) =
+    Hike_vsa.solve ~state:initial.Hike_vsa.state
+      ~materialize_transfer:(materialize_dispatch t frame e)
+      t.context.target ~lookup ~images ~callee ~foreign_slots ~sub
+      ~resolved:Tid.Map.empty ~synth:initial.Hike_vsa.synth
+      ~seed:(Some initial.Hike_vsa.sol) ~wake:Tid.Set.empty
+  in
+  let envs, stamped =
+    Hike_vsa.stamp ~images:t.context.images ~synth:solved.Hike_vsa.synth
+      ~sol:solved.Hike_vsa.sol solved.Hike_vsa.sub
+  in
   let summary =
-    S.of_solved ~abi:t.abi ~synth:t.synth
+    S.of_solved ~abi ~synth:solved.Hike_vsa.synth
       ~callee:(fun tid ->
-          match known tid with
-          | `Symbol s -> Some s
-          | `Entry e -> Some (summary t frame e)
-          | `Unknown -> None)
+          match Core.Hashtbl.find t.symbols tid,
+                Core.Hashtbl.find t.by_tid tid with
+          | Some (_, s), _ -> Some s
+          | _, Some en -> Some (summary t frame en)
+          | _ -> None)
       ~slot:(fun a ->
           Base.Option.map (Core.Map.find t.slot_names a) ~f:(fun n ->
               symbol_summary t (symbol t n)))
-      ~lookup ~foreign_slots ~block_addrs ~envs solved
+      ~lookup:(lookup_addr t) ~foreign_slots:t.context.linker_slots
+      ~block_addrs:(block_addrs_of stamped) ~envs stamped
   in
-  ({ solved; envs; block_addrs; summary }, continuation)
+  t.synth <- solved.Hike_vsa.synth;
+  let seen = Tid.Table.create () in
+  Term.enum blk_t stamped
+  |> Seq.iter ~f:(fun b ->
+      let tid = Term.tid b in
+      let n = Option.value (Core.Hashtbl.find seen tid) ~default:0 in
+      Core.Hashtbl.set seen ~key:tid ~data:(n + 1));
+  let dups =
+    Core.Hashtbl.fold seen ~init:[] ~f:(fun ~key ~data acc ->
+        if data > 1 then Tid.name key :: acc else acc)
+  in
+  if not (Base.List.is_empty dups) then
+    failwith
+      (Printf.sprintf "hike-dispatch: duplicate block tids in %s: %s"
+         (Sub.name stamped) (String.concat "," dups));
+  ({ solved = stamped; envs; block_addrs = block_addrs_of stamped;
+     summary })
 
 (* ---- facts from a solved body ---- *)
 
@@ -553,74 +1107,6 @@ and bounded_words (ws : Vsa.WordSet.t) : int64 list option =
   else
     Base.Option.map (Vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
         Base.List.filter_map words ~f:Cbat_word.to_int64_opt)
-
-(* The resolved destinations of the body's indirect transfers become
-   decode facts on their instructions.  Whether any is new: the body
-   is then decoded and lifted again.  A jump's destination stays inside
-   a function, as in BAP's decode, so it is never a root. *)
-and learn_dests t cfg (f : func) : bool =
-  let instruction =
-    Core.Map.of_alist_reduce (module Core.Int64) ~f:(fun a _ -> a)
-      (Base.List.map (D.terminators cfg) ~f:(fun (b, i) ->
-           (Word.to_int64_exn b, Word.to_int64_exn i)))
-  in
-  let calls =
-    Graphs.Cfg.nodes cfg |> Seq.filter ~f:D.is_call
-    |> Seq.map ~f:(fun b -> Word.to_int64_exn (Block.addr b))
-    |> Seq.to_list |> Core.Int64.Set.of_list
-  in
-  let insns = Core.Int64.Set.of_list (Core.Map.data instruction) in
-  let call_insns =
-    Core.Set.fold calls ~init:Core.Int64.Set.empty ~f:(fun acc b ->
-        match Core.Map.find instruction b with
-        | Some i -> Core.Set.add acc i
-        | None -> acc)
-  in
-  (* The instruction an indirect transfer belongs to: its block's
-     terminator, or - for a call set apart in a block of its own - the
-     address the lift stamped on the jmp. *)
-  let site_of blk j =
-    match Term.get_attr blk address with
-    | Some site -> Core.Map.find instruction (Word.to_int64_exn site)
-    | None ->
-      Base.Option.bind (Term.get_attr j address) ~f:(fun a ->
-          let a = Word.to_int64_exn a in
-          Base.Option.some_if (Core.Set.mem insns a) a)
-  in
-  let learned =
-    Term.enum blk_t f.solved |> Seq.to_list
-    |> Base.List.concat_map ~f:(fun blk ->
-        match Core.Map.find f.envs (Term.tid blk) with
-        | Some (pre, post) ->
-          Term.enum jmp_t blk |> Seq.to_list
-          |> Base.List.concat_map ~f:(fun j ->
-              match indirect_target j, site_of blk j with
-              | Some e, Some insn -> (
-                let jump = not (Core.Set.mem call_insns insn) in
-                match Vsa.denote_exp_at ~synth:t.synth ~pre ~post ~blk e with
-                | Ok ws ->
-                  Base.List.map (Base.Option.value (bounded_words ws) ~default:[])
-                    ~f:(fun w ->
-                        if jump then frontier_add_jump t.frontier w;
-                        (insn, w))
-                | Error _ -> [])
-              | _ -> [])
-        | None -> [])
-    |> Base.List.filter ~f:(fun (site, w) ->
-        match Core.Map.find t.dests site with
-        | Some ws -> not (Core.Set.mem ws w)
-        | None -> true)
-  in
-  Base.List.iter learned ~f:(fun (site, w) ->
-      t.dests <- Core.Map.update t.dests site ~f:(function
-          | Some ws -> Core.Set.add ws w
-          | None -> Core.Int64.Set.singleton w));
-  if Base.List.is_empty learned then false
-  else begin
-    t.state <- D.grow t.proj ~file:t.file ~roots:(frontier_roots t.frontier)
-        ~destinations:learned t.state;
-    true
-  end
 
 (* The words of a bounded value with the text origin. *)
 and text_words (ws : Vsa.WordSet.t) : int64 list =
@@ -713,7 +1199,6 @@ let create proj ~file ~state ~subroutines : t =
     state;
     synth = Hike_synth.empty;
     frontier = frontier_create ~subroutines;
-    dests = Core.Int64.Map.empty;
     entries = Core.Hashtbl.create (module Core.Int64);
     by_tid = Core.Hashtbl.create (module Tid);
     symbols = Core.Hashtbl.create (module Tid);

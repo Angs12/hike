@@ -30,15 +30,25 @@ open Bap.Std
   (** A dispatch site's destination words: the target's bounded
       denotation.  [None] when it is not enumerable. *)
   val case_words :
+    ?cap:int ->
     denote:denote ->
     block_addrs:Tid.t Addr.Map.t ->
     last_defs:def term Var.Map.t ->
     blk:blk term ->
     exp -> Cbat_word.t list option
 
+  (** The indirect transfer's target expression, unless it is a
+      return-address read or a linker-owned slot read (neither is a
+      dispatch).  [last_defs] is the block's own last-def map. *)
+  val dispatch_target :
+    synth:Hike_synth.table -> last_defs:def term Var.Map.t ->
+    retaddr:Tid.Set.t -> index:Hike_transfer.index ->
+    foreign_slots:Core.Int64.Set.t -> jmp term -> exp option
+
   (** The words and the base, the base read by backward substitution
       over [graph], which must carry every dispatch's case edges. *)
   val dispatch_words :
+    ?cap:int ->
     denote:denote ->
     graph:Hike_backsubst.graph ->
     block_addrs:Tid.t Addr.Map.t ->
@@ -46,34 +56,77 @@ open Bap.Std
     blk:blk term ->
     exp -> dispatch option
 
-  type progress = Grew of Tid.Set.t Tid.Map.t | Drained of sub term
+  (** A site materialization's intra-sub case target: validated address,
+      final tid, lifted fragment. *)
+  type case = int64 * Tid.t * sub term
 
-  (** Resolves the current solution, growing extra edges without changing
-      the sub. Once no edges grow, canonicalizes returns, prunes proven
-      unreachable blocks and names fallthroughs. Return-address and transfer
-      classification belong to this call and cannot outlive its solution.
-      Runs under the caller's image bracket. *)
-  val advance :
-    abi:Hike_abi.t -> sol:Cbat_vsa.vsa_sol -> synth:Hike_synth.table ->
-    block_addrs:Tid.t Addr.Map.t -> foreign_slots:Core.Int64.Set.t ->
-    sub term -> Tid.Set.t Tid.Map.t -> progress
+  (** An exact block edge: source block, destination block. *)
+  type edge = Tid.t * Tid.t
+
+  (** One staged builder run's result.  [delta_sub] is the complete
+      rewritten sub (source, new blocks, old targets) after SSA and DCE;
+      [new_edges] are the exact source/new-block edges. *)
+  type delta = {
+    delta_sub : sub term;
+    delta_synth : Hike_synth.table;
+    new_blocks : Tid.Set.t;
+    new_edges : edge list;
+    woken : Tid.Set.t;
+  }
+
+  (** Materialize a site: [working] already carries the rewritten source
+      and trap; Prepare inserts the missing decoded case blocks, Create
+      normalizes them, Wire records the exact source/new-block edges, and
+      Finalize runs [Hike_ssa.update_sub_woken] over the complete rewrite
+      against the pre-rewrite [old] sub, then DCEs the created blocks.
+      [cases] are the validated target address, its final tid, and its
+      lifted fragment. *)
+  val materialize_site :
+    target:Bap_core_theory.Theory.Target.t ->
+    abi:Hike_abi.t ->
+    callee_tid:(Tid.t -> Tid.t) ->
+    rip_address:(int64 -> bool) ->
+    claim:(sub term -> sub term) ->
+    synth:Hike_synth.table ->
+    block_addrs:Tid.t Addr.Map.t ->
+    old:sub term ->
+    working:sub term ->
+    cases:case list ->
+    edges:edge list ->
+    delta
+
+  (** Each block's term-order follower: the false edge of a conditional
+      goto whose block has no explicit one. *)
+  val term_follower : sub term -> Tid.t -> Tid.t option
+
+  (** The exit materialization at drain: the return canonicalization
+      lands once, then every block neither reachable from the sub's
+      entry nor live behind a surviving indirect transfer drops
+      ([foreign_slots] are the linker-owned slot addresses a transfer
+      may read its target through — such a transfer leaves the
+      program).  Fallthroughs are completed before the solve; a source
+      rewritten by a site install is not a term-order conditional jmp.
+      [retaddr] is the sub's [retaddr_defs]; the sub and call facts
+      must be unchanged since. *)
+  val materialize :
+    sol:Cbat_vsa.vsa_sol ->
+    synth:Hike_synth.table ->
+    block_addrs:Tid.t Addr.Map.t ->
+    foreign_slots:Core.Int64.Set.t ->
+    retaddr:Tid.Set.t ->
+    sub term -> sub term
+
+  (** The return-address definitions of [sub] under [sol]. *)
+  val retaddr_defs :
+    abi:Hike_abi.t ->
+    synth:Hike_synth.table ->
+    sol:Cbat_vsa.vsa_sol ->
+    sub term -> Tid.Set.t
 
   (** Names every block's successors: a conditional goto's implicit
       false edge becomes an explicit [Goto], and a destination two jumps
       share collapses to one unconditional edge (ADR 0024). *)
   val materialize_fallthroughs : sub term -> sub term
-
-(** The destination word a dispatch arm tests, if [j] is one. *)
-val arm_word : jmp term -> int64 option
-
-(** The destination words not covered by the block's existing arms. *)
-val remaining_words : blk term -> Cbat_word.t list -> Cbat_word.t list
-
-(** Each indirect transfer gains, before it, one arm per destination word
-    ([dests]) naming the start of one of the sub's blocks: a direct goto
-    guarded by [target = word] over model addresses.  The transfer stays
-    as the fallback for every word no arm tests. *)
-val arm_dispatches : dests:(jmp term -> int64 list) -> sub term -> sub term
 
 (** Rewrites a lifted term's direct targets: a call's target names a
     subroutine, a goto's a block, so the two resolve through different

@@ -8,11 +8,23 @@ val file_of : Project.t -> string
 (** Each block's start address and its last instruction's address. *)
 val terminators : Graphs.Cfg.t -> (Addr.t * Addr.t) list
 
+(** Whether [a] lies in one of the project's code regions. *)
+val in_code : Project.t -> int64 -> bool
+
 (** A fresh decode of every code region in which every root in [roots]
     answers [is_subroutine] through the entry promise (address-keyed, so
     the full set is needed on each scan), plus every provided destination
     fact. *)
 val scan : Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state
+
+(** Resumes the decode from [starts] over the regions holding them.  A
+    start becomes a subroutine only when [subroutines] says it is a root. *)
+val resume :
+  ?subroutines:bool -> Project.t -> file:string -> roots:int64 list ->
+  Disasm.Driver.state -> starts:int64 list -> Disasm.Driver.state
+
+(** Records that [site]'s last instruction transfers to [dest]. *)
+val provide_dest : file:string -> site:int64 -> int64 -> unit
 
 (** Adds destination facts and decodes their reach and every pending root.
     [roots] carries all entries. The resumed state is verified against these
