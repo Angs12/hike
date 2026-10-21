@@ -84,6 +84,24 @@ let tests = [
           check "DEC-04.atomic"
             (List.exists (fun n -> Hike.Abi.strip_at n = "intrinsic:x86:atomic_add_64") targets);
           check "DEC-04.markers" (not (List.exists Hike.Abi.is_lock_marker targets))));
+  ("growth", [ case "new destinations join old facts and roots survive successive growth" (fun () ->
+      with_binary "\xff\xe0\xc3\xc3" (fun project ->
+          let file = file_of project in
+          let state = D.scan project ~file ~roots:[] in
+          let state = D.grow project ~file ~roots:[ 0x40007aL ]
+              ~destinations:[ 0x400078L, 0x40007aL ] state in
+          let state = D.grow project ~file ~roots:[ 0x40007aL; 0x40007bL; 0L ]
+              ~destinations:[ 0x400078L, 0x40007bL ] state in
+          let jump = Disasm.Driver.jump state (addr 0x400078L) |> Base.Option.value_exn in
+          List.iter (fun target ->
+              check "destination remains decoded"
+                (Disasm.Driver.is_block state (addr target));
+              check "destination facts are unioned"
+                (Core.Set.mem (Disasm.Driver.destinations jump) (addr target));
+              check "every supplied code root remains an entry"
+                (Disasm.Driver.is_subroutine state (addr target)))
+            [ 0x40007aL; 0x40007bL ])) ]);
+
 ]
 
 let () = run "decode" tests

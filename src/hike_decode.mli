@@ -8,24 +8,18 @@ val file_of : Project.t -> string
 (** Each block's start address and its last instruction's address. *)
 val terminators : Graphs.Cfg.t -> (Addr.t * Addr.t) list
 
-(** Provides [dest] as a destination fact on the instruction at [site]. *)
-val provide_dest : file:string -> site:int64 -> int64 -> unit
-
 (** A fresh decode of every code region in which every root in [roots]
     answers [is_subroutine] through the entry promise (address-keyed, so
     the full set is needed on each scan), plus every provided destination
     fact. *)
 val scan : Project.t -> file:string -> roots:int64 list -> Disasm.Driver.state
 
-(** Whether [a] lies in a code region of the project. *)
-val in_code : Project.t -> int64 -> bool
-
-(** The decode resumed from [starts]: only the code they reach is
-    decoded again, merged into the state.  With [subroutines] the starts
-    are recorded as subroutines. *)
-val resume :
-  ?subroutines:bool -> Project.t -> file:string -> roots:int64 list ->
-  Disasm.Driver.state -> starts:int64 list -> Disasm.Driver.state
+(** Adds destination facts and decodes their reach and every pending root.
+    [roots] carries all entries. The resumed state is verified against these
+    facts, with a fresh scan as fallback; rejected data is already settled. *)
+val grow :
+  Project.t -> file:string -> roots:int64 list ->
+  destinations:(int64 * int64) list -> Disasm.Driver.state -> Disasm.Driver.state
 
 (** One function's candidate graph from the decoded state: the blocks
     [entry] reaches without entering another entry, every edge kept. *)

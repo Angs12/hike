@@ -228,6 +228,46 @@ let resume ?(subroutines = false) (proj : Project.t) ~(file : string)
                (Core.Set.of_list (module Addr) here) mem s)
         state (code_mems proj))
 
+(* Grow from learned dispatches and pending roots. Accept the resumed
+   state only after every fact is represented; otherwise scan afresh. *)
+let grow (proj : Project.t) ~(file : string) ~(roots : int64 list)
+    ~(destinations : (int64 * int64) list) (state : Driver.state) : Driver.state =
+  Base.List.iter destinations ~f:(fun (site, dest) -> provide_dest ~file ~site dest);
+  let pending state =
+    Base.List.filter roots ~f:(fun a ->
+        let w = Addr.of_int64 a in
+        in_code proj a && not (Driver.is_subroutine state w)
+        && not (Driver.is_data state w))
+  in
+  let starts = Base.List.map destinations ~f:fst
+      |> Base.List.dedup_and_sort ~compare:Core.Int64.compare in
+  let resumed = match starts with
+    | [] -> state
+    | _ -> resume proj ~file ~roots state ~starts in
+  let resumed = match pending resumed with
+    | [] -> resumed
+    | starts -> resume ~subroutines:true proj ~file ~roots resumed ~starts in
+  let decoded (site, target) =
+    let target = Addr.of_int64 target in
+    (match Driver.jump resumed (Addr.of_int64 site) with
+     | Some jump -> Core.Set.mem (Driver.destinations jump) target
+     | None -> false)
+    && (Driver.is_block resumed target || Driver.is_data resumed target)
+  in
+  let kept = Base.List.is_empty (pending resumed)
+      && Base.List.for_all destinations ~f:decoded in
+#ifdef VSA_DEBUG
+  let full = scan proj ~file ~roots in
+  Printf.eprintf "hike-dbg-rescan: starts=%d roots=%d resume=%s equal=%b subs=%b\n%!"
+    (List.length starts) (List.length (pending state))
+    (if kept then "kept" else "fallback")
+    (Driver.equal resumed full)
+    (Core.Set.equal (Driver.subroutines resumed) (Driver.subroutines full));
+  if kept then resumed else full
+#else
+  if kept then resumed else scan proj ~file ~roots
+#endif
+
 (* Each decoded block's start address and its terminator instruction's
    address.  The solver's jmp rewrites rebuild jmps with [Jmp.create
    ~tid], dropping the [address] attr, so a dispatch's site is the
