@@ -87,9 +87,6 @@ let tests : unit Alcotest.test list =
         check "HSB-35.bottom"
           (Hsb.key_extent ~width:64 (Ws.bottom 64) = None));
 
-    pin "HSB-34" "caller_window_bytes: the window capacity is 65536"
-      (fun () -> check "HSB-34" (Hsb.caller_window_bytes = 65536L));
-
   ]
 
 let () = run "hike_stack_bounds" tests

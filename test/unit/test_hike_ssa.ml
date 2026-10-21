@@ -10,7 +10,6 @@ open Hike_test.Fixtures
 let guard v k =
   Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int (Cbat_word.to_word (w64 k)))
 
-
 let ret_reg = int_ret 0
 
 let sub_named name blks =
@@ -163,19 +162,13 @@ let tests : unit Alcotest.test list =
           |> Base.Option.value_exn
         in
         let call_blk = Term.first blk_t caller' |> Base.Option.value_exn in
-        let minted =
-          Hike.Stack_model.boundary_write call_blk ret_reg
-        in
+        let minted = Hike.Stack_model.boundary_write call_blk ret_reg
+          |> Base.Option.value_exn in
         let call = Term.first jmp_t call_blk |> Base.Option.value_exn in
-        check "SSA-01 term writes include the result"
-          (Base.Option.value_map minted ~default:false
-             ~f:(fun v -> Core.Set.mem (Hike.Stack_model.writes (`Jmp call)) v));
-        check "SSA-01"
-          (Base.Option.is_some minted
-          && Base.Option.is_some
-               (Base.Option.filter minted ~f:(fun v ->
-                    Var.index v > 0
-                    && Var.same (Var.base v) (int_ret 0))));
+        check "call defines a version of its return register"
+          (Var.index minted > 0 && Var.same (Var.base minted) ret_reg);
+        check "term writes include the return value"
+          (Core.Set.mem (Hike.Stack_model.writes (`Jmp call)) minted);
         (* The continuation reads its own phi of the call result. *)
         let cont =
           Term.enum blk_t caller'
@@ -191,7 +184,7 @@ let tests : unit Alcotest.test list =
         check "SSA-01 incoming result"
           (Phi.values result_phi |> Seq.exists ~f:(fun (_, e) ->
               match e with
-              | Bil.Var v -> Base.Option.equal Var.equal minted (Some v)
+              | Bil.Var v -> Var.equal minted v
               | _ -> false));
         let reads_version =
           Term.enum def_t cont
@@ -262,8 +255,6 @@ let tests : unit Alcotest.test list =
                      String.equal (Var.name (Var.base w)) "sj_v"
                      && Var.index w > 0
                  | _ -> false)));
-
-
 
     pin "SSA-03" "under SSA the sub's input lanes are its index-0 reads"
       (fun () ->

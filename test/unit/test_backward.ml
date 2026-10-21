@@ -1,5 +1,4 @@
-(* Backward-refinement and inverse-denotation pins.  One Alcotest group per
-   pin; each pin builds its own fixture, so no state crosses pins.  The first
+(* Backward-refinement and inverse-denotation pins.  The first
    block of pins is the backward lane (the guard/flag/row walks); the second
    is the inverse denote's leaf facts (the load cell meet and the guard
    operand windows). *)
@@ -69,7 +68,6 @@ let s_w32_of_env env v = AI.find_word 32 env (Var.base v)
    var's def; "range" places it in the guard operand itself. *)
 let a4_t = Var.create ~is_virtual:false ~fresh:false "a4_t" (Type.Imm 32)
 let a4_v (w : int) = Var.create ~is_virtual:false ~fresh:false "a4_v" (Type.Imm w)
-let a4_w16 = Cbat_word.of_int ~width:16
 
 (* One cell of the table.  Returns (guard-can-be-false,
    head-cell-keeps-the-exit-value, body-cell-excludes-it). *)
@@ -317,8 +315,6 @@ let tests : unit Alcotest.test list =
           && not (Ws.elem (w32 0) cell4)
           && not (Ws.elem (w32 11) cell4)));
 
-
-
     (* L3c2: the signed comparison rows. *)
     pin "BK-11"
       "a direct SLT(t, 4) guard on a seeded non-negative counter — the signed \
@@ -413,8 +409,6 @@ let tests : unit Alcotest.test list =
           (let v = l3c3_run sub1 body1 in
            bounded_above v (w32 9)));
 
-
-
     pin "BK-18"
       "the seeded operand is bounded by the guard's signed row, so the TIMES \
        pre-image applies: the cell at RBP-8 is [0..9] (8t <s 80 over t ∈ [0..9])"
@@ -469,8 +463,6 @@ let tests : unit Alcotest.test list =
         check "BK-21" (Ws.elem (w32 0x80000000) cell
           && Ws.elem (w32 0xFFFFFFFF) cell && Ws.elem (w32 39) cell
           && not (Ws.elem (w32 40) cell)));
-
-
 
     pin "BK-23"
       "TIMES with an EQ singleton {5} and k = 8 (non-divisible) — the row is \
@@ -587,8 +579,6 @@ let tests : unit Alcotest.test list =
           (let v = l3c5_run sub3a body3a in
            bounded_above v (w32 9)));
 
-
-
     pin "BK-33"
       "an Unknown condition — the fixpoint completes and constrain_edge keeps \
        the env unchanged (the shrunk catch-all, never asserts)"
@@ -625,7 +615,6 @@ let tests : unit Alcotest.test list =
 
     (* L-3b: the equal-lower merge arm and the partition views. *)
 
-
     pin "BK-35"
       "the partition — the iterate view's cell is the loop-body values (⊆ [0,7], \
        non-top) and the exit view's cell carries the exit-iteration value (8 \
@@ -658,8 +647,6 @@ let tests : unit Alcotest.test list =
              |> Option.is_some
           && (not (Ws.is_top ecell))
           && Ws.elem (w32 8) ecell));
-
-
 
     (* B-1: interrupt edges. *)
     pin "BK-37"
@@ -1104,24 +1091,6 @@ let tests : unit Alcotest.test list =
     (* The guard's operand windows observed through the inverse denote: on a
        TOP env the leaf meet preserves the raw row. *)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     pin "BK-71" "the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
       (fun () ->
         let s11 =
@@ -1131,10 +1100,6 @@ let tests : unit Alcotest.test list =
         in
         let c11 = s_w32_of_env s11 s_t in
         check "BK-71" (Ws.elem (s_r32 0) c11 && Ws.elem (s_r32 0xFFFFFFFF) c11));
-
-
-
-
 
     pin "BK-74"
       "the SIGNED ext row — the pre-image [0, 0xFF] on a top env; the meet with \
@@ -1255,8 +1220,6 @@ let tests : unit Alcotest.test list =
                   (Ws.singleton (s_r32 5)))
                (mk_env [])));
 
-
-
     pin "BK-80"
       "the Ite inverse with a true condition — only the true branch is constrained"
       (fun () ->
@@ -1292,8 +1255,6 @@ let tests : unit Alcotest.test list =
              (AI.find_word 32 env11 (Var.base s_t))
           && Ws.equal (s_w32_of_env env11' s_u)
                (AI.find_word 32 env11 (Var.base s_u))));
-
-
 
     pin "BK-83"
       "the AND singleton mask keeps the constrained bits and leaves the rest \
@@ -1388,67 +1349,21 @@ let tests : unit Alcotest.test list =
           && Ws.elem (w32 0x80000000) cell1
           && Ws.elem (w32 99) cell1));
 
-    (* ---------------------------------------------------------------- *)
-    (* T07 / A4: the four-way table. *)
-
-    pin "BK-87"
-      "A4 table — syntactic x cast-UNSIGNED: the compared var is defined by \
-       Cast(UNSIGNED,64,t).  The exit edge stays live, the head's cell keeps \
-       the reachable exit value 4, and the body's cell excludes it (the \
-       refinement fired)"
-      (fun () ->
-        let live, keeps, fired =
-          a4_cell ~op:(Bil.Cast (Bil.UNSIGNED, 64, Bil.Var a4_t)) ~v_w:64
-            ~c:(w64 4) ~exit:(w32 4) ~seed:(w32 0) ~body_k:(w32 1)
-            ~inline:false
-        in
-        check "BK-87.live" live;
-        check "BK-87.head-keeps" keeps;
-        check "BK-87.body-excludes" fired);
-
-    pin "BK-88"
-      "A4 table — syntactic x extract-hull: the compared var is defined by \
-       Extract(31,16,t) (the top half-word).  The exit edge stays live, the \
-       head's cell keeps the reachable exit value 0x40000, and the body's \
-       cell excludes it (the operand constraint [0, 0x3FFFF] is exact here)"
-      (fun () ->
-        let live, keeps, fired =
-          a4_cell ~op:(Bil.Extract (31, 16, Bil.Var a4_t)) ~v_w:16
-            ~c:(a4_w16 4) ~exit:(w32 0x40000) ~seed:(w32 0)
-            ~body_k:(w32 0x10000) ~inline:false
-        in
-        check "BK-88.live" live;
-        check "BK-88.head-keeps" keeps;
-        check "BK-88.body-excludes" fired);
-
-    pin "BK-89"
-      "A4 table — range x cast-UNSIGNED: the guard's operand is \
-       Cast(UNSIGNED,64,t) itself.  The exit edge stays live, the head's cell \
-       keeps the reachable exit value 4, and the body's cell excludes it"
-      (fun () ->
-        let live, keeps, fired =
-          a4_cell ~op:(Bil.Cast (Bil.UNSIGNED, 64, Bil.Var a4_t)) ~v_w:64
-            ~c:(w64 4) ~exit:(w32 4) ~seed:(w32 0) ~body_k:(w32 1)
-            ~inline:true
-        in
-        check "BK-89.live" live;
-        check "BK-89.head-keeps" keeps;
-        check "BK-89.body-excludes" fired);
-
-    pin "BK-90"
-      "A4 table — range x extract-hull: the guard's operand is \
-       Extract(31,16,t) itself.  The exit edge stays live, the head's cell \
-       keeps the reachable exit value 0x40000, and the body's cell excludes \
-       it"
-      (fun () ->
-        let live, keeps, fired =
-          a4_cell ~op:(Bil.Extract (31, 16, Bil.Var a4_t)) ~v_w:16
-            ~c:(a4_w16 4) ~exit:(w32 0x40000) ~seed:(w32 0)
-            ~body_k:(w32 0x10000) ~inline:true
-        in
-        check "BK-90.live" live;
-        check "BK-90.head-keeps" keeps;
-        check "BK-90.body-excludes" fired);
+    ("cast and extract loop guards",
+     List.concat_map (fun inline ->
+         List.map (fun (name, operand, width, bound, exit, increment) ->
+             let name = name ^ (if inline then " in the guard" else " through a definition") in
+             case name (fun () ->
+                 let live, keeps, refines = a4_cell ~op:operand ~v_w:width
+                     ~c:bound ~exit ~seed:(w32 0) ~body_k:increment ~inline in
+                 check "exit remains reachable" live;
+                 check "head retains the reachable exit value" keeps;
+                 check "taken edge excludes the exit value" refines))
+           [ "unsigned cast", Bil.Cast (Bil.UNSIGNED, 64, Bil.Var a4_t),
+             64, w64 4, w32 4, w32 1;
+             "high-half extract", Bil.Extract (31, 16, Bil.Var a4_t),
+             16, Cbat_word.of_int ~width:16 4, w32 0x40000, w32 0x10000 ])
+       [ false; true ]);
 
     (* ---------------------------------------------------------------- *)
     (* T07 / A4 candidate 3: [evidence_constraint]'s non-negativity proof.
@@ -1512,7 +1427,8 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let x = Var.create ~is_virtual:true ~fresh:false "bk94_x" (Type.Imm 32) in
         let env = mk_env [ (x, Ws.top 32) ] in
-        let cstr16 = Ws.of_clp (Clp.interval ~width:16 (a4_w16 0) (a4_w16 3)) in
+        let word = Cbat_word.of_int ~width:16 in
+        let cstr16 = Ws.of_clp (Clp.interval ~width:16 (word 0) (word 3)) in
         let env' =
           Vsa.Test_seam.constrain_operands ~synth:Hike.Synth.empty
             ~landmarks:(Cbat_landmarks.create ()) ~env

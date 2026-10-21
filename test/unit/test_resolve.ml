@@ -1,13 +1,10 @@
-(* Indirect-target resolution pins.  One Alcotest group per pin; each pin
-   builds its own fixture, so no state crosses pins. *)
+(* Indirect-target resolution pins. *)
 
 open Bap.Std
 open Bap_core_theory
 open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
-
-(* 64-bit literal word (native-int [w64] covers 63 bits only). *)
 
 (* A singleton word-set from an int64 address. *)
 let ws_singleton (v : int64) : Cbat_vsa.WordSet.t =
@@ -47,141 +44,100 @@ let with_addrs (addrs : int64 array) (sub : sub term) : sub term =
 let check_key1 name ks f =
   check name (match ks with [ k ] -> f k | _ -> false)
 
+let abi = Hike.Abi.x86_64_sysv
+
 let tests : unit Alcotest.test list =
   [
-    (* T4-RES: the target-resolution predicate's four classes. *)
-    pin "RES-01"
-      "T4-RES singleton: a singleton naming a lifted sub resolves direct"
-      (fun () ->
-        let callee_tid = Tid.for_name "res_callee" in
-        let lifted v = if Int64.equal v 0x1000L then Some callee_tid else None in
-        check "RES-01"
-          (Hike.Resolve.resolve_target ~lookup:lifted (ws_singleton 0x1000L)
-           = Some callee_tid));
-
-    pin "RES-02" "T4-RES multi: a bounded two-target set takes the pointer call"
-      (fun () ->
-        let callee_tid = Tid.for_name "res_callee" in
-        let lifted v = if Int64.equal v 0x1000L then Some callee_tid else None in
-        check "RES-02"
-          (Hike.Resolve.resolve_target ~lookup:lifted
-             (Cbat_vsa.WordSet.union (ws_singleton 0x1000L) (ws_singleton 0x1008L))
-           = None));
-
-    pin "RES-03" "T4-RES foreign: a foreign singleton takes the pointer call"
-      (fun () ->
-        let callee_tid = Tid.for_name "res_callee" in
-        let lifted v = if Int64.equal v 0x1000L then Some callee_tid else None in
-        check "RES-03"
-          (Hike.Resolve.resolve_target ~lookup:lifted (ws_singleton 0x9999L) = None));
-
-    pin "RES-04" "T4-RES top: an unresolvable target set takes the pointer call"
-      (fun () ->
-        let callee_tid = Tid.for_name "res_callee" in
-        let lifted v = if Int64.equal v 0x1000L then Some callee_tid else None in
-        check "RES-04"
-          (Hike.Resolve.resolve_target ~lookup:lifted (Cbat_vsa.WordSet.top 64) = None));
-
-    (* T22-J1: the lifted return epilogue — [#t := mem[RSP]]; call #t
-       noreturn — the target var's reaching def is the retaddr read. *)
-    pin "RES-05" "T22-J1: the epilogue's [RSP] load is the retaddr read"
-      (fun () ->
-        let j1_ra = v64 "t22_j1_ra" in
-        let j1_ld =
-          Def.create j1_ra
-            (Bil.Load (Bil.Var (memv "t22_j1_m"), Bil.Var sp, LittleEndian, `r64))
-        in
-        let j1, _ =
-          sub_of "t22_ret"
-            [ [ j1_ld ],
-              [ (1, fun t -> Jmp.create (Call (Call.create ~target:(Indirect (Bil.Var j1_ra)) ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let j1_retaddr =
-          let sol =
-            static_graph_vsa ~synth:Hike.Synth.empty ~abi:Hike.Abi.x86_64_sysv
-              ~resolved:Tid.Map.empty j1
-              (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv j1)
-          in
-          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv
-            ~synth:Hike.Synth.empty ~sol j1
-        in
-        check "RES-05" (Core.Set.mem j1_retaddr (Term.tid j1_ld)));
-
-    pin "RES-06"
-      "N8-RET: the epilogue lands in the canonical direct return edge"
-      (fun () ->
-        let j1_ra = v64 "t22_j1_ra" in
-        let j1_ld =
-          Def.create j1_ra
-            (Bil.Load (Bil.Var (memv "t22_j1_m"), Bil.Var sp, LittleEndian, `r64))
-        in
-        let j1, _ =
-          sub_of "t22_ret"
-            [ [ j1_ld ],
-              [ (1, fun t -> Jmp.create (Call (Call.create ~target:(Indirect (Bil.Var j1_ra)) ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j1', _ =
-          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j1 ] ()) j1
-        in
-        check "RES-06"
-          (match jmps_of_blk j1' 0 with
-           | [ j ] -> Hike_return.is_jmp j
-           | _ -> false));
-
-    (* The lifted `ret` is a plain `Goto` (BAP lifts `retq` as
-       `jmp #retaddr`), not a call; the same retaddr read behind it is
-       the epilogue and canonicalizes to a direct return edge. *)
-    pin "RES-22"
-      "the lifted `ret` Goto canonicalizes to the var-free return"
-      (fun () ->
-        let j9_ra = v64 "t22_j9_ra" in
-        let j9_ld =
-          Def.create j9_ra
-            (Bil.Load
-               (Bil.Var (memv "t22_j9_m"), Bil.Var sp, LittleEndian, `r64))
-        in
-        let j9, _ =
-          sub_of "t22_ret_goto"
-            [ [ j9_ld ],
-              [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j9_ra)))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j9', _ =
-          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j9 ] ()) j9
-        in
-        check "RES-22"
-          (match jmps_of_blk j9' 0 with
-           | [ j ] -> Hike_return.is_jmp j
-           | _ -> false));
-
-    (* J1b: the control — the same target read behind a return=Some call
-       is a real indirect call, not the epilogue: no rewrite. *)
-    pin "RES-07"
-      "T22-J1b: a return=Some call with the same target stays a call (no rewrite)"
-      (fun () ->
-        let j1_ra = v64 "t22_j1_ra" in
-        let j1_ld =
-          Def.create j1_ra
-            (Bil.Load (Bil.Var (memv "t22_j1_m"), Bil.Var sp, LittleEndian, `r64))
-        in
-        let j1b, _ =
-          sub_of "t22_call"
-            [ [ j1_ld ],
-              [ (1,
-                 fun t ->
-                   Jmp.create
-                     (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Var j1_ra)) ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j1b', _ =
-          produce ~synth:Hike.Synth.empty (x86_target ()) (Program.create ~subs:[ j1b ] ()) j1b
-        in
-        check "RES-07"
-          (match jmps_of_blk j1b' 0 with
-           | [ j ] -> (match Jmp.kind j with Call _ -> true | _ -> false)
-           | _ -> false));
+    ( "target resolution",
+      [
+        case "only a known singleton becomes a direct call" (fun () ->
+            let callee = Tid.for_name "resolved_callee" in
+            let lookup address =
+              if Int64.equal address 0x1000L then Some callee else None
+            in
+            let check_target =
+              Alcotest.(check (option (testable Tid.pp Tid.equal)))
+            in
+            List.iter
+              (fun (name, targets, expected) ->
+                check_target name expected
+                  (Hike.Resolve.resolve_target ~lookup targets))
+              [
+                ("known singleton", ws_singleton 0x1000L, Some callee);
+                ( "multiple destinations",
+                  Ws.union (ws_singleton 0x1000L) (ws_singleton 0x1008L),
+                  None );
+                ("foreign singleton", ws_singleton 0x9999L, None);
+                ("unknown", Ws.top 64, None);
+                ("unreachable", Ws.bottom 64, None);
+              ]);
+      ] );
+    ( "return epilogues",
+      List.map
+        (fun (name, transfer, returns) ->
+          case name (fun () ->
+              let target = v64 "loaded_return_address" in
+              let load =
+                Def.create target
+                  (Bil.Load
+                     ( Bil.Var (memv "return_memory"),
+                       Bil.Var sp,
+                       LittleEndian,
+                       `r64 ))
+              in
+              let sub, _ =
+                sub_of "return_epilogue"
+                  [
+                    ([ load ], [ (1, transfer target) ]); ([], [ (0, mk_ret) ]);
+                  ]
+              in
+              let solution =
+                static_graph_vsa ~synth:Hike.Synth.empty ~abi
+                  ~resolved:Tid.Map.empty sub (Vsa.init_sol ~abi sub)
+              in
+              let loads =
+                Hike.Cfg_complete.retaddr_defs ~abi ~synth:Hike.Synth.empty
+                  ~sol:solution sub
+              in
+              check "the target's definition reads the return-address cell"
+                (Core.Set.mem loads (Term.tid load));
+              let _, completed, _ =
+                produce ~synth:Hike.Synth.empty (x86_target ())
+                  (Program.create ~subs:[ sub ] ())
+                  sub
+              in
+              match jmps_of_blk completed 0 with
+              | [ jump ] -> (
+                  Alcotest.(check bool)
+                    "canonical return" returns (Hike_return.is_jmp jump);
+                  if not returns then
+                    match Jmp.kind jump with
+                    | Call call ->
+                        check "the real call keeps its target"
+                          (match Call.target call with
+                          | Indirect (Bil.Var v) -> Var.same v target
+                          | _ -> false);
+                        check "the real call keeps its return edge"
+                          (Call.return call <> None)
+                    | _ -> Alcotest.fail "expected a real call")
+              | _ -> Alcotest.fail "expected one completed transfer"))
+        [
+          ( "a tail call through the return address becomes a return",
+            (fun target _ ->
+              Jmp.create
+                (Call (Call.create ~target:(Indirect (Bil.Var target)) ()))),
+            true );
+          ( "a goto through the return address becomes a return",
+            (fun target _ -> Jmp.create (Goto (Indirect (Bil.Var target)))),
+            true );
+          ( "a returning call through the same value remains a real call",
+            (fun target continuation ->
+              Jmp.create
+                (Call
+                   (Call.create ~return:(Direct continuation)
+                      ~target:(Indirect (Bil.Var target)) ()))),
+            false );
+        ] );
 
     (* J2: the jump-table dispatch — the target var's denotation joins
        two in-sub block constants; block_addrs names both blocks' tids,
@@ -360,7 +316,6 @@ let tests : unit Alcotest.test list =
     (* J4: a word the run's map cannot name is a decline, not a failure —
        it rides the fact channels to the driver's decode. *)
 
-
     pin "RES-14"
       "T22-J4: a dispatch word the map cannot name declines (the transfer stays, no failure)"
       (fun () ->
@@ -416,14 +371,10 @@ let tests : unit Alcotest.test list =
 
     (* J3b: the TOP target (an undefined var) stays too. *)
 
-
     (* J5 (the ret-not-dispatch pin): the epilogue's target VALUE is
        bounded — the corpus crash shape — and the resolution leaves it
        alone: no split, no growth, no loud failure.  The retaddr fact is
        the load's ADDRESS denotation (the entry-RSP cell). *)
-
-
-
 
     pin "RES-19"
       "RET-ND1: a bounded retaddr target is not a dispatch (no raise, no growth)"
@@ -469,8 +420,6 @@ let tests : unit Alcotest.test list =
                 j5 Tid.Map.empty
             in
             (not events5) && Core.Map.is_empty resolved5'));
-
-
 
     (* The completion owns the edge set: a conditional goto's false edge
        is named, and a destination two jumps share is carried once. *)

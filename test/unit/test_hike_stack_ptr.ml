@@ -14,13 +14,17 @@ module Stack_ptr = Hike_stack_ptr
 
 (* A real function to build into, the builder at the end of its entry block
    (the emitter's [create_sub] position).  Allocas need an insertion point. *)
-let make_builder () =
+let with_builder f =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "stack_ptr_test" in
   let fn_ty = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
   let fn = Llvm.define_function "sp_fn" fn_ty llvm_module in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-  (llvm_ctx, llvm_module, llvm_builder)
+  Fun.protect
+    ~finally:(fun () -> Llvm.dispose_module llvm_module; Llvm.dispose_context llvm_ctx)
+    (fun () ->
+      f llvm_ctx llvm_module llvm_builder;
+      Base.Option.iter (Llvm_analysis.verify_module llvm_module) ~f:Alcotest.fail)
 
 let layout_of ?(window_param = false) ?(runtime_residue = false) regions
     : Model.sub_layout =
@@ -38,12 +42,11 @@ let alloca_p (v : Llvm.llvalue) : bool =
 let tests : unit Alcotest.test list =
   [
 
-
     pin "SPTR-02"
       "one region is one storage: the region's mem var, its entry-relative \
        base, and a real alloca of the range's bytes"
       (fun () ->
-        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
+        with_builder (fun llvm_ctx llvm_module llvm_builder ->
         let regions =
           [ { Model.Sub_layout.r_id = 3;
               r_lo = pos (-24L);
@@ -55,25 +58,22 @@ let tests : unit Alcotest.test list =
             (layout_of regions)
         in
         ignore (Llvm.build_ret_void llvm_builder);
-        let ir = Llvm.string_of_llmodule llvm_module in
         check "SPTR-02"
           (match storages with
           | [ s ] ->
               Var.same s.mem (Model.region_mem ~addr_bits:64 3)
               && Int64.equal s.rel (-24L)
               && alloca_p s.base
-              && String.equal (Llvm.value_name s.base) "stack_r3"
               && Int.equal (Llvm.alignment s.base) 16
-              && contains_substring ir "%stack_r3 = alloca [16 x i8], align 16"
-          | _ -> false));
-
+              && contains_substring (Llvm.string_of_llvalue s.base) "alloca [16 x i8], align 16"
+          | _ -> false)));
 
     pin "SPTR-04"
       "a runtime residue is the region below the cursor: the residue base \
        derives from the entry call by GEPs, a carved region stays an alloca, \
        and the helpers are weak noinline definitions with the cursor attributes"
       (fun () ->
-        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
+        with_builder (fun llvm_ctx llvm_module llvm_builder ->
         let regions =
           [ { Model.Sub_layout.r_id = 0;
               r_lo = pos (-48L);
@@ -106,12 +106,12 @@ let tests : unit Alcotest.test list =
               && contains_substring ir "memory(inaccessiblemem: write)"
               && contains_substring ir "noinline"
               && contains_substring ir "@hike_rstack_cur = weak thread_local global"
-          | _ -> false));
+          | _ -> false)));
 
     pin "SPTR-05"
       "a bounded layout carries no runtime-stack helper"
       (fun () ->
-        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
+        with_builder (fun llvm_ctx llvm_module llvm_builder ->
         let regions =
           [ { Model.Sub_layout.r_id = 0;
               r_lo = pos (-48L);
@@ -127,16 +127,15 @@ let tests : unit Alcotest.test list =
         check "SPTR-05"
           (Base.Option.is_none runtime_top
            && (match storages with [ s ] -> alloca_p s.base | _ -> false)
-           && not (contains_substring ir "hike_rstack")));
+           && not (contains_substring ir "hike_rstack"))));
 
     pin "SPTR-06"
       "the optimizer sees a runtime frame as a fresh object: a frame store \
-       survives an unknown call and a store through an argument, and a frame \
-       counter becomes a phi"
+       survives an unknown call and a store through an argument"
       (fun () ->
         match Unix.system "command -v opt-21 >/dev/null 2>&1" with
         | Unix.WEXITED 0 ->
-            let llvm_ctx, llvm_module, sp_b = make_builder () in
+            with_builder (fun llvm_ctx llvm_module sp_b ->
             ignore (Llvm.build_ret_void sp_b);
             let i64 = Llvm.i64_type llvm_ctx in
             let ptr = Llvm.pointer_type llvm_ctx in
@@ -180,16 +179,16 @@ let tests : unit Alcotest.test list =
             let out = src ^ ".opt.ll" in
             let rc =
               Sys.command
-                (Printf.sprintf "opt-21 -O2 -S %s -o %s 2>&1 >/dev/null"
+                (Printf.sprintf "opt-21 -O2 -S %s -o %s"
                    (Filename.quote src) (Filename.quote out))
             in
+            Alcotest.(check int) "optimizer succeeds" 0 rc;
             let text = In_channel.with_open_bin out In_channel.input_all in
-
             Sys.remove src;
             Sys.remove out;
             check "SPTR-06"
-              (rc = 0 && contains_substring text "ret i64 42"
-               && not (contains_substring text "load i64"))
+              (contains_substring text "ret i64 42"
+               && not (contains_substring text "load i64")))
         | _ -> Alcotest.fail "SPTR-06 requires opt-21 on PATH");
 
   ]

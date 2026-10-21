@@ -1,5 +1,4 @@
-(* VSA pass pins.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins.  The Call_effects transfer pins
+(* VSA pass pins.  The Call_effects transfer pins
    (CE-01..CE-15) live with their module, not here. *)
 
 open Bap.Std
@@ -79,33 +78,17 @@ let slice_bounded (ws : Ws.t) (n : int) : bool = bounded_above ws (w32 n)
 
 let tests : unit Alcotest.test list =
   [
-    (* D4: branch-assume refinement — gate-free, every guard shape. *)
-    pin "VSA-01" "D4-1: assume (x < 5) refines x to [0,4]"
-      (fun () ->
-        let ivar = i32 "i" in
-        let c =
-          assume 32 ivar
-            (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))
-        in
-        check "VSA-01" (Ws.min_elem c = Some (w32 0) && Ws.max_elem c = Some (w32 4)));
-
-    pin "VSA-02" "D4-2: assume (x <= 5) refines x to [0,5]"
-      (fun () ->
-        let ivar = i32 "i" in
-        let c =
-          assume 32 ivar
-            (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))
-        in
-        check "VSA-02" (Ws.min_elem c = Some (w32 0) && Ws.max_elem c = Some (w32 5)));
-
-    pin "VSA-03" "D4-3: assume (x == 5) refines x to {5}"
-      (fun () ->
-        let ivar = i32 "i" in
-        let c =
-          assume 32 ivar
-            (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))
-        in
-        check "VSA-03" (Ws.min_elem c = Some (w32 5) && Ws.max_elem c = Some (w32 5)));
+    ("integer guards",
+     List.map (fun (name, op, lo, hi) ->
+         case name (fun () ->
+             let x = i32 "guard_input" in
+             let result = assume 32 x
+                 (Bil.BinOp (op, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) in
+             check_ws "refined input"
+               (Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi))) result))
+       [ "x < 5", Bil.LT, 0, 4;
+         "x <= 5", Bil.LE, 0, 5;
+         "x = 5", Bil.EQ, 5, 5 ]);
 
     pin "VSA-04" "D4-4: doubt — constant condition keeps the state (top)"
       (fun () ->
@@ -193,8 +176,6 @@ let tests : unit Alcotest.test list =
         let c = value_at sub sol tids.(1) f in
         check "VSA-32" (Ws.elem Cbat_word.b1 c && not (Ws.elem Cbat_word.b0 c)));
 
-
-
     (* T4: the caller-alias fixpoint — the post-call state. *)
     pin "VSA-34" "T4-7: caller-alias — the post-call reload reads TOP (sound)"
       (fun () ->
@@ -202,8 +183,6 @@ let tests : unit Alcotest.test list =
         let sol = run_anchored fx.ca_sub in
         check "VSA-34"
           (Ws.is_top (value_after fx.ca_sub sol fx.ca_post_tid fx.ca_r2)));
-
-
 
     pin "VSA-36" "T4-9: RSP is preserved across the call"
       (fun () ->
@@ -238,43 +217,12 @@ let tests : unit Alcotest.test list =
         let v = value_at sub sol tids.(1) rbp in
         check "VSA-37" (Ws.equal v (Ws.singleton (w64 0x100))));
 
-
-
-
-
     (* F1: the map lattice's fold visits the explicitly-stored bindings. *)
-
-
-
 
     (* D7: degenerate cast/extract sizes degrade to top. *)
 
-
-
-
-
-
-
-
-
-
-
-
     (* D8: a signed widening cast is top at the target width; the source
    width remains part of the input value's identity. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     (* D7-15: the crash shape RAX := high:0[RAX] after a call — the
        untagged cast is denoted and the fixpoint completes. *)
@@ -286,13 +234,6 @@ let tests : unit Alcotest.test list =
         check "VSA-52" (Ws.is_top (value_at sub sol final_tid rax)));
 
     (* E2eH: equal's short-circuit changes no observable result. *)
-
-
-
-
-
-
-
 
     (* E2eC: the counter-shift BIR loop — the [0,N) window survives the
        shift. *)
@@ -336,7 +277,6 @@ let tests : unit Alcotest.test list =
 
     (* E2eD: channel-2 negative — the heap-indexed store never seeds. *)
 
-
     (* P3: the gate-free entry RSP anchor. *)
     pin "VSA-60"
       "P3-1: gate-free — the entry RSP anchor is denoted (entry input state carries RSP = the symbolic segment base at offset 0 — StackOff{0})"
@@ -349,7 +289,6 @@ let tests : unit Alcotest.test list =
              (Ws.stack_word_i64 0L)));
 
     (* L2b: the full 1-bit domain reads cardinality 2. *)
-
 
     pin "VSA-66"
       "round-pair: the two-def [(x >> k) << k] idiom — a temp saves x, the shift-back becomes the mask"
@@ -430,7 +369,6 @@ let tests : unit Alcotest.test list =
         let _, post = Core.Map.find_exn envs (Term.tid blk) in
         check "VSA-67"
           (Ws.equal (AI.find_word 64 post (Sm.version_at_end blk r)) (Ws.singleton (w64 0x2d))));
-
 
     pin "VSA-68"
       "a solve paused on a callee past the entry block resumes to the cold \

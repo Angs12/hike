@@ -1,7 +1,6 @@
 (* Forward-denotation pins: the transfer over BIR fixtures —
    denote_def/denote_defs/denote_imm_exp/reachable_jumps (the seam's
-   forward half).  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins.  The image-backed pins arm and
+   forward half).  The image-backed pins arm and
    disarm the section images inside their own closure. *)
 
 open Bap.Std
@@ -109,15 +108,6 @@ let tests : unit Alcotest.test list =
             check "FWD-01" (Ws.elem (w32 10) ws && Ws.elem (w32 20) ws && not (Ws.is_bottom ws))
         | Error _ -> check "FWD-01" false);
 
-    (* FWD-02: gate-free — every def is denoted without a tag. *)
-
-
-    (* FWD-03: the caller-alias fixture's pre-call state — the slot holds {42}. *)
-
-
-    (* FWD-04: pre-call rdi is the concrete aliased address {0xd0}. *)
-
-
     (* FWD-05: a top-address store invalidates the whole memory. *)
     pin "FWD-05"
       "gate-free — a top-addr store invalidates the memory (the store may hit any cell: \
@@ -144,9 +134,6 @@ let tests : unit Alcotest.test list =
         check "FWD-05"
           (not (Mem.equal mem1 (Mem.top (Mem.get_idx mem1)))
           && Mem.equal mem2 (Mem.top (Mem.get_idx mem2))));
-
-    (* FWD-06: the load at the invalidated slot reads top. *)
-
 
     (* FWD-07: EQ over a {0,1} operand is bool_top. *)
     pin "FWD-07"
@@ -433,9 +420,6 @@ let tests : unit Alcotest.test list =
             (not (Ws.is_top ws)
             && Ws.bitwidth ws = 128
             && Ws.elem (Cbat_word.of_int ~width:128 1) ws));
-
-    (* FWD-18: an arithmetic op with mismatched operand widths answers top
-       at the common width. *)
 
     (* FWD-19: the band round trip — a stored stack pointer reloads
        with its band, so the through-pointer accesses stay bounded. *)

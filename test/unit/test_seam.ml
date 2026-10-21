@@ -80,7 +80,6 @@ let tests : unit Alcotest.test list =
        run under the context's widening head records the empty meet's boundary
        in that same table. *)
 
-
     pin "SEAM-03"
       "a refine under the context's widening head records the empty meet's boundary in the context's own table"
       (fun () ->
