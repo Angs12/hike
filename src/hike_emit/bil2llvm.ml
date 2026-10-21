@@ -471,6 +471,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       sub_of;
       synthetic;
       synth;
+      let_counter = ref 0;
       llvm_ctx;
       llvm_module;
       sections;

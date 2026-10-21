@@ -49,11 +49,11 @@ let marker_of_size ctx size =
 
 (* The Let-binder's evaluation temp: a fresh identity with a name the
    lifted vocabulary never uses, so the substitution cannot capture. *)
-let fresh_let_var ctx scope (v : Var.t) : Var.t =
-  incr scope.let_counter;
+let fresh_let_var ctx (v : Var.t) : Var.t =
+  incr ctx.let_counter;
   let synth, v =
     Hike_synth.mint ~addr_bits:ctx.addr_bits
-      (Hike_synth.K_let (!(scope.let_counter), Var.typ v)) ctx.synth
+      (Hike_synth.K_let (!(ctx.let_counter), Var.typ v)) ctx.synth
   in
   ctx.synth <- synth;
   v
@@ -195,7 +195,7 @@ and create_exp ctx scope llvm_builder blk_tid exp : Bil2llvm_value.t =
         load_cell ctx llvm_builder ~ptr:false size
           (tls_ptr ctx scope llvm_builder blk_tid cls))
   | Let (var, e, body) ->
-      let unique_var = fresh_let_var ctx scope var in
+      let unique_var = fresh_let_var ctx var in
       insert_local scope blk_tid unique_var (eval e);
       eval (Exp.substitute (Var var) (Var unique_var) body)
   | Ite (cond, true_exp, false_exp) ->

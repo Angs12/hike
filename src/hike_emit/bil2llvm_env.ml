@@ -114,6 +114,10 @@ type emit_ctx = {
   (* The KB's synthetic-variable table: every synthetic var's kind, so
      the evaluator resolves through one function. *)
   mutable synth : Hike_synth.table;
+  (* The Let-temp counter.  A var's identity ignores its sort, so the
+     table cannot hold two different kinds under one name: the names
+     must be unique across the whole emission, not just one sub. *)
+  let_counter : int ref;
   (* Bound once per emission. *)
   llvm_ctx : Llvm.llcontext;
   llvm_module : Llvm.llmodule;
@@ -175,8 +179,6 @@ type sub_scope = {
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
   undef_vals : value_map ref;
-  (* The Let-temp counter: names need only sub-scoped uniqueness. *)
-  let_counter : int ref;
   (* The lock-marker brackets' per-def plans, computed once per sub
      before any body emits.  Key: the def's tid. *)
   atomic_plan : atomic_action Tid.Map.t ref;
@@ -206,7 +208,6 @@ let fresh_scope () : sub_scope =
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     undef_vals = ref WVarMap.empty;
-    let_counter = ref 0;
     atomic_plan = ref Tid.Map.empty;
     entries = ref WVarMap.empty;
     definitions = ref WVarMap.empty;
