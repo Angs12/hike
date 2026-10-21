@@ -285,7 +285,7 @@ let solve_with_synth ~synth ?(images = [])
       ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hv.Done (envs, sub', block_addrs', synth, _) -> (envs, sub', block_addrs', synth)
+  | Hv.Done { envs; sub; block_addrs; synth; _ } -> (envs, sub, block_addrs, synth)
   | Hv.Paused _ -> Alcotest.fail "solve: a fixture callee is blocked"
 
 let solve ~synth ?images ?block_addrs ~callee target sub =

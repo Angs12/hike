@@ -40,7 +40,7 @@ let solve_ssa ~synth ~callee target sub =
       ~block_addrs:Addr.Map.empty ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hike.Vsa.Done (envs, solved, _, synth, _) -> (envs, solved, synth)
+  | Hike.Vsa.Done { envs; sub; synth; _ } -> (envs, sub, synth)
   | Hike.Vsa.Paused _ -> failwith "dce probe: a callee is blocked"
 
 let flag_cone ~abi removed_defs =

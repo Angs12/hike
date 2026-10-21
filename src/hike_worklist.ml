@@ -534,21 +534,20 @@ and solve ?previous t frame (raw : sub term) : func * Hike_vsa.continuation =
   in
   let images = ctx.images and foreign_slots = ctx.linker_slots in
   let rec run = function
-    | Hike_vsa.Done (envs, solved, block_addrs, synth, continuation) ->
-      t.synth <- synth;
-      (envs, solved, block_addrs, continuation)
+    | Hike_vsa.Done completed -> completed
     | Paused p ->
-      Core.Set.iter p.p_blocked ~f:(fun tid ->
+      Core.Set.iter (Hike_vsa.blocked p) ~f:(fun tid ->
           ignore (summary t frame (Core.Hashtbl.find_exn t.by_tid tid)));
       run (Hike_vsa.resume ctx.target ~lookup ~images ~callee ~foreign_slots p)
   in
-  let envs, solved, block_addrs, continuation =
+  let { Hike_vsa.envs; sub = solved; block_addrs; synth; continuation } =
     run (match previous with
         | None -> Hike_vsa.start ctx.target ~lookup ~images ~callee ~block_addrs
             ~foreign_slots ~synth:t.synth sub
         | Some previous -> Hike_vsa.restart ctx.target ~lookup ~images ~callee ~block_addrs
             ~foreign_slots ~synth:t.synth ~previous ~woken sub)
   in
+  t.synth <- synth;
   let summary =
     S.of_solved ~abi:t.abi ~synth:t.synth
       ~callee:(fun tid ->

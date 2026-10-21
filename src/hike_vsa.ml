@@ -46,10 +46,20 @@ type paused = {
   p_synth : Hike_synth.table;
 }
 
+let blocked (p : paused) : Tid.Set.t = p.p_blocked
+
 type continuation = { canonical : sub term; seed : Vsa.vsa_sol }
 
+type completed = {
+  envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t;
+  sub : sub term;
+  block_addrs : Tid.t Addr.Map.t;
+  synth : Hike_synth.table;
+  continuation : continuation;
+}
+
 type outcome =
-  | Done of (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table * continuation
+  | Done of completed
   | Paused of paused
 
 (* The callees the solution's reachable calls wait on, and the blocks
@@ -150,7 +160,6 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
   in
   Vsa.with_images images (fun () ->
       let rec phases (resolved : Tid.Set.t Tid.Map.t)
-          (block_addrs : Tid.t Addr.Map.t)
           (init : Vsa.vsa_sol option) (wake : Tid.Set.t) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol = solve_once sub ~resolved ~init:seed ~wake in
@@ -162,15 +171,15 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
         else
           match Hike_cfg_complete.advance ~abi ~sol ~synth:!synth ~block_addrs
                   ~foreign_slots sub resolved with
-          | Grew resolved -> phases resolved block_addrs (Some sol) Tid.Set.empty
-          | Drained materialized -> `Drained (sol, block_addrs, resolved, materialized)
+          | Grew resolved -> phases resolved (Some sol) Tid.Set.empty
+          | Drained materialized -> `Drained (sol, resolved, materialized)
       in
       (* A sub without a converged solution has no sound summary or
          body; the lift stops. *)
       try
-      match phases resolved block_addrs seed wake with
+      match phases resolved seed wake with
       | `Paused p -> Paused p
-      | `Drained (sol, block_addrs', resolved, materialized) ->
+      | `Drained (sol, resolved, materialized) ->
         let continuation = { canonical = sub; seed = sol } in
         (* The materialization changes the edge set; the SSA follows, and
            the blocks it renamed are solved again from the warm solution
@@ -212,7 +221,7 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
         let envs, stamped = Vsa.stamp_envs_of_sol ~synth:!synth ~sol sub' in
         let continuation = { continuation with canonical =
             Hike_ssa.retain_history ~from:stamped continuation.canonical } in
-        Done (envs, stamped, block_addrs', !synth, continuation)
+        Done { envs; sub = stamped; block_addrs; synth = !synth; continuation }
       with Vsa.Fixpoint_not_converged (n, _) ->
         failwith
           (Printf.sprintf "hike-vsa: sub %s: fixpoint not converged in %d iterations"

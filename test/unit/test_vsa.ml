@@ -400,11 +400,9 @@ let tests : unit Alcotest.test list =
         match solve ~callee:(fun _ -> Vsa.Call_effects.Blocked) with
         | Hv.Done _ -> check "VSA-68.paused" false
         | Hv.Paused p ->
-          check "VSA-68.blocked" (Core.Set.equal p.p_blocked (Tid.Set.singleton callee_tid));
-          check "VSA-68.seed"
-            (AI.equal (Graphlib.Std.Solution.get p.p_seed tids.(2)) AI.bottom);
+          check "VSA-68.blocked" (Core.Set.equal (Hv.blocked p) (Tid.Set.singleton callee_tid));
           match resume p ~callee:(fun _ -> writes_rcx), solve ~callee:(fun _ -> writes_rcx) with
-          | Hv.Done (warm, warm_sub, _, _, _), Hv.Done (cold, _, _, _, _) ->
+          | Hv.Done { envs = warm; sub = warm_sub; _ }, Hv.Done { envs = cold; _ } ->
             check "VSA-68.equal"
               (Core.Map.equal (fun (a, b) (c, d) -> AI.equal a c && AI.equal b d) warm cold);
             check "VSA-68.flowed"

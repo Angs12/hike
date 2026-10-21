@@ -85,7 +85,7 @@ let solve ~synth ~callee target (sub : sub term) =
       ~synth
       ~foreign_slots:Core.Int64.Set.empty sub
   with
-  | Hike.Vsa.Done (envs, sub', block_addrs, synth, _) -> (envs, sub', block_addrs, synth)
+  | Hike.Vsa.Done { envs; sub; block_addrs; synth; _ } -> (envs, sub, block_addrs, synth)
   | Hike.Vsa.Paused _ -> failwith "probe: a callee is blocked"
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.

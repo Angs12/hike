@@ -26,27 +26,27 @@ open Bap_core_theory
 
   type lookup_fn = int64 -> Tid.t option
 
-  (** A solve paused on callees with no summary yet: [p_seed] is the
-      phase's solution (every blocked call's continuation bottom),
-      [p_blocked] the callees it waits on, [p_wake] the blocks of the
-      blocked calls. *)
-  type paused = {
-    p_sub : sub term;
-    p_resolved : Tid.Set.t Tid.Map.t;
-    p_block_addrs : Tid.t Addr.Map.t;
-    p_seed : Cbat_vsa.vsa_sol;
-    p_blocked : Tid.Set.t;
-    p_wake : Tid.Set.t;
-  p_synth : Hike_synth.table;
+  (** The solver retains the matching body, seed and wake set until resume. *)
+  type paused
+
+  (** The callees whose final summaries this solve needs. *)
+  val blocked : paused -> Tid.Set.t
+
+  (** The canonical body and its seed stay paired across decoder growth. *)
+  type continuation = private {
+    canonical : sub term;
+    seed : Cbat_vsa.vsa_sol;
   }
 
-  (** A solve's end: the per-block (pre, post) environments, the
-      rewritten sub and the grown block-address map, or a pause. *)
-  type continuation = { canonical : sub term; seed : Cbat_vsa.vsa_sol }
+  type completed = {
+    envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t;
+    sub : sub term;
+    block_addrs : Tid.t Addr.Map.t;
+    synth : Hike_synth.table;
+    continuation : continuation;
+  }
 
-  type outcome =
-    | Done of (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t * Hike_synth.table * continuation
-    | Paused of paused
+  type outcome = Done of completed | Paused of paused
 
   (** The fused solve under [callee]: phases of solve + resolution
       growth, pausing when a reachable call's callee is [Blocked]. *)
