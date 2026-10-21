@@ -48,6 +48,7 @@
   cbat_forward
   cbat_backward
   cbat_runctx
+  cbat_dispatch
   cbat_wto
   cbat_dispatch_graph
   cbat_mem_key

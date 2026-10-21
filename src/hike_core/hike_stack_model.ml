@@ -823,23 +823,30 @@ let map_effects ~read ~write j =
     { Term_effects.reads = Base.List.map effects.reads ~f:read;
       writes = Base.List.map effects.writes ~f:write }
 
+(* One block's derived lanes.  [outgoing] is the sub-level return lane
+   set (the SP plus the signature's return operands); a new block can be
+   prepared without touching the rest of the sub. *)
+let prepare_block_effects ~synth ~abi ~callee ~outgoing (blk : blk term) :
+    blk term =
+  let boundary = Core.Set.to_list (blk_boundary_reads synth blk) in
+  Term.map jmp_t blk ~f:(fun j ->
+      let effects =
+        if Hike_return.is_jmp j then
+          { Term_effects.reads = outgoing; writes = [] }
+        else match Jmp.kind j with
+          | Ret _ -> { Term_effects.reads = outgoing; writes = [] }
+          | _ -> call_effects ~abi ~callee j in
+      let reads = match Jmp.kind j with
+        | Call _ -> effects.reads @ boundary
+        | _ -> effects.reads in
+      Term.set_attr j effects_tag { effects with reads })
+
 let prepare_effects ~synth ~abi ~callee sub =
   let outgoing = abi.Abi.sp :: (sig_rets sub
       |> Base.List.concat_map ~f:(fun arg ->
           Exp.free_vars (Arg.rhs arg) |> Core.Set.to_list)) in
-  Term.map blk_t sub ~f:(fun blk ->
-      let boundary = Core.Set.to_list (blk_boundary_reads synth blk) in
-      Term.map jmp_t blk ~f:(fun j ->
-          let effects =
-            if Hike_return.is_jmp j then
-              { Term_effects.reads = outgoing; writes = [] }
-            else match Jmp.kind j with
-              | Ret _ -> { Term_effects.reads = outgoing; writes = [] }
-              | _ -> call_effects ~abi ~callee j in
-          let reads = match Jmp.kind j with
-            | Call _ -> effects.reads @ boundary
-            | _ -> effects.reads in
-          Term.set_attr j effects_tag { effects with reads }))
+  Term.map blk_t sub
+    ~f:(prepare_block_effects ~synth ~abi ~callee ~outgoing)
 
 let sub_reads sub =
   Term.enum blk_t sub |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->

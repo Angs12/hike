@@ -26,6 +26,10 @@ type t = {
      The worklist seeds them directly — a warm seed's stable prefix
      never enqueues them (propagation is change-driven). *)
   gained_preds : Tid.Set.t;
+  (* In-place growth: add one CFG/dispatch edge to the same tables.  The
+     WTO is not updated; a new block lies outside its position map and is
+     queued in [unplaced]. *)
+  add_edge : source:tid -> target:tid -> unit;
 }
 
 (* The resolved dispatches' extra successor edges, keyed by BLOCK: the
@@ -67,8 +71,9 @@ let make ~(cfg : Graphs.Tid.t) ~(blocks : Tid.Set.t)
         in
         Core.Map.set acc ~key:v ~data:ss)
   in
+  let succs_map = ref succs_map in
   let succs (v : tid) : tid list =
-    Option.value (Core.Map.find succs_map v) ~default:[]
+    Option.value (Core.Map.find !succs_map v) ~default:[]
   in
   let preds =
     Graphs.Tid.nodes cfg
@@ -84,10 +89,20 @@ let make ~(cfg : Graphs.Tid.t) ~(blocks : Tid.Set.t)
             if Base.List.mem ps v ~equal:Tid.equal then acc
             else Core.Map.set acc ~key:w ~data:(v :: ps)))
   in
+  let preds_map = ref preds in
+  let preds (v : tid) : tid list =
+    Option.value (Core.Map.find !preds_map v) ~default:[]
+  in
   let gained_preds =
     Core.Map.fold extras ~init:Tid.Set.empty
       ~f:(fun ~key:_ ~data:es acc -> Core.Set.union acc es)
   in
-  { succs;
-    preds = (fun v -> Option.value ~default:[] (Core.Map.find preds v));
-    gained_preds }
+  let add_edge ~(source : tid) ~(target : tid) : unit =
+    let ss = Option.value (Core.Map.find !succs_map source) ~default:[] in
+    if not (Base.List.mem ss target ~equal:Tid.equal) then
+      succs_map := Core.Map.set !succs_map ~key:source ~data:(target :: ss);
+    let ps = Option.value (Core.Map.find !preds_map target) ~default:[] in
+    if not (Base.List.mem ps source ~equal:Tid.equal) then
+      preds_map := Core.Map.set !preds_map ~key:target ~data:(source :: ps)
+  in
+  { succs; preds; gained_preds; add_edge }

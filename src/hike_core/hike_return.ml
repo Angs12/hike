@@ -18,3 +18,6 @@ let is_jmp (j : jmp term) : bool =
   | Goto _ | Int _ -> false
 
 let create () : jmp term = Jmp.create_ret (Direct tid)
+
+let create_ret ~jmp_tid () : jmp term =
+  Jmp.create_ret ~tid:jmp_tid (Direct tid)

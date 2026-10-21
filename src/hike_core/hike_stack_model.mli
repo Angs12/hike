@@ -290,6 +290,11 @@ val writes :
   Var.Set.t
 val prepare_effects :
   synth:Hike_synth.table -> abi:Abi.t -> callee:(Tid.t -> sub term option) -> sub term -> sub term
+(** The per-block part of [prepare_effects]; [outgoing] is the sub-level
+    return lane set (the SP and the signature's return operands). *)
+val prepare_block_effects :
+  synth:Hike_synth.table -> abi:Abi.t -> callee:(Tid.t -> sub term option) ->
+  outgoing:var list -> blk term -> blk term
 val map_effects : read:(var -> var) -> write:(var -> var) -> jmp term -> jmp term
 
 (* The lane type/kind flags on the arg terms. *)

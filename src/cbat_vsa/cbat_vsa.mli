@@ -22,6 +22,9 @@ module AI = Cbat_ai_representation
 (* The one policy for what survives a call. *)
 module Call_effects = Cbat_call_effects
 
+(* Dispatch guard construction: target binding and ordered arm guards. *)
+module Dispatch = Cbat_dispatch
+
 (* Re-exported memory abstraction. *)
 module Mem = Cbat_ai_memmap
 
@@ -50,6 +53,9 @@ end
 
 
 type vsa_sol = (tid, AI.t) Solution.t
+
+(** The canonical run context, for the site materializer. *)
+module Runctx = Cbat_runctx
 
 (* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
@@ -86,8 +92,59 @@ val normalize_round_with_synth : synth:Hike_synth.table ref -> Sub.t -> Sub.t
 (** Clear the per-solve pure-op memo.  Call once at a solve boundary. *)
 val reset_memos : unit -> unit
 
-(* The fixpoint from [init]; a [wake] block's successors re-join even
-   when no state changes (a resumed solve's blocked calls). *)
+(** The complete persisted solve state is the canonical
+    [Cbat_runctx.refine_ctx]: block facts, delivered edge states,
+    landmarks, synth, lookup and oracle, the solution store/default, the
+    incoming joins, the worklist ([pending]/[unplaced]),
+    [total_processed], [head_visits], the saved block cursor, the
+    resolution view, and all derived graph/order/plan caches.  A warm
+    restart installs that same value, never [mk_rctx] and never a
+    rebuilt field.
+
+    [state_sol] exposes the current solution, [state_current] the block
+    whose fan-out was in progress, and
+    [state_sub]/[state_resolved]/[state_synth] the current static
+    views. *)
+type run_state = Cbat_runctx.refine_ctx
+
+val state_sol : run_state -> vsa_sol
+val state_ctx : run_state -> Cbat_runctx.refine_ctx
+val state_current : run_state -> Tid.t option
+val state_pending : run_state -> Tid.Set.t
+val state_heads : run_state -> Tid.Set.t
+val state_head_of : run_state -> Tid.t -> Tid.t option
+val state_sub : run_state -> Sub.t
+val state_resolved : run_state -> Tid.Set.t Tid.Map.t
+val state_synth : run_state -> Hike_synth.table
+
+(* External restart helpers: replace the solution store, and add/replace
+   only the facts of a sub an install changed.  Neither rebuilds the
+   [refine_ctx]; [state_with_sub] never calls [mk_rctx]. *)
+val state_with_sol : run_state -> vsa_sol -> run_state
+val state_with_sub : run_state -> Sub.t -> run_state
+val state_with_synth : run_state -> Hike_synth.table -> run_state
+
+(* A site materialization request.  The callback owns target enumeration,
+   validation and any lifting/solving; the solver owns the source-block
+   rewrite, facts/conds/plan/graph/WTO refresh and the current fan-out
+   delivery.  A [None] result leaves the indirect transfer untouched. *)
+type materialize_transfer =
+  state:run_state ->
+  source:Tid.t ->
+  blk:blk term ->
+  jmp:jmp term ->
+  env:AI.t ->
+  Dispatch.materialized option
+
+(* The fixpoint from [init].  With [state] the complete persisted
+   context (including the whole [refine_ctx]) and worklist are installed
+   as-is.  A paused state resumes exactly at [state_current] and drains
+   its saved worklist; an unpaused state is an external restart and
+   refreshes only the woken/newly-resolved sources.  Without [state] the
+   entry is seeded.  [materialize_transfer] is asked for each indirect
+   Goto/indirect Call in a source fan-out before its outgoing edges are
+   delivered; an installed transfer's new case edges are delivered by
+   that same fan-out. *)
 val static_graph_vsa :
   abi:Hike_abi.t ->
   def_reads:(def term -> Var.Set.t) ->
@@ -99,7 +156,9 @@ val static_graph_vsa :
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
   ?wake:Tid.Set.t ->
-  synth:Hike_synth.table ref ->  Sub.t -> vsa_sol -> vsa_sol
+  ?state:run_state ->
+  ?materialize_transfer:materialize_transfer ->
+  synth:Hike_synth.table ref -> Sub.t -> vsa_sol -> vsa_sol * run_state
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
    completion loop, ONLY.  Consumers use the seam [denote_exp_at];

@@ -18,20 +18,19 @@ type site = {
 }
 
 (* What a call site reads about its callee: its published kill summary
-   ([None] = any caller-saved GPR), or [Blocked] while the callee has no
-   summary yet — nothing flows past the call until it has one, so a
-   paused solve resumes from a state below its final one. *)
-type callee = Summary of Core.Int.Set.t option | Blocked
+   ([None] = any caller-saved GPR).  The caller obtains it by solving the
+   callee recursively; an already-final summary is read directly. *)
+type callee = Summary of Core.Int.Set.t option
 
 val stack_arg_ranges :
   synth:Hike_synth.table ->
   abi:Hike_abi.t -> block:Bap.Std.blk Bap.Std.term -> entry:AI.t -> AI.t ->
   (Cbat_word.t * Cbat_word.t) list
 
-(* An indirect target's callee: the target exp's denotation in the
-   pre-call env — a singleton word naming a lifted sub through [lookup]
-   reads that sub through [callee]; anything unresolved is
-   [Summary None]. *)
+(* An indirect target's callee: every code word in the target exp's
+   pre-call denotation reads its lifted sub through [callee]; the call
+   keeps the intersection of the solved targets' preserved sets.  Any
+   unresolved target makes the whole call [Summary None]. *)
 val indirect_callee :
   synth:Hike_synth.table ->
   lookup:(int64 -> Tid.t option) ->

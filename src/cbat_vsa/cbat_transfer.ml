@@ -125,27 +125,49 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
          | Some lo, Some hi when Cbat_word.equal lo hi -> Some (o, lo)
          | _ -> None)
       | _ -> None in
+    (* A plain singleton's concrete word.  A module address is absolute
+       (its link-time word IS the runtime value), so an equality against
+       a plain word of the same value is decidable; the representation
+       differs, the value does not. *)
+    let plain_singleton (v : wordset) : Cbat_word.t option =
+      match WordSet.origin v with
+      | Some _ -> None
+      | None ->
+        (match WordSet.min_elem v, WordSet.max_elem v with
+         | Some lo, Some hi when Cbat_word.equal lo hi -> Some lo
+         | _ -> None) in
+    let decide b = wordset_of_bool (if negate then not b else b) in
+    let generic () =
+      let v1_size = WordSet.cardinality v1 in
+      let v2_size = WordSet.cardinality v2 in
+      if Cbat_word.is_zero v1_size || Cbat_word.is_zero v2_size then bool_bottom
+      else if Word_ops.is_one v1_size && Word_ops.is_one v2_size then begin
+#ifdef VSA_DEBUG
+        debug_b16_eq v1 v2;
+#endif
+        wordset_of_bool
+          (if negate then not (WordSet.equal v1 v2) else WordSet.equal v1 v2)
+      end
+      else if WordSet.overlap v1 v2 then begin
+#ifdef VSA_DEBUG
+        debug_b16_pair ~negate v1 v2;
+#endif
+        bool_top
+      end
+      else if negate then btrue else bfalse
+    in
     match rel_singleton v1, rel_singleton v2 with
     | Some (o1, a), Some (o2, b) when Hike_origin.equal o1 o2 ->
-      wordset_of_bool (if negate then not (Cbat_word.equal a b) else Cbat_word.equal a b)
-    | _ ->
-    (let v1_size = WordSet.cardinality v1 in
-    let v2_size = WordSet.cardinality v2 in
-    if Cbat_word.is_zero v1_size || Cbat_word.is_zero v2_size then bool_bottom
-    else if Word_ops.is_one v1_size && Word_ops.is_one v2_size then begin
-#ifdef VSA_DEBUG
-      debug_b16_eq v1 v2;
-#endif
-      wordset_of_bool
-        (if negate then not (WordSet.equal v1 v2) else WordSet.equal v1 v2)
-    end
-    else if WordSet.overlap v1 v2 then begin
-#ifdef VSA_DEBUG
-      debug_b16_pair ~negate v1 v2;
-#endif
-      bool_top
-    end
-    else if negate then btrue else bfalse)
+      decide (Cbat_word.equal a b)
+    | Some (Hike_origin.Rip _, a), _ -> (
+      match plain_singleton v2 with
+      | Some b -> decide (Cbat_word.equal a b)
+      | None -> generic ())
+    | _, Some (Hike_origin.Rip _, b) -> (
+      match plain_singleton v1 with
+      | Some a -> decide (Cbat_word.equal a b)
+      | None -> generic ())
+    | _ -> generic ()
   in
   let op_fn : wordset -> wordset -> wordset =
     match op with

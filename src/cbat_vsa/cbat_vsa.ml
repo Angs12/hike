@@ -20,6 +20,9 @@ module Stages = Cbat_vsa_stages
 
 module AI = Cbat_ai_representation
 module Call_effects = Cbat_call_effects
+
+(* The dispatch guard construction shared with the Hike worklist. *)
+module Dispatch = Cbat_dispatch
 module WordSet = Cbat_clp_set_composite
 module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word
@@ -51,14 +54,12 @@ let visit_budget (wto : Cbat_wto.comp list) : int =
   in
   Stdlib.max min_visit_budget (List.fold wto ~init:0 ~f:(go 0))
 
-(* WTO over the engine cfg; [succ]/[pred] are the dispatch graph's
-   accessors — the resolved dispatches' extra edges ride BOTH, so the
-   ordering closes on the same graph pair it walks. *)
+(* WTO over the engine's current block set; [succ]/[pred] are the
+   dispatch graph's accessors — the resolved dispatches' extra edges ride
+   BOTH, so the ordering closes on the same graph pair it walks. *)
 let wto_of_cfg ~(succ : tid -> tid list) ~(pred : tid -> tid list)
-    (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
-  Cbat_wto.wto
-    ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
-    ~succ ~pred
+    ~(nodes : tid list) : Cbat_wto.comp list =
+  Cbat_wto.wto ~nodes ~succ ~pred
 
 
 (* Solution still changing at the step cap. *)
@@ -142,53 +143,6 @@ let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes
   { rctx with
     Cbat_runctx.rc_nonneg =
       (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
-
-(* Preserved registers: the convention's SP plus its callee-saved GPRs.
-
-   The scan for the synthesizer's temporaries is gone: on the SSA path
-   every one of them carries a version, and a versioned word keeps its
-   value across a call ([Cbat_ai_representation.top_words_except]) --
-   no call redefines a version.  The base lanes the convention names
-   are the ones a call can clobber. *)
-let preserved_of_sub ~(abi : Hike_abi.t) (_s : sub term) : Int.Set.t =
-  let regs =
-    abi.Hike_abi.sp :: abi.Hike_abi.thread_pointer :: abi.callee_saved
-    |> Var.Set.of_list in
-  Cbat_var_id.intern_set regs
-
-
-(* Per-sub static edge table: per (block, jmp) accumulated cond, in
-   the completed (negation-free) form. *)
-let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
-  let ircfg = Sub.to_cfg sub in
-  Graphs.Ir.edges ircfg
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc e ->
-      let src = Term.tid (Graphs.Ir.Node.label (Graphs.Ir.Edge.src e)) in
-      let jmp = Term.tid (Graphs.Ir.Edge.jmp e) in
-      let cond = Cbat_vsa_utils.complete_cond (Graphs.Ir.Edge.cond e ircfg) in
-      Core.Map.update acc src ~f:(fun by_jmp ->
-          Core.Map.set (Option.value by_jmp ~default:Tid.Map.empty)
-            ~key:jmp ~data:cond))
-
-(* Per-sub disabled-continuation table: each jmp observes the NEXT
-   jmp's cond — the excluded edge whose exclusion becomes a landmark. *)
-let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
-    (sub : sub term) : exp Tid.Map.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc b ->
-      let js = Term.enum jmp_t b |> Seq.to_list in
-      let cond j =
-        Option.bind (Core.Map.find edge_conds (Term.tid b)) ~f:(fun by_jmp ->
-            Core.Map.find by_jmp (Term.tid j)) in
-      let rec pair js dcs acc =
-        match js, dcs with
-        | [], _ | _, [] -> acc
-        | j :: js, Some e :: dcs ->
-          pair js dcs (Core.Map.set acc ~key:(Term.tid j) ~data:e)
-        | _ :: js, None :: dcs -> pair js dcs acc in
-      match List.map js ~f:cond with
-      | [] -> acc
-      | _ :: tl -> pair js tl acc)
 
 (* The widen cycle's need set: the block SCC's variable SCCs (a
    singleton variable SCC needs itself iff self-looping; every
@@ -429,6 +383,100 @@ let debug_churn ~(head : bool) ~(has_widened : bool) ~(head_arm : string)
          (if mono then "grow" else "nonmono") detail)
 #endif
 
+(* [run_state] is the canonical context, not a wrapper around one. *)
+type run_state = Cbat_runctx.refine_ctx
+
+(* A site materialization request.  The callback owns target enumeration,
+   validation and any lifting/solving; VSA owns installing the returned
+   transfer in the source block and delivering its edges in the current
+   fan-out.  [None] leaves the indirect transfer untouched. *)
+type materialize_transfer =
+  state:run_state ->
+  source:Tid.t ->
+  blk:blk term ->
+  jmp:jmp term ->
+  env:AI.t ->
+  Dispatch.materialized option
+
+let no_materialize_transfer : materialize_transfer =
+  fun ~state:_ ~source:_ ~blk:_ ~jmp:_ ~env:_ -> None
+
+let sol_map_of_sol (sol : vsa_sol) : AI.t Tid.Map.t =
+  Solution.enum sol
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k, v) ->
+      Core.Map.set m ~key:k ~data:v)
+
+let state_sol (st : run_state) : vsa_sol =
+  Solution.create st.rs_store st.rs_default
+
+(* The canonical context: [run_state] is this value, not a wrapper. *)
+let state_ctx (st : run_state) : Cbat_runctx.refine_ctx = st
+
+let state_current (st : run_state) : Tid.t option = st.rs_current
+let state_pending (st : run_state) : Tid.Set.t = st.rs_pending
+let state_sub (st : run_state) : Sub.t = st.rs_sub
+let state_resolved (st : run_state) : Tid.Set.t Tid.Map.t = st.rs_resolved
+let state_synth (st : run_state) : Hike_synth.table =
+  !(st.rc_synth)
+
+(* The widening heads and each block's innermost head, saved with the
+   state.  Exposed for growth pins and the WTO evidence. *)
+let state_heads (st : run_state) : Tid.Set.t = st.rs_heads
+let state_head_of (st : run_state) (v : Tid.t) : Tid.t option =
+  Hashtbl.find st.rs_block_to_head v
+
+(* Replace the solution/store for an external restart, keeping the whole
+   [refine_ctx] (block facts, delivered edges, landmarks, synth and
+   lookup), the incoming joins and the visit counters.  A restart has no
+   saved cursor, and woken sources are refreshed explicitly. *)
+let state_with_sol (st : run_state) (sol : vsa_sol) : run_state =
+  { st with
+    rs_store = sol_map_of_sol sol;
+    rs_default = Solution.default sol;
+    rs_pending = Tid.Set.empty;
+    rs_unplaced = Tid.Set.empty;
+    rs_current = None;
+    rs_reseed = Tid.Set.empty;
+    rs_fan = Tid.Set.empty;
+    rs_heads = st.rs_heads;
+    rs_block_to_head = st.rs_block_to_head }
+
+(* Add or replace the facts of a sub a site install changed.  This is the
+   only way [rc_blocks] grows after construction; [mk_rctx] is never
+   called again, and an unchanged block keeps its existing facts. *)
+let state_with_sub (st : run_state) (s : Sub.t) : run_state =
+  let abi = st.rc_abi in
+  Term.enum blk_t s
+  |> Seq.iter ~f:(fun b ->
+      let tid = Term.tid b in
+      match Core.Map.find st.rc_blocks tid with
+      | Some bf when phys_equal bf.Cbat_runctx.bf_term b -> ()
+      | _ ->
+        st.rc_blocks <-
+          Core.Map.set st.rc_blocks ~key:tid
+            ~data:(Cbat_runctx.block_facts_of_block ~abi b));
+  st.rc_preserved <- Cbat_runctx.preserved_of_sub ~abi s;
+  st.rc_edge_conds <- Cbat_runctx.edge_conds_of s;
+  st.rc_disabled_conds <-
+    Cbat_runctx.disabled_conds_of ~edge_conds:st.rc_edge_conds s;
+  (* The graph, ordering and plans are functions of the old sub; the new
+     sub invalidates them.  The solve rebuilds them once, not per resume. *)
+  { st with rs_sub = s;
+    rs_dg = None;
+    rs_wto = None;
+    rs_smry = None;
+    rs_need = None;
+    rs_max_steps = None;
+    rs_plan = None;
+    rs_heads = Tid.Set.empty;
+    rs_block_to_head = Hashtbl.create (module Tid) }
+
+(* Install a newer synth table in the same context cell; no block facts
+   or plans are rebuilt. *)
+let state_with_synth (st : run_state) (synth : Hike_synth.table) : run_state =
+  st.rc_synth := synth;
+  st
+
 let static_graph_vsa
     ~(abi : Hike_abi.t)
     ~def_reads ~def_writes ~phi_reads ~phi_writes ~jmp_reads
@@ -437,88 +485,659 @@ let static_graph_vsa
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     ?(wake : Tid.Set.t = Tid.Set.empty)
+    ?state
+    ?(materialize_transfer : materialize_transfer = no_materialize_transfer)
     ~(synth : Hike_synth.table ref)
-    (s : Sub.t) (init : vsa_sol) : vsa_sol =
-  let s = normalize_round_with_synth ~synth s in
-  let preserved = preserved_of_sub ~abi s in
-  let edge_conds = edge_conds_of s in
-  let disabled_conds = disabled_conds_of ~edge_conds s in
+    (s_arg : Sub.t) (init : vsa_sol) : vsa_sol * run_state =
+  let fresh = Option.is_none state in
+  let st =
+    match state with
+    | Some st -> st
+    | None ->
+      let s = normalize_round_with_synth ~synth s_arg in
+      let ctx =
+        mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_writes
+          ~jmp_reads ~synth ~sub_lookup s in
+      { ctx with
+        rs_sub = s;
+        rs_store = sol_map_of_sol init;
+        rs_default = Solution.default init;
+        rs_incoming = Tid.Map.empty;
+        rs_pending = Tid.Set.empty;
+        rs_unplaced = Tid.Set.empty;
+        rs_total_processed = 0;
+        rs_head_visits = Hashtbl.create (module Tid);
+        rs_current = None;
+        rs_resolved = resolved;
+        rs_reseed = Tid.Set.empty;
+        rs_fan = Tid.Set.empty;
+        rs_heads = Tid.Set.empty;
+        rs_block_to_head = Hashtbl.create (module Tid);
+        rs_dg = None;
+        rs_wto = None;
+        rs_smry = None;
+        rs_need = None;
+        rs_max_steps = None;
+        rs_plan = None }
+  in
+  let s = st.rs_sub in
+  let rctx = st in
+  (* The persisted rctx owns the synth ref; an external restart may carry
+     a newer table value, so refresh the cell without rebuilding. *)
+  rctx.Cbat_runctx.rc_synth := !synth;
+  (* The active resolution view: persisted on save, and the source of
+     every plan's edge relation. *)
+  let resolved_ref = ref resolved in
+  let saved_sub = ref s in
+  let preserved = ref st.rc_preserved in
+  let edge_conds = ref st.rc_edge_conds in
+  let disabled_conds = ref st.rc_disabled_conds in
+  (* Reuse the persisted graph/order/plan caches only for a paused resume
+     with the same static inputs.  A changed sub or resolution view
+     invalidates them in [state_with_sub]. *)
+  let resume_meta =
+    match state with
+    | Some st when
+        Core.Map.equal (fun a b -> Tid.Set.equal a b)
+          st.rs_resolved resolved ->
+      Some st
+    | _ -> None
+  in
+  (* Plans are the one derived cache the solver owns: a site install
+     invalidates only the affected source, and the next lookup rebuilds
+     against the current blocks/edge conditions/resolution.  A resumed
+     solve reuses the persisted closure until it changes. *)
+  let compute_plan (source : Tid.t) : Cbat_runctx.block_plan =
+    Cbat_forward.plan_block ~resolved:!resolved_ref ~edge_conds:!edge_conds
+      ~disabled:!disabled_conds ~rctx source
+  in
+  let plan_table : Cbat_runctx.block_plan Tid.Table.t = Tid.Table.create () in
+  let resumed_plan =
+    ref (match resume_meta with Some st -> st.rs_plan | None -> None) in
+  let plan_of source =
+    match Hashtbl.find plan_table source with
+    | Some p -> p
+    | None ->
+      let p = match !resumed_plan with
+        | Some f -> f source
+        | None -> compute_plan source in
+      Hashtbl.set plan_table ~key:source ~data:p;
+      p
+  in
+  let set_plan source p = Hashtbl.set plan_table ~key:source ~data:p in
+  let rebuild_plan source = set_plan source (compute_plan source) in
   (* Pseudo-nodes never reach denotation. *)
-  let cfg =
-    Sub.to_graph s
+  let cfg_of_sub (sub : Sub.t) =
+    Sub.to_graph sub
     |> Graphs.Tid.Node.remove Graphs.Tid.start
-    |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  let rctx =
-    mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_writes
-      ~jmp_reads ~synth ~sub_lookup s
+    |> Graphs.Tid.Node.remove Graphs.Tid.exit
   in
+  let tids_of_sub (sub : Sub.t) : Tid.t list =
+    Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Seq.to_list
+  in
+  let block_set (sub : Sub.t) : Tid.Set.t =
+    Tid.Set.of_list (tids_of_sub sub) in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
-     edges, serving the WTO, the worklist, and the predecessor lists. *)
-  let dg = Cbat_dispatch_graph.make ~cfg
-      ~blocks:(Tid.Set.of_list (Core.Map.keys rctx.Cbat_runctx.rc_blocks))
-      resolved s
-  in
-  let { Cbat_dispatch_graph.succs; Cbat_dispatch_graph.preds } = dg in
-  let plan_of =
-    Cbat_forward.plans_of ~resolved ~edge_conds ~disabled:disabled_conds ~rctx in
-  (* WTO fixpoint; inner SCCs stabilize first. *)
-  let wto = wto_of_cfg ~succ:succs ~pred:preds cfg in
-  let smry = Cbat_wto.summary wto in
-  let heads = smry.Cbat_wto.heads in
-  let head_to_blocks = smry.Cbat_wto.head_to_blocks in
-  let block_to_head = smry.Cbat_wto.block_to_head in
-  let need_map : Core.Int.Set.t Tid.Map.t =
+     edges, serving the WTO, the worklist, and the predecessor lists.  It
+     is rebuilt from the current sub/resolution after a growth delta, so
+     both new vertices and retired edges reach the ordering. *)
+  let make_dg () =
+    Cbat_dispatch_graph.make ~cfg:(cfg_of_sub s) ~blocks:(block_set s)
+      !resolved_ref s in
+  let dg_ref =
+    ref (match resume_meta with
+         | Some st ->
+           (match st.rs_dg with Some dg -> dg | None -> make_dg ())
+         | None -> make_dg ()) in
+  let succs (v : Tid.t) : Tid.t list = (!dg_ref).Cbat_dispatch_graph.succs v in
+  let preds (v : Tid.t) : Tid.t list = (!dg_ref).Cbat_dispatch_graph.preds v in
+  (* WTO fixpoint; inner SCCs stabilize first.  A paused resume installs
+     the saved ordering and summary; growth refreshes them. *)
+  let make_wto () =
+    wto_of_cfg ~succ:succs ~pred:preds ~nodes:(tids_of_sub s) in
+  let wto_ref =
+    ref (match resume_meta with
+         | Some st ->
+           (match st.rs_wto with Some w -> w | None -> make_wto ())
+         | None -> make_wto ()) in
+  let smry_ref =
+    ref (match resume_meta with
+         | Some st ->
+           (match st.rs_smry with
+            | Some sm -> sm
+            | None -> Cbat_wto.summary !wto_ref)
+         | None -> Cbat_wto.summary !wto_ref) in
+  let heads_ref = ref (!smry_ref).Cbat_wto.heads in
+  let head_to_blocks_ref = ref (!smry_ref).Cbat_wto.head_to_blocks in
+  let block_to_head_ref = ref (!smry_ref).Cbat_wto.block_to_head in
+  let build_need ~(head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t) :
+      Core.Int.Set.t Tid.Map.t =
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
       ~f:(fun ~key:h ~data:blocks acc ->
-        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~def_reads ~phi_reads ~rc_blocks:rctx.rc_blocks blocks)))
+        Core.Map.set acc ~key:h
+          ~data:(Cbat_var_id.intern_set
+                   (compute_need ~def_reads ~phi_reads
+                      ~rc_blocks:rctx.rc_blocks blocks)))
   in
-  let sol_default = Solution.default init in
+  let need_map_ref =
+    ref (match resume_meta with
+         | Some st ->
+           (match st.rs_smry, st.rs_need with
+            | Some _, Some need -> need
+            | _ -> build_need ~head_to_blocks:!head_to_blocks_ref)
+         | None -> build_need ~head_to_blocks:!head_to_blocks_ref) in
+  let sol_default = st.rs_default in
   (* The solve's own store: each block's state is what the block needs —
      the values it receives and the memory it carries.  The values a
      block computes are a derived working set, never stored here. *)
-  let sol_store =
-    ref (Solution.enum init
-         |> Seq.fold ~init:Tid.Map.empty
-              ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v)) in
+  let sol_store = ref st.rs_store in
   let get n = Option.value (Core.Map.find !sol_store n) ~default:sol_default in
   let set n v = sol_store := Core.Map.set !sol_store ~key:n ~data:v in
   let mk_sol () = Solution.create !sol_store sol_default in
   Stages.reset ();
-  let total_processed = ref 0 in
-  let max_steps = visit_budget wto in
+  let total_processed = ref st.rs_total_processed in
+  let max_steps =
+    ref (match resume_meta with
+         | Some st ->
+           (match st.rs_max_steps with
+            | Some n -> n
+            | None -> visit_budget !wto_ref)
+         | None -> visit_budget !wto_ref) in
   (* Per-head visit counts; each head gets its own warmup window. *)
-  let head_visits : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
+  let head_visits = st.rs_head_visits in
   let head_warmed (v : Tid.t) : bool =
     Option.value ~default:0 (Hashtbl.find head_visits v)
     > head_warmup_visits in
-  (* The destination's state is built: every predecessor contributes the
-     values of this block's phis and the memory it carries.  Nothing of a
-     predecessor's own values comes along. *)
+  (* The solver is source-oriented: a source IN state is replayed once,
+     then its edge states fan out to every successor; [incoming_store]
+     keeps the join of the edge states delivered so far for each target.
+     Both this join and [rctx.rc_edges] are part of the persisted state. *)
 #ifdef VSA_DEBUG
   let head_arm = ref "" in
+  let dbg_fan_calls = ref 0 in
 #endif
-  let incoming_of (v : Tid.t) ~(preds : Tid.t list) ~(old : AI.t) : AI.t =
-    let out p =
-      Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
-        (Hashtbl.find block_to_head p) (fun () ->
-          let p_entry = Stages.time `Glue (fun () -> get p) in
-          let res = Stages.time `Denote (fun () ->
-              Cbat_forward.denote_block ~preserved ~callee ~plan_of
-                ~rctx
-                ~source:p p_entry ~target:v) in
-#ifdef VSA_DEBUG
-          debug_edge_result ~rctx ~edge_conds ~get ~p ~v res;
-#endif
-          res)
+  let delivered_at ~(source : Tid.t) ~(target : Tid.t) : AI.t =
+    match Core.Map.find !(rctx.Cbat_runctx.rc_edges) source with
+    | None -> AI.bottom
+    | Some edges -> Option.value (Core.Map.find edges target) ~default:AI.bottom
+  in
+  let incoming_store = ref st.rs_incoming in
+  (* The target's joined incoming state over the tracked edge
+     contributions.  Unchanged warm-seed contributions are already
+     joined into the target's state, so they need not be re-delivered. *)
+  let recompute_incoming (v : Tid.t) : AI.t =
+    List.fold (preds v) ~init:AI.bottom
+      ~f:(fun acc p -> AI.join acc (delivered_at ~source:p ~target:v))
+  in
+  (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
+     completely, and changed sources enqueue their targets.  The queue
+     pops the lowest WTO position, whose block is unique: [pending] holds
+     one block per position, and [unplaced] the blocks outside the WTO,
+     which pop last in Tid order. *)
+  let pending : Tid.t Int.Map.t ref = ref Int.Map.empty in
+  let unplaced = ref st.rs_unplaced in
+  let enqueue t =
+    match Core.Map.find (!smry_ref).Cbat_wto.pos_of t with
+    | Some p -> pending := Core.Map.set !pending ~key:p ~data:t
+    | None -> unplaced := Core.Set.add !unplaced t
+  in
+  Core.Set.iter st.rs_pending ~f:enqueue;
+  let current = ref st.rs_current in
+  (* Deferred seed work survives an in-place install. *)
+  let reseed_pending = ref st.rs_reseed in
+  let fan_pending = ref st.rs_fan in
+  (* Rebuild the dispatch graph from the current sub/resolution.  Called
+     after a growth delta: new vertices and retired edges reach the
+     ordering and the predecessor lists in one place. *)
+  let rebuild_graph () =
+    let sub = !saved_sub in
+    dg_ref :=
+      Cbat_dispatch_graph.make ~cfg:(cfg_of_sub sub) ~blocks:(block_set sub)
+        !resolved_ref sub
+  in
+  (* Refresh the WTO/head/need/position metadata from the updated graph.
+     The solution, incoming joins, landmarks, visit counters, every
+     pending entry and the saved cursor are preserved; only positions are
+     recomputed, so the pending set is re-inserted by the new priority. *)
+  let rebuild_wto () =
+    let wto = wto_of_cfg ~succ:succs ~pred:preds
+        ~nodes:(tids_of_sub !saved_sub) in
+    wto_ref := wto;
+    let smry = Cbat_wto.summary wto in
+    smry_ref := smry;
+    heads_ref := smry.Cbat_wto.heads;
+    head_to_blocks_ref := smry.Cbat_wto.head_to_blocks;
+    block_to_head_ref := smry.Cbat_wto.block_to_head;
+    need_map_ref := build_need ~head_to_blocks:smry.Cbat_wto.head_to_blocks;
+    (* Growth extends the allowance for the new vertices; a paused
+       resume must not reset the budget it already spent. *)
+    max_steps := Stdlib.max !max_steps (visit_budget wto);
+    let keep =
+      Core.Map.fold !pending ~init:!unplaced
+        ~f:(fun ~key:_ ~data:t acc -> Core.Set.add acc t)
     in
-    if List.is_empty preds then old
-    else
-      Option.value ~default:old
-        (List.fold preds ~init:None ~f:(fun acc p ->
-             let res = out p in
-             match acc with
-             | None -> Some res
-             | Some a -> Some (Stages.time `Join (fun () -> AI.join a res))))
+    pending := Int.Map.empty;
+    unplaced := Tid.Set.empty;
+    Core.Set.iter keep ~f:enqueue
+  in
+  (* Record one delivered edge state and enqueue the target when its
+     joined incoming state changes.  A monotone edge update replaces its
+     old contribution by the new one; a non-monotone update (a resolution
+     can retire an edge) recomputes the target's join. *)
+  let note_edge ~(source : Tid.t) ~(target : Tid.t)
+      ~(old_delivered : AI.t) (delivered : AI.t) : unit =
+    let edges =
+      Option.value (Core.Map.find !(rctx.Cbat_runctx.rc_edges) source)
+        ~default:Tid.Map.empty in
+    rctx.Cbat_runctx.rc_edges :=
+      Core.Map.set !(rctx.Cbat_runctx.rc_edges) ~key:source
+        ~data:(Core.Map.set edges ~key:target ~data:delivered);
+    if not (AI.equal old_delivered delivered) then begin
+      let previous =
+        Option.value (Core.Map.find !incoming_store target)
+          ~default:AI.bottom in
+      let incoming =
+        if AI.equal old_delivered AI.bottom
+           || AI.precedes old_delivered delivered
+        then AI.join previous delivered
+        else recompute_incoming target
+      in
+      let changed = not (AI.equal previous incoming) in
+      incoming_store :=
+        Core.Map.set !incoming_store ~key:target ~data:incoming;
+      (* A contribution already covered by the target's warm state changes
+         no state; processing it would only replay work. *)
+      if changed && not (AI.precedes incoming (get target)) then
+        enqueue target
+    end
+  in
+  (* The transfers a site materializer may own: an indirect Goto, or an
+     indirect Call (a normal call or a noreturn tail call). *)
+  let materializable_target (j : jmp term) : exp option =
+    match Jmp.kind j with
+    | Goto (Indirect e) -> Some e
+    | Call c -> (
+        match Call.target c with
+        | Indirect e -> Some e
+        | Direct _ -> None)
+    | _ -> None
+  in
+  let is_true_cond (e : exp) : bool =
+    match e with
+    | Bil.Int w -> Word.equal w (Word.one 1)
+    | _ -> false
+  in
+  (* The source block's term-order follower: the conditional fallthrough
+     edge the completion pass materializes from the same order. *)
+  let term_follower (sub : Sub.t) (source : Tid.t) : Tid.t option =
+    let rec find = function
+      | a :: (b :: _ as rest) ->
+        if Tid.equal a source then Some b else find rest
+      | _ -> None
+    in
+    find (Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Seq.to_list)
+  in
+  (* The installed chain is not an ordinary conditional jmp: every piece
+     is a conditional Goto, and the last one needs its explicit false
+     edge before the splitter runs.  The source's term-order follower is
+     that continuation; an already explicit one is left alone. *)
+  let complete_false_edge ~(source : Tid.t) (blk : blk term) : blk term =
+    match Base.List.last (Term.enum jmp_t blk |> Seq.to_list) with
+    | Some j
+      when (match Jmp.kind j with Goto (Direct _) -> true | _ -> false)
+           && not (is_true_cond (Jmp.cond j)) -> (
+        match term_follower !saved_sub source with
+        | Some follower ->
+          Term.append jmp_t blk (Jmp.create (Goto (Direct follower)))
+        | None -> blk)
+    | _ -> blk
+  in
+  let has_block (s : Sub.t) tid = Option.is_some (Term.find blk_t s tid) in
+  let source_block source =
+    match Term.find blk_t !saved_sub source with
+    | Some b -> b
+    | None ->
+      (Core.Map.find_exn rctx.Cbat_runctx.rc_blocks source).bf_term
+  in
+  (* The callback may already have rewritten the source and run its SSA
+     (the production worklist path).  Then the install only refreshes the
+     context and recomputes the source post-state; the BIR construction
+     below is the fallback for a synthetic callback that leaves the source
+     jmp unchanged. *)
+  let install_materialization ~(source : Tid.t) ~(blk : blk term)
+      ~(jmp : jmp term) ~(entry : AI.t) ~(forward : AI.t)
+      (m : Dispatch.materialized) : AI.t =
+    let rewritten =
+      match Term.find blk_t m.Dispatch.sub source with
+      | Some b -> Option.is_none (Term.find jmp_t b (Term.tid jmp))
+      | None -> false
+    in
+    if rewritten then begin
+      let sub = m.Dispatch.sub in
+      saved_sub := sub;
+      preserved := Cbat_runctx.preserved_of_sub ~abi sub;
+      edge_conds := Cbat_runctx.edge_conds_of sub;
+      disabled_conds :=
+        Cbat_runctx.disabled_conds_of ~edge_conds:!edge_conds sub;
+      rctx.Cbat_runctx.rc_preserved <- !preserved;
+      rctx.Cbat_runctx.rc_edge_conds <- !edge_conds;
+      rctx.Cbat_runctx.rc_disabled_conds <- !disabled_conds;
+      (* The rewritten source, its new blocks and every old target whose
+         phis changed all carry new terms; only an unchanged block keeps
+         its previous facts. *)
+      Term.enum blk_t sub
+      |> Seq.iter ~f:(fun b ->
+             let tid = Term.tid b in
+             match Core.Map.find rctx.Cbat_runctx.rc_blocks tid with
+             | Some bf when phys_equal bf.Cbat_runctx.bf_term b -> ()
+             | Some _ ->
+               rctx.Cbat_runctx.rc_blocks <-
+                 Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:tid
+                   ~data:(Cbat_runctx.block_facts_of_block ~abi b)
+             | None ->
+               sol_store :=
+                 Core.Map.set !sol_store ~key:tid ~data:AI.bottom;
+               incoming_store :=
+                 Core.Map.set !incoming_store ~key:tid ~data:AI.bottom;
+               rctx.Cbat_runctx.rc_blocks <-
+                 Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:tid
+                   ~data:(Cbat_runctx.block_facts_of_block ~abi b));
+      rebuild_plan source;
+      Cbat_forward.denote_block ~rctx (plan_of source) ~entry
+    end else begin
+    let target = Option.value_exn (materializable_target jmp) in
+    let original =
+      match Jmp.kind jmp with
+      | Call c when Option.is_some (Call.return c) -> Some c
+      | _ -> None
+    in
+    let kind = if Option.is_some original then Dispatch.Call else Dispatch.Jump in
+    let binding, arms =
+      Dispatch.materialize m ~kind ~cond:(Some (Jmp.cond jmp)) ~target
+    in
+    (* An unconditional indirect jump has no false continuation: its
+       complete target set is exhaustive, so the last arm is the default
+       terminator. *)
+    let arms =
+      if Option.is_none original
+         && is_true_cond (Jmp.cond jmp)
+         && not (List.is_empty arms)
+      then
+        List.mapi arms ~f:(fun i a ->
+            if i + 1 = List.length arms then
+              { a with Dispatch.guard = Bil.Int (Word.one 1) }
+            else a)
+      else arms
+    in
+    (* The callback may have bound the base summand in the source block.
+       Keep its defs/phis, our current jmps (including an earlier install
+       in this same fan-out), and any fresh defs of ours. *)
+    let blk =
+      match Term.find blk_t m.sub source with
+      | None -> blk
+      | Some mb when phys_equal mb blk -> blk
+      | Some mb ->
+        let b =
+          Blk.Builder.init ~copy_defs:true ~copy_phis:true ~copy_jmps:false
+            mb
+        in
+        Term.enum def_t blk
+        |> Seq.iter ~f:(fun d ->
+               if Option.is_none (Term.find def_t mb (Term.tid d)) then
+                 Blk.Builder.add_def b d);
+        Term.enum phi_t blk
+        |> Seq.iter ~f:(fun p ->
+               if Option.is_none (Term.find phi_t mb (Term.tid p)) then
+                 Blk.Builder.add_phi b p);
+        Term.enum jmp_t blk |> Seq.iter ~f:(Blk.Builder.add_jmp b);
+        Blk.Builder.result b
+    in
+    let trap =
+      match original with
+      | None -> None
+      | Some _ ->
+        (* A normal block whose one jmp is [Int]: the emitter already
+           renders it as a trap, so it needs no special name. *)
+        let tid = Tid.create () in
+        Some (tid, Some (Blk.create ~tid ~jmps:[ Jmp.create_int 0 tid ] ()))
+    in
+    let arm_jmp (a : Dispatch.arm) : jmp term =
+      match original with
+      | Some c ->
+        (* A call arm is a direct call to the same continuation. *)
+        Jmp.create ~cond:a.guard
+          (Call
+             (Call.create ~target:(Direct a.target)
+                ~return:(Option.value_exn (Call.return c)) ()))
+      | None ->
+        if has_block m.sub a.target || has_block !saved_sub a.target then
+          (* A target that is a block of this sub is the intra-function case
+             jump; its role wins over the original transfer's kind. *)
+          Jmp.create_goto ~cond:a.guard (Direct a.target)
+        else
+          (* A target outside the sub is a function entry: a tail call. *)
+          Jmp.create ~cond:a.guard
+            (Call (Call.create ~target:(Direct a.target) ()))
+    in
+    let arms =
+      match trap with
+      | None -> List.map arms ~f:arm_jmp
+      | Some (trap_tid, _) ->
+        let cond = Jmp.cond jmp in
+        let trap_jmp =
+          if is_true_cond cond then Jmp.create (Goto (Direct trap_tid))
+          else Jmp.create ~cond (Goto (Direct trap_tid))
+        in
+        List.map arms ~f:arm_jmp @ [ trap_jmp ]
+    in
+    let blk =
+      if List.is_empty arms then blk
+      else
+        Term.concat_map jmp_t blk ~f:(fun j ->
+            if Tid.equal (Term.tid j) (Term.tid jmp) then arms else [ j ])
+    in
+    (* Only a conditional original has a false continuation.  An
+       unconditional indirect jump's target set is exhaustive. *)
+    let blk =
+      if is_true_cond (Jmp.cond jmp) then blk
+      else complete_false_edge ~source blk
+    in
+    let blk, forward =
+      match binding with
+      | None -> (blk, forward)
+      | Some (v, d) ->
+        let blk = Term.append def_t blk d in
+        let forward =
+          match
+            Cbat_transfer.denote_imm_exp
+              ~synth:!(rctx.Cbat_runctx.rc_synth) (Def.rhs d) forward
+          with
+          | Ok ws -> AI.add_word forward ~key:v ~data:ws
+          | Error _ -> forward
+        in
+        (blk, forward)
+    in
+    (* The callback's m.sub carries new blocks; keep the old sub's term
+       order (the completion's fallthrough edge reads it) and append only
+       blocks the SSA view introduced. *)
+    let sub =
+      Term.enum blk_t !saved_sub
+      |> Seq.fold ~init:m.sub ~f:(fun s b ->
+             if Option.is_some (Term.find blk_t s (Term.tid b)) then s
+             else Term.append blk_t s b)
+    in
+    let sub =
+      match Term.find blk_t sub source with
+      | Some _ -> Term.update blk_t sub blk
+      | None -> Term.append blk_t sub blk
+    in
+    let sub =
+      match trap with
+      | Some (_, Some b) -> Term.append blk_t sub b
+      | Some (_, None) | None -> sub
+    in
+    saved_sub := sub;
+    preserved := Cbat_runctx.preserved_of_sub ~abi sub;
+    edge_conds := Cbat_runctx.edge_conds_of sub;
+    disabled_conds :=
+      Cbat_runctx.disabled_conds_of ~edge_conds:!edge_conds sub;
+    rctx.Cbat_runctx.rc_preserved <- !preserved;
+    rctx.Cbat_runctx.rc_edge_conds <- !edge_conds;
+    rctx.Cbat_runctx.rc_disabled_conds <- !disabled_conds;
+    rctx.Cbat_runctx.rc_blocks <-
+      Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:source
+        ~data:(Cbat_runctx.block_facts_of_block ~abi blk);
+    Term.enum blk_t sub
+    |> Seq.iter ~f:(fun b ->
+           let tid = Term.tid b in
+           if not (Core.Map.mem rctx.Cbat_runctx.rc_blocks tid) then begin
+             (* First sight of a block: its pre-state is bottom, so the
+                current fan-out's delivery is its first incoming state. *)
+             sol_store := Core.Map.set !sol_store ~key:tid ~data:AI.bottom;
+             incoming_store :=
+               Core.Map.set !incoming_store ~key:tid ~data:AI.bottom;
+             rctx.Cbat_runctx.rc_blocks <-
+               Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:tid
+                 ~data:(Cbat_runctx.block_facts_of_block ~abi b)
+           end);
+    (* Only the source's plan changed; the graph and ordering refresh
+       once after the source's installs. *)
+    rebuild_plan source;
+    forward
+    end
+  in
+  let save_state () : run_state =
+    let pending_tids =
+      Core.Map.fold !pending ~init:Tid.Set.empty
+        ~f:(fun ~key:_ ~data:v acc -> Core.Set.add acc v) in
+    { st with
+      rc_preserved = !preserved;
+      rc_edge_conds = !edge_conds;
+      rc_disabled_conds = !disabled_conds;
+      rs_sub = !saved_sub;
+      rs_store = !sol_store;
+      rs_default = sol_default;
+      rs_incoming = !incoming_store;
+      rs_pending = pending_tids;
+      rs_unplaced = !unplaced;
+      rs_total_processed = !total_processed;
+      rs_head_visits = head_visits;
+      rs_current = !current;
+      rs_resolved = !resolved_ref;
+      rs_reseed = !reseed_pending;
+      rs_fan = !fan_pending;
+      rs_heads = !heads_ref;
+      rs_block_to_head = !block_to_head_ref;
+      rs_dg = Some !dg_ref;
+      rs_wto = Some !wto_ref;
+      rs_smry = Some !smry_ref;
+      rs_need = Some !need_map_ref;
+      rs_max_steps = Some !max_steps;
+      rs_plan = Some plan_of }
+  in
+  (* One source IN state: replay its definitions once, install any site
+     materializations, then deliver every outgoing edge with its own
+     backward refinement.  An install's new case edges are delivered by
+     this same fan-out; the source is never re-enqueued. *)
+  let fan_out (source : Tid.t) (state : AI.t) : unit =
+#ifdef VSA_DEBUG
+    incr dbg_fan_calls;
+#endif
+    current := Some source;
+    let dedup_targets () =
+      List.fold (succs source) ~init:[] ~f:(fun acc t ->
+          if Base.List.mem acc t ~equal:Tid.equal then acc else t :: acc)
+      |> List.rev
+    in
+    let candidates =
+      if phys_equal materialize_transfer no_materialize_transfer then []
+      else
+        Term.enum jmp_t (source_block source)
+        |> Seq.filter ~f:(fun j ->
+               Option.is_some (materializable_target j))
+        |> Seq.to_list
+    in
+    if not
+         (List.is_empty (dedup_targets ())
+         && List.is_empty candidates)
+    then begin
+      let plan = plan_of source in
+      let forward = Stages.time `Denote (fun () ->
+          Cbat_forward.denote_block ~rctx plan ~entry:state) in
+      let installed = ref false in
+      let forward =
+        List.fold candidates ~init:forward ~f:(fun forward jmp ->
+            let blk = source_block source in
+            match
+              materialize_transfer ~state:(save_state ()) ~source ~blk ~jmp
+                ~env:forward
+            with
+            | None -> forward
+            | Some m ->
+              installed := true;
+              install_materialization ~source ~blk ~jmp ~entry:state ~forward m)
+      in
+      if !installed then begin
+        rebuild_graph ();
+        rebuild_wto ()
+      end;
+      let plan = plan_of source in
+      List.iter (dedup_targets ()) ~f:(fun target ->
+          let old_delivered = delivered_at ~source ~target in
+          let res =
+            if AI.equal forward AI.bottom then AI.bottom
+            else
+              Cbat_landmarks.with_widening_head
+                rctx.Cbat_runctx.rc_landmarks
+                (Hashtbl.find !block_to_head_ref source) (fun () ->
+                  Stages.time `Denote (fun () ->
+                      Cbat_forward.denote_jump ~preserved:!preserved
+                        ~callee ~rctx plan ~source ~entry:state ~forward
+                        ~target))
+          in
+#ifdef VSA_DEBUG
+          debug_edge_result ~rctx ~edge_conds:!edge_conds ~get
+            ~p:source ~v:target res;
+#endif
+          note_edge ~source ~target ~old_delivered res)
+    end;
+    current := None
+  in
+  (* Drop one source's delivered edges (a woken source's term changed) and
+     rebuild the affected targets' joins from the remaining edges. *)
+  let forget_source (source : Tid.t) : unit =
+    match Core.Map.find !(rctx.Cbat_runctx.rc_edges) source with
+    | None -> ()
+    | Some edges ->
+      rctx.Cbat_runctx.rc_edges :=
+        Core.Map.remove !(rctx.Cbat_runctx.rc_edges) source;
+      Core.Map.iteri edges ~f:(fun ~key:target ~data:_ ->
+          let joined = recompute_incoming target in
+          incoming_store :=
+            Core.Map.set !incoming_store ~key:target ~data:joined)
+  in
+  (* A changed old target retires every edge into it; the caller then
+     re-fans every predecessor, because the target's phi set changed and
+     each operand must be re-delivered. *)
+  let forget_target (target : Tid.t) : unit =
+    rctx.Cbat_runctx.rc_edges :=
+      Core.Map.fold !(rctx.Cbat_runctx.rc_edges) ~init:Tid.Map.empty
+        ~f:(fun ~key:source ~data:edges acc ->
+          let edges = Core.Map.remove edges target in
+          if Core.Map.is_empty edges then acc
+          else Core.Map.set acc ~key:source ~data:edges);
+    incoming_store :=
+      Core.Map.set !incoming_store ~key:target ~data:AI.bottom
+  in
+  (* Rebuild every incoming contribution of one target.  Used when a
+     target's phi operands changed: every predecessor's delivery reads
+     the new phi set, so all of them must replay, not only the sources
+     with a new edge. *)
+  let refan_into (target : Tid.t) : unit =
+    List.iter (preds target) ~f:(fun source ->
+        let state = get source in
+        if not (AI.equal state AI.bottom) then fan_out source state);
+    enqueue target
   in
   (* A warm head whose join grew widens by the landmark module's arm:
      Finite extrapolates; Zero advances and joins; Inf widens.
@@ -526,7 +1145,9 @@ let static_graph_vsa
      head's arm is the fallback, and the clear spends only what was
      consumed. *)
   let widen_at_head (v : Tid.t) ~(old : AI.t) ~(incoming : AI.t) : AI.t =
-    let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
+    let need =
+      Option.value ~default:Core.Int.Set.empty
+        (Core.Map.find !need_map_ref v) in
     Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
       (fun () ->
         let arm =
@@ -552,22 +1173,26 @@ let static_graph_vsa
     Stages.time `Scaffold (fun () ->
     incr total_processed;
     (* This visit counts toward the head's own window, including itself. *)
-    if Core.Set.mem heads v then begin
+    if Core.Set.mem !heads_ref v then begin
       let n = Option.value ~default:0 (Hashtbl.find head_visits v) in
       Hashtbl.set head_visits ~key:v ~data:(n + 1)
     end;
-    if !total_processed > max_steps then begin
+    if !total_processed > !max_steps then begin
       let sol = mk_sol () in
-      raise (Fixpoint_not_converged (max_steps, sol))
+      raise (Fixpoint_not_converged (!max_steps, sol))
     end;
     let old = get v in
     let preds = preds v in
-    let incoming = incoming_of v ~preds ~old in
+    let incoming =
+      if List.is_empty preds then old
+      else
+        Option.value (Core.Map.find !incoming_store v) ~default:AI.bottom
+    in
 #ifdef VSA_DEBUG
-    debug_entry ~rctx ~edge_conds ~get ~preds ~v incoming;
+    debug_entry ~rctx ~edge_conds:!edge_conds ~get ~preds ~v incoming;
     head_arm := "";
 #endif
-    let has_widened = Core.Set.mem heads v && head_warmed v in
+    let has_widened = Core.Set.mem !heads_ref v && head_warmed v in
     let new_val =
       if List.is_empty preds then old
       else if has_widened then begin
@@ -584,37 +1209,99 @@ let static_graph_vsa
     then false
     else begin
 #ifdef VSA_DEBUG
-      debug_churn ~head:(Core.Set.mem heads v) ~has_widened
+      debug_churn ~head:(Core.Set.mem !heads_ref v) ~has_widened
         ~head_arm:!head_arm v old new_val;
 #endif
       Stages.time `Glue (fun () -> set v new_val);
+      fan_out v new_val;
       true
     end)
   in
-  (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
-     completely, and changes enqueue Tid-CFG successors.  The queue pops
-     the lowest WTO position, whose block is unique: [pending] holds one
-     block per position, and [unplaced] the blocks outside the WTO,
-     which pop last in Tid order. *)
-  let pending : Tid.t Int.Map.t ref = ref Int.Map.empty in
-  let unplaced : Tid.Set.t ref = ref Tid.Set.empty in
-  let enqueue t =
-    match Core.Map.find smry.Cbat_wto.pos_of t with
-    | Some p -> pending := Core.Map.set !pending ~key:p ~data:t
-    | None -> unplaced := Core.Set.add !unplaced t
+  (* The sources a resolution delta retires or redirects.  Only these
+     outgoing edges need rebuilding; the rest of the graph is unchanged. *)
+  let resolved_changes ~(old : Tid.Set.t Tid.Map.t)
+      ~(cur : Tid.Set.t Tid.Map.t) : Tid.Set.t =
+    Term.enum blk_t !saved_sub
+    |> Seq.filter ~f:(fun b ->
+        Term.enum jmp_t b
+        |> Seq.exists ~f:(fun j ->
+            let k = Term.tid j in
+            match Core.Map.find old k, Core.Map.find cur k with
+            | None, None -> false
+            | Some a, Some b -> not (Tid.Set.equal a b)
+            | _ -> true))
+    |> Seq.map ~f:Term.tid |> Seq.to_list |> Tid.Set.of_list
   in
-  (* Entry itself is never seeded: init_sol pre-seeds its state. *)
-  Option.iter (entry_block_of s) ~f:(fun entry ->
-    succs (Term.tid entry)
-    |> List.iter ~f:enqueue);
-  (* A block that gained an extra-edge predecessor re-joins even from
-     a stable warm seed — its incoming set grew without any
-     predecessor's value changing. *)
-  Core.Set.iter dg.Cbat_dispatch_graph.gained_preds ~f:enqueue;
-  (* A woken block's successors re-join from the warm seed: its outgoing
-     edges changed without any state of the walk changing (a resumed
-     solve's blocked calls now have a callee summary). *)
-  Core.Set.iter wake ~f:(fun b -> succs b |> List.iter ~f:enqueue);
+  (* Sources whose resolved dispatch set differs from the persisted one.
+     Only these are refreshed by an external restart; no global fan-out. *)
+  let resolved_sources =
+    if fresh then Tid.Set.empty
+    else resolved_changes ~old:st.rs_resolved ~cur:!resolved_ref
+  in
+  (* Every source that owns a resolved dispatch.  A fresh warm start fans
+     these once, because a stable warm prefix never reaches the extra
+     edges on its own. *)
+  let resolved_dispatch_sources =
+    Term.enum blk_t s
+    |> Seq.filter ~f:(fun b ->
+        Term.enum jmp_t b
+        |> Seq.exists ~f:(fun j -> Core.Map.mem !resolved_ref (Term.tid j)))
+    |> Seq.map ~f:Term.tid |> Seq.to_list |> Tid.Set.of_list
+  in
+  (* Rebuild one woken block's incoming state from every predecessor and
+     enqueue it.  A woken old target's phi set changed; a woken new block
+     has no seed entry.  Its own outgoing edges are fanned separately. *)
+  let reseed_block b =
+    forget_target b;
+    refan_into b
+  in
+  let rec reseed_deferred () =
+    match Core.Set.min_elt !reseed_pending with
+    | None -> ()
+    | Some b ->
+      reseed_block b;
+      reseed_pending := Core.Set.remove !reseed_pending b;
+      reseed_deferred ()
+  in
+  let rec fan_deferred () =
+    match Core.Set.min_elt !fan_pending with
+    | None -> ()
+    | Some source ->
+      (* A resolved view change retires the old deliveries; the replay
+         below rebuilds exactly the current edge set. *)
+      forget_source source;
+      if not (AI.equal (get source) AI.bottom) then
+        fan_out source (get source);
+      fan_pending := Core.Set.remove !fan_pending source;
+      fan_deferred ()
+  in
+  let defer_reseed tids =
+    Core.Set.iter tids ~f:(fun b ->
+        reseed_pending := Core.Set.add !reseed_pending b)
+  in
+  let defer_fan tids =
+    Core.Set.iter tids ~f:(fun b ->
+        fan_pending := Core.Set.add !fan_pending b)
+  in
+  (* Seed: a fresh start fans the entry once (and, for a warm seed, rebuilds
+     the woken blocks and fans the woken/resolved sources).  An external
+     restart does the same for only the woken/changed sources. *)
+  let seed () =
+    if fresh then
+      Option.iter (entry_block_of s) ~f:(fun entry ->
+          fan_out (Term.tid entry) (get (Term.tid entry)));
+    let seed_sources =
+      if fresh then Core.Set.union wake resolved_dispatch_sources
+      else Core.Set.union wake resolved_sources
+    in
+    defer_reseed wake;
+    defer_fan seed_sources;
+    (match !current with
+     | Some source when not fresh -> fan_out source (get source)
+     | _ -> ());
+    reseed_deferred ();
+    fan_deferred ()
+  in
   let pop_min () =
     match Core.Map.min_elt !pending with
     | Some (p, v) ->
@@ -630,14 +1317,19 @@ let static_graph_vsa
     match pop_min () with
     | None -> ()
     | Some v ->
-      if process_vertex v then
-        succs v |> List.iter ~f:enqueue;
+      ignore (process_vertex v : bool);
       stabilize_worklist () in
-  stabilize_worklist ();
+  let run () = stabilize_worklist () in
+  seed ();
+  run ();
   Stages.report (Sub.name s);
-  mk_sol ()
+  (mk_sol (), save_state ())
+
 (* Re-exports for the mli's fixture seam. *)
 type refine_ctx = Cbat_runctx.refine_ctx
+
+(* The canonical run context, for the site materializer. *)
+module Runctx = Cbat_runctx
 
 (* Re-exports of the sibling transfer/forward/backward modules. *)
 let set_addr_bits = Cbat_transfer.set_addr_bits

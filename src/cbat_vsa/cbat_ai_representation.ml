@@ -307,8 +307,23 @@ let walk_landmarks ~(head : Tid.t)
     ~(need : Int.Set.t) ~(arm : Cbat_landmarks.arm) (e1 : t) (e2 : t) : t =
   if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
-  else if Core.Set.is_empty need then join e1 e2
-  else if Cbat_landmarks.equal_arm arm Cbat_landmarks.Zero then begin
+  else
+    (* A loop head can carry an inherited key that grows even when the
+       local SCC has its own needed keys (a versioned register or stack
+       pointer fed around the loop).  Widen every carried key; a key
+       that did not grow is unchanged by the widening. *)
+    let add_word acc env =
+      WordEnv.fold env.words ~init:acc
+        ~f:(fun ~key ~data:_ acc -> Core.Set.add acc key)
+    in
+    let add_slice acc env =
+      SliceEnv.fold env.slices ~init:acc
+        ~f:(fun ~key ~data:_ acc -> Core.Set.add acc (slice_owner key))
+    in
+    let need =
+      add_slice (add_slice (add_word (add_word need e1) e2) e1) e2 in
+    if Core.Set.is_empty need then join e1 e2
+    else if Cbat_landmarks.equal_arm arm Cbat_landmarks.Zero then begin
     (* The non-widening arm: the head's own consumption — every row at
        the head advances (a row outside [need] would otherwise hold
        [steps_head] in Zero forever), and the value is the plain

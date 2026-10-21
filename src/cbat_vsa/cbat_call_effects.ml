@@ -13,19 +13,36 @@ type site = {
   read_lanes : var list;
 }
 
-type callee = Summary of Int.Set.t option | Blocked
+type callee = Summary of Int.Set.t option
 
+(* An indirect call may name several code targets.  Every target is
+   solved (or read from its final summary), and the call preserves only
+   what every target preserves; one unknown target keeps the whole call
+   conservative. *)
 let indirect_callee ~(synth : Hike_synth.table) ~(lookup : int64 -> Tid.t option)
     ~(callee : Tid.t -> callee) ~(env : AI.t) (texp : exp) : callee =
+  let meet = function
+    | [] -> None
+    | Summary s :: rest ->
+      Base.List.fold rest ~init:s ~f:(fun acc (Summary s') ->
+          match acc, s' with
+          | None, _ | Some _, None -> None
+          | Some a, Some b -> Some (Core.Set.inter a b))
+  in
   match Cbat_transfer.denote_imm_exp ~synth texp env with
   | Error _ -> Summary None
   | Ok ws ->
-    (match WordSet.enumerate ~cap:1 ws with
-     | Some [ target ] ->
-       (match Cbat_word.to_int64_opt target with
-        | Some v -> Option.value_map (lookup v) ~default:(Summary None) ~f:callee
-        | None -> Summary None)
-     | _ -> Summary None)
+    (match WordSet.enumerate ~cap:1024 ws with
+     | Some [] | None -> Summary None
+     | Some targets ->
+       let summaries =
+         Base.List.map targets ~f:(fun target ->
+             match Cbat_word.to_int64_opt target with
+             | None -> None
+             | Some v -> Option.map (lookup v) ~f:callee)
+       in
+       if Base.List.exists summaries ~f:Option.is_none then Summary None
+       else Summary (meet (Base.List.filter_opt summaries)))
 
 (* Segment-relative bounds of a stack value; None when no bound exists.
    [key_extent] is the shared key-space clamp — the same rule the

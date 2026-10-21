@@ -26,6 +26,10 @@ type t = {
      The worklist seeds them directly — a warm seed's stable prefix
      never enqueues them (propagation is change-driven). *)
   gained_preds : Tid.Set.t;
+  (* In-place growth: add one CFG/dispatch edge to the same tables.  The
+     WTO is not updated; a new block lies outside its position map and is
+     queued in [unplaced]. *)
+  add_edge : source:tid -> target:tid -> unit;
 }
 
 (* The graph over [cfg] for [sub]: each jmp's [resolved] target set

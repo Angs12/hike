@@ -12,8 +12,9 @@ open Cbat_transfer
 
 (* The edge classification: whether a jump's transfer reaches the
    denotation target.  [Exact ts] — iff the transfer's target is in
-   [ts]; [Any] — may continue anywhere. *)
-type edge_rel = Exact of Tid.Set.t | Any
+   [ts]; [Any] — may continue anywhere.  The plan types live in
+   [Cbat_runctx] so the canonical context owns its plan cache. *)
+type edge_rel = Cbat_runctx.edge_rel = Exact of Tid.Set.t | Any
 
 let edge_rel_of ~(resolved : Tid.Set.t Tid.Map.t) (jmp : jmp term) : edge_rel =
   match Jmp.kind jmp with
@@ -50,7 +51,7 @@ let walk_discards ~(target : tid) (rel : edge_rel) : bool =
    each jump with its edge cond, disabled continuation and classification,
    plus the block's call facts.  The callee summary is read per visit —
    it grows while a recursion is tentative. *)
-type jump_plan = {
+type jump_plan = Cbat_runctx.jump_plan = {
   jp_jmp : jmp term;
   jp_cond : exp option;
   jp_disabled : exp option;
@@ -61,7 +62,7 @@ type jump_plan = {
   mutable jp_preserved : (Int.Set.t * Int.Set.t) option;
 }
 
-type block_plan = {
+type block_plan = Cbat_runctx.block_plan = {
   bp_term : blk term;
   bp_call_facts : Cbat_runctx.call_facts;
   bp_has_conds : bool;
@@ -125,27 +126,28 @@ let contribution (rctx : Cbat_runctx.refine_ctx) ~(source : tid)
         |> List.map ~f:Cbat_var_id.var_of in
       AI.deliver ~keep edge
 
-(* Denotation of a block's jumps. *)
+(* The source block's post-state: its IN state with its definitions
+   replayed.  It is edge-independent, so the solver computes it once per
+   source IN state and fans the same [forward] into every target. *)
+let denote_block
+    ~(rctx : Cbat_runctx.refine_ctx)
+    (plan : block_plan) ~(entry : AI.t) : AI.t =
+  (* A woken edge can visit an unreached predecessor.  Its calls and
+     stores must not turn bottom into a partially populated state. *)
+  if AI.equal entry AI.bottom then AI.bottom
+  else denote_block_values ~synth:!(rctx.rc_synth) plan.bp_term entry
+
+(* Denotation of one edge: [forward] is the source block's post-state. *)
 let denote_jump
     ~(preserved : Int.Set.t)
     ~(callee : Tid.t -> Cbat_call_effects.callee)
     ~(rctx : Cbat_runctx.refine_ctx)
-    (plan : block_plan) ~(entry : AI.t) ~(target : tid)
-    : AI.t =
+    (plan : block_plan) ~(source : tid) ~(entry : AI.t)
+    ~(forward : AI.t) ~(target : tid) : AI.t =
   (* The backward refinement's entry state IS the source block's IN
      state — the env this jump transfers. *)
   let b = plan.bp_term in
-  let source = Term.tid b in
-  let edges = match Map.find !(rctx.rc_edges) source with
-    | Some (saved, edges) when phys_equal saved entry -> edges
-    | _ -> Tid.Map.empty in
-  match Map.find edges target with
-  | Some delivered -> delivered
-  | None ->
-  (* The source's post state: its IN state with its definitions
-     replayed.  It is the edge's own working set — the destination's
-     state is built from it, and none of it is stored. *)
-  let env = denote_block_values ~synth:!(rctx.rc_synth) b entry in
+  let env = forward in
   let per_jump acc (jp : jump_plan) =
     let jmp = jp.jp_jmp in
     let rel = jp.jp_rel in
@@ -187,24 +189,29 @@ let denote_jump
         env
     in
     let inspect_call c =
-      match Call.return c with
-      | None -> AI.bottom
-      | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
-      | Some _ ->
-        (* Calls abstract; every caller's def is denoted.  A blocked
-           callee has no summary yet: nothing flows past it. *)
-        let site_callee =
-          match Call.target c with
-          | Direct ct -> callee ct
-          | Indirect texp ->
-            Cbat_call_effects.indirect_callee
-              ~synth:!(rctx.rc_synth) ~lookup:rctx.Cbat_runctx.rc_sub_lookup
-              ~callee ~env texp
-        in
-        match site_callee with
-        | Cbat_call_effects.Blocked -> AI.bottom
-        | Cbat_call_effects.Summary summary ->
-          call_site_transfer ~summary
+      (* An unsat edge is unreachable: it must not pause the solve on a
+         callee it can never call. *)
+      if AI.equal env AI.bottom then AI.bottom
+      else
+        match Call.return c with
+        | None -> AI.bottom
+        | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
+        | Some _ ->
+          (* The callee callback solves a Fresh callee at this call site
+             and returns its published summary; an already-final sub is
+             read without re-solving. *)
+          let site_callee =
+            match Call.target c with
+            | Direct ct -> callee ct
+            | Indirect texp ->
+              Cbat_call_effects.indirect_callee
+                ~synth:!(rctx.rc_synth)
+                ~lookup:rctx.Cbat_runctx.rc_sub_lookup
+                ~callee ~env texp
+          in
+          (match site_callee with
+           | Cbat_call_effects.Summary summary ->
+             call_site_transfer ~summary)
     in
     let leads () = if env_leads ~target rel then env else AI.bottom in
     let env_res =
@@ -232,22 +239,4 @@ let denote_jump
   (* The edge delivers the destination's state: the values it receives and
      the memory it carries. *)
   let delivered = contribution rctx ~source ~target refined in
-  rctx.rc_edges := Map.set !(rctx.rc_edges) ~key:source
-      ~data:(entry, Map.set edges ~key:target ~data:delivered);
   delivered
-
-(* Block denotation toward a target. *)
-let denote_block
-    ~(preserved : Int.Set.t)
-    ~(callee : Tid.t -> Cbat_call_effects.callee)
-    ~(plan_of : tid -> block_plan)
-    ~(rctx : Cbat_runctx.refine_ctx)
-    ~(source : tid) (env : AI.t)
-    : target:tid -> AI.t =
-  (* A woken edge can visit an unreached predecessor. Its calls and
-     stores must not turn bottom into a partially populated state. *)
-  if AI.equal env AI.bottom then fun ~target:_ -> AI.bottom
-  else
-  let plan = plan_of source in
-  fun ~target ->
-    denote_jump ~preserved ~callee ~rctx plan ~entry:env ~target
