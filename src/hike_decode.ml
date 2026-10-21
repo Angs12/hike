@@ -47,7 +47,8 @@ let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
     ~init:Graphs.Cfg.empty
     ~block:(fun mem insns ->
       Driver.execution_order insns
-      >>= Kb.List.filter_map ~f:(fun label ->
+      >>= fun labels ->
+      Kb.List.filter_map labels ~f:(fun label ->
               Kb.collect Disasm_expert.Basic.Insn.slot label
               >>= fun basic ->
               Kb.collect Theory.Semantics.slot label >>= fun s ->
@@ -59,7 +60,12 @@ let explore_cfg ?entry ?follow (state : Driver.state) : Graphs.Cfg.t Kb.t =
                   match basic with Some b -> Insn.with_basic s b | None -> s
                 in
                 Some (mem, insn))
-      >>| Block.create mem)
+      >>| fun kept ->
+      if Base.List.is_empty kept && not (Base.List.is_empty labels) then
+        Hike_diag.warn
+          "decode: block at %s lost every semantic instruction"
+          (Addr.to_string (Memory.min_addr mem));
+      Block.create mem kept)
     ~node:(fun node cfg -> Kb.return (Graphs.Cfg.Node.insert node cfg))
     ~edge:(fun src dst g ->
       let k =
