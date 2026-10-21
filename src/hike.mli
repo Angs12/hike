@@ -95,7 +95,7 @@ module Attribution = Hike_attribution
 module Kb = Hike_kb
 
 (** The type inference: every value typed from the denotation and the
-    use graph; the lane kinds stamped; runs after [Ssa]. *)
+    use graph; the lane kinds stamped; runs on the drive's SSA. *)
 module Types = Hike_types
 
 (** LLVM emitter. *)

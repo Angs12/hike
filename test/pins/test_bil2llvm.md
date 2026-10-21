@@ -3,10 +3,11 @@
 Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-65`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
-`src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
-lanes `src/bil2llvm_access.ml` / `src/bil2llvm_exp.ml` / `src/bil2llvm_calls.ml` /
-`src/bil2llvm_env.ml`, and `src/bil2llvm_section.ml`
-(`Bil2llvm.build_sections`).
+`src/hike_emit/bil2llvm.ml` (the `emit_program` body loop and `create_sub`),
+the emission lanes `src/hike_emit/bil2llvm_access.ml` /
+`src/hike_emit/bil2llvm_exp.ml` / `src/hike_emit/bil2llvm_calls.ml` /
+`src/hike_emit/bil2llvm_env.ml`, and `src/hike_emit/bil2llvm_section.ml`
+(`Bil2llvm_section.build_sections`).
 
 No `Test_seam` switch exists for the emitter, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The disable

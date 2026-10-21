@@ -4,9 +4,10 @@ Module: `test/unit/test_emit_fp.ml` (group `emit_fp`, ids `FP-01`, `FP-32`, `FP-
 migrating `test_cbat/test_fp.ml`.  Every source `check` site is carried; none
 retired.
 
-Production mechanisms: `src/bil2llvm_fp.ml` (`native_fp_table`, `native_fp_op`,
-the `fp_sig` interface, the render arms of `create_native_fp_call`) and
-`src/bil2llvm_calls.ml` (`create_call`'s mapping branch and its unmapped-intrinsic
+Production mechanisms: `src/hike_emit/bil2llvm_fp.ml` (`native_fp_table`,
+`native_fp_op`, the `fp_sig` interface, the render arms of
+`create_native_fp_call`) and
+`src/hike_emit/bil2llvm_calls.ml` (`create_call`'s mapping branch and its unmapped-intrinsic
 warning).  The 29-row native-FP execution table is one pin per row: the map
 assertion and the emission assertion live in the same pin, so a dropped row is
 exactly one red pin (the recorded FP-table incident — a merge silently dropped

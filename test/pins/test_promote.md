@@ -10,11 +10,12 @@ is retired.  The swallowing `try … with _ -> ()` that wrote
 were neither pins nor assertions and are dropped.
 
 Production mechanisms: `src/hike_promote.ml` (`promote_sub`,
-`rewrite_program`, `site_bindings_of_sub`, `call_resolution`), `src/hike_sections.ml`
+`rewrite_program`, `call_resolution`), `src/hike_sections.ml`
 (`attribute` / `stamp_tags` / `storage_of_range`), `src/hike_cfg_complete.ml`
-(`retaddr_defs`), `src/hike_stack_model.ml` (`arg_slot`, `is_call_arg`), and
-the emitter's promotion rendering `src/bil2llvm.ml` +
-`src/bil2llvm_calls.ml` (promoted signature, `_hike_thunk`, `indirect_call`).
+(`retaddr_defs`), `src/hike_core/hike_stack_model.ml` (`arg_slot`,
+`is_call_arg`), and the emitter's promotion rendering
+`src/hike_emit/bil2llvm.ml` + `src/hike_emit/bil2llvm_calls.ml` (promoted
+signature, `_hike_thunk`, `indirect_call`).
 
 There is no `Test_seam` for this pass, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The
@@ -25,9 +26,9 @@ closure — no cross-pin state.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| PR-04 | The thunk's synthetic indirect convention is the ABI register lanes plus `ptr %hike_window` — the window base, never SP. | In `src/bil2llvm_calls.ml`, replace the trailing `hike_window` parameter with the SP register in the thunk signature. | PR-04: the `… ptr %hike_window)` tail is absent from the thunk signature (review). |
+| PR-04 | The thunk's synthetic indirect convention is the ABI register lanes plus `ptr %hike_window` — the window base, never SP. | In `src/hike_emit/bil2llvm_calls.ml`, replace the trailing `hike_window` parameter with the SP register in the thunk signature. | PR-04: the `… ptr %hike_window)` tail is absent from the thunk signature (review). |
 | PR-08 | The unresolved site's pointer call never lands on the promoted body directly by name. | Same recipe as PR-07; additionally force the fallback target name to the callee. | PR-08: `call { i64, i64 } @prom_callee(` appears (review). |
-| PR-09 | `bil2llvm.ml` emits the synthetic `@indirect_call` signature: six GP lanes, eight YMM lanes, and the trailing `ptr %hike_window`. | In `src/bil2llvm.ml`, drop the trailing window parameter from the `indirect_call` declaration. | PR-09: the `@indirect_call(…, ptr)` full signature substring is absent (review). |
+| PR-09 | `bil2llvm.ml` emits the synthetic `@indirect_call` signature: six GP lanes, eight YMM lanes, and the trailing `ptr %hike_window`. | In `src/hike_emit/bil2llvm.ml`, drop the trailing window parameter from the `indirect_call` declaration. | PR-09: the `@indirect_call(…, ptr)` full signature substring is absent (review). |
 | PR-12 | `Hike_sections.stamp_tags` keeps the `sec_tag` on an identity stack access through the stamp. | In `src/hike_sections.ml` `stamp_tags`, skip defs whose rhs is an unclassified identity access. | PR-12: `Sm.sec_tag keep_def` is `None` (review). |
 | PR-16 | `Hike_cfg_complete.retaddr_defs` puts the `[RSP+0]` load in the return-address set (it never forces a window parameter). | In `src/hike_cfg_complete.ml` `retaddr_defs`, stop filtering loads at the entry-RSP cell `{0}`. | PR-16: `Core.Set.mem a2_retaddr (Term.tid a2_ld)` is false (review). |
 | PR-17 | A store into the caller window writes real memory: the touched slot is write-closed into `Stack_residue` (Window), so its reads take the window. | In `src/hike_sections.ml`, treat written args slots as unbound `Arg_slot` (skip the write-closed demotion). | PR-17: `storage_of_range` at `[+8,+15]` is not `Some Stack_residue` (review). |

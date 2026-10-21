@@ -6,7 +6,7 @@ Module: `test/unit/test_split_blocks.ml` (group `split_blocks`, ids
 materializes every guard's implicit fallthrough as an explicit `Goto`
 and splits a 3+-jmp direct-goto series into pieces, each carrying an
 explicit `Goto` to the next.  The BIR's edges are then the jmps
-themselves, so `src/bil2llvm.ml`'s `create_branches` is a mechanical
+themselves, so `src/hike_emit/bil2llvm.ml`'s `create_branches` is a mechanical
 1- or 2-jmp mapping and every later pass (SSA, types) reads
 `Sub.to_graph`.  Its pins live here because the split and the emitter's
 branch shape are one contract: the BIR is explicit.
