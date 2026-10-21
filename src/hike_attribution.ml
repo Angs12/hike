@@ -13,7 +13,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (program : program term) : result =
   let synth, program = Hike_split_blocks.materialize ~facts program in
   let facts = Hike_kb.with_synth facts synth in
-  let addr_bits = Hike_abi.addr_size_bits facts.target in
+  let addr_bits = Bap_core_theory.Theory.Target.data_addr_size facts.target in
   let synth, program =
     Hike_tls.rewrite_program ~synth ~addr_bits ~tls ~denote:facts.denote program
   in

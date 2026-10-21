@@ -206,7 +206,7 @@ let () =
        (* The address width follows the loaded target ABI. *)
        let target = Project.target proj in
        let abi = Hike.Abi.of_target target in
-         Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
+         Vsa.set_addr_bits (Bap_core_theory.Theory.Target.data_addr_size target);
        let synth, prog = production_input proj in
        (if String.equal subname "ALL" then
           Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub ~abi ~synth sub)

@@ -13,7 +13,7 @@ let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n
 (* Every analysis entry self-arms the address width from the target it
    carries — no cross-pass init order exists. *)
 let self_arm (target : Theory.Target.t) : unit =
-  set_addr_bits (Hike_abi.addr_size_bits target)
+  set_addr_bits (Bap_core_theory.Theory.Target.data_addr_size target)
 
 type section_image = Vsa.section_image = {
   img_lo : int64;

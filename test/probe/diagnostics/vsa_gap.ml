@@ -59,7 +59,7 @@ let () =
       | "none" -> fun _ -> Vsa.Call_effects.Summary None
       | _ -> callee_of ~synth:!synth prog
     in
-    Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
+    Vsa.set_addr_bits (Bap_core_theory.Theory.Target.data_addr_size target);
     (* The pass's transforms, in chain order. *)
     let compile raw =
       let table, sub = Hike.Jump.compile_sub ~synth:!synth target raw in

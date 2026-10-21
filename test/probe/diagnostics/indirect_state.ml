@@ -23,7 +23,7 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) usage_text
     in
-    Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
+    Vsa.set_addr_bits (Bap_core_theory.Theory.Target.data_addr_size target);
     let abi = Hike.Abi.of_target target in
     let callee = callee_of ~synth prog in
     let sol =

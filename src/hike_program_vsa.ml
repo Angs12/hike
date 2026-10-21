@@ -94,7 +94,7 @@ let tag_rip context ~synth ~(is_entry : int64 -> bool) program =
         && Int64.unsigned_compare a span.ds_hi <= 0)
   in
   Hike_rip.prepare_program ~synth
-    ~addr_bits:(Hike_abi.addr_size_bits context.target) ~is_address program
+    ~addr_bits:(Bap_core_theory.Theory.Target.data_addr_size context.target) ~is_address program
 
 (* A transfer that is not a goto (a call, a trap) shares its block with
    other jmps: it moves to a block of its own, entered under its guard, so

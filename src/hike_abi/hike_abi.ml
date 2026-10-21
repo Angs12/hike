@@ -136,10 +136,6 @@ let is_interrupt_name (n : string) : bool =
 (* Argument registers in convention order: integer, then vector. *)
 let param_regs (t : t) : var list = t.int_param_regs @ t.vector_param_regs
 
-let addr_size_bits target =
-  if Theory.Target.is_unknown target then 0
-  else Theory.Target.data_addr_size target
-
 (* The machine size word for [bits]-bit addresses. *)
 let addr_size_of_bits (bits : int) : [> `r32 | `r64 ] =
   if bits <= 32 then `r32 else `r64

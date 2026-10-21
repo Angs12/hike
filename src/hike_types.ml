@@ -348,7 +348,7 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
           | None -> None)
       | None -> None
   in
-  let addr_width = Hike_stack_model.word_bits word in
+  let addr_width = Bap_core_theory.Theory.Target.data_addr_size facts.Hike_kb.target in
   let is_addr_width (d : def term) : bool =
     match Var.typ (Def.lhs d) with
     | Type.Imm n -> Int.equal n addr_width
@@ -634,7 +634,8 @@ let ptr_solver ~(facts : Hike_kb.facts) (sub : sub term) :
 (* The value type of a pointer: `Mem (addr, byte)`; the emitter lowers
    it to LLVM `ptr`.  The address size is the target's, never a literal. *)
 let mem_type_of_target (target : Bap_core_theory.Theory.Target.t) : Type.t =
-  Hike_abi.mem_type ~addr_bits:(Bap_core_theory.Theory.Target.bits target)
+  Hike_abi.mem_type
+    ~addr_bits:(Bap_core_theory.Theory.Target.data_addr_size target)
 
 (* Types each pointer SSA version [Mem]: a version has one def, so its
    sort is its type at every occurrence.  An input lane takes its entry
