@@ -38,8 +38,9 @@ let prepare_block ~(synth : Hike_synth.table ref) ~addr_bits ~is_address
 #endif
           Bil.Var (Synth.record synth (Synth.mint_module_addr ~addr_bits a))
         | _ -> Bil.Int w
-      (* A store's data is not an address: only the address operand
-         takes the synthetic form. *)
+      (* Only the address operand takes the synthetic form: a store's
+         data is not an address, and its memory operand is the lifted
+         memory-state var, never a tagged RIP expression. *)
       method! map_store ~mem ~addr ~exp endian size =
         Bil.Store (mem, self#map_exp addr, exp, endian, size)
     end
