@@ -355,7 +355,7 @@ let fallthroughs (sub : sub term) : Tid.t Tid.Map.t =
    reach cannot execute — no other sub transfers into it (a jump into
    another sub's interior is the tail-call rule, its entry only) — so
    dropping it is dead-code removal, never a missing definition. *)
-let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
+let prune_unreachable ~synth ~index ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t) (sub : sub term) : sub term =
   (* The walk starts at the sub's own entry — the block at the address
@@ -381,7 +381,6 @@ let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
   match entry with
   | None -> sub
   | Some entry ->
-    let index = Hike_transfer.index_of_sub sub in
     let blocks = Seq.to_list (Term.enum blk_t sub) in
     let by_tid =
       Core.Map.of_alist_exn (module Tid)
@@ -500,22 +499,15 @@ let materialize_fallthroughs (sub : sub term) : sub term =
   in
   Term.map blk_t sub ~f:normalize
 
-(* One resolution event pass on the phase's own solution: the resolved
-   dispatches contribute their target sets to the extra edges.  The
-   words are the target denotations; the drive discovers the case
-   bodies from the raw transfers' own denotations, so the completion
-   carries no fact channel.  The caller supplies [retaddr_defs] for
-   this exact (sub, sol) pair. *)
-let resolve_phase ~(sol : Vsa.vsa_sol)
+(* Grow only the phase's extra edges; materialization waits for drain. *)
+let resolve_phase ~(denote : denote) ~(index : Hike_transfer.index)
     ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     ~(retaddr : Tid.Set.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     Tid.Set.t Tid.Map.t * bool =
-  let denote = denote_of_sol ~synth sol in
   let sub_tids = sub_tids sub in
-  let index = Hike_transfer.index_of_sub sub in
   let resolved', grew =
     Term.enum blk_t sub
     |> Seq.fold ~init:(resolved, false) ~f:(fun acc blk ->
@@ -533,7 +525,7 @@ let resolve_phase ~(sol : Vsa.vsa_sol)
                 | Some cases ->
                     let ts = Core.Set.of_list (module Tid) cases in
                     match Core.Map.find m (Term.tid j) with
-                    | Some old when Core.Set.equal old ts -> acc
+                    | Some old when Core.Set.is_subset ts ~of_:old -> acc
                     | Some old ->
                         ( Core.Map.set m ~key:(Term.tid j)
                             ~data:(Core.Set.union old ts),
@@ -543,19 +535,24 @@ let resolve_phase ~(sol : Vsa.vsa_sol)
   in
   (resolved', grew)
 
-(* The exit materialization at drain: the return canonicalization lands
-   once, then the unreachable-block rule runs on the edge set.  The
-   bounded dispatches materialize later, in
-   [Split_blocks.materialize].  The denotations read the images through
-   the caller's bracket.  The caller supplies the same [retaddr_defs]
-   set as the drained resolution phase. *)
-let materialize ~(sol : Vsa.vsa_sol)
+(* Return canonicalization and pruning share the drained phase's facts. *)
+let materialize ~(denote : denote) ~(index : Hike_transfer.index)
     ~(synth : Hike_synth.table)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     ~(retaddr : Tid.Set.t)
     (sub : sub term) : sub term =
   let sub = rewrite_jmps_once ~retaddr sub in
-  prune_unreachable ~synth ~denote:(denote_of_sol ~synth sol) ~retaddr ~block_addrs
-    ~foreign_slots sub
+  prune_unreachable ~synth ~index ~denote ~retaddr ~block_addrs ~foreign_slots sub
   |> materialize_fallthroughs
+
+type progress = Grew of Tid.Set.t Tid.Map.t | Drained of sub term
+
+let advance ~abi ~sol ~synth ~block_addrs ~foreign_slots sub resolved =
+  let denote = denote_of_sol ~synth sol in
+  let index = Hike_transfer.index_of_sub sub in
+  let retaddr = retaddr_defs ~abi ~synth ~sol sub in
+  let resolved, grew =
+    resolve_phase ~denote ~index ~synth ~block_addrs ~foreign_slots ~retaddr sub resolved in
+  if grew then Grew resolved
+  else Drained (materialize ~denote ~index ~synth ~block_addrs ~foreign_slots ~retaddr sub)

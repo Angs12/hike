@@ -91,16 +91,6 @@ let tests : unit Alcotest.test list =
                     ([ load ], [ (1, transfer target) ]); ([], [ (0, mk_ret) ]);
                   ]
               in
-              let solution =
-                static_graph_vsa ~synth:Hike.Synth.empty ~abi
-                  ~resolved:Tid.Map.empty sub (Vsa.init_sol ~abi sub)
-              in
-              let loads =
-                Hike.Cfg_complete.retaddr_defs ~abi ~synth:Hike.Synth.empty
-                  ~sol:solution sub
-              in
-              check "the target's definition reads the return-address cell"
-                (Core.Set.mem loads (Term.tid load));
               let _, completed, _ =
                 produce ~synth:Hike.Synth.empty (x86_target ())
                   (Program.create ~subs:[ sub ] ())
@@ -409,17 +399,15 @@ let tests : unit Alcotest.test list =
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
-            let retaddr = Hike.Cfg_complete.retaddr_defs
-                ~abi:Hike.Abi.x86_64_sysv ~synth:Hike.Synth.empty ~sol j5 in
-            let resolved5', events5 =
-              Hike.Cfg_complete.resolve_phase ~sol ~synth:Hike.Synth.empty
-                ~retaddr ~block_addrs:
-                  (Core.Map.of_alist_exn (module Addr)
-                     [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
-                ~foreign_slots:Core.Int64.Set.empty
-                j5 Tid.Map.empty
-            in
-            (not events5) && Core.Map.is_empty resolved5'));
+            match Hike.Cfg_complete.advance ~abi ~sol ~synth:Hike.Synth.empty
+                    ~block_addrs:(Core.Map.of_alist_exn (module Addr)
+                       [ Addr.of_int64 0x3008L, j5_tids.(1) ])
+                    ~foreign_slots:Core.Int64.Set.empty j5 Tid.Map.empty with
+            | Grew _ -> false
+            | Drained sub ->
+              match jmps_of_blk sub 0 with
+              | [ jump ] -> Hike_return.is_jmp jump
+              | _ -> false));
 
     (* The completion owns the edge set: a conditional goto's false edge
        is named, and a destination two jumps share is carried once. *)
@@ -758,18 +746,15 @@ let tests : unit Alcotest.test list =
           static_graph_vsa ~synth:Hike.Synth.empty ~abi ~resolved:Tid.Map.empty
             sub (Cbat_vsa.init_sol ~abi sub)
         in
-        let retaddr =
-          Hike.Cfg_complete.retaddr_defs ~abi ~synth:Hike.Synth.empty ~sol sub
-        in
-        let resolved, grew =
-          Hike.Cfg_complete.resolve_phase ~sol ~synth:Hike.Synth.empty
-            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ~retaddr sub
-            Tid.Map.empty
-        in
-        let materialized =
-          Hike.Cfg_complete.materialize ~sol ~synth:Hike.Synth.empty
-            ~block_addrs ~foreign_slots:Core.Int64.Set.empty ~retaddr sub
-        in
+        let advance resolved =
+          Hike.Cfg_complete.advance ~abi ~sol ~synth:Hike.Synth.empty
+            ~block_addrs ~foreign_slots:Core.Int64.Set.empty sub resolved in
+        let resolved = match advance Tid.Map.empty with
+          | Grew resolved -> resolved
+          | Drained _ -> Alcotest.fail "expected new dispatch edges" in
+        let materialized = match advance resolved with
+          | Drained sub -> sub
+          | Grew _ -> Alcotest.fail "the same edges must drain" in
         let outcome (s : sub term) =
           let blk tid = Term.find blk_t s tid in
           let return_edge =
@@ -800,12 +785,12 @@ let tests : unit Alcotest.test list =
             Core.Set.equal ts (Tid.Set.of_list [ tids.(3); tids.(5) ])
           | None -> false
         in
-        check "RES-27a the fixture has both return-address cells"
-          (Core.Set.mem retaddr (Term.tid ra_ld)
-           && Core.Set.mem retaddr (Term.tid rar_ld));
-        check "RES-27b the dispatch keeps its two cases" (grew && dispatch_cases);
-        check "RES-27c materialization keeps the return and dispatch"
-          (outcome materialized));
+        check "RES-27 the dispatch keeps its two cases" dispatch_cases;
+        check "RES-27 materialization keeps the return and dispatch" (outcome materialized);
+        let previously_wider = Core.Map.update resolved (Term.tid (sub_jmp sub 4 0))
+            ~f:(fun previous -> Core.Set.add (Base.Option.value_exn previous) tids.(6)) in
+        check "an already known extra edge does not report growth"
+          (match advance previously_wider with Drained _ -> true | Grew _ -> false));
   ]
 
 let () = run "resolve" tests

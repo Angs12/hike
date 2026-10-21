@@ -46,46 +46,17 @@ open Bap.Std
     blk:blk term ->
     exp -> dispatch option
 
-  (** The defs whose load address denotates, in the def's own
-      before-env, to the stack-symbolic entry-RSP cell. *)
-  val retaddr_defs :
-    abi:Hike_abi.t -> synth:Hike_synth.table -> sol:Cbat_vsa.vsa_sol -> sub term -> Tid.Set.t
+  type progress = Grew of Tid.Set.t Tid.Map.t | Drained of sub term
 
-  (** One resolution event pass on the phase's solution: the resolved
-      dispatches contribute their target sets to the extra edges.  The
-      words are the target denotations; the drive discovers the case
-      bodies from the raw transfers' own denotations.  Returns the
-      grown edge set and whether anything grew.  Runs under the
-      caller's image bracket.
-
-      [retaddr] is the sub's [retaddr_defs] for this exact
-      [(sub, sol)] pair, shared by the consumers of this phase. *)
-  val resolve_phase :
-    sol:Cbat_vsa.vsa_sol ->
-    synth:Hike_synth.table ->
-    block_addrs:Tid.t Addr.Map.t ->
-    foreign_slots:Core.Int64.Set.t ->
-    retaddr:Tid.Set.t ->
-    sub term ->
-    Tid.Set.t Tid.Map.t ->
-    Tid.Set.t Tid.Map.t * bool
-
-  (** The exit materialization at drain: the return canonicalization
-      lands once, then every block neither reachable from the sub's
-      entry nor live behind a surviving indirect transfer drops
-      ([foreign_slots] are the linker-owned slot addresses a transfer
-      may read its target through — such a transfer leaves the
-      program).  The bounded dispatches materialize later, in
-      [Split_blocks.materialize].  [retaddr] is the set shared with
-      the drained resolution phase; the sub and call facts must be
-      unchanged since. *)
-  val materialize :
-    sol:Cbat_vsa.vsa_sol ->
-    synth:Hike_synth.table ->
-    block_addrs:Tid.t Addr.Map.t ->
-    foreign_slots:Core.Int64.Set.t ->
-    retaddr:Tid.Set.t ->
-    sub term -> sub term
+  (** Resolves the current solution, growing extra edges without changing
+      the sub. Once no edges grow, canonicalizes returns, prunes proven
+      unreachable blocks and names fallthroughs. Return-address and transfer
+      classification belong to this call and cannot outlive its solution.
+      Runs under the caller's image bracket. *)
+  val advance :
+    abi:Hike_abi.t -> sol:Cbat_vsa.vsa_sol -> synth:Hike_synth.table ->
+    block_addrs:Tid.t Addr.Map.t -> foreign_slots:Core.Int64.Set.t ->
+    sub term -> Tid.Set.t Tid.Map.t -> progress
 
   (** Names every block's successors: a conditional goto's implicit
       false edge becomes an explicit [Goto], and a destination two jumps

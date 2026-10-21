@@ -160,31 +160,18 @@ let solve_phases (target : Theory.Target.t) ~(lookup : lookup_fn)
                     p_block_addrs = block_addrs; p_seed = sol;
                     p_blocked = blocked; p_wake = blocks; p_synth = !synth }
         else
-          (* The return-address set is one replay of the phase's
-             solution; the resolution and, on drain, the
-             materialization both read it.  A phase that grows the
-             edges discards it: the next phase's solution differs. *)
-          let retaddr =
-            Hike_cfg_complete.retaddr_defs ~abi ~synth:!synth ~sol sub
-          in
-          let resolved', events =
-            Hike_cfg_complete.resolve_phase ~sol ~synth:!synth ~block_addrs
-              ~foreign_slots ~retaddr sub resolved
-          in
-          if events then phases resolved' block_addrs (Some sol) Tid.Set.empty
-          else `Drained (sol, block_addrs, resolved, retaddr)
+          match Hike_cfg_complete.advance ~abi ~sol ~synth:!synth ~block_addrs
+                  ~foreign_slots sub resolved with
+          | Grew resolved -> phases resolved block_addrs (Some sol) Tid.Set.empty
+          | Drained materialized -> `Drained (sol, block_addrs, resolved, materialized)
       in
       (* A sub without a converged solution has no sound summary or
          body; the lift stops. *)
       try
       match phases resolved block_addrs seed wake with
       | `Paused p -> Paused p
-      | `Drained (sol, block_addrs', resolved, retaddr) ->
+      | `Drained (sol, block_addrs', resolved, materialized) ->
         let continuation = { canonical = sub; seed = sol } in
-        let materialized =
-          Hike_cfg_complete.materialize ~sol ~synth:!synth ~retaddr
-            ~block_addrs:block_addrs' ~foreign_slots sub
-        in
         (* The materialization changes the edge set; the SSA follows, and
            the blocks it renamed are solved again from the warm solution
            (the others keep their variables, so their states stand). *)

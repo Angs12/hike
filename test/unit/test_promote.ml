@@ -543,26 +543,18 @@ let tests : unit Alcotest.test list =
         let keep_def = Base.Option.value_exn (t10_find_def keep_sub (Term.tid keep)) in
         check "PR-12" (Ds.sec_tag keep_def <> None));
 
-    (* PR-16: the return-address cell ([RSP+0] load) dies into the retaddr
-       set — it never forces a window parameter. *)
-    pin "PR-16" "the [RSP+0] read is the retaddr cell (the retaddr set)" (fun () ->
-        let m = memv "pr_m" in
-        let a2_ra = v64 "pr_a2_ra" in
-        let a2_ld =
-          Def.create a2_ra (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64))
-        in
-        let a2 = straight_sub "pr_a2_retaddr" [ a2_ld ] in
-        let a2_retaddr =
-          let sol =
-            static_graph_vsa ~synth:Hike.Synth.empty
-              ~abi:Hike_abi.x86_64_sysv
-              ~resolved:Tid.Map.empty a2
-              (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv a2)
-          in
-          Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv
-            ~synth:Hike.Synth.empty ~sol a2
-        in
-        check "PR-16" (Core.Set.mem a2_retaddr (Term.tid a2_ld)));
+    ("return address", [ case "reading the return address does not introduce a window parameter" (fun () ->
+        let memory = memv "return_memory" and target = v64 "return_target" in
+        let sub, _ = sub_of "return_address"
+            [ [ Def.create target (Bil.Load (Bil.Var memory, Bil.Var sp, LittleEndian, `r64)) ],
+              [ 0, (fun _ -> Jmp.create (Goto (Indirect (Bil.Var target)))) ] ] in
+        let rewritten = rewrite_one ~synth:Hike.Synth.empty sub in
+        check "return is canonicalized"
+          (Term.enum blk_t rewritten |> Seq.concat_map ~f:(Term.enum jmp_t)
+           |> Seq.exists ~f:Hike_return.is_jmp);
+        match Term.get_attr rewritten Sm.layout_tag with
+        | Some layout -> check "no incoming window" (not layout.Sm.window_param)
+        | None -> Alcotest.fail "missing attributed layout") ]);
 
     (* PR-17: a written cell promotes too — the pointer convention carries
        the store (no value to reconstruct, no demotion). *)
