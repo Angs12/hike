@@ -92,8 +92,10 @@ let native_fp_op (name : string) : native_fp option =
   Core.Option.map (row_of_name name) ~f:fst
 
 (* The ONE lane-width policy for a mapped call: the width the target
-   names, the target word when the spelling stayed unqualified.  Every
-   consumer of a mapped call's widths reads this. *)
+   names, the target word when the spelling stayed unqualified.  Only
+   rows with no sized spelling (the runtime boundary) reach the word
+   fallback; a sized-row miss is refused by Hike_fp, including the
+   80-bit class.  Every consumer of a mapped call's widths reads this. *)
 let lane_width_of_name ~(word_bits : int) (name : string) : int =
   let named = Core.Option.bind (row_of_name name) ~f:snd in
   Base.Option.value named ~default:word_bits
