@@ -1,155 +1,141 @@
-(* Cbat_clp.Exact pins.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins. *)
-
 open Bap.Std
-open Bap_core_theory
 open Hike_test.Harness
 open Hike_test.Common
-open Hike_test.Fixtures
 
-let tests : unit Alcotest.test list =
+let set width xs = Ex.of_list ~width (List.map (Wo.of_int ~width) xs)
+let check_set = Alcotest.check (Alcotest.testable Ex.pp Ex.equal)
+
+let tests =
   [
-    pin "FS-01" "FS1: of_list basics (cardn/bitwidth/min/max/elem)"
-      (fun () ->
-        let s = Ex.of_list ~width:32 [ w32 1; w32 2; w32 3 ] in
-        check "FS-01"
-          (Ex.bitwidth s = 32
-          && Cbat_word.to_int_exn (Ex.cardinality s) = 3
-          && Ex.min_elem s = Some (w32 1)
-          && Ex.max_elem s = Some (w32 3)
-          && Ex.elem (w32 2) s
-          && not (Ex.elem (w32 4) s)));
-
-
-
-    pin "FS-03" "FS2: lift1 unops are involutive (neg, lnot)"
-      (fun () ->
-        let s = Ex.of_list ~width:32 [ w32 1; w32 2; w32 3 ] in
-        check "FS-03"
-          (Ex.equal (Ex.neg (Ex.neg s)) s && Ex.equal (Ex.lnot (Ex.lnot s)) s));
-
-    pin "FS-04" "FS3: lift2 union/intersection"
-      (fun () ->
-        check "FS-04"
-          (let a = Ex.of_list ~width:32 [ w32 1; w32 2 ] in
-           let b = Ex.of_list ~width:32 [ w32 2; w32 3 ] in
-           Ex.equal (Ex.union a b) (Ex.of_list ~width:32 [ w32 1; w32 2; w32 3 ])
-           && Ex.equal (Ex.intersection a b) (Ex.of_list ~width:32 [ w32 2 ])));
-
-
-
-
-
-
-
-    pin "FS-08" "FS7: add: {1,2} + {10} = {11,12}"
-      (fun () ->
-        check "FS-08"
-          (let a = Ex.of_list ~width:32 [ w32 1; w32 2 ] in
-           let r = Ex.add a (Ex.singleton (w32 10)) in
-           Ex.elem (w32 11) r && Ex.elem (w32 12) r
-           && Cbat_word.to_int_exn (Ex.cardinality r) = 2));
-
-    pin "FS-09" "FS8: extract/cast/concat width sanity"
-      (fun () ->
-        check "FS-09"
-          (let one = Ex.singleton (w32 1) in
-           Ex.bitwidth (Ex.extract ~hi:7 ~lo:0 one) = 8
-           && Ex.bitwidth (Ex.cast Bil.UNSIGNED 64 one) = 64
-           && Ex.bitwidth (Ex.concat one (Ex.singleton (Cbat_word.of_int ~width:16 1))) = 48));
-
-    pin "FS-10" "FS9 (delta #1): equal on width-mismatched sets is false (no assert)"
-      (fun () ->
-        let f32 = Ex.of_list ~width:32 [ w32 1; w32 2 ] in
-        let f64 = Ex.of_list ~width:64 [ w64 1; w64 2 ] in
-        check "FS-10" ((not (Ex.equal f32 f64)) && not (Ex.equal f64 f32)));
-
-    pin "FS-11" "image production preserves unsigned order and uniqueness across word arms"
+    case "construction sorts and deduplicates at small and large word widths"
       (fun () ->
         List.iter
           (fun width ->
-            let word z = Cbat_word.of_z z width in
+            let word z = Wo.of_z z width in
             let high = Z.shift_left Z.one (width - 1) in
             let expected =
-              List.map word [ Z.zero; Z.one; Z.of_int 3; high; Z.succ high ] in
+              List.map word [ Z.zero; Z.one; Z.of_int 3; high; Z.succ high ]
+            in
             let input =
-              List.map word [ Z.succ high; Z.of_int 3; high; Z.zero; Z.one; high ] in
+              List.map word
+                [ Z.succ high; Z.of_int 3; high; Z.zero; Z.one; high ]
+            in
             let image =
-              Ex.of_iter ~width ~iter:(fun emit -> List.iter emit input) in
-            check "FS-11.ordered"
-              (Ex.elements image = expected
-              && Ex.equal image (Ex.of_list ~width input)) )
-          [ 8; 63; 64; 128 ];
-        let at8 n = Cbat_word.of_int ~width:8 n in
-        let a = Ex.of_list ~width:8 (List.map at8 [ 0; 1; 7; 128; 255 ]) in
-        let b = Ex.of_list ~width:8 (List.map at8 [ 1; 3; 129 ]) in
-        let xor = Ex.logxor a b in
-        let concrete =
-          List.concat_map
-            (fun x -> List.map (fun y -> Cbat_word.logxor x y) (Ex.elements b))
-            (Ex.elements a) in
-        check "FS-11.xor"
-          (List.for_all (fun w -> Ex.elem w xor) concrete
-          && List.for_all (fun w -> List.mem w concrete) (Ex.elements xor)));
-
-
-
-
-
-
-
-
-
-    pin "FS-12" "N6: filter calls f once per element in order and returns the source when all survive"
+              Ex.of_iter ~width ~iter:(fun emit -> List.iter emit input)
+            in
+            Alcotest.(check int) "width" width (Ex.bitwidth image);
+            Alcotest.(check int)
+              "cardinality" 5
+              (Wo.to_int_exn (Ex.cardinality image));
+            Alcotest.(check (list (testable Wo.pp Wo.equal)))
+              "ordered elements" expected (Ex.elements image);
+            let check_word =
+              Alcotest.(check (option (testable Wo.pp Wo.equal)))
+            in
+            check_word "minimum" (Some (word Z.zero)) (Ex.min_elem image);
+            check_word "maximum" (Some (word (Z.succ high))) (Ex.max_elem image);
+            check "membership excludes an absent value"
+              (not (Ex.elem (word (Z.of_int 2)) image));
+            check_set "list and streamed construction agree"
+              (Ex.of_list ~width input) image)
+          [ 8; 63; 64; 128 ]);
+    case "unary operations compute their modular images" (fun () ->
+        let input = set 8 [ 0; 1; 127; 128; 255 ] in
+        check_set "negation" (set 8 [ 0; 255; 129; 128; 1 ]) (Ex.neg input);
+        check_set "complement" (set 8 [ 255; 254; 128; 127; 0 ]) (Ex.lnot input));
+    case "binary operations retain exactly the resulting alternatives"
       (fun () ->
-        let at8 n = Cbat_word.of_int ~width:8 n in
-        let a = Ex.of_list ~width:8 (List.map at8 [ 1; 4; 7; 200 ]) in
-        let seen = ref [] in
-        let same = Ex.filter a ~f:(fun w -> seen := w :: !seen; true) in
-        check "FS-12.all"
-          (same == a && List.rev !seen = Ex.elements a);
-        seen := [];
-        let odd =
-          Ex.filter a ~f:(fun w -> seen := w :: !seen;
-                          Cbat_word.to_int_exn w mod 2 = 1) in
-        check "FS-12.some"
-          (List.rev !seen = Ex.elements a
-          && Ex.elements odd = List.map at8 [ 1; 7 ]
-          && Ex.is_bottom (Ex.filter a ~f:(fun _ -> false))));
-
-
-    pin "FS-13" "N7: signed extrema agree with a signed scan; splits_by checks consecutive gaps"
-      (fun () ->
-        let at8 n = Cbat_word.of_int ~width:8 n in
-        let signed_val n = if n >= 128 then n - 256 else n in
+        let a = set 8 [ 1; 2 ] and b = set 8 [ 2; 3 ] in
         List.iter
-          (fun l ->
-            let e = Ex.of_list ~width:8 (List.map at8 l) in
-            let vs = List.map signed_val l in
-            let lo = List.fold_left min max_int vs
-            and hi = List.fold_left max min_int vs in
-            let sv w = signed_val (Cbat_word.to_int_exn (Cbat_word.unsigned w)) in
-            check "FS-13.extrema"
-              (match Ex.min_elem_signed e, Ex.max_elem_signed e with
-               | Some a, Some b ->
-                 sv a = lo && sv b = hi
-                 && Cbat_word.is_signed a && Cbat_word.is_signed b
-               | _ -> false))
-          [ [ 5 ]; [ 200 ]; [ 1; 2; 3 ]; [ 130; 200; 255 ]; [ 0; 127; 128; 255 ];
-            [ 3; 100; 250 ] ];
-        check "FS-13.empty"
-          (Ex.min_elem_signed (Ex.bottom 8) = None
-          && Ex.max_elem_signed (Ex.bottom 8) = None);
-        let grid = Ex.of_list ~width:8 (List.map at8 [ 2; 6; 10 ]) in
-        check "FS-13.splits"
-          (Ex.splits_by grid (at8 4)
-          && not (Ex.splits_by grid (at8 8))
-          && Ex.splits_by (Ex.bottom 8) (at8 3)
-          && Ex.splits_by (Ex.singleton (at8 9)) (at8 3)));
-
-
-
-
+          (fun (name, expected, actual) ->
+            check_set name (set 8 expected) actual)
+          [
+            ("union", [ 1; 2; 3 ], Ex.union a b);
+            ("intersection", [ 2 ], Ex.intersection a b);
+            ("addition", [ 11; 12 ], Ex.add a (set 8 [ 10 ]));
+            ("wrapping addition", [ 0; 255 ], Ex.add a (set 8 [ 254 ]));
+            ( "xor across the sign bit",
+              [ 0; 1; 2; 3; 4; 6; 126; 128; 129; 131; 134; 252; 254 ],
+              Ex.logxor (set 8 [ 0; 1; 7; 128; 255 ]) (set 8 [ 1; 3; 129 ]) );
+          ]);
+    case "extract, extension and concat preserve the selected bits" (fun () ->
+        List.iter
+          (fun (name, width, expected, actual) ->
+            check_set name (set width [ expected ]) actual)
+          [
+            ( "middle byte",
+              8,
+              0xab,
+              Ex.extract ~hi:15 ~lo:8 (set 32 [ 0x12abcd ]) );
+            ( "zero extension",
+              64,
+              0x80000001,
+              Ex.cast Bil.UNSIGNED 64 (set 32 [ 0x80000001 ]) );
+            ("sign extension", 64, -128, Ex.cast Bil.SIGNED 64 (set 8 [ 0x80 ]));
+            ( "concat",
+              48,
+              0x12345678abcd,
+              Ex.concat (set 32 [ 0x12345678 ]) (set 16 [ 0xabcd ]) );
+          ]);
+    case "different word widths are unequal in either operand order" (fun () ->
+        let a = set 32 [ 1; 2 ] and b = set 64 [ 1; 2 ] in
+        check "32 versus 64" (not (Ex.equal a b));
+        check "64 versus 32" (not (Ex.equal b a)));
+    case "filter visits each element once and preserves an unchanged set"
+      (fun () ->
+        let input = set 8 [ 1; 4; 7; 200 ] in
+        let seen = ref [] in
+        let filtered =
+          Ex.filter input ~f:(fun word ->
+              seen := word :: !seen;
+              true)
+        in
+        check "unchanged set is shared" (filtered == input);
+        check_set "all survive" input filtered;
+        Alcotest.(check (list int))
+          "visit order" [ 1; 4; 7; 200 ]
+          (List.rev_map Wo.to_int_exn !seen);
+        check_set "some survive"
+          (set 8 [ 1; 7 ])
+          (Ex.filter input ~f:(fun word -> Wo.to_int_exn word mod 2 = 1));
+        check_set "none survive" (Ex.bottom 8)
+          (Ex.filter input ~f:(fun _ -> false)));
+    case "signed extrema include the sign boundary and the empty set" (fun () ->
+        List.iter
+          (fun (values, expected) ->
+            let input = set 8 values in
+            let actual =
+              match (Ex.min_elem_signed input, Ex.max_elem_signed input) with
+              | None, None -> None
+              | Some lo, Some hi ->
+                  check "extrema are signed words"
+                    (Wo.is_signed lo && Wo.is_signed hi);
+                  let signed word =
+                    let n = Wo.to_int_exn word in
+                    if n < 128 then n else n - 256
+                  in
+                  Some (signed lo, signed hi)
+              | _ -> Alcotest.fail "only one signed extremum exists"
+            in
+            Alcotest.(check (option (pair int int)))
+              "signed bounds" expected actual)
+          [
+            ([], None);
+            ([ 5 ], Some (5, 5));
+            ([ 200 ], Some (-56, -56));
+            ([ 1; 2; 3 ], Some (1, 3));
+            ([ 130; 200; 255 ], Some (-126, -1));
+            ([ 0; 127; 128; 255 ], Some (-128, 127));
+            ([ 3; 100; 250 ], Some (-6, 100));
+          ]);
+    case "stride divisibility uses consecutive gaps" (fun () ->
+        let splits values divisor =
+          Ex.splits_by (set 8 values) (Wo.of_int ~width:8 divisor)
+        in
+        check "grid divides" (splits [ 2; 6; 10 ] 4);
+        check "larger stride does not divide" (not (splits [ 2; 6; 10 ] 8));
+        check "empty set" (splits [] 3);
+        check "singleton" (splits [ 9 ] 3));
   ]
 
-let () = run "exact" tests
+let () = run "exact sets" [ ("operations", tests) ]

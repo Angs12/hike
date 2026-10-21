@@ -1,5 +1,4 @@
-(* Cbat_map_lattice (and the Mem axis-map) pins.  One Alcotest group per
-   pin; each pin builds its own fixture, so no state crosses pins. *)
+(* Cbat_map_lattice (and the Mem axis-map) pins. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -31,16 +30,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "MAP-01" (Map.equal (Map.add Map.bottom ~key:0 ~data:1) Map.bottom));
 
-
-
     pin "MAP-03" "ML3: find on bottom/top returns bottom/top"
       (fun () ->
         check "MAP-03"
           (Map.find () Map.bottom 10 = IntLattice.bottom && Map.find () Map.top 10 = IntLattice.top));
-
-
-
-
 
     pin "MAP-06" "ML6: join_add/meet_add merge with the stored value"
       (fun () ->
@@ -48,8 +41,6 @@ let tests : unit Alcotest.test list =
           (let m = Map.join_add (Map.add Map.top ~key:5 ~data:3) ~key:5 ~data:10 in
            Map.find () m 5 = 10
            && Map.find () (Map.meet_add (Map.add Map.top ~key:5 ~data:10) ~key:5 ~data:3) 5 = 3));
-
-
 
     pin "MAP-08" "D2-4: Val.equal/precedes on idx-mismatched cells -> false (no assert)"
       (fun () ->
@@ -60,14 +51,6 @@ let tests : unit Alcotest.test list =
           ((not (Mem.Val.equal v32 v64))
           && (not (Mem.Val.precedes v32 v64))
           && not (Mem.Val.equal v32 vbe)));
-
-
-
-
-
-
-
-
 
     pin "MAP-13" "D2-9: Mem.widen_join of non-preceding maps -> join fallback (no assert)"
       (fun () ->
@@ -84,8 +67,6 @@ let tests : unit Alcotest.test list =
            let d = Mem.Val.data v in
            Ws.elem (w32 1) d && Ws.elem (w32 2) d && Ws.elem (w32 3) d && Ws.elem (w32 4) d));
 
-
-
     pin "MAP-15"
       "opadd-a: join a key fully inside one node — interval_diff `two (low flank lo 10 = {1}, middle \
        lo 12 = {1,2}, high flank lo 19 = {1})"
@@ -99,14 +80,6 @@ let tests : unit Alcotest.test list =
           && Ws.is_top (read32 m 11)
           && Ws.is_top (read32 m 9)
           && Ws.is_top (read32 m 21)));
-
-
-
-
-
-
-
-
 
     pin "MAP-20"
       "opadd-d1: a wrapped-interval WordSet fans per piece — both arcs carry the \
@@ -122,10 +95,6 @@ let tests : unit Alcotest.test list =
           && Ws.is_top (read32 m 0x50)
           && Ws.equal (read32 m 0xFFFFFFF0) (Ws.singleton (w32 7))));
 
-
-
-
-
     pin "MAP-23" "opadd-f: a 64-bit {5} meets a 32-bit {5} cell via meet_poly (widened to 64, no crash)"
       (fun () ->
         let m = range_cell 10 10 5 in
@@ -134,8 +103,6 @@ let tests : unit Alcotest.test list =
         check "MAP-23"
           (let v = Mem.Val.data (Mem.find (64, LittleEndian) m (point 10)) in
            Ws.equal v (Ws.singleton (w64 5))));
-
-
 
     pin "MAP-25"
       "ML8: a top-valued add stores no binding (absent reads top; the add is a remove)"
@@ -276,7 +243,6 @@ let tests : unit Alcotest.test list =
         check "MAP-32.fact-vs-top" (Mem.precedes fact top);
         check "MAP-32.fact-vs-other" (not (Mem.precedes fact other)));
 
-
     pin "MAP-33"
       "join and meet of a memory with itself return it physically"
       (fun () ->
@@ -288,10 +254,6 @@ let tests : unit Alcotest.test list =
         check "MAP-33.meet" (Mem.meet m m == m);
         let other = Mem.add top ~key:(point 0) ~data:(byte 0x22) in
         check "MAP-33.distinct" (Mem.join m other != m));
-
-
-
-
 
     pin "MAP-34"
       "equality and inclusion read an explicit top binding as an absent key, find a difference at any position, and a write that changes nothing keeps the wrapper"
@@ -358,7 +320,6 @@ let tests : unit Alcotest.test list =
             done
           done
         done);
-
 
     pin "MAP-36"
       "a strided key split by a meet, a diff or a gap keeps its own grid: pieces start and end on \

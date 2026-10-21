@@ -237,21 +237,12 @@ let tests : unit Alcotest.test list =
             check "TYPES-36 needs no scalar copies"
               (Seq.is_empty (Term.enum def_t blk))));
 
-
     pin "TYPES-05" "tag_lane: a plain [In] register lane is not a pointer"
       (fun () ->
         let rdi = int_param 0 in
         let a' = Types.tag_lane ~synth:Hike.Synth.empty (Arg.create ~intent:In rdi (Bil.Var rdi)) in
         check "TYPES-05"
           (arg_name a' = Var.name rdi && Arg.intent a' = Some In && not (is_ptr a')));
-
-
-
-
-
-
-
-
 
     pin "TYPES-12"
       "compute_sub_sig: SP, the thread pointer, and callee-saved registers are \
@@ -281,10 +272,6 @@ let tests : unit Alcotest.test list =
         in
         let _, args = sig_of ~synth sub in
         check "TYPES-13" (args = []));
-
-
-
-
 
     pin "TYPES-16"
       "compute_sub_sig: a window-param layout carries the caller window as a \
@@ -400,10 +387,6 @@ let tests : unit Alcotest.test list =
           (match rax_def with
            | Some d -> Core.Set.mem pf.Types.def_tids (Term.tid d)
            | None -> false));
-
-
-
-
 
     pin "KIND-05"
       "an integer SSA version of a pointer register stays an integer" (fun () ->

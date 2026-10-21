@@ -1,6 +1,4 @@
-(* Cbat_clp.Pieces pins: the canonical progression union.  One Alcotest
-   group per pin; each pin builds its own fixture, so no state crosses
-   pins. *)
+(* Cbat_clp.Pieces pins: the canonical progression union. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -45,10 +43,6 @@ let tests : unit Alcotest.test list =
                (P.to_list (P.union (p32 [ 0; 1; 2 ]) (p32 [ 3; 4; 5 ])))
              = 1
           && P.elem (w32 5) (P.union (p32 [ 0; 1; 2 ]) (p32 [ 3; 4; 5 ]))));
-
-
-
-
 
     pin "PCS-04"
       "the budget: a union of at most max_pieces pieces keeps every piece, \
@@ -187,8 +181,6 @@ let tests : unit Alcotest.test list =
             (P.equal (P.intersection (P.of_progression d) (P.singleton (w 4))) (P.singleton (w 4))))
           [8;16;32;64]);
 
-
-
     pin "PCS-08"
       "the parts exactness: a straddling lshift keeps the overshift and the \
        capped exact pieces apart"
@@ -232,9 +224,6 @@ let tests : unit Alcotest.test list =
         let ray = Clp.create_ascending ~width:64 ~base:(w64 (-0x58)) ~step:(w64 8) in
         let up = P.translate (P.of_progression ray) (w64 8) in
         check "PCS-14.ray" (P.elem (w64 0) up && P.elem (w64 (-0x50)) up));
-
-
-
 
     pin "PCS-15"
       "the canonical merge: union/intersection/diff stay sound and canonical \
@@ -441,12 +430,12 @@ let tests : unit Alcotest.test list =
        set's pieces and a piece union's elements equal what Pieces.of_list \
        and Exact.of_list build, across runs, scatter and a cap overflow"
       (fun () ->
-        Random.init 20261015;
+        let rng = Random.State.make [| 20261015 |] in
         let sets width =
           let top = (1 lsl width) - 1 in
           let wd = Cbat_word.of_int ~width in
           let run lo step n = List.init n (fun i -> lo + (i * step)) in
-          let scattered n = List.init n (fun _ -> Random.int (min (top + 1) ((1 lsl 30) - 1))) in
+          let scattered n = List.init n (fun _ -> Random.State.int rng (min (top + 1) ((1 lsl 30) - 1))) in
           List.map (List.map wd)
             [ [ 0 ]; [ top ]; [ 0; top ]; run 3 1 12; run 0 4 9;
               run 1 2 5 @ run 40 3 4 @ [ 90; 91; 92 ];
@@ -457,9 +446,9 @@ let tests : unit Alcotest.test list =
         let random_sets width =
           let top = (1 lsl width) - 1 in
           List.init 100 (fun _ ->
-              let n = 2 + Random.int 220 in
-              let span = 1 + Random.int top in
-              List.init n (fun _ -> Cbat_word.of_int ~width (Random.int (span + 1))))
+              let n = 2 + Random.State.int rng 220 in
+              let span = 1 + Random.State.int rng top in
+              List.init n (fun _ -> Cbat_word.of_int ~width (Random.State.int rng (span + 1))))
         in
         List.iter
           (fun width ->

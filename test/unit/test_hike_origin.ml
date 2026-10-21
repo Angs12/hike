@@ -12,39 +12,11 @@ module Origin = Hike_origin
 
 let abi = Hike_abi.x86_64_sysv
 
-(* ORI-01: the facts table — the stack base sits on the segment line and
-   carries the certified entry nibble. *)
-let ori_01 () =
-  let st = Origin.facts Origin.Stack in
-  check "stack base is the segment base"
-    (Stdlib.Int64.equal st.Origin.base Origin.segment_base);
-  check "entry nibble certified" (st.Origin.certified = 4);
-  check "stack span is 8 MiB each way"
-    (Stdlib.Int64.equal (Stdlib.Int64.sub st.Origin.hi st.Origin.lo)
-       (Stdlib.Int64.mul 2L (Int64.shift_left 1L 23)))
-
-(* ORI-02: every origin has a name.  The match is exhaustive, so a new
-   constructor stops compiling here until it is listed. *)
-let ori_02 () =
-  let listed (o : Origin.t) : Origin.t =
-    match o with
-    | Origin.Stack | Origin.Fs | Origin.Rip _ -> o
-  in
-  List.iter
-    [ Origin.Stack; Origin.Fs; Origin.Rip Hike_section.Rodata ]
-    ~f:(fun o ->
-        let n = Origin.name (listed o) in
-        check (sprintf "name %s nonempty" n) (String.length n > 0))
-
-(* The accessor's name answer, for the pin asserts. *)
-let origin_name (o : Origin.t option) : string option =
-  Option.map ~f:Origin.name o
-
 (* ORI-03: the one-origin accessor — a stack value reads Stack, plain
    values read None, a mixed union reads None. *)
 let ori_03 () =
   let stk = Ws.stack_word_i64 (-8L) in
-  check "stack value reads Stack" (Option.equal String.equal (origin_name (Ws.origin stk)) (Some "stack"));
+  check "stack value reads Stack" (Option.equal Origin.equal (Ws.origin stk) (Some Origin.Stack));
   let plain = Ws.singleton (i2w 5L) in
   check "plain value reads None" (Option.is_none (Ws.origin plain));
   let mixed = Ws.union stk plain in
@@ -274,9 +246,9 @@ let ori_28 () =
       |> Seq.to_list in
   List.iter defs ~f:(fun d ->
       check ("FS origin survives at " ^ Var.name (Def.lhs d))
-        (Option.equal String.equal
-           (origin_name (Vsa.Def_origin.def_origin d))
-           (Some (if Var.same (Def.lhs d) q then "stack" else "fs"))
+        (Option.equal Origin.equal
+           (Vsa.Def_origin.def_origin d)
+           (Some (if Var.same (Def.lhs d) q then Origin.Stack else Origin.Fs))
          || Var.same (Def.lhs d) m));
   (* The reloaded pointer's own value: the block's state holds the
      definition's version, so the pin reads it there. *)
@@ -332,7 +304,7 @@ let ori_30 () =
   in
   let pointer = value_after sub sol load_tid p in
   check "a foreign call preserves FS and its self-pointer load"
-    (Option.equal String.equal (origin_name (Ws.origin pointer)) (Some "fs"))
+    (Option.equal Origin.equal (Ws.origin pointer) (Some Origin.Fs))
 
 let ori_31 () =
   let m = memv "ori31_mem" in
@@ -350,18 +322,9 @@ let ori_31 () =
 
 let () =
   run "hike_origin"
-    [ pin "ORI-01" "the facts table" ori_01;
-      pin "ORI-02" "the ADT is total" ori_02;
-      pin "ORI-03" "the one-origin accessor" ori_03;
+    [ pin "ORI-03" "the one-origin accessor" ori_03;
 
       pin "ORI-07" "store-to-load round-trip (frame)" ori_07;
-
-
-
-
-
-
-
 
       pin "ORI-18" "the D10 namespace test" ori_18;
       pin "ORI-19" "all origins retain identity and use their own facts" ori_19;

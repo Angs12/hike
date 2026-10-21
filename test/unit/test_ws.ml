@@ -1,5 +1,4 @@
-(* Cbat_clp_set_composite pins.  One Alcotest group per pin; each pin
-   builds its own fixture, so no state crosses pins. *)
+(* Cbat_clp_set_composite pins. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -48,59 +47,55 @@ let tests : unit Alcotest.test list =
           && (not (Ws.elem (w32 0) d8))
           && not (Ws.elem (w32 2) d8)));
 
-
-
-
-
     pin "WS-05" "D1-5: composite meet on width-mismatched sets -> no assert, not bottom"
       (fun () ->
         check "WS-05"
           (let r = Ws.meet (Ws.of_list ~width:32 [ w32 1; w32 2 ]) (Ws.of_list ~width:64 [ w64 1 ]) in
            (not (Ws.is_bottom r)) && Ws.bitwidth r = 64 && Ws.elem (w64 1) r));
 
-
-
-    pin "WS-07" "D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert"
+    pin "WS-07" "mixed-width right shifts preserve every concrete result within the operand's bound"
       (fun () ->
         let big32 = Ws.of_list ~width:32 (List.init 11 (fun i -> w32 (i * 2))) in
         let big64 = Ws.of_list ~width:64 (List.init 11 (fun i -> w64 (i * 2))) in
-        check "WS-07" (not (Ws.is_top (Ws.rshift big32 big64))));
-
-
-
-
-
+        let result = Ws.rshift big32 big64 in
+        Alcotest.(check int) "result width" 32 (Ws.bitwidth result);
+        check "result stays within [0,20]"
+          (Ws.precedes result (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 20))));
+        List.iter (fun x -> List.iter (fun shift ->
+            let expected = Wo.rshift (w32 x) (w32 shift) in
+            check (Printf.sprintf "%d >> %d is retained" x shift) (Ws.elem expected result))
+            (List.init 11 (fun i -> i * 2))) (List.init 11 (fun i -> i * 2)));
 
     pin "WS-13"
       "property m6 overlap = not is_bottom o meet enumerated (300 random equal-width trials, \
        representation-aware)"
       (fun () ->
-        Random.init 20260822;
+        let rng = Random.State.make [| 20260822 |] in
         let failures = ref 0 in
         let rand_ws (w : int) : Ws.t * [ `fs | `clp ] =
-          match Random.int 4 with
+          match Random.State.int rng 4 with
           | 0 ->
               (* Small explicit set (Exact arm). *)
-              let n = 1 + Random.int 5 in
+              let n = 1 + Random.State.int rng 5 in
               let rec els acc i =
                 if i <= 0 then acc
-                else els (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) :: acc) (i - 1)
+                else els (Cbat_word.of_int ~width:w (Random.State.bits rng land ((1 lsl w) - 1)) :: acc) (i - 1)
               in
               (Ws.of_list ~width:w (els [] n), `fs)
           | 1 ->
               (* Random progression. *)
-              let base = Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
-              let step = Cbat_word.of_int ~width:w (1 + Random.int 3) in
-              let c = if Random.bool () then 1 + Random.int 6 else 17 + Random.int 30 in
+              let base = Cbat_word.of_int ~width:w (Random.State.bits rng land ((1 lsl w) - 1)) in
+              let step = Cbat_word.of_int ~width:w (1 + Random.State.int rng 3) in
+              let c = if Random.State.bool rng then 1 + Random.State.int rng 6 else 17 + Random.State.int rng 30 in
               ( Ws.of_clp (Clp.create base ~step ~cardn:(Cbat_word.of_int ~width:(w + 1) c)),
                 if c <= 16 (* Utils.fin_set_size *) then `fs else `clp )
           | 2 ->
               (* Top (demotes by width). *)
               (Ws.top w, if w <= 3 then `fs else `clp)
-          | _ -> (Ws.singleton (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
+          | _ -> (Ws.singleton (Cbat_word.of_int ~width:w (Random.State.bits rng land ((1 lsl w) - 1))), `fs)
         in
         for _i = 1 to 300 do
-          let w = [| 3; 5; 8; 32 |].(Random.int 4) in
+          let w = [| 3; 5; 8; 32 |].(Random.State.int rng 4) in
           let a, ta = rand_ws w in
           let b, tb = rand_ws w in
           if Ws.bitwidth a = Ws.bitwidth b then begin
@@ -130,40 +125,10 @@ let tests : unit Alcotest.test list =
            | Some lo, Some hi -> Cbat_word.equal lo (addr (-8L)) && Cbat_word.equal hi (addr (-8L))
            | _ -> false));
 
-
-
     pin "WS-17" "PW-B1: an AND confined to the certified nibble computes the ABI truth"
       (fun () ->
         let p = Ws.stack_word_i64 (-72L) in
         check "WS-17" (pw_exact 0 (Ws.logand p (pw_w 15))));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pin "WS-32"
       "DOM-44: a bitwise op on a stack value zero-extends the narrower plain operand to the common \

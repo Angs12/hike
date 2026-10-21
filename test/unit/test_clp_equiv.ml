@@ -209,8 +209,6 @@ let run_sweep () : int * int * int =
     if Z.leq (Z.abs i) max_small then Some (Z.to_int i) else None
   in
 
-
-
   (* Word of [width] bits holding [v] mod 2^width. *)
   let word_of_z (width : int) (v : Z.t) : word =
     Word.of_string (Printf.sprintf "%s:%d" (Z.to_string v) width)

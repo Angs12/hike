@@ -1,5 +1,4 @@
-(* Cbat_clp pins.  One Alcotest group per pin; each pin builds its own
-   fixture, so no state crosses pins. *)
+(* Cbat_clp pins. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -10,14 +9,6 @@ open Hike_test.Fixtures
 (* Interval builder: [lo, hi] step 1. *)
 let int32 ~lo ~hi =
   Clp.create ~width:32 ~step:(w32 1) ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (w32 lo)
-
-(* Two CLPs agree: equal, same cardn, same elems, same extrema. *)
-let clp_agree a b =
-  let elems p = List.sort compare (Clp.iter p) in
-  Clp.equal a b
-  && Clp.cardinality a = Clp.cardinality b
-  && elems a = elems b
-  && Clp.min_elem a = Clp.min_elem b && Clp.max_elem a = Clp.max_elem b
 
 (* An all-overshifted image is exactly {zero}: min/max/cardn agree, non-top. *)
 let w64i (v : int64) = Cbat_word.of_int64 ~width:64 v
@@ -72,20 +63,6 @@ let tests : unit Alcotest.test list =
           && Clp.max_elem c = Some (w32 10)
           && Cbat_word.to_int_exn (Clp.cardinality c) = 1));
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     pin "CLP-09" "CLP5: bottom: cardn 0, empty iter, no min elem"
       (fun () ->
         check "CLP-09"
@@ -95,14 +72,6 @@ let tests : unit Alcotest.test list =
            && Clp.iter b = []
            && Clp.min_elem b = None));
 
-
-
-
-
-
-
-
-
     pin "CLP-14" "CLP8: join of disjoint singletons contains both operands"
       (fun () ->
         let s5 = Clp.create (w32 5) in
@@ -110,37 +79,15 @@ let tests : unit Alcotest.test list =
         let u = Clp.join s5 s9 in
         check "CLP-14" (Clp.elem (w32 5) u && Clp.elem (w32 9) u));
 
-
-
-
-
-
-
-
-
-
-
     pin "CLP-20" "CLP12: meet of overlapping intervals: intersection members only"
       (fun () ->
         let clp2 = Clp.create ~width:32 ~step:(w32 2) ~cardn:(w33 5) (w32 10) in
         let q = Clp.of_list ~width:32 [ w32 14; w32 16; w32 18 ] in
-        let m = Clp.meet clp2 q in
-        check "CLP-20"
-          (Clp.elem (w32 14) m
-          && Clp.elem (w32 16) m
-          && Clp.elem (w32 18) m
-          && (not (Clp.elem (w32 10) m))
-          && not (Clp.elem (w32 17) m)));
-
-
-
-
-
-
-
-
-
-
+        let check_clp = Alcotest.check (Alcotest.testable Clp.pp Clp.equal) in
+        check_clp "same grid" q (Clp.meet clp2 q);
+        let interval = Clp.interval ~width:32 (w32 16) (w32 19) in
+        check_clp "intersection preserves the stride"
+          (Clp.of_list ~width:32 [ w32 16; w32 18 ]) (Clp.meet clp2 interval));
 
     pin "CLP-26" "CLP18: widen_join p p = p; widen_join bottom {5} = {5} (the new iterate)"
       (fun () ->
@@ -163,18 +110,6 @@ let tests : unit Alcotest.test list =
           (match Cbat_clp_core.diff a b with
            | [ r ] -> Cbat_clp.equal r a
            | _ -> false));
-
-
-
-
-
-
-
-
-
-
-
-
 
     pin "CLP-34"
       "W9: lnot/neg — the exact mirror rows: lnot {0,2,4} = {7,5,3}; neg {0,2,4} = {0,6,4}; the top \
@@ -211,36 +146,11 @@ let tests : unit Alcotest.test list =
                (fun (sec, msg) -> sec = "cbat_vsa" && contains_substring msg "policy5-log-probe")
                !hits));
 
-    pin "CLP-38" "A1: meet wrap {10..18} n {16..19} is NOT bottom (live path)"
-      (fun () ->
-        let a = Clp.of_list ~width:32 [ w32 10; w32 12; w32 14; w32 16; w32 18 ] in
-        let b = Clp.of_list ~width:32 [ w32 16; w32 17; w32 18; w32 19 ] in
-        let m = Clp.meet a b in
-        check "CLP-38" (not (Clp.is_bottom m)));
-
-
-
-
-
-
-
-
-
-
-
     pin "CLP-44" "D3-1: div by a set containing 0 -> top, no raise"
       (fun () ->
         let d1 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
         let d0 = Clp.of_list ~width:32 [ w32 0; w32 1 ] in
         check "CLP-44" (Clp.is_top (Clp.div d1 d0)));
-
-
-
-
-
-
-
-
 
     pin "CLP-49" "D2-1: CLP widen_join of non-subset singletons -> join, no assert"
       (fun () ->
@@ -248,20 +158,6 @@ let tests : unit Alcotest.test list =
         let s9 = Clp.create (w32 9) in
         let w = Clp.widen_join s5 s9 in
         check "CLP-49" (Clp.elem (w32 5) w && Clp.elem (w32 9) w));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pin "CLP-57"
       "O4c-1: width-64 singleton 0xFFFF_FFFF_FFFF_FFFF is unsigned — min = max = itself, elem holds, 0 \
@@ -277,27 +173,15 @@ let tests : unit Alcotest.test list =
           && (not (Clp.is_top c1))
           && not (Clp.is_bottom c1)));
 
-
-
-
-
-
-
-
-
-
-
-    pin "CLP-63" "O4c-7a: add commutative"
+    pin "CLP-63" "adding strided ranges produces the expected grid in either operand order"
       (fun () ->
         let p = Clp.create ~width:64 ~step:(w64 2) ~cardn:(Cbat_word.of_int ~width:65 5) (w64 10) in
         let q = Clp.create ~width:64 ~step:(w64 4) ~cardn:(Cbat_word.of_int ~width:65 3) (w64 6) in
-        check "CLP-63" (clp_agree (Clp.add p q) (Clp.add q p)));
-
-
-
-
-
-
+        let expected = Clp.create ~width:64 ~step:(w64 2)
+            ~cardn:(Cbat_word.of_int ~width:65 9) (w64 16) in
+        let check_clp = Alcotest.check (Alcotest.testable Clp.pp Clp.equal) in
+        check_clp "left + right" expected (Clp.add p q);
+        check_clp "right + left" expected (Clp.add q p));
 
     pin "CLP-67" "O4c-8: step 0 with cardn 1 canonizes to the singleton {10}"
       (fun () ->
@@ -308,38 +192,12 @@ let tests : unit Alcotest.test list =
           && Clp.elem (w32 10) s8
           && not (Clp.elem (w32 11) s8)));
 
-
-
-
-
-
-
-
-
     pin "CLP-72"
       "A-1: mixed-width rshift (32-bit {0xFF} >> 64-bit {2}) is EXACTLY {0x3F} at 32 bits (no guard \
        fire)"
       (fun () ->
         let r1 = Clp.rshift (Clp.create (w32 0xFF)) (Clp.create (w64 2)) in
         check "CLP-72" (Clp.equal r1 (Clp.create (w32 0x3F))));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pin "CLP-82" "D7-10: lshift 2-bit {2} amount vs 64-bit operand -> computes {64}, no spurious fire"
       (fun () ->
@@ -348,55 +206,23 @@ let tests : unit Alcotest.test list =
         check "CLP-82"
           (Clp.bitwidth r = 64 && Clp.min_elem r = Some (w64 64) && (not (Clp.is_top r)) && not fire_l));
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     pin "CLP-100"
       "property m6 Exact↔Clp round-trips enumerated (200 random progression trials: soundness always, \
        exactness on wrap-free arcs)"
       (fun () ->
-        Random.init 20260822;
+        let rng = Random.State.make [| 20260822 |] in
         let failures = ref 0 in
         for _i = 1 to 200 do
-          let w = [| 4; 8; 12; 32 |].(Random.int 4) in
+          let w = [| 4; 8; 12; 32 |].(Random.State.int rng 4) in
           let dom = 1 lsl w in
-          (* Random.int's bound stays under 2^31: a 32-bit domain draws
+          (* Random's bound stays under 2^31: a 32-bit domain draws
              its base in two halves. *)
           let base =
-            if dom <= 1 lsl 29 then Random.int dom
-            else (Random.int (dom lsr 16) lsl 16) + Random.int (1 lsl 16)
+            if dom <= 1 lsl 29 then Random.State.int rng dom
+            else (Random.State.int rng (dom lsr 16) lsl 16) + Random.State.int rng (1 lsl 16)
           in
-          let step = 1 + Random.int 5 in
-          let n = 1 + Random.int 10 in
+          let step = 1 + Random.State.int rng 5 in
+          let n = 1 + Random.State.int rng 10 in
           let rec els acc k =
             if k = n then acc
             else els (Cbat_word.of_int ~width:w ((base + (k * step)) mod dom) :: acc) (k + 1)
@@ -443,22 +269,6 @@ let tests : unit Alcotest.test list =
           (let r = Clp.modulo (pbh_iv 64 0x17 0xfb6) (pbh_one 64 16) in
            Clp.min_elem r = Some (Wo.of_int ~width:64 0)
            && Clp.max_elem r = Some (Wo.of_int ~width:64 15)));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     (* One sweep, two facts: the sound rows and the exact hull. *)
     pin "CLP-110" "PBH-M9/M10: mod/smod sweep — row soundness and the same-quotient exact residue hull (widths 4..8, all intervals, k<=5)"
@@ -568,14 +378,6 @@ let tests : unit Alcotest.test list =
           (Clp.subset (Clp.of_list ~width:32 [ w32 0; w32 1; w32 2 ])
              (Clp.modulo (grid 0) (Clp.singleton (w32 3)))));
 
-
-
-
-
-
-
-
-
     pin "CLP-117"
       "difference by something other than one run equals the hull of its ascending survivors"
       (fun () ->
@@ -590,9 +392,6 @@ let tests : unit Alcotest.test list =
         check "CLP-117.tie"
           (same (Cbat_clp_core.diff (prog 0 64 4) (prog 64 128 2))
              (Cbat_clp_core.of_list ~width:8 [ w8 0; w8 128 ])));
-
-
-
 
   ]
 
