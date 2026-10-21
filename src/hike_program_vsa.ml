@@ -131,37 +131,6 @@ let isolate_transfers (sub : sub term) : sub term =
   in
   Base.List.fold (Base.List.rev !moved) ~init:sub ~f:(Term.append blk_t)
 
-(* The block-level normalization seam: the passes that do not need the
-   whole-sub graph.  Jump compilation stays on the whole-sub path: it
-   walks unique-goto predecessors and can bind a def in a predecessor.
-   SSA follows separately through [update_sub_woken]. *)
-let normalize_blocks context ~synth ~is_address (blocks : blk term list) :
-    Hike_synth.table * blk term list =
-  let addr_bits = Hike_abi.word_bits (Hike_abi.of_target context.target) in
-  let cell = ref synth in
-  let blocks =
-    Base.List.map blocks ~f:(Hike_atomic.normalize_block ~addr_bits)
-  in
-  let blocks =
-    Base.List.map blocks ~f:(Hike_split_mem.split_block ~synth:cell)
-  in
-  let blocks = Base.List.map blocks ~f:Hike_coerce.coerce_block in
-  let blocks =
-    Base.List.map blocks ~f:(Hike_fp.run_block ~word_bits:addr_bits ~synth:cell)
-  in
-  let blocks =
-    Base.List.map blocks
-      ~f:(Hike_rip.prepare_block ~synth:cell ~addr_bits ~is_address)
-  in
-  let moved = ref [] in
-  let blocks =
-    Base.List.map blocks ~f:(fun blk ->
-        let blk, own = isolate_block blk in
-        moved := Base.List.rev_append own !moved;
-        blk)
-  in
-  (!cell, blocks @ Base.List.rev !moved)
-
 (* The function's normalized body in SSA and the table grown by its
    minted vars.  The returns read the ABI's return lanes and the calls the
    machine convention; signing narrows the calls later. *)
