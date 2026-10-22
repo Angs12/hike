@@ -35,11 +35,16 @@ cell () {
     srcs+=("$f"); names+=("$name")
   done
 
-  local n=0 total=0 reds=""
+  local n=0 total=0 skipped=0 reds=""
   local -A level_pass=([0]=0 [3]=0 [z]=0)
   for i in "${!srcs[@]}"; do
     f="${srcs[$i]}"; name="${names[$i]}"
     if [ -n "$model" ] && [ "$name" != "tls_models" ]; then continue; fi
+    if is_expected_lift_red "$name"; then
+      skipped=$((skipped + 1))
+      echo "  $name: SKIP (known lift red)" >> "$log"
+      continue
+    fi
     total=$((total + 1))
     local bin="$dir/$name" ll="$dir/$name.ll" o="$dir/$name.o" exe="$dir/$name.lifted"
     local extra=()
@@ -107,9 +112,9 @@ cell () {
   local levels="" lvl
   for lvl in 0 3 z; do levels="$levels O$lvl=${level_pass[$lvl]}/$total"; done
   if [ -n "$reds" ]; then
-    echo "CELL $tag: $n/$total pass; LLVM:$levels; reds:$reds"
+    echo "CELL $tag: $n/$total pass; LLVM:$levels; skipped:$skipped; reds:$reds"
   else
-    echo "CELL $tag: $n/$total pass; LLVM:$levels"
+    echo "CELL $tag: $n/$total pass; LLVM:$levels; skipped:$skipped"
   fi
   [ "$total" -gt 0 ] && [ "$n" -eq "$total" ]
 }

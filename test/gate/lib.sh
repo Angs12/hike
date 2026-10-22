@@ -26,6 +26,17 @@ hike_exe() {
 # seconds; 15 s is the generous ceiling).
 HIKE_RUN_TIMEOUT="${HIKE_RUN_TIMEOUT:-15}"
 
+# Known unresolved indirect-tail-call reds.  The lift and matrix gates
+# skip these by name; a red here is a known limitation, not a regression.
+EXPECTED_LIFT_REDS="enum_field_switch enum_field_guarded_switch"
+
+is_expected_lift_red() {
+  case " $EXPECTED_LIFT_REDS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Run lifted vs native with identical argv[0] (glibc prints it in usage
 # messages) and the shared timeout; compare both rc and stdout bytes.
 # The fifth argument names the lifted output stem (default

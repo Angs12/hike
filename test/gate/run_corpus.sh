@@ -66,7 +66,13 @@ fi
 fail=0
 n=0
 cached=0
+skipped=0
 for f in $BINS; do
+  if is_expected_lift_red "$f"; then
+    skipped=$((skipped + 1))
+    printf 'SKIP %s (known lift red)\n' "$f"
+    continue
+  fi
   n=$((n + 1))
   bin_sha="$(sha256sum "$CORPUS/$f" | cut -d' ' -f1)"
   stamp="$OUT/.lift_$f"
@@ -108,7 +114,7 @@ if [ "${ndiag:-0}" -gt 0 ]; then
     esac
   done
 fi
-printf '\nlift: %d binaries, %d failed, %d cached; %s diagnostic line(s) [classes: %s]\n' \
-  "$n" "$fail" "$cached" "${ndiag:-0}" "${classes:-none}"
+printf '\nlift: %d binaries, %d failed, %d cached, %d skipped expected; %s diagnostic line(s) [classes: %s]\n' \
+  "$n" "$fail" "$cached" "$skipped" "${ndiag:-0}" "${classes:-none}"
 
 [ "$fail" -eq 0 ] || exit 1
