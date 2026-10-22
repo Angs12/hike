@@ -1045,8 +1045,7 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
                 let base, pre_sub, synth =
                   match
                     Hike_cfg_complete.dispatch_words ~cap:dispatch_cap ~denote
-                      ~graph:(Hike_backsubst.graph_of_sub sub) ~block_addrs
-                      ~last_defs ~blk texp
+                      ~block_addrs ~last_defs ~blk texp
                   with
                   | None | Some { Hike_cfg_complete.base = None; _ } ->
                     (None, sub, synth)

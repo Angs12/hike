@@ -2,10 +2,10 @@
    expression over values.  A backward pass substitutes the defs it
    passes into the cond — a def replaces its var, so every var left
    reads the value at the walked position — and simplifies after each
-   step; the walk continues into a unique goto predecessor.  The
-   smallest flag-free form wins: inlined at the jump when its vars still
-   hold those values there, else bound to a fresh comparison def at its
-   own position.  No flag-free form keeps the cond. *)
+   step; the walk stays inside the jump's block.  The smallest flag-free
+   form wins: inlined at the jump when its vars still hold those values
+   there, else bound to a fresh comparison def at its own position.  No
+   flag-free form keeps the cond. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -28,13 +28,13 @@ let acceptable (flags : var list) (e : exp) : bool =
   && not (Core.Set.exists (Exp.free_vars e) ~f:(is_flag flags))
 
 let order (f : B.form) =
-  (B.size f.exp, (if B.holds f f.exp then 0 else 1), f.hops, - f.pos)
+  (B.size f.exp, (if B.holds f f.exp then 0 else 1), - f.pos)
 
 (* The best flag-free form of [j]'s cond, if any improves on it. *)
-let compile_jmp ~(flags : var list) (g : B.graph) (b0 : blk term) (j : jmp term) :
+let compile_jmp ~(flags : var list) (b0 : blk term) (j : jmp term) :
     B.form option =
   let orig = Jmp.cond j in
-  B.forms g b0 orig
+  B.forms b0 orig
   |> List.filter ~f:(fun (f : B.form) -> acceptable flags f.exp)
   |> List.min_elt ~compare:(fun x y -> Poly.compare (order x) (order y))
   |> Option.filter ~f:(fun (f : B.form) -> not (Exp.equal f.exp orig))
@@ -49,13 +49,12 @@ let uses_of (s : sub term) : Var.Set.t = Hike_stack_model.sub_reads s
 let compile_sub ~(synth : Hike_synth.table) (target : Theory.Target.t)
     (sub : sub term) : Hike_synth.table * sub term =
   let flags = flag_vars target in
-  let g = B.graph_of_sub sub in
   let plans =
     Term.enum blk_t sub
     |> Seq.concat_map ~f:(fun b ->
         Term.enum jmp_t b
         |> Seq.filter_map ~f:(fun j ->
-            Option.map (compile_jmp ~flags g b j) ~f:(fun f -> (Term.tid j, f))))
+            Option.map (compile_jmp ~flags b j) ~f:(fun f -> (Term.tid j, f))))
     |> Seq.to_list in
   if List.is_empty plans then (synth, sub)
   else

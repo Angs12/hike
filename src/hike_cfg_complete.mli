@@ -46,11 +46,10 @@ open Bap.Std
     foreign_slots:Core.Int64.Set.t -> jmp term -> exp option
 
   (** The words and the base, the base read by backward substitution
-      over [graph], which must carry every dispatch's case edges. *)
+      inside the dispatch's block. *)
   val dispatch_words :
     ?cap:int ->
     denote:denote ->
-    graph:Hike_backsubst.graph ->
     block_addrs:Tid.t Addr.Map.t ->
     last_defs:def term Var.Map.t ->
     blk:blk term ->

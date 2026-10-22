@@ -348,9 +348,10 @@ let tests : unit Alcotest.test list =
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, yv, zv))
           && Int.equal (Base.List.length (defs_of s')) 3));
 
-    (* cmp in one block, jbe in its goto successor: the walk continues
-       into the unique predecessor. *)
-    pin "JMP-48" "cross-block jbe compiles to x <= y and the flags die" (fun () ->
+    (* cmp in one block, jbe in its goto successor: the walk stays in
+       the jump's block, so both flags remain live and the condition is
+       unchanged. *)
+    pin "JMP-48" "a cross-block jbe stays residual and its flags survive" (fun () ->
         let s, tids =
           raw_sub_of "t13_xjbe"
             [
@@ -368,13 +369,12 @@ let tests : unit Alcotest.test list =
         let blk i = Term.enum blk_t s' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tids.(i)) in
         let j = Term.enum jmp_t (blk 1) |> Seq.hd_exn in
         check "JMP-48"
-          (Exp.equal (Jmp.cond j) (Bil.BinOp (Bil.LE, xv, yv))
-          && Int.equal (Seq.length (Term.enum def_t (blk 0))) 1));
+          (Exp.equal (Jmp.cond j) cf_or_zf
+          && Int.equal (Seq.length (Term.enum def_t (blk 0))) 3));
 
-    (* ucomisd: the lifter's flags are formulas over the is_nan/forder
-       intrinsic results, set in the block before the jump; jp is the
-       unordered test itself. *)
-    pin "JMP-49" "jp after an FP compare compiles to the unordered test" (fun () ->
+    (* ucomisd: the lifter's flags are formulas in the predecessor block;
+       the block-local walk leaves the jp condition as PF. *)
+    pin "JMP-49" "a cross-block PF stays residual at the block boundary" (fun () ->
         let a = v1 "t13_a" and b = v1 "t13_b" and c = v1 "t13_c" and d = v1 "t13_d" in
         let bv v = Bil.Var v in
         let s, tids =
@@ -396,7 +396,7 @@ let tests : unit Alcotest.test list =
         let s' = compile_sub s in
         let blk1 = Term.enum blk_t s' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tids.(1)) in
         let j = Term.enum jmp_t blk1 |> Seq.hd_exn in
-        check "JMP-49" (Exp.equal (Jmp.cond j) (Bil.BinOp (Bil.OR, bv a, bv b))));
+        check "JMP-49" (Exp.equal (Jmp.cond j) (Bil.Var pf)));
 
     (* Integer jp: PF is the low byte's parity of the result; the cond
        becomes that expression over the result and the PF def dies. *)

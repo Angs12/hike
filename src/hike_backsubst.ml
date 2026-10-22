@@ -258,33 +258,15 @@ let rec simplify (e : exp) : exp =
 (* A substituted cond past this size ends the walk. *)
 let size_cap = 128
 
-type edge = Goto_edge | Other_edge
-
-(* Every block's incoming edges, by source block: the BIR's jumps.  An
-   indirect transfer names none. *)
-let preds_of (sub : sub term) : (tid * edge) list Tid.Map.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-      Term.enum jmp_t b
-      |> Seq.fold ~init:m ~f:(fun m j ->
-          let add m t k = Core.Map.add_multi m ~key:t ~data:(Term.tid b, k) in
-          match Jmp.kind j with
-          | Goto (Direct t) -> add m t Goto_edge
-          | Call c ->
-            (match Call.return c with Some (Direct t) -> add m t Other_edge | _ -> m)
-          | Ret (Direct t) | Int (_, t) -> add m t Other_edge
-          | Goto (Indirect _) | Ret (Indirect _) -> m))
-
 (* The exp's value read at one position: before [at] in [blk], or at
-   the block's end with no [at] (the start).  [hops] counts the blocks
-   back from the start; [pos] orders positions within a block (later is
-   larger); [written] are the vars defined between the position and the
-   start; [substituted] are the vars whose defs the walk substituted. *)
+   the block's end with no [at] (the start).  [pos] orders positions
+   within a block (later is larger); [written] are the vars defined
+   between the position and the start; [substituted] are the vars whose
+   defs the walk substituted. *)
 type form = {
   exp : exp;
   blk : blk term;
   at : def term option;
-  hops : int;
   pos : int;
   written : Var.Set.t;
   substituted : Var.Set.t;
@@ -295,74 +277,42 @@ type form = {
 let holds (f : form) (e : exp) : bool =
   not (Core.Set.exists (Exp.free_vars e) ~f:(fun v -> Core.Set.mem f.written (Var.base v)))
 
-type graph = {
-  blocks : blk term Tid.Map.t;
-  preds : (tid * edge) list Tid.Map.t;
-  entry : tid option;
-}
-
-let graph_of_sub (sub : sub term) : graph =
-  { blocks =
-      Term.enum blk_t sub
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-          Core.Map.set m ~key:(Term.tid b) ~data:b);
-    preds = preds_of sub;
-    entry = Option.map (Term.first blk_t sub) ~f:Term.tid }
-
-let unique_goto_pred (g : graph) (b : tid) : tid option =
-  if Option.exists g.entry ~f:(Tid.equal b) then None
-  else
-    match Core.Map.find_multi g.preds b with
-    | (p, Goto_edge) :: rest
-      when List.for_all rest ~f:(fun (q, k) ->
-          Tid.equal p q && (match k with Goto_edge -> true | Other_edge -> false)) ->
-      Some p
-    | _ -> None
-
 (* Every form of [e] read at the end of [b0], the start first, then one
-   per substituting def, nearest first.  A form past [size_cap] ends the
-   walk. *)
-let forms (g : graph) (b0 : blk term) (e : exp) : form list =
+   per substituting def, nearest first.  The walk stays inside [b0]: a
+   predecessor may contain a loop's backedge or a not-yet-materialized
+   indirect transfer, so crossing the boundary is not sound yet.  A form
+   past [size_cap] ends the walk. *)
+let forms (b0 : blk term) (e : exp) : form list =
+  let orig = e in
   let start =
-    { exp = e; blk = b0; at = None; hops = 0; pos = Int.max_value;
+    { exp = e; blk = b0; at = None; pos = Int.max_value;
       written = Var.Set.empty; substituted = Var.Set.empty } in
-  (* [later]: the vars defined between this block's end and the start. *)
-  let rec walk e substituted (blk : blk term) hops later visited acc =
-    let defs = Term.enum def_t blk |> Seq.to_list in
-    let n = List.length defs in
-    let e, substituted, acc, defined, stop =
-      List.foldi (List.rev defs) ~init:(e, substituted, acc, later, false)
-        ~f:(fun k (e, substituted, acc, defined, stop) d ->
-            let lhs = Def.lhs d in
-            let defined = Core.Set.add defined (Var.base lhs) in
-            if stop || not (Core.Set.exists (Exp.free_vars e) ~f:(Var.same lhs))
-            then (e, substituted, acc, defined, stop)
+  let defs = Term.enum def_t b0 |> Seq.to_list in
+  let n = List.length defs in
+  let e, _substituted, acc, _defined, _stop =
+    List.foldi (List.rev defs) ~init:(e, Var.Set.empty, [], Var.Set.empty, false)
+      ~f:(fun k (e, substituted, acc, defined, stop) d ->
+          let lhs = Def.lhs d in
+          let defined = Core.Set.add defined (Var.base lhs) in
+          if stop || not (Core.Set.exists (Exp.free_vars e) ~f:(Var.same lhs))
+          then (e, substituted, acc, defined, stop)
+          else
+            let e = simplify (subst lhs (Def.rhs d) e) in
+            let substituted = Core.Set.add substituted lhs in
+            if size e > size_cap then begin
+              Hike_diag.debug ~tag:"hike-dbg-backsubst" (fun () ->
+                  Printf.sprintf "size cap %d at %s" size_cap
+                    (Tid.name (Term.tid d)));
+              (e, substituted, acc, defined, true)
+            end
             else
-              let e = simplify (subst lhs (Def.rhs d) e) in
-              let substituted = Core.Set.add substituted lhs in
-              if size e > size_cap then begin
-                Hike_diag.debug ~tag:"hike-dbg-backsubst" (fun () ->
-                    Printf.sprintf "size cap %d at %s" size_cap
-                      (Tid.name (Term.tid d)));
-                (e, substituted, acc, defined, true)
-              end
-              else
-                let f =
-                  { exp = e; blk; at = Some d; hops; pos = n - 1 - k;
-                    written = defined; substituted } in
-                (e, substituted, f :: acc, defined, false)) in
-    if stop then acc
-    else
-      match unique_goto_pred g (Term.tid blk) with
-      | Some p when not (Core.Set.mem visited p) ->
-        (match Core.Map.find g.blocks p with
-         | Some pb -> walk e substituted pb (hops + 1) defined (Core.Set.add visited p) acc
-         | None -> acc)
-      | _ -> acc in
-  if Core.Set.is_empty (Exp.free_vars e) then [ start ]
-  else
-    start :: List.rev
-      (walk e Var.Set.empty b0 0 Var.Set.empty (Tid.Set.singleton (Term.tid b0)) [])
+              let f =
+                { exp = e; blk = b0; at = Some d; pos = n - 1 - k;
+                  written = defined; substituted } in
+              (e, substituted, f :: acc, defined, false))
+  in
+  if Core.Set.is_empty (Exp.free_vars orig) then [ start ]
+  else start :: List.rev acc
 
 (* Binds each form's exp to its var by a def at the form's position:
    before [at], or appended at the block's end. *)

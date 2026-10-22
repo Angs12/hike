@@ -149,8 +149,7 @@ let rec summands (e : exp) : exp list =
    position.  [Some None]: no form
    has a module-address summand.  [None]: one does, but no form gives
    an enumerable var base, so no case series is sound. *)
-let module_base ~(denote : denote) ~(graph : Hike_backsubst.graph) ~(blk : blk term)
-    (texp : exp) : base option option =
+let module_base ~(denote : denote) ~(blk : blk term) (texp : exp) : base option option =
   let classify (f : Hike_backsubst.form) =
     let parts = summands f.exp in
     let based =
@@ -173,7 +172,7 @@ let module_base ~(denote : denote) ~(graph : Hike_backsubst.graph) ~(blk : blk t
       | None -> `Bad)
     | _ -> `Bad
   in
-  let classes = Base.List.map (Hike_backsubst.forms graph blk texp) ~f:classify in
+  let classes = Base.List.map (Hike_backsubst.forms blk texp) ~f:classify in
   let bases = Base.List.filter_map classes ~f:(function `Base b -> Some b | _ -> None) in
   match Base.List.find bases ~f:(fun b -> Option.is_none b.site), bases with
   | Some b, _ | None, b :: _ -> Some (Some b)
@@ -206,13 +205,11 @@ let case_words ?cap ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
   in
   bounded_words ?cap ~denote ~block_addrs ~blk ?def:at rhs
 
-(* [graph] must carry every dispatch's case edges: the base walk crosses
-   only a block's sole predecessor. *)
-let dispatch_words ?cap ~(denote : denote) ~(graph : Hike_backsubst.graph)
+let dispatch_words ?cap ~(denote : denote)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t) ~(blk : blk term) (texp : exp) :
     dispatch option =
-  match module_base ~denote ~graph ~blk texp with
+  match module_base ~denote ~blk texp with
   | None -> None
   | Some base ->
     Base.Option.map
