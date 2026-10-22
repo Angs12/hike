@@ -43,10 +43,10 @@ let tests : unit Alcotest.test list =
           sub_of "sb4"
             [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
               [ (1, fun t -> mk_jmp_to t (guard flag 1));
-                (1, fun t -> mk_jmp_to t (guard flag 2));
                 (2,
                  fun _ ->
-                   Jmp.create (Goto (Indirect (Bil.Var (v64 "sb4_tgt"))))) ];
+                   Jmp.create (Goto (Indirect (Bil.Var (v64 "sb4_tgt")))));
+                (1, fun t -> mk_jmp_to t (guard flag 2)) ];
               [], [ (0, mk_ret) ];
               [], [] ]
         in

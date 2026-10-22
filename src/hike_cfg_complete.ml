@@ -242,8 +242,9 @@ let ret_jmp : jmp term = Hike_return.create ()
 (* The canonical return keeps the original edge's condition; an
    unconditional return stays unconditional. *)
 let canonical_ret (j : jmp term) : jmp term =
-  if Model.is_true_cond (Jmp.cond j) then ret_jmp
-  else Jmp.with_cond ret_jmp (Jmp.cond j)
+  (* Preserve the transfer's own effects: the canonical return reads the
+     SSA versions the original transfer wrote, not the entry lanes. *)
+  Jmp.with_kind j (Jmp.kind ret_jmp)
 
 let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     (j : jmp term) : jmp term =
@@ -882,13 +883,76 @@ let case_dedup (cases : case list) : case list =
       then acc
       else acc @ [ c ])
 
+(* Post-solve: a retained jump fallback is retired only when the no-match
+   condition over its arms proves its target bottom.  The arms themselves
+   were materialized in the solve; this pass adds no targets. *)
+let retire_jump_fallbacks ~(sol : Vsa.vsa_sol) ~(synth : Hike_synth.table)
+    (sub : sub term) : sub term =
+  let landmarks = Cbat_landmarks.create () in
+  let traps = ref [] in
+  let is_indirect_tail j =
+    match Jmp.kind j with
+    | Goto (Indirect _) -> true
+    | Call c ->
+      Option.is_none (Call.return c)
+      && (match Call.target c with Indirect _ -> true | _ -> false)
+    | _ -> false
+  in
+  let sub =
+    Term.map blk_t sub ~f:(fun blk ->
+        let jmps = Term.enum jmp_t blk |> Seq.to_list in
+        let rec split acc = function
+          | [] -> None
+          | j :: js ->
+            if is_indirect_tail j then Some (Base.List.rev acc, j, js)
+            else split (j :: acc) js
+        in
+        match split [] jmps with
+        | Some ([], _, _) | None -> blk
+        | Some (arms, fallback, _) ->
+          let cond =
+            Base.List.fold arms ~init:(Jmp.cond fallback)
+              ~f:(fun c j -> Bil.BinOp (Bil.AND, c, Bil.UnOp (Bil.NOT, Jmp.cond j)))
+          in
+          let _, post =
+            Vsa.fold_block_states ~synth ~sol blk ~init:()
+              ~f:(fun _ _ _ () -> ())
+          in
+          let env =
+            Vsa.constrain_edge ~synth ~env:post ~landmarks cond
+          in
+          let bottom =
+            match Vsa.Dispatch.indirect_target fallback with
+            | None -> false
+            | Some target -> (
+              match Vsa.denote_imm_exp ~synth target env with
+              | Ok ws -> Vsa.WordSet.is_bottom ws
+              | Error _ -> false)
+          in
+          if not bottom then blk
+          else begin
+            let tid = Tid.create () in
+            let trap =
+              Term.set_attr
+                (Blk.create ~tid ~jmps:[ Jmp.create_int 0 tid ] ())
+                Model.ssa_tag ()
+            in
+            traps := trap :: !traps;
+            Term.map jmp_t blk ~f:(fun j ->
+                if Tid.equal (Term.tid j) (Term.tid fallback) then
+                  Jmp.create_goto (Direct tid)
+                else j)
+          end)
+  in
+  Base.List.fold !traps ~init:sub ~f:(Term.append blk_t)
+
 (* The builder's entry: Prepare inserts the missing case blocks, Create
    transforms them, Wire records the exact source and created-block edges,
    and Finalize runs the complete-rewrite SSA update then DCEs the created
    blocks. *)
-let materialize_site ~target ~abi ~callee_tid ~rip_address ~claim ~synth
-    ~block_addrs ~old ~working ~(cases : case list) ~(edges : edge list) :
-    delta =
+let materialize_site ~target ~abi ~callee_tid
+    ~rip_address ~claim ~synth ~block_addrs ~old ~working
+    ~(cases : case list) ~(edges : edge list) : delta =
   let cases = case_dedup cases in
   let fragments =
     Base.List.fold cases ~init:Core.Int64.Map.empty ~f:(fun m (addr, _, f) ->

@@ -50,7 +50,8 @@ let x86_64_sysv : t =
   let rax = r64 "RAX" in
   let flag name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 1) in
   let cf = flag "CF" and pf = flag "PF" and af = flag "AF"
-  and zf = flag "ZF" and sf = flag "SF" and ovf = flag "OF" in
+  and zf = flag "ZF" and sf = flag "SF" and ovf = flag "OF"
+  and df = flag "DF" in
   {
     sp = r64 "RSP";
     frame_pointer = r64 "RBP";
@@ -69,7 +70,11 @@ let x86_64_sysv : t =
     variadic_count_reg = Some rax;
     env_regs =
       [ Var.create ~is_virtual:false ~fresh:false "FPU_CONTROL" (Type.Imm 16);
-        Var.create ~is_virtual:false ~fresh:false "MXCSR" (Type.Imm 32) ];
+        Var.create ~is_virtual:false ~fresh:false "MXCSR" (Type.Imm 32);
+        (* SysV requires DF clear at every function boundary.  Treat it
+           as an environment lane so a string instruction's direction
+           read never becomes a parameter lane. *)
+        df ];
     carry_flag = cf;
     parity_flag = pf;
     zero_flag = zf;

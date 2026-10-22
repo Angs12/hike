@@ -135,6 +135,13 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
       | Some offs -> WordSet.Clp.Pieces.max_elem offs
       | None -> None
   in
+#ifdef VSA_DEBUG
+  Format.eprintf "DBG frame_keep escaped=%b rsp=%a keep=%s@.%!"
+    frame_escaped WordSet.pp rsp
+    (match keep_lo with
+     | None -> "none"
+     | Some lo -> Cbat_word.to_string lo);
+#endif
   match keep_lo with
   | Some lo ->
 #ifdef VSA_DEBUG

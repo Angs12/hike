@@ -81,6 +81,11 @@ open Bap.Std
       against the pre-rewrite [old] sub, then DCEs the created blocks.
       [cases] are the validated target address, its final tid, and its
       lifted fragment. *)
+  (** Retire a retained jump fallback when the no-match condition over
+      its arms proves the target bottom.  No targets are materialized. *)
+  val retire_jump_fallbacks :
+    sol:Cbat_vsa.vsa_sol -> synth:Hike_synth.table -> sub term -> sub term
+
   val materialize_site :
     target:Bap_core_theory.Theory.Target.t ->
     abi:Hike_abi.t ->

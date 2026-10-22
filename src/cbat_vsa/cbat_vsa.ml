@@ -807,9 +807,10 @@ let static_graph_vsa
   let install_materialization ~(source : Tid.t) ~(blk : blk term)
       ~(jmp : jmp term) ~(entry : AI.t) ~(forward : AI.t)
       (m : Dispatch.materialized) : AI.t =
+    let jmp_tids b = Term.enum jmp_t b |> Seq.map ~f:Term.tid |> Seq.to_list in
     let rewritten =
       match Term.find blk_t m.Dispatch.sub source with
-      | Some b -> Option.is_none (Term.find jmp_t b (Term.tid jmp))
+      | Some b -> not (Base.List.equal Tid.equal (jmp_tids b) (jmp_tids blk))
       | None -> false
     in
     if rewritten then begin
@@ -901,34 +902,20 @@ let static_graph_vsa
         let tid = Tid.create () in
         Some (tid, Some (Blk.create ~tid ~jmps:[ Jmp.create_int 0 tid ] ()))
     in
-    let arm_jmp (a : Dispatch.arm) : jmp term =
-      match original with
-      | Some c ->
-        (* A call arm is a direct call to the same continuation. *)
-        Jmp.create ~cond:a.guard
-          (Call
-             (Call.create ~target:(Direct a.target)
-                ~return:(Option.value_exn (Call.return c)) ()))
-      | None ->
-        if has_block m.sub a.target || has_block !saved_sub a.target then
-          (* A target that is a block of this sub is the intra-function case
-             jump; its role wins over the original transfer's kind. *)
-          Jmp.create_goto ~cond:a.guard (Direct a.target)
-        else
-          (* A target outside the sub is a function entry: a tail call. *)
-          Jmp.create ~cond:a.guard
-            (Call (Call.create ~target:(Direct a.target) ()))
-    in
+    let is_intra tid = has_block m.sub tid || has_block !saved_sub tid in
+    let return = match original with Some c -> Call.return c | None -> None in
     let arms =
       match trap with
-      | None -> List.map arms ~f:arm_jmp
+      | None ->
+        List.map arms ~f:(Dispatch.arm_jmp ~kind ~return ~is_intra)
       | Some (trap_tid, _) ->
         let cond = Jmp.cond jmp in
         let trap_jmp =
           if is_true_cond cond then Jmp.create (Goto (Direct trap_tid))
           else Jmp.create ~cond (Goto (Direct trap_tid))
         in
-        List.map arms ~f:arm_jmp @ [ trap_jmp ]
+        List.map arms ~f:(Dispatch.arm_jmp ~kind ~return ~is_intra)
+        @ [ trap_jmp ]
     in
     let blk =
       if List.is_empty arms then blk
@@ -1375,6 +1362,9 @@ let refine_edge ~sol ~rctx ~seeds env blk =
 (* The walk's write census: the walked env with the per-site count of
    ACTUAL env writes — a delivery equal to the state's value writes
    nothing, so it never counts. *)
+let constrain_edge ~synth ~env ~landmarks cond =
+  Cbat_backward.constrain_edge ~synth ~env ~landmarks cond
+
 let refine_edge_count_writes ~sol ~rctx ~seeds env blk =
   let output_writes = ref 0 in
   let input_writes = ref 0 in

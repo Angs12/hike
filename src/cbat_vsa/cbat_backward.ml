@@ -753,6 +753,10 @@ let rec constrain_operands ~(synth : Hike_synth.table) ~(env : AI.t) ?(seed = fa
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
+  (* Bottom is absorbing: a later conjunct must not revive a state the
+     previous one proved empty. *)
+  if AI.equal env AI.bottom then env
+  else
   (* The recursive call on a sub-expression, in [env] unless given. *)
   let recur ?(env = env) e produced =
     constrain_operands ~synth ~seed ~env ~cells ~nonneg ~landmarks e produced in
@@ -897,6 +901,45 @@ let rec constrain_operands ~(synth : Hike_synth.table) ~(env : AI.t) ?(seed = fa
        (* A store onto a computed memory may write any cell. *)
        cells := no_cells;
        env)
+  | Bil.BinOp (Bil.AND, a, b)
+    when WordSet.bitwidth produced = 1
+         && (match Type.infer a, Type.infer b with
+             | Ok (Type.Imm 1), Ok (Type.Imm 1) -> true
+             | _ -> false) ->
+    (* Logical conjunction: true is true for both operands. *)
+    let env = recur a produced in
+    recur ~env b produced
+  | Bil.BinOp ((Bil.EQ | Bil.NEQ as cmp), a, b)
+    when WordSet.bitwidth produced = 1 ->
+    let env =
+      constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks
+        (Cbat_preimage.Op cmp) a b produced
+    in
+    (* A comparison against one word filters the whole value, every
+       leaf included; a plain leaf beside a rip leaf must lose the word
+       too. *)
+    let singleton e =
+      match denote_imm_exp ~synth e env with
+      | Ok ws when Cbat_word.is_one (WordSet.cardinality ws) ->
+        WordSet.min_elem ws
+      | _ -> None
+    in
+    let filter e w =
+      match denote_imm_exp ~synth e env with
+      | Ok ws when WordSet.bitwidth ws = Cbat_word.bitwidth w ->
+        let one = WordSet.singleton w in
+        let ws =
+          match cmp with
+          | Bil.EQ -> WordSet.meet ws one
+          | _ -> WordSet.diff ws one
+        in
+        recur ~env e ws
+      | _ -> env
+    in
+    (match singleton b with
+     | Some w -> filter a w
+     | None -> (
+         match singleton a with Some w -> filter b w | None -> env))
   | Bil.BinOp (op,a,b) ->
     constrain_binary ~synth ~seed ~env ~cells ~nonneg ~landmarks (Cbat_preimage.Op op) a b produced
   | Bil.Unknown _ -> env

@@ -194,6 +194,12 @@ val denote_exp_at :
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
+(** Constrain a state by an edge condition (the context's landmark
+    table).  This is the backward-refinement primitive the solve uses. *)
+val constrain_edge :
+  synth:Hike_synth.table -> env:AI.t -> landmarks:Cbat_landmarks.t ->
+  exp -> AI.t
+
 
 
 (* The Env Tag: the before-state environment the solve held at a def,

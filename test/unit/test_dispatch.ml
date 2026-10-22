@@ -18,10 +18,12 @@ let minus (a : exp) (b : exp) : exp = Bil.BinOp (Bil.MINUS, a, b)
 let and_ (a : exp) (b : exp) : exp = Bil.BinOp (Bil.AND, a, b)
 let or_ (a : exp) (b : exp) : exp = Bil.BinOp (Bil.OR, a, b)
 
+let raw_addr a = Bil.Int (Word.of_int64 ~width:64 a)
+
 let sub = Sub.create ~name:"dispatch_test" ()
 
 let mat ?base (targets : (Cbat_word.t * Tid.t) list) : D.materialized =
-  { D.base; targets; sub }
+  { D.base; targets; sub; module_addr = raw_addr }
 
 let guards_of (arms : D.arm list) : exp list =
   Base.List.map arms ~f:(fun a -> a.guard)
@@ -43,7 +45,7 @@ let tests : unit Alcotest.test list =
         let t1 = Tid.create () and t2 = Tid.create () in
         let targets = [ (w 0x401000L, t1); (w 0x401020L, t2) ] in
         let arms =
-          D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
+          D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
             ~targets
         in
         check "DISP-01"
@@ -60,7 +62,7 @@ let tests : unit Alcotest.test list =
         let summand = v64 "disp2_summand" in
         let t1 = Tid.create () in
         let arms =
-          D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
+          D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
             ~base:(Some (table ~summand ~values:[ 0x400000L ]))
             ~targets:[ (w 0x400018L, t1) ]
         in
@@ -83,7 +85,7 @@ let tests : unit Alcotest.test list =
             (and_ (eq (Bil.Var summand) (iexp 0x500000L)) (delta 0x500000L))
         in
         let arms =
-          D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
+          D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
             ~base:(Some (table ~summand ~values:[ 0x400000L; 0x500000L ]))
             ~targets:[ (w 0x500018L, t1) ]
         in
@@ -104,10 +106,10 @@ let tests : unit Alcotest.test list =
         in
         let same_with_cond ~base ~kind =
           let bare =
-            D.arms ~kind ~cond:None ~target:(Bil.Var target) ~base ~targets
+            D.arms ~module_addr:raw_addr ~kind ~cond:None ~target:(Bil.Var target) ~base ~targets
           in
           let with_cond =
-            D.arms ~kind ~cond:(Some cond) ~target:(Bil.Var target) ~base
+            D.arms ~module_addr:raw_addr ~kind ~cond:(Some cond) ~target:(Bil.Var target) ~base
               ~targets
           in
           Base.List.for_all2_exn bare with_cond ~f:(fun b c ->
@@ -118,11 +120,11 @@ let tests : unit Alcotest.test list =
         let true_cond_is_unconditional =
           let base = Some (table ~summand ~values:[ 0x400000L ]) in
           let bare =
-            D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base
+            D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base
               ~targets
           in
           let with_true =
-            D.arms ~kind:D.Jump ~cond:(Some (Bil.Int (Word.one 1)))
+            D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:(Some (Bil.Int (Word.one 1)))
               ~target:(Bil.Var target) ~base ~targets
           in
           Base.List.equal Exp.equal (guards_of bare) (guards_of with_true)
@@ -135,7 +137,7 @@ let tests : unit Alcotest.test list =
           && true_cond_is_unconditional
           && Base.List.equal (fun a b -> a = b)
                (kinds_of
-                  (D.arms ~kind:D.Call ~cond:(Some cond)
+                  (D.arms ~module_addr:raw_addr ~kind:D.Call ~cond:(Some cond)
                      ~target:(Bil.Var target) ~base:None ~targets))
                [ D.Call; D.Call; D.Call ]));
 
@@ -149,7 +151,7 @@ let tests : unit Alcotest.test list =
           [ (w 0x10L, t1); (w 0x10L, t1); (w 0x20L, t2); (w 0x10L, t2) ]
         in
         let arms =
-          D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
+          D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
             ~targets
         in
         let expected_guards =
@@ -173,12 +175,12 @@ let tests : unit Alcotest.test list =
         let expected = [ eq (Bil.Var target) (wexp 0x401000L) ] in
         let none =
           guards_of
-            (D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
+            (D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target) ~base:None
                ~targets)
         in
         let empty =
           guards_of
-            (D.arms ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
+            (D.arms ~module_addr:raw_addr ~kind:D.Jump ~cond:None ~target:(Bil.Var target)
                ~base:(Some (table ~summand ~values:[])) ~targets)
         in
         check "DISP-06"

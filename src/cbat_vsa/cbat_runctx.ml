@@ -38,6 +38,8 @@ type jump_plan = {
   jp_disabled : exp option;
   jp_rel : edge_rel;
   jp_resolved : bool;
+  (* The SP version and lanes this jmp reads. *)
+  jp_call_facts : call_facts;
   (* The summary's effective preserved set, keyed physically by the
      summary it was derived from. *)
   mutable jp_preserved : (Int.Set.t * Int.Set.t) option;
@@ -45,7 +47,6 @@ type jump_plan = {
 
 type block_plan = {
   bp_term : blk term;
-  bp_call_facts : call_facts;
   bp_has_conds : bool;
   bp_jumps : jump_plan list;
 }
@@ -58,7 +59,6 @@ type block_facts = {
      Backward scalar refinement follows this index; it does not replay
      unrelated scalar definitions. *)
   bf_def_index : (int * def term) Var.Map.t;
-  bf_call_facts : call_facts;
   bf_live_ids : Int.Set.t;
 }
 
@@ -127,28 +127,26 @@ type refine_ctx = {
   rs_plan : (Tid.t -> block_plan) option;
 }
 
-(* The block's call facts.  The program carries the SP restore of a
-   call's pushed word itself. *)
-let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) :
-    call_facts =
-  let machine_reads =
-    Term.enum jmp_t b
-    |> Seq.filter_map ~f:(fun j ->
-           match Jmp.kind j with
-           | Call _ when Hike_stack_model.machine_call j ->
-             Some (Hike_stack_model.effects j).reads
-           | _ -> None)
-    |> Seq.concat_map ~f:Seq.of_list
-    |> Seq.to_list
+(* One jmp's call facts: a dispatch block's arms and its retained
+   fallback each carry their own SP read; a trap uses the block-end SP. *)
+let call_facts_of_jmp ~(abi : Hike_abi.t) ~(blk : blk term)
+    (j : jmp term) : call_facts =
+  let reads =
+    match Jmp.kind j with
+    | Call _ when Hike_stack_model.machine_call j ->
+      (Hike_stack_model.effects j).reads
+    | _ -> []
   in
   let is_sp v = Var.same v abi.Hike_abi.sp in
   let cf_lanes =
-    List.filter machine_reads ~f:(fun v -> not (is_sp v))
-    |> Var.Set.of_list
-    |> Core.Set.to_list
+    List.filter reads ~f:(fun v -> not (is_sp v))
+    |> Var.Set.of_list |> Core.Set.to_list
   in
   let cf_sp =
-    Option.value (List.find machine_reads ~f:is_sp) ~default:abi.Hike_abi.sp in
+    match List.find reads ~f:is_sp with
+    | Some v -> v
+    | None -> Hike_stack_model.version_at_end blk abi.Hike_abi.sp
+  in
   { cf_lanes; cf_sp }
 
 (* The static facts of one block.  In-place growth adds one of these to
@@ -162,7 +160,6 @@ let block_facts_of_block ~(abi : Hike_abi.t) (b : blk term) : block_facts =
     bf_term = b;
     bf_defs = defs;
     bf_def_index = def_index;
-    bf_call_facts = call_facts_of_block ~abi b;
     bf_live_ids = Cbat_var_id.intern_set
         (Term.enum phi_t b |> Seq.map ~f:Phi.lhs |> Seq.to_list
          |> Var.Set.of_list);

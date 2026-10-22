@@ -254,14 +254,24 @@ let build_frame ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
             Llvm.build_gep i8 entry [| Llvm.const_of_int64 i64 rel true |]
               (Model.region_name id) llvm_builder
           | _ ->
-            let base =
+            (* Keep the model address's low bits: an alloca base is
+               16-aligned, but a carved region may start at 8 (mod 16).
+               Pad only when the region start is misaligned. *)
+            let align = Int64.of_int Abi.stack_align in
+            let offset = Int64.logand lo (Int64.pred align) in
+            let extra = if Int64.equal offset 0L then 0L else Int64.pred align in
+            let raw =
               Llvm.build_alloca
-                (Llvm.array_type i8 (Int64.to_int bytes))
+                (Llvm.array_type i8 (Int64.to_int (Int64.add bytes extra)))
                 (Model.region_name id)
                 llvm_builder
             in
-            Llvm.set_alignment Abi.stack_align base;
-            base
+            Llvm.set_alignment Abi.stack_align raw;
+            if Int64.equal offset 0L then raw
+            else
+              Llvm.build_gep i8 raw
+                [| Llvm.const_of_int64 i64 offset false |]
+                (Model.region_name id) llvm_builder
         in
         { id; mem = Model.region_mem ~addr_bits id; base; rel })
   in

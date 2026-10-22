@@ -19,6 +19,7 @@ type materialized = {
   base : base option;
   targets : (Cbat_word.t * Tid.t) list;
   sub : Sub.t;
+  module_addr : int64 -> exp;
 }
 
 type arm_kind = Jump | Call
@@ -48,6 +49,7 @@ val arms :
   cond:exp option ->
   target:exp ->
   base:base option ->
+  module_addr:(int64 -> exp) ->
   targets:(Cbat_word.t * Tid.t) list ->
   arm list
 
@@ -60,6 +62,15 @@ val materialize :
   cond:exp option ->
   target:exp ->
   (var * def term) option * arm list
+
+(* One arm's transfer.  [kind] only selects the transfer form; the arm
+   layout is shared. *)
+val arm_jmp :
+  kind:arm_kind ->
+  return:label option ->
+  is_intra:(Tid.t -> bool) ->
+  arm ->
+  jmp term
 
 (* The transfer's indirect target expression, if its target is indirect. *)
 val indirect_target : jmp term -> exp option

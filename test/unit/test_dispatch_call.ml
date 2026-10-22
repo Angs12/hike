@@ -14,6 +14,8 @@ open Hike_test.Fixtures
 
 module D = Cbat_vsa.Dispatch
 
+let raw_addr a = Bil.Int (Word.of_int64 ~width:64 a)
+
 let w (n : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 n
 let wexp (n : int64) : exp = Bil.Int (Cbat_word.to_word (w n))
 let and_ (a : exp) (b : exp) : exp = Bil.BinOp (Bil.AND, a, b)
@@ -131,7 +133,10 @@ let tests : unit Alcotest.test list =
         let src = Base.Option.value_exn (blk_at sub 0x400078L) in
         let target = sub_tid result.program 0x400082L in
         let cont = blk_tid sub 0x400081L in
-        let cs = calls src in
+        let cs =
+          calls src
+          |> Base.List.filter ~f:(fun c -> Option.is_some (call_target c))
+        in
         check "CALL-1 one call arm" (List.length cs = 1);
         check "CALL-1 direct target"
           (match cs with
@@ -141,10 +146,8 @@ let tests : unit Alcotest.test list =
           (match cs with
            | [ c ] -> Option.equal Tid.equal (call_return c) (Some cont)
            | _ -> false);
-        check "CALL-1 no indirect call"
-          (not (List.exists is_indirect_call (jmps src)));
-        check "CALL-1 no-match trap"
-          (List.exists (fun j -> Option.is_some (trap_tid sub j)) (jmps src)));
+        check "CALL-1 indirect fallback retained"
+          (List.exists is_indirect_call (jmps src)));
 
     (* Ordered guarded arms, every arm returning to the same continuation,
        with the explicit no-match trap after them. *)
@@ -156,7 +159,10 @@ let tests : unit Alcotest.test list =
         let t1 = sub_tid result.program 0x40009BL in
         let t2 = sub_tid result.program 0x4000A1L in
         let cont = blk_tid sub 0x400095L in
-        let cs = calls src in
+        let cs =
+          calls src
+          |> Base.List.filter ~f:(fun c -> Option.is_some (call_target c))
+        in
         check "CALL-2 two arms"
           (Base.List.equal Tid.equal
              (Base.List.filter_map cs ~f:call_target) [ t1; t2 ]);
@@ -164,14 +170,10 @@ let tests : unit Alcotest.test list =
           (Base.List.for_all cs ~f:(fun c ->
                Option.equal Tid.equal (call_return c) (Some cont)));
         let js = jmps src in
-        let trap = Base.List.find_map js ~f:(trap_tid sub) in
-        check "CALL-2 trap after the arms"
-          (match trap with
-           | Some t ->
-             (match List.rev js with
-              | last :: _ -> Option.equal Tid.equal (goto_tid last) (Some t)
-              | [] -> false)
-           | None -> false);
+        check "CALL-2 indirect fallback after the arms"
+          (match List.rev js with
+           | last :: _ -> is_indirect_call last
+           | [] -> false);
         check "CALL-2 both targets solved"
           (match (at result.program 0x40009BL, at result.program 0x4000A1L) with
            | Some s1, Some s2 ->
@@ -190,10 +192,9 @@ let tests : unit Alcotest.test list =
         let sub = Base.Option.value_exn (at result.program 0x400078L) in
         let src = Base.Option.value_exn (blk_at sub 0x40007DL) in
         let target_tid = sub_tid result.program target in
-        check "CALL-3 the indirect call names the final callee"
-          (match calls src with
-           | [ c ] -> Option.equal Tid.equal (call_target c) (Some target_tid)
-           | _ -> false));
+        check "CALL-3 the direct call arm names the final callee"
+          (Base.List.exists (calls src) ~f:(fun c ->
+               Option.equal Tid.equal (call_target c) (Some target_tid))));
 
     (* A code address with no entry yet is discovered, added as a root and
        solved at the call site. *)
@@ -247,7 +248,7 @@ let tests : unit Alcotest.test list =
         let t1 = Tid.create () and t2 = Tid.create () in
         let targets = [ (w 0x400010L, t1); (w 0x400020L, t2) ] in
         let mat_transfer ~state ~source:_ ~blk:_ ~jmp:_ ~env:_ =
-          Some { D.base = None; targets; sub = Vsa.state_sub state }
+          Some { D.base = None; targets; sub = Vsa.state_sub state; module_addr = raw_addr }
         in
         let sol, state = solve_sub ~materialize_transfer:mat_transfer sub in
         let sub' = Vsa.state_sub state in
@@ -295,8 +296,8 @@ let tests : unit Alcotest.test list =
                | None -> false)
              | None -> false)
            | None -> false);
-        check "CALL-6 false continuation delivered"
-          (not (AI.equal (Graphlib.Std.Solution.get sol tids.(1)) AI.bottom));
+        check "CALL-6 false continuation is bottom"
+          (AI.equal (Graphlib.Std.Solution.get sol tids.(1)) AI.bottom);
         check "CALL-6 return continuation delivered"
           (not (AI.equal (Graphlib.Std.Solution.get sol tids.(2)) AI.bottom)));
   ]

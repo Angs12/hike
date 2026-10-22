@@ -39,6 +39,16 @@ let alloca_p (v : Llvm.llvalue) : bool =
   | Llvm.ValueKind.Instruction Llvm.Opcode.Alloca -> true
   | _ -> false
 
+(* A region storage is its alloca, or the alloca GEP'd to the region's
+   model-aligned start. *)
+let storage_base_p (v : Llvm.llvalue) : bool =
+  alloca_p v
+  ||
+  match Llvm.classify_value v with
+  | Llvm.ValueKind.Instruction Llvm.Opcode.GetElementPtr ->
+    Llvm.num_operands v = 2 && alloca_p (Llvm.operand v 0)
+  | _ -> false
+
 let tests : unit Alcotest.test list =
   [
 
@@ -70,8 +80,9 @@ let tests : unit Alcotest.test list =
 
     pin "SPTR-04"
       "a runtime residue is the region below the cursor: the residue base \
-       derives from the entry call by GEPs, a carved region stays an alloca, \
-       and the helpers are weak noinline definitions with the cursor attributes"
+       derives from the entry call by GEPs, a carved region's storage is its \
+       alloca (offset to its model-aligned start), and the helpers are weak \
+       noinline definitions with the cursor attributes"
       (fun () ->
         with_builder (fun llvm_ctx llvm_module llvm_builder ->
         let regions =
@@ -96,7 +107,7 @@ let tests : unit Alcotest.test list =
           (match storages, runtime_top with
           | [ residue; carved ], Some top ->
               (not (alloca_p residue.base))
-              && alloca_p carved.base
+              && storage_base_p carved.base
               && Int64.equal residue.rel (-48L)
               && contains_substring ir "%rstack_top = call ptr @hike_rstack_enter()"
               && contains_substring ir "%rstack_entry = getelementptr i8, ptr %rstack_top, i64 -24"
@@ -126,7 +137,7 @@ let tests : unit Alcotest.test list =
         let ir = Llvm.string_of_llmodule llvm_module in
         check "SPTR-05"
           (Base.Option.is_none runtime_top
-           && (match storages with [ s ] -> alloca_p s.base | _ -> false)
+           && (match storages with [ s ] -> storage_base_p s.base | _ -> false)
            && not (contains_substring ir "hike_rstack"))));
 
     pin "SPTR-06"

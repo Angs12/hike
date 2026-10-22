@@ -16,6 +16,8 @@ open Hike_test.Common
 open Hike_test.Fixtures
 
 module D = Cbat_vsa.Dispatch
+
+let raw_addr a = Bil.Int (Word.of_int64 ~width:64 a)
 module Ws = Cbat_vsa.WordSet
 
 let w (n : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 n
@@ -88,6 +90,22 @@ let is_indirect (j : jmp term) : bool =
     match Call.target c with Indirect _ -> true | Direct _ -> false)
   | _ -> false
 
+let is_trap_target (sub : sub term) (j : jmp term) : bool =
+  match target_tid j with
+  | None -> false
+  | Some t -> (
+    match Term.find blk_t sub t with
+    | None -> false
+    | Some b ->
+      Term.enum jmp_t b
+      |> Seq.exists ~f:(fun j ->
+             match Jmp.kind j with Int _ -> true | _ -> false))
+
+let arms (sub : sub term) (b : blk term) : jmp term list =
+  jmps b
+  |> Base.List.filter ~f:(fun j ->
+         not (is_trap_target sub j) && not (is_indirect j))
+
 (* The table-offset case test: [EQ (MINUS target base) delta]. *)
 let offset_delta (j : jmp term) : int64 option =
   match Jmp.cond j with
@@ -95,10 +113,26 @@ let offset_delta (j : jmp term) : int64 option =
     Some (Word.to_int64_exn w)
   | _ -> None
 
-(* The equality case test: [EQ target word]. *)
+let synth_word (v : var) : int64 option =
+  let prefix = "hike_synth_" in
+  let name = Var.name v in
+  let n = String.length prefix in
+  if String.length name > n && String.sub name 0 n = prefix then
+    let rest = String.sub name n (String.length name - n) in
+    let hex =
+      match String.index_opt rest '.' with
+      | Some i -> String.sub rest 0 i
+      | None -> rest
+    in
+    Base.Option.try_with (fun () -> Int64.of_string ("0x" ^ hex))
+  else None
+
+(* The equality case test: [EQ target word], with the word either a raw
+   integer or the synthetic module address that represents it. *)
 let equality_word (j : jmp term) : int64 option =
   match Jmp.cond j with
   | Bil.BinOp (Bil.EQ, _, Bil.Int w) -> Some (Word.to_int64_exn w)
+  | Bil.BinOp (Bil.EQ, _, Bil.Var v) -> synth_word v
   | _ -> None
 
 let rec has_minus (e : exp) : bool =
@@ -157,7 +191,7 @@ let tests : unit Alcotest.test list =
         let result = drive ~data:rel_data rel_code in
         let sub = Base.Option.value_exn (at result.program 0x400078L) in
         let src = Base.Option.value_exn (blk_at sub 0x400085L) in
-        let arms = jmps src in
+        let arms = arms sub src in
         let t0 = blk_tid sub 0x400095L and t1 = blk_tid sub 0x40009BL in
         check "JUMP-1 two arms"
           (List.length arms = 2
@@ -172,11 +206,8 @@ let tests : unit Alcotest.test list =
         check "JUMP-1 table-offset deltas"
           (Base.List.equal (Option.equal Int64.equal)
              (List.map offset_delta arms)
-             [ Some (Int64.sub 0x400095L 0x401000L); None ]);
-        check "JUMP-1 last arm is the default"
-          (match Base.List.last arms with
-           | Some j -> Hike.Stack_model.is_true_cond (Jmp.cond j)
-           | None -> false));
+             [ Some (Int64.sub 0x400095L 0x401000L);
+               Some (Int64.sub 0x40009BL 0x401000L) ]));
 
     (* The missing case blocks are lifted into the source sub and receive
        a solved state in this same pass. *)
@@ -202,7 +233,7 @@ let tests : unit Alcotest.test list =
         let m : D.materialized =
           { D.base = None;
             targets = [ (w 0x10L, tid); (w 0x10L, tid); (w 0x20L, tid) ];
-            sub = Sub.create () }
+            sub = Sub.create (); module_addr = raw_addr }
         in
         let _, arms =
           D.materialize m ~kind:D.Jump ~cond:None ~target:(Bil.Var t)
@@ -224,16 +255,12 @@ let tests : unit Alcotest.test list =
         let result = drive ~data:abs_data abs_code in
         let sub = Base.Option.value_exn (at result.program 0x400078L) in
         let src = Base.Option.value_exn (blk_at sub 0x400085L) in
-        let arms = jmps src in
+        let arms = arms sub src in
         check "JUMP-4 two arms" (List.length arms = 2);
         check "JUMP-4 equality words"
           (Base.List.equal (Option.equal Int64.equal)
              (List.map equality_word arms)
-             [ Some 0x400095L; None ]);
-        check "JUMP-4 last arm is the default"
-          (match Base.List.last arms with
-           | Some j -> Hike.Stack_model.is_true_cond (Jmp.cond j)
-           | None -> false);
+             [ Some 0x400095L; Some 0x40009BL ]);
         check "JUMP-4 no subtraction"
           (not (List.exists (fun j -> has_minus (Jmp.cond j)) arms)));
 
@@ -250,7 +277,7 @@ let tests : unit Alcotest.test list =
           Some
             { D.base = Some { D.summand = Bil.Var base; values = [ 0x400000L ] };
               targets;
-              sub = Vsa.state_sub state }
+              sub = Vsa.state_sub state; module_addr = raw_addr }
         in
         let _, state = solve_sub ~materialize_transfer:mat_transfer sub in
         let src =
@@ -275,7 +302,7 @@ let tests : unit Alcotest.test list =
         let result = drive ~data:entry_data entry_code in
         let sub = Base.Option.value_exn (at result.program 0x400078L) in
         let src = Base.Option.value_exn (blk_at sub 0x40008AL) in
-        let arms = jmps src in
+        let arms = arms sub src in
         let entry = Base.Option.value_exn (at result.program 0x4000A0L) in
         let entry_blk = Base.Option.value_exn (blk_at entry 0x4000A0L) in
         let case = Base.Option.value_exn (blk_at sub 0x40009AL) in

@@ -10,15 +10,27 @@ open Bap.Std
 module Model = Hike_stack_model
 
 (* Calls execute in their own arm blocks; the selector blocks contain
-   only guarded gotos and explicit false edges. A call's return remains
-   its original continuation, so SSA sees one ret-lane definition per arm. *)
+   only guarded gotos and explicit false edges. A call needs a direct
+   return, not a direct target: an indirect call still splits. *)
+let compilable_jmp ~last (j : jmp term) : bool =
+  match Jmp.kind j with
+  | Goto (Direct tid) ->
+      not (Hike_abi.is_interrupt_name (Tid.name tid))
+  | Goto (Indirect _) -> last
+  | Call c -> (
+      match Call.return c with
+      | Some (Direct _) -> true
+      | None -> last
+      | Some _ -> false)
+  | _ -> false
+
 let compilable_series (jmps : jmp term list) : bool =
-  Base.List.for_all jmps ~f:(fun j ->
-      match Jmp.kind j with
-      | Goto (Direct tid) ->
-          not (Hike_abi.is_interrupt_name (Tid.name tid))
-      | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
-      | _ -> false)
+  let rec loop = function
+    | [] -> true
+    | [ j ] -> compilable_jmp ~last:true j
+    | j :: js -> compilable_jmp ~last:false j && loop js
+  in
+  loop jmps
 
 (* The block/jmp split rides the SSA edit session: each jmp becomes its
    own piece, a call moves into an action block, and successor phi edges

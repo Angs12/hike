@@ -121,28 +121,27 @@ let tests = [
           let result = Hike.Drive.run project in
           let caller = at result.program 0x400078L |> Base.Option.value_exn in
           check "destination is a discovered function" (at result.program 0x400082L <> None);
-          let block = Term.enum blk_t caller
-            |> Seq.find_exn ~f:(fun b -> Seq.exists (Term.enum jmp_t b)
-                ~f:(fun j -> not (Hike_return.is_jmp j)
-                    && match Jmp.kind j with Call _ -> true | _ -> false)) in
-          match calls caller with
-          | [ call ] ->
-            check "call retains its return edge" (Call.return call <> None);
-            (match Call.target call with
-             | Indirect target ->
-               (match result.facts.Hike.Kb.denote ~blk:block target with
-                | Ok value -> Alcotest.(check (option (list int64)))
-                    "call target denotes the discovered entry" (Some [ 0x400082L ])
-                    (Base.Option.map (Cbat_vsa.WordSet.enumerate ~cap:1 value)
-                       ~f:(List.map Cbat_word.to_int64_exn))
-                | Error _ -> Alcotest.fail "call target has no denotation")
-             | Direct t -> check "direct target is the discovered function"
-                 (Base.Option.equal Tid.equal
+          let direct =
+            calls caller
+            |> Base.List.filter ~f:(fun c ->
+                   match Call.target c with Direct _ -> true | Indirect _ -> false)
+          in
+          (match direct with
+           | [ call ] ->
+             check "call retains its return edge" (Call.return call <> None);
+             check "direct target is the discovered function"
+               (match Call.target call with
+                | Direct t ->
+                  Base.Option.equal Tid.equal
                     (Base.Option.map (Term.find sub_t result.program t)
                        ~f:Term.tid)
                     (Base.Option.map (at result.program 0x400082L)
-                       ~f:Term.tid)))
-          | _ -> Alcotest.fail "expected one indirect call"));
+                       ~f:Term.tid)
+                | Indirect _ -> false)
+           | _ -> Alcotest.fail "expected one direct call arm");
+          check "indirect fallback retained"
+            (Base.List.exists (calls caller) ~f:(fun c ->
+                 match Call.target c with Indirect _ -> true | Direct _ -> false))));
   pin "WL-09" "successive decode growth keeps the warm SSA values"
     (fun () ->
       (* eax := 7; jump to add 1; jump to add 1; ret. Each indirect

@@ -143,9 +143,11 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
            if Var.index v > 0 then set_name v);
     Term.enum jmp_t blk |> Seq.iter ~f:(fun j ->
         match Jmp.kind j with
-        | Call _ ->
+        (* A no-return call has no successor; its clobbered lanes cannot
+           reach a phi.  They contribute bottom, not a block-end name. *)
+        | Call c when Option.is_some (Call.return c) ->
           Base.List.iter (Model.effects j).Model.Term_effects.writes ~f:set_name
-        | Goto _ | Ret _ | Int _ -> ());
+        | Call _ | Goto _ | Ret _ | Int _ -> ());
     blk
   in
   let full_blk blk =
@@ -177,9 +179,9 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
       Term.map jmp_t blk ~f:(fun j ->
           Model.map_effects ~read:Fun.id ~write:(fun v ->
               match Jmp.kind j with
-              | Call _ ->
+              | Call c ->
                 let version = new_name v in
-                set_name version;
+                if Option.is_some (Call.return c) then set_name version;
                 version
               | Goto _ | Ret _ | Int _ -> v) j)
     in
@@ -221,19 +223,37 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
                   Model.map_effects ~read:Fun.id ~write:(fun v ->
                       match Jmp.kind j with
                       | Goto _ | Ret _ | Int _ -> v
-                      | Call _ ->
+                      | Call c ->
+                        let has_ret = Option.is_some (Call.return c) in
                         if Var.index v = 0 && renamable v
                            && not (preserve_write tid (Term.tid j) v) then begin
-                          let v = new_name v in set_name v; v
-                        end else (set_name v; v)) j) in
+                          let v = new_name v in
+                          if has_ret then set_name v;
+                          v
+                        end else begin
+                          if has_ret then set_name v;
+                          v
+                        end) j) in
               Term.set_attr blk ssa_tag ()
         in
         record tid;
         blk)
   in
+  let call_return_edge src dst =
+    match Term.find blk_t sub src with
+    | None -> false
+    | Some b ->
+      Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
+          match Jmp.kind j with
+          | Call c -> (
+              match Call.return c with
+              | Some (Direct t) -> Tid.equal t dst
+              | _ -> false)
+          | _ -> false)
+  in
   (* The wiring pass: each phi operand is the predecessor's end name
      for that base, base itself when the predecessor does not name it.
-     The SP incoming from a call block carries the pushed word. *)
+     The SP incoming from a call-return edge carries the pushed word. *)
   let wired_blk blk =
       Term.map phi_t blk ~f:(fun phi ->
           let base = Var.base (Phi.lhs phi) in
@@ -250,12 +270,8 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
                      | None -> base
                    in
                    let exp =
-                     if
-                       Var.same base sp
-                       && Core.Set.mem machine_blk_tids src
-                     then
-                       Bil.BinOp
-                         (Bil.PLUS, Bil.Var name, restore_word ~abi)
+                     if Var.same base sp && call_return_edge src (Term.tid blk)
+                     then Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
                      else Bil.Var name
                    in
                    (src, exp))
@@ -1147,9 +1163,15 @@ let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
                       if Var.same (Var.base w) base then found := Some w));
             Base.Option.value !found ~default:base)
     in
-    let machine tid =
-      Base.Option.value_map (block_of tid) ~default:false ~f:(fun b ->
-          Term.enum jmp_t b |> Seq.exists ~f:machine_call)
+    let call_return_edge src dst =
+      Base.Option.value_map (block_of src) ~default:false ~f:(fun b ->
+          Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
+              match Jmp.kind j with
+              | Call c -> (
+                  match Call.return c with
+                  | Some (Direct t) -> Tid.equal t dst
+                  | _ -> false)
+              | _ -> false))
     in
     let operand ~dst src base =
       match Base.List.find operands ~f:(fun (s, d, b, _) ->
@@ -1157,7 +1179,7 @@ let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
       | Some (_, _, _, exp) -> exp
       | None ->
         let name = output src base in
-        if Var.same base sp && machine src then
+        if Var.same base sp && call_return_edge src dst then
           Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
         else Bil.Var name
     in
@@ -1554,6 +1576,7 @@ module Edit = struct
       let edge_of j =
         match Jmp.kind j with
         | Goto (Direct target) -> `Goto target
+        | Goto (Indirect _) -> `No_edge
         | Call c -> (
             match Call.return c with
             | Some (Direct return) -> `Call return

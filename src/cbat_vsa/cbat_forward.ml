@@ -57,6 +57,7 @@ type jump_plan = Cbat_runctx.jump_plan = {
   jp_disabled : exp option;
   jp_rel : edge_rel;
   jp_resolved : bool;
+  jp_call_facts : Cbat_runctx.call_facts;
   (* The summary's effective preserved set, keyed physically by the
      summary it was derived from. *)
   mutable jp_preserved : (Int.Set.t * Int.Set.t) option;
@@ -64,7 +65,6 @@ type jump_plan = Cbat_runctx.jump_plan = {
 
 type block_plan = Cbat_runctx.block_plan = {
   bp_term : blk term;
-  bp_call_facts : Cbat_runctx.call_facts;
   bp_has_conds : bool;
   bp_jumps : jump_plan list;
 }
@@ -89,9 +89,11 @@ let plan_block
             jp_disabled = Core.Map.find disabled (Term.tid jmp);
             jp_rel = edge_rel_of ~resolved jmp;
             jp_resolved = Core.Map.mem resolved (Term.tid jmp);
+            jp_call_facts =
+              Cbat_runctx.call_facts_of_jmp ~abi:rctx.Cbat_runctx.rc_abi
+                ~blk:b jmp;
             jp_preserved = None }) in
-    { bp_term = b; bp_call_facts = bf.Cbat_runctx.bf_call_facts;
-      bp_has_conds = Option.is_some conds; bp_jumps }
+    { bp_term = b; bp_has_conds = Option.is_some conds; bp_jumps }
 
 (* The plan of [source], memoized for the solve. *)
 let plans_of ~resolved ~edge_conds ~disabled ~rctx : tid -> block_plan =
@@ -168,7 +170,7 @@ let denote_jump
       | None -> env in
 
     let call_site_transfer ~(summary : Int.Set.t option) =
-      let facts = plan.bp_call_facts in
+      let facts = jp.jp_call_facts in
       (* The call reads the SP version the block ends with. *)
       let abi = { rctx.Cbat_runctx.rc_abi with sp = facts.cf_sp } in
       let stack_args =

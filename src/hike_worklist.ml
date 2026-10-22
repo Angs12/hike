@@ -141,6 +141,8 @@ type t = {
   mutable state : Disasm.Driver.state;
   (* The synthetic vars the solves' normalization minted. *)
   mutable synth : Hike_synth.table;
+  (* Target words already armed at each retained fallback jmp. *)
+  dispatch_seen : (Tid.t, Cbat_word.t list) Core.Hashtbl.t;
   (* The symtab entries, discovered roots, materialised code words and
      resolved jump destinations, with each address's decode role. *)
   frontier : frontier;
@@ -631,6 +633,12 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
   | None -> None
   | Some kind -> begin
     let sub = Vsa.state_sub state in
+    let module_addr a =
+      Bil.Var
+        (Hike_synth.record
+           (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth
+           (Hike_synth.mint_module_addr ~addr_bits:(Hike_abi.word_bits t.abi) a))
+    in
     let sol = Vsa.state_sol state in
     let synth = Vsa.state_synth state in
     let block_addrs = block_addrs_of sub in
@@ -652,17 +660,212 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
     match texp with
     | None -> None
     | Some texp -> (
-      (* Replay from the solve's own states: the defs have no boundary
-         env tags yet, and the source's post-state is only [env]. *)
-      let denote ~blk ?def exp =
-        Vsa.solve_denote ~synth
-          ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk)) ~blk ?def exp
+      (* The graph's edge condition already carries the preceding arms'
+         guards.  Its simple [target <> word] conjuncts are exactly the
+         targets those arms cover; a true/absent condition covers none. *)
+      let cond =
+        match Core.Map.find (Vsa.Runctx.edge_conds_of sub) source with
+        | Some by_jmp -> Core.Map.find by_jmp (Term.tid jmp)
+        | None -> None
       in
-      match
-        Hike_cfg_complete.case_words ~cap:dispatch_cap ~denote ~block_addrs
-          ~last_defs ~blk texp
-      with
-      | None | Some [] -> None
+      Hike_diag.debug ~tag:"hike-dbg-cond" (fun () ->
+          Printf.sprintf "blk %s cond=%s arms=[%s]"
+            (Tid.name source)
+            (match cond with None -> "none" | Some c -> Exp.to_string c)
+            (String.concat ","
+               (Term.enum jmp_t blk
+                |> Seq.filter_map ~f:(fun j ->
+                       match Jmp.kind j with
+                       | Call c -> (
+                           match Call.target c with
+                           | Indirect _ -> Some "indirect"
+                           | Direct t ->
+                             Some
+                               (Printf.sprintf "%s if %s" (Tid.name t)
+                                  (Exp.to_string (Jmp.cond j))))
+                       | _ -> None)
+                |> Seq.to_list)));
+      let pre = Graphlib.Std.Solution.get sol source in
+      let denote ~blk ?def exp =
+        Vsa.solve_denote ~synth ~pre ~blk ?def exp
+      in
+      let _, post =
+        Vsa.fold_block_states ~synth ~sol blk ~init:()
+          ~f:(fun _ _ _ () -> ())
+      in
+      let post_raw = post in
+      let post =
+        match cond with
+        | Some c when not (Hike_stack_model.is_true_cond c) ->
+          Vsa.constrain_edge ~synth ~env:post
+            ~landmarks:(Vsa.state_ctx state).Cbat_vsa.Runctx.rc_landmarks c
+        | _ -> post
+      in
+      Hike_diag.debug ~tag:"hike-dbg-rawref" (fun () ->
+          let show = function
+            | Ok ws ->
+              let s = Format.asprintf "%a" Vsa.WordSet.pp ws in
+              if String.length s > 300 then Base.String.prefix s 300 else s
+            | Error _ -> "error"
+          in
+          let target =
+            match texp with
+            | Bil.Var v -> (
+                match Core.Map.find last_defs v with
+                | None -> "no-def"
+                | Some d -> Exp.to_string (Def.rhs d))
+            | _ -> "non-var"
+          in
+          let rax_defs =
+            match texp with
+            | Bil.Var v ->
+              let defs =
+                Term.enum def_t blk
+                |> Seq.filter ~f:(fun d ->
+                       String.equal (Var.name (Var.base (Def.lhs d))) "RAX")
+                |> Seq.map ~f:(fun d ->
+                       Printf.sprintf "%s:=%s" (Var.name (Def.lhs d))
+                         (Exp.to_string (Def.rhs d)))
+                |> Seq.to_list
+              in
+              let phis =
+                Term.enum phi_t blk
+                |> Seq.filter ~f:(fun p ->
+                       String.equal (Var.name (Var.base (Phi.lhs p))) "RAX")
+                |> Seq.map ~f:(fun p ->
+                       Printf.sprintf "%s<-{%s}" (Var.name (Phi.lhs p))
+                         (Phi.values p
+                          |> Seq.map ~f:(fun (src, e) ->
+                                 Printf.sprintf "%s:%s"
+                                   (Tid.name src) (Exp.to_string e))
+                          |> Seq.to_list |> String.concat ";"))
+                |> Seq.to_list
+              in
+              String.concat ";" (defs @ phis)
+            | _ -> ""
+          in
+          let inputs =
+            match texp with
+            | Bil.Var v -> (
+                match Core.Map.find last_defs v with
+                | None -> ""
+                | Some d ->
+                  Exp.free_vars (Def.rhs d)
+                  |> Core.Set.to_list
+                  |> Base.List.map ~f:(fun v ->
+                         Printf.sprintf "%s=%s" (Var.name v)
+                           (match
+                              Vsa.denote_imm_exp ~synth (Bil.Var v) post_raw
+                            with
+                            | Ok ws -> (
+                                match Vsa.WordSet.enumerate ~cap:8 ws with
+                                | Some ws ->
+                                  String.concat "|"
+                                    (Base.List.map ws ~f:Cbat_word.to_string)
+                                | None -> "big")
+                            | Error _ -> "err"))
+                  |> String.concat "," )
+            | _ -> ""
+          in
+          let preds =
+            let g = Sub.to_graph (Vsa.state_sub state) in
+            Graphs.Tid.Node.preds (Term.tid blk) g
+            |> Seq.filter_map ~f:(fun tid ->
+                   match Term.find blk_t (Vsa.state_sub state) tid with
+                   | None -> None
+                   | Some p ->
+                     let defs =
+                       Term.enum def_t p
+                       |> Seq.filter ~f:(fun d ->
+                              String.equal (Var.name (Var.base (Def.lhs d)))
+                                "RAX")
+                       |> Seq.map ~f:(fun d ->
+                              Printf.sprintf "%s:=%s"
+                                (Var.name (Def.lhs d))
+                                (Exp.to_string (Def.rhs d)))
+                       |> Seq.to_list
+                     in
+                     let phis =
+                       Term.enum phi_t p
+                       |> Seq.filter ~f:(fun phi ->
+                              String.equal (Var.name (Var.base (Phi.lhs phi)))
+                                "RAX")
+                       |> Seq.map ~f:(fun phi ->
+                              Printf.sprintf "%s<-%s"
+                                (Var.name (Phi.lhs phi))
+                                (Phi.values phi
+                                 |> Seq.map ~f:(fun (s, e) ->
+                                        Printf.sprintf "%s:%s" (Tid.name s)
+                                          (Exp.to_string e))
+                                 |> Seq.to_list |> String.concat ";"))
+                       |> Seq.to_list
+                     in
+                     Some
+                       (Printf.sprintf "%s{%s}" (Tid.name tid)
+                          (String.concat ";" (defs @ phis))))
+            |> Seq.to_list |> String.concat ","
+          in
+          Printf.sprintf
+            "raw=[%s] refined=[%s] target=%s rax_defs=[%s] preds=[%s] inputs=[%s]"
+            (show (Vsa.denote_imm_exp ~synth texp post_raw))
+            (show (Vsa.denote_imm_exp ~synth texp post))
+            target rax_defs preds inputs);
+      let words =
+        match Vsa.denote_exp_at ~synth ~post ~pre ~blk texp with
+        | Ok ws when Vsa.WordSet.is_bottom ws -> Some []
+        | Ok ws
+          when not (Vsa.WordSet.is_top ws)
+               && not (Vsa.WordSet.is_infinite ws) ->
+          Vsa.WordSet.enumerate ~cap:dispatch_cap ws
+        | Ok _ -> None
+        | Error _ -> None
+      in
+      Hike_diag.debug ~tag:"hike-dbg-refined" (fun () ->
+          Printf.sprintf "blk %s texp=%s words=[%s]" (Tid.name source)
+            (Exp.to_string texp)
+            (match words with
+             | None -> "none"
+             | Some ws ->
+               String.concat ","
+                 (Base.List.map ws ~f:Cbat_word.to_string)));
+      match words with
+      | None -> None
+      | Some [] ->
+        (* Every target this fallback could name is already covered by
+           the arms.  Keep the block compilable and emit the no-match as
+           a trap instead of an indirect transfer. *)
+        let source_blk = Term.find_exn blk_t sub source in
+        let trap_tid = Tid.create () in
+        let trap =
+          Blk.create ~tid:trap_tid
+            ~jmps:[ Jmp.create_int 0 trap_tid ] ()
+        in
+        let fallback = Jmp.with_kind jmp (Goto (Direct trap_tid)) in
+        let rewritten =
+          Term.concat_map jmp_t source_blk ~f:(fun j ->
+              if Tid.equal (Term.tid j) (Term.tid jmp) then [ fallback ]
+              else [ j ])
+        in
+        let working =
+          Term.append blk_t (Term.update blk_t sub rewritten) trap
+        in
+        let synth =
+          Hike_synth.union (Vsa.state_synth state) t.synth
+        in
+        let delta =
+          Hike_cfg_complete.materialize_site
+            ~target:t.context.target ~abi:t.abi
+            ~callee_tid:(fun tid -> callee_tid t frame tid)
+            ~rip_address ~claim:(claim t e) ~synth ~block_addrs
+            ~old:sub ~working ~cases:[]
+            ~edges:(direct_block_edges rewritten)
+        in
+        let built_synth = delta.Hike_cfg_complete.delta_synth in
+        if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
+          (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth := built_synth;
+        Some
+          { Vsa.Dispatch.base = None; targets = [];
+            sub = delta.Hike_cfg_complete.delta_sub; module_addr }
       | Some words -> (
         match
           Base.Option.all
@@ -686,6 +889,53 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
               if Base.List.exists lifted ~f:(fun (_, f) -> Option.is_none f)
               then None
               else begin
+                (* One construction path for both wrappers: the wrapper
+                   decides discovery and the arm kind; the rewrite and
+                   finalization are shared. *)
+                let commit ~(dkind : Vsa.Dispatch.arm_kind) ~targets ~base
+                    ~pre_sub ~cases ~is_intra ~synth =
+                  let source_blk = Term.find_exn blk_t pre_sub source in
+                  let false_target =
+                    if Hike_stack_model.is_true_cond (Jmp.cond jmp) then None
+                    else Hike_cfg_complete.term_follower sub source
+                  in
+                  let rewritten, trap =
+                    Vsa.Dispatch.rewrite_source
+                      { Vsa.Dispatch.base; targets; sub = pre_sub; module_addr }
+                      ~kind:dkind ~blk:source_blk ~jmp ~is_intra ~false_target
+                  in
+                  let working = Term.update blk_t pre_sub rewritten in
+                  let working =
+                    match trap with
+                    | Some b -> Term.append blk_t working b
+                    | None -> working
+                  in
+                  let delta =
+                    Hike_cfg_complete.materialize_site
+                      ~target:t.context.target ~abi:t.abi
+                      ~callee_tid:(fun tid -> callee_tid t frame tid)
+                      ~rip_address ~claim:(claim t e) ~synth ~block_addrs
+                      ~old:sub ~working ~cases
+                      ~edges:(direct_block_edges rewritten)
+                  in
+                  Hike_diag.debug ~tag:"hike-dbg-install" (fun () ->
+                      let count sub =
+                        let b = Term.find_exn blk_t sub source in
+                        Term.enum jmp_t b |> Seq.length
+                      in
+                      Printf.sprintf
+                        "source=%s rewritten_jmps=%d delta_jmps=%d"
+                        (Tid.name source)
+                        (Term.enum jmp_t rewritten |> Seq.length)
+                        (count delta.Hike_cfg_complete.delta_sub));
+                  let built_synth = delta.Hike_cfg_complete.delta_synth in
+                  if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
+                    (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
+                      built_synth;
+                  Some
+                    { Vsa.Dispatch.base; targets;
+                      sub = delta.Hike_cfg_complete.delta_sub; module_addr }
+                in
                 match kind with
                 | `Call ->
                   (* ---- validation passed; commit ---- *)
@@ -706,46 +956,13 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
                   let synth =
                     if Base.phys_equal t.synth synth then synth
                     else begin
-                      (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
-                        t.synth;
-                      t.synth
+                      let merged = Hike_synth.union synth t.synth in
+                      (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth := merged;
+                      merged
                     end
                   in
-                  (* The source rewrite and its SSA finalization happen here:
-                     VSA installs the already-rewritten sub and only
-                     refreshes its facts, plan and ordering. *)
-                  let source_blk = Term.find_exn blk_t sub source in
-                  let false_target =
-                    if Hike_stack_model.is_true_cond (Jmp.cond jmp) then None
-                    else Hike_cfg_complete.term_follower sub source
-                  in
-                  let rewritten, trap =
-                    Vsa.Dispatch.rewrite_source
-                      { Vsa.Dispatch.base = None; targets; sub }
-                      ~kind:Vsa.Dispatch.Call ~blk:source_blk ~jmp
-                      ~is_intra:(fun _ -> false) ~false_target
-                  in
-                  let working = Term.update blk_t sub rewritten in
-                  let working =
-                    match trap with
-                    | Some b -> Term.append blk_t working b
-                    | None -> working
-                  in
-                  let delta =
-                    Hike_cfg_complete.materialize_site
-                      ~target:t.context.target ~abi:t.abi
-                      ~callee_tid:(fun tid -> callee_tid t frame tid)
-                      ~rip_address ~claim:(claim t e) ~synth ~block_addrs
-                      ~old:sub ~working ~cases:[]
-                      ~edges:(direct_block_edges rewritten)
-                  in
-                  let built_synth = delta.Hike_cfg_complete.delta_synth in
-                  if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
-                    (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
-                      built_synth;
-                  Some
-                    { Vsa.Dispatch.base = None; targets;
-                      sub = delta.Hike_cfg_complete.delta_sub }
+                  commit ~dkind:Vsa.Dispatch.Call ~targets ~base:None
+                    ~pre_sub:sub ~cases:[] ~is_intra:(fun _ -> false) ~synth
                 | `Jump ->
                 (* ---- validation passed; commit ---- *)
                 t.state <- decoded;
@@ -876,37 +1093,13 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
                       | Ok _ | Error _ -> (None, sub, synth))
                     | Some _ -> (None, sub, synth))
                 in
-                let source_blk = Term.find_exn blk_t pre_sub source in
-                let false_target =
-                  if Hike_stack_model.is_true_cond (Jmp.cond jmp) then None
-                  else Hike_cfg_complete.term_follower sub source
-                in
                 let case_tids =
                   Core.Set.of_list (module Tid)
                     (Base.List.map cases ~f:(fun (_, tid, _) -> tid))
                 in
-                let rewritten, _trap =
-                  Vsa.Dispatch.rewrite_source
-                    { Vsa.Dispatch.base; targets; sub = pre_sub }
-                    ~kind:Vsa.Dispatch.Jump ~blk:source_blk ~jmp
-                    ~is_intra:(fun tid -> Core.Set.mem case_tids tid)
-                    ~false_target
-                in
-                let working = Term.update blk_t pre_sub rewritten in
-                let delta =
-                  Hike_cfg_complete.materialize_site
-                    ~target:t.context.target ~abi:t.abi
-                    ~callee_tid:(fun tid -> callee_tid t frame tid)
-                    ~rip_address ~claim:(claim t e) ~synth ~block_addrs
-                    ~old:sub ~working ~cases
-                    ~edges:(direct_block_edges rewritten)
-                in
-                let built_sub = delta.Hike_cfg_complete.delta_sub in
-                let built_synth = delta.Hike_cfg_complete.delta_synth in
-                if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
-                  (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth :=
-                    built_synth;
-                Some { Vsa.Dispatch.base; targets; sub = built_sub }
+                commit ~dkind:Vsa.Dispatch.Jump ~targets ~base ~pre_sub
+                  ~cases
+                  ~is_intra:(fun tid -> Core.Set.mem case_tids tid) ~synth
               end
           end))
     end
@@ -970,6 +1163,7 @@ and solve_initial t frame (e : entry) (raw : sub term) :
      solve; the completion pass reads that view, not the pre-solve one. *)
   let solved = s.Hike_vsa.sub in
   let sol = s.Hike_vsa.sol and synth = s.Hike_vsa.synth in
+  let solved = Hike_cfg_complete.retire_jump_fallbacks ~sol ~synth solved in
   let block_addrs = block_addrs_of solved in
   let retaddr = Hike_cfg_complete.retaddr_defs ~abi ~synth ~sol solved in
   let materialized =
@@ -1056,7 +1250,7 @@ and solve_body t frame (e : entry) (raw : sub term) : func =
       ~lookup:(lookup_addr t) ~foreign_slots:t.context.linker_slots
       ~block_addrs:(block_addrs_of stamped) ~envs stamped
   in
-  t.synth <- solved.Hike_vsa.synth;
+  t.synth <- Hike_synth.union t.synth solved.Hike_vsa.synth;
   let seen = Tid.Table.create () in
   Term.enum blk_t stamped
   |> Seq.iter ~f:(fun b ->
@@ -1174,6 +1368,7 @@ let create proj ~file ~state ~subroutines : t =
         (Hike_image.external_references proj);
     state;
     synth = Hike_synth.empty;
+    dispatch_seen = Core.Hashtbl.create (module Tid);
     frontier = frontier_create ~subroutines;
     entries = Core.Hashtbl.create (module Core.Int64);
     by_tid = Core.Hashtbl.create (module Tid);
@@ -1310,11 +1505,12 @@ let facts t : Hike_kb.facts =
           Core.Map.merge_skewed acc f.envs ~combine:(fun ~key:_ a _ -> a)))
       ~block_addrs:(union (Base.List.map funcs ~f:(fun (_, f) -> f.block_addrs)))
   in
+  let synth = Hike_synth.union built.synth t.synth in
   Hike_kb.with_synth { built with
     Hike_kb.sub_addrs;
     images = t.context.images;
     foreign_slots = t.context.linker_slots }
-    (Hike_synth.union built.synth t.synth)
+    synth
 
 (* The worklist's program: main's closure (or, on refusal, that of
    every subroutine entry and every materialised code word) as solved

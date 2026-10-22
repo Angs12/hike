@@ -9,6 +9,8 @@ open Hike_test.Fixtures
 
 module D = Cbat_vsa.Dispatch
 
+let raw_addr a = Bil.Int (Word.of_int64 ~width:64 a)
+
 let w (n : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 n
 let wexp (n : int64) : exp = Bil.Int (Cbat_word.to_word (w n))
 let eq (a : exp) (b : exp) : exp = Bil.BinOp (Bil.EQ, a, b)
@@ -36,7 +38,8 @@ let indirect_jmp (blk : blk term) : jmp term =
   |> Seq.find_exn ~f:(fun j ->
       match Jmp.kind j with Goto (Indirect _) -> true | _ -> false)
 
-let mat ~sub ~base targets : D.materialized = { D.base; targets; sub }
+let mat ~sub ~base targets : D.materialized =
+  { D.base; targets; sub; module_addr = raw_addr }
 
 (* A two-target indirect Goto.  The targets carry a phi for the dispatch
    value, so the delivered edge states expose the per-arm guard.  The sub
@@ -335,13 +338,13 @@ let tests : unit Alcotest.test list =
           (match Jmp.kind tail with
            | Goto (Direct tid) -> Tid.equal tid tids.(3)
            | _ -> false);
-        check "INST-07 arm values"
+        check "INST-07 first arm value"
           (Ws.equal (AI.find_word 64 (in_state sol tids.(1)) p1)
-             (Ws.singleton (w 0x400010L))
-          && Ws.equal (AI.find_word 64 (in_state sol tids.(2)) p2)
-               (Ws.singleton (w 0x400020L)));
-        check "INST-07 false edge delivered"
-          (not (AI.equal (in_state sol tids.(3)) AI.bottom)));
+             (Ws.singleton (w 0x400010L)));
+        check "INST-07 second arm value is bottom"
+          (Ws.is_bottom (AI.find_word 64 (in_state sol tids.(2)) p2));
+        check "INST-07 false edge is bottom"
+          (AI.equal (in_state sol tids.(3)) AI.bottom));
 
     (* The staged builder finalizes the complete rewrite itself: the source
        arms and the new case block are SSA-complete, and an old target that
@@ -397,7 +400,7 @@ let tests : unit Alcotest.test list =
         in
         let rewritten, _trap =
           D.rewrite_source
-            { D.base = None; targets; sub }
+            { D.base = None; targets; sub; module_addr = raw_addr }
             ~kind:D.Jump ~blk:source ~jmp
             ~is_intra:(fun _ -> true) ~false_target:None
         in
@@ -419,13 +422,14 @@ let tests : unit Alcotest.test list =
         let built = delta.Hike.Cfg_complete.delta_sub in
         Hike_test.Verify_ssa.sub ~synth ~target ~what:"INST-08" built;
         let src = source_blk built tids.(0) in
-        let arms = Term.enum jmp_t src |> Seq.to_list in
-        check "INST-08 source arms are direct"
-          (List.length arms = 2
-          && List.for_all
-               (fun j ->
-                 match Jmp.kind j with Goto (Direct _) -> true | _ -> false)
-               arms);
+        let arms =
+          Term.enum jmp_t src |> Seq.to_list
+          |> Base.List.filter ~f:(fun j ->
+                 match Jmp.kind j with
+                 | Goto (Direct _) -> true
+                 | _ -> false)
+        in
+        check "INST-08 source arms are direct" (List.length arms = 2);
         check "INST-08 new case block present"
           (Option.is_some (Term.find blk_t built case_tid)
           && Core.Set.mem delta.Hike.Cfg_complete.new_blocks case_tid);

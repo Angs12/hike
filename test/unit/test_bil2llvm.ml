@@ -614,13 +614,13 @@ let tests : unit Alcotest.test list =
           sub_of "unsplit_series"
             [ [],
               [ (1, mk_goto);
-                (2, mk_goto);
                 (0,
                  fun _ ->
                    Jmp.create
                      (Goto
                         (Indirect
-                           (Bil.Int (Cbat_word.to_word (w64 0)))))) ];
+                           (Bil.Int (Cbat_word.to_word (w64 0))))));
+                (2, mk_goto) ];
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in

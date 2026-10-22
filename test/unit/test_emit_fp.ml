@@ -219,16 +219,18 @@ let tests : unit Alcotest.test list =
                   "operand load type" "i64"
                   (Llvm.string_of_lltype (Llvm.type_of load));
                 let pointer = Llvm.operand load 0 in
+                let rec storage_alloca v =
+                  match Llvm.classify_value v with
+                  | Llvm.ValueKind.Instruction Llvm.Opcode.Alloca -> true
+                  | Llvm.ValueKind.Instruction Llvm.Opcode.GetElementPtr ->
+                    storage_alloca (Llvm.operand v 0)
+                  | _ -> false
+                in
                 check "load addresses its region storage"
                   (match Llvm.classify_value pointer with
                   | Llvm.ValueKind.Instruction Llvm.Opcode.GetElementPtr ->
-                      let storage = Llvm.operand pointer 0 in
-                      Llvm.classify_value storage
-                      = Llvm.ValueKind.Instruction Llvm.Opcode.Alloca
+                      storage_alloca (Llvm.operand pointer 0)
                       && Llvm.int64_of_const (Llvm.operand pointer 1) = Some 4L
-                      && contains_substring
-                           (Llvm.string_of_llvalue storage)
-                           "alloca [16 x i8]"
                   | _ -> false)));
       ] );
 
