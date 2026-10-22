@@ -94,6 +94,25 @@ let place_phis ~preds_of ~only (needs : Var.Set.t Tid.Map.t) (sub : sub term) :
    only newly added outputs. *)
 type mode = Fixed | Changed | Full
 
+(* The SP restore belongs to the call's return edge.  A single-jmp call
+   block has only that edge; a multi-jmp block may also carry dispatch or
+   fallthrough edges that must not restore. *)
+let sp_restore_edge ~(block_of : Tid.t -> blk term option)
+    ~(machine : Tid.t -> bool) (src : Tid.t) (dst : Tid.t) : bool =
+  machine src
+  &&
+  match block_of src with
+  | None -> false
+  | Some b ->
+    Int.equal (Seq.length (Term.enum jmp_t b)) 1
+    || Seq.exists (Term.enum jmp_t b) ~f:(fun j ->
+           match Jmp.kind j with
+           | Call c -> (
+               match Call.return c with
+               | Some (Direct t) -> Tid.equal t dst
+               | _ -> false)
+           | _ -> false)
+
 (* Block-local renaming.  A block's incoming names are its phi lhs
    values; its defs and call results take fresh versions.  A second pass
    wires every phi operand from the predecessor's end-of-block names.
@@ -239,21 +258,10 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
         record tid;
         blk)
   in
-  let call_return_edge src dst =
-    match Term.find blk_t sub src with
-    | None -> false
-    | Some b ->
-      Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
-          match Jmp.kind j with
-          | Call c -> (
-              match Call.return c with
-              | Some (Direct t) -> Tid.equal t dst
-              | _ -> false)
-          | _ -> false)
-  in
   (* The wiring pass: each phi operand is the predecessor's end name
      for that base, base itself when the predecessor does not name it.
-     The SP incoming from a call-return edge carries the pushed word. *)
+     A call block's SP incoming carries the pushed word on the call's
+     return edge; a single-jmp call block has only that edge. *)
   let wired_blk blk =
       Term.map phi_t blk ~f:(fun phi ->
           let base = Var.base (Phi.lhs phi) in
@@ -270,8 +278,16 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
                      | None -> base
                    in
                    let exp =
-                     if Var.same base sp && call_return_edge src (Term.tid blk)
-                     then Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
+                     if
+                       Var.same base sp
+                       && sp_restore_edge
+                            ~block_of:(fun t -> Term.find blk_t sub t)
+                            ~machine:(fun t ->
+                              Core.Set.mem machine_blk_tids t)
+                            src (Term.tid blk)
+                     then
+                       Bil.BinOp
+                         (Bil.PLUS, Bil.Var name, restore_word ~abi)
                      else Bil.Var name
                    in
                    (src, exp))
@@ -1163,15 +1179,9 @@ let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
                       if Var.same (Var.base w) base then found := Some w));
             Base.Option.value !found ~default:base)
     in
-    let call_return_edge src dst =
-      Base.Option.value_map (block_of src) ~default:false ~f:(fun b ->
-          Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
-              match Jmp.kind j with
-              | Call c -> (
-                  match Call.return c with
-                  | Some (Direct t) -> Tid.equal t dst
-                  | _ -> false)
-              | _ -> false))
+    let machine tid =
+      Base.Option.value_map (block_of tid) ~default:false ~f:(fun b ->
+          Term.enum jmp_t b |> Seq.exists ~f:machine_call)
     in
     let operand ~dst src base =
       match Base.List.find operands ~f:(fun (s, d, b, _) ->
@@ -1179,8 +1189,10 @@ let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
       | Some (_, _, _, exp) -> exp
       | None ->
         let name = output src base in
-        if Var.same base sp && call_return_edge src dst then
-          Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
+        if
+          Var.same base sp
+          && sp_restore_edge ~block_of ~machine src dst
+        then Bil.BinOp (Bil.PLUS, Bil.Var name, restore_word ~abi)
         else Bil.Var name
     in
     let new_blocks =
