@@ -208,6 +208,8 @@ type rewrite = [ `Mask of var * exp * word | `Temp of var * exp * word ]
 
 let normalize_round_with_synth ~(synth : Hike_synth.table ref)
     (s : Sub.t) : Sub.t =
+  (* The rewrite mints regular virtuals, not synthetic-table entries. *)
+  ignore synth;
   let mask_of (k : word) (w : int) : word option =
     let kk = Word.to_int64_exn k in
     if w > 0 && w <= 64 && Stdlib.Int64.compare kk 0L > 0
@@ -245,10 +247,16 @@ let normalize_round_with_synth ~(synth : Hike_synth.table ref)
                   | Some (d0, x, k, w) when Word.equal k j -> (
                       match mask_of k w with
                       | Some mask ->
-                          let synth', t =
-                            Hike_synth.mint_fresh ~bits:w Hike_synth.Refinement
-                              !synth in
-                          synth := synth';
+                          (* This rewrite runs after SSA.  The temp is a
+                             regular virtual, but it must carry a local
+                             SSA version: index 0 is reserved for entry
+                             inputs, and a version-0 local def would leak
+                             into the sub's signature. *)
+                          let t =
+                            Var.create ~is_virtual:true ~fresh:true
+                              "hike_tmp" (Type.Imm w)
+                            |> fun t -> Var.with_index t 1
+                          in
                           (* d0's tid keys the temp insertion; d's tid keys
                              the mask rewrite. *)
                           let m =

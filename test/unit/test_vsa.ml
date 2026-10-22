@@ -332,8 +332,14 @@ let tests : unit Alcotest.test list =
                   | Bil.Var v -> Var.equal v rax
                   | _ -> false))
         in
+        (* The rewrite runs after SSA: the regular virtual must have a
+           local version, never version 0 (the entry-lane convention). *)
+        let temp_is_versioned_virtual =
+          Base.Option.value_map temp_of_shl ~default:false ~f:(fun tv ->
+              Var.is_virtual tv && Var.index tv > 0)
+        in
         check "VSA-66"
-          (temp_copies_x
+          (temp_copies_x && temp_is_versioned_virtual
            &&
            match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
            | Some (Bil.BinOp (Bil.RSHIFT, _, _)),

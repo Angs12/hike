@@ -1309,9 +1309,39 @@ let update_sub_blocks ~skip_effects ~(synth : Hike_synth.table)
 
 (* Under SSA the sub's input lanes are its index-0 reads: every
    versioned read is dominated by its def.  The model's memory vars and
-   storage bases are not lanes; a Mem-typed pointer value is. *)
+   storage bases are not lanes; a Mem-typed pointer value is.
+
+   The version-0 convention is an SSA contract.  Post-SSA rewrites are
+   outside the renaming pass, so the debug build checks the local-definition
+   half of the contract here; a version-0 local def must never reach the
+   signature lane computation. *)
 let free_regs_ssa ~(synth : Hike_synth.table) ~(abi : Abi.t) (sub : sub term) :
     var list =
+#ifdef VSA_DEBUG
+  let renamable v =
+    not (Model.is_model_storage synth v)
+    && not (Model.is_window_var synth v)
+    && not (Abi.is_sp abi (Var.base v))
+    && not (Hike_synth.is_address_var synth v)
+    && not (Model.is_arg_slot synth (Var.base v))
+    && not (Model.is_call_arg synth (Var.base v))
+  in
+  let check_local_def tid v =
+    if Var.index v = 0 && renamable v then
+      failwith
+        (Printf.sprintf
+           "hike-ssa: block %s defines renamable %s at version 0"
+           (Tid.name tid) (Var.to_string v))
+  in
+  if Term.has_attr sub ssa_tag then
+    Term.enum blk_t sub
+    |> Seq.iter ~f:(fun blk ->
+           let tid = Term.tid blk in
+           Term.enum def_t blk
+           |> Seq.iter ~f:(fun d -> check_local_def tid (Def.lhs d));
+           Term.enum phi_t blk
+           |> Seq.iter ~f:(fun p -> check_local_def tid (Phi.lhs p)));
+#endif
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
       Blk.elts blk |> Seq.fold ~init:acc ~f:(fun acc term ->

@@ -323,6 +323,20 @@ let thunk_name_of (sub_tid : tid) : string =
 let thunk_tid_of (sub_tid : tid) : tid =
   Tid.for_name (Tid.name sub_tid ^ ":thunk")
 
+(* The lanes the synthetic convention can carry: the ABI parameter
+   registers, the variadic count, the caller window, and the promoted
+   slot pointers. *)
+let convention_lane ctx v =
+  Hike_stack_model.is_arg_slot ctx.synth (Var.base v)
+  || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
+  || Base.List.exists
+       (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
+       ~f:(fun a -> Var.same (Arg.lhs a) v)
+
+let nonconvention_args ctx sub_tid =
+  Base.List.filter (get_args ctx sub_tid) ~f:(fun a ->
+      not (convention_lane ctx (Arg.lhs a)))
+
 (* Whether [sub_tid] gets a twin.  Every non-entry sub carries one when
    the synthetic indirect convention can serve it: an address handed to
    an external (a data word, a call argument) is callable through the
@@ -330,27 +344,24 @@ let thunk_tid_of (sub_tid : tid) : tid =
    signature with lanes the convention does not carry (a promoted
    pointer parameter) stays untwinned. *)
 let thunk_eligible ctx (sub_tid : tid) : bool =
-  let conv_lane v =
-    Hike_stack_model.is_arg_slot ctx.synth (Var.base v)
-    || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
-    || Base.List.exists
-         (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
-         ~f:(fun a -> Var.same (Arg.lhs a) v)
-  in
   (not (is_extern ctx sub_tid))
   && (not (Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid)))
-  && Base.List.for_all (get_args ctx sub_tid) ~f:(fun a ->
-         conv_lane (Arg.lhs a))
+  && Base.List.is_empty (nonconvention_args ctx sub_tid)
 
 (* The twin unpacks the window into the promoted body's slot
    parameters and forwards the register lanes.  Internal linkage: the
    consumer's optimizer inlines it where the call site resolves. *)
 let create_thunk ctx (sub_tid : tid) =
   if not (thunk_eligible ctx sub_tid) then
+    let bad =
+      Base.List.map (nonconvention_args ctx sub_tid) ~f:(fun a ->
+          Var.to_string (Arg.lhs a))
+    in
     failwith
       (Printf.sprintf
          "hike-emit: escaped sub %s cannot be reached through the synthetic \
-          convention" (Tid.name sub_tid))
+          convention (non-convention lanes: %s)"
+         (Tid.name sub_tid) (String.concat ", " bad))
   else
   let llvm_ctx = ctx.llvm_ctx in
   let llvm_module = ctx.llvm_module in

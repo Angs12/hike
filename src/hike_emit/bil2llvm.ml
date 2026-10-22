@@ -547,8 +547,9 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let thunk_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
-        if is_entry sub || not (Core.Set.mem escaped (Term.tid sub)) then ()
-        else create_thunk ctx (Term.tid sub))
+        let tid = Term.tid sub in
+        if is_entry sub || not (Core.Set.mem escaped tid) then ()
+        else if thunk_eligible ctx tid then create_thunk ctx tid)
   in
   (* The per-run synth-var bindings: the synth-value lane enumerates the
      vocabulary once and binds each module-lifetime var before any body
