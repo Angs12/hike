@@ -303,9 +303,9 @@ let prune_unreachable ~synth ~(denote : denote) ~(retaddr : Tid.Set.t)
                | None -> false)
       | None -> None
     in
-    match Term.first blk_t sub with
-    | Some b when Term.has_attr b Hike_ssa.entry_tag -> Some b
-    | _ -> (match at_addr with Some b -> Some b | None -> Vsa.entry_block_of sub)
+    match at_addr with
+    | Some b -> Some b
+    | None -> Vsa.entry_block_of sub
   in
   match entry with
   | None -> sub

@@ -489,6 +489,27 @@ let static_graph_vsa
     ?(materialize_transfer : materialize_transfer = no_materialize_transfer)
     ~(synth : Hike_synth.table ref)
     (s_arg : Sub.t) (init : vsa_sol) : vsa_sol * run_state =
+  (* A true entry that is also a loop header has a start-pseudo phi
+     operand for its initial value.  Bind that operand from the entry
+     seed once, so the first iteration starts from the seed rather than
+     from the backedge alone. *)
+  let init =
+    match entry_block_of s_arg with
+    | Some entry
+      when Term.enum phi_t entry |> Seq.exists ~f:(fun p ->
+               Seq.exists (Phi.values p) ~f:(fun (src, _) ->
+                   Tid.equal src Graphs.Tid.start)) ->
+      let tid = Term.tid entry in
+      let state = Solution.get init tid in
+      let state =
+        Cbat_transfer.denote_phis ~synth:!synth ~source:Graphs.Tid.start
+          entry state
+      in
+      Solution.create
+        (Core.Map.set (sol_map_of_sol init) ~key:tid ~data:state)
+        (Solution.default init)
+    | _ -> init
+  in
   let fresh = Option.is_none state in
   let st =
     match state with

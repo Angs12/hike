@@ -887,7 +887,7 @@ let tests : unit Alcotest.test list =
               [Def.create y (Bil.Var x)], [(0, mk_ret)] ] in
         let ssa = ssa_of sub in
         let entry = Term.first blk_t ssa |> Base.Option.value_exn in
-        check "SSA-22 entry is separate" (not (Tid.equal (Term.tid entry) tids.(0)));
+        check "SSA-22 entry is the real entry" (Tid.equal (Term.tid entry) tids.(0));
         check "SSA-22 both operands"
           (phi_arity ssa (Term.find_exn blk_t ssa tids.(0)) x = Some 2);
         let initial = AI.add_word (anchored_entry ()) ~key:x ~data:(Ws.singleton (w64 0)) in
@@ -898,7 +898,7 @@ let tests : unit Alcotest.test list =
         let value = Base.List.Assoc.find (def_values ssa sol) def_tid ~equal:Tid.equal
           |> Base.Option.value_exn in
         check "SSA-22 initial value reaches the loop" (Ws.equal value (Ws.singleton (w64 3))));
-    pin "SSA-23" "an entry backedge update keeps unrelated blocks' versions"
+    pin "SSA-23" "an entry backedge update keeps the real entry and unrelated blocks' versions"
       (fun () ->
         let x = int_param 0 and y = callee_saved 0 and z = callee_saved 1 in
         let sub, tids = raw_sub_of "entry_update"
@@ -912,29 +912,27 @@ let tests : unit Alcotest.test list =
             else b) in
         let prepared = Hike.Ssa.prepare_sub ~synth:Hike.Synth.empty
             ~target:(x86_target ()) full in
-        (* The decode update drops the old synthetic entry and re-adds it;
-           the changed exit block alone is the local update. *)
+        (* The changed exit block alone is the local update; the real
+           entry stays first and keeps its processed SSA identity. *)
         let old_base = Hike.Ssa.unssa_sub old in
         let mixed =
-          Term.filter_map blk_t old ~f:(fun b ->
-              if Term.has_attr b Hike.Ssa.entry_tag then None
-              else
-                match Term.find blk_t prepared (Term.tid b) with
-                | Some pb when
-                    not (Blk.equal
-                           (Term.find_exn blk_t old_base (Term.tid b)) pb) ->
-                  Some pb
-                | _ -> Some b)
+          Term.map blk_t old ~f:(fun b ->
+              match Term.find blk_t prepared (Term.tid b) with
+              | Some pb when
+                  not (Blk.equal
+                         (Term.find_exn blk_t old_base (Term.tid b)) pb) ->
+                pb
+              | _ -> b)
         in
         let upd = Hike.Ssa.update_sub ~synth:Hike.Synth.empty
             ~target:(x86_target ()) ~old mixed in
         check "SSA-23 equals fresh" (Hike.Ssa.equivalent upd (ssa_of full));
         check "SSA-23 unrelated block kept"
           (kept old upd (Term.find_exn blk_t old tids.(0)));
-        check "SSA-23 entry marked processed"
+        check "SSA-23 entry stays the real entry"
           (match Term.first blk_t upd with
            | Some b ->
-             Term.has_attr b Hike.Ssa.entry_tag
+             Tid.equal (Term.tid b) tids.(0)
              && Term.has_attr b Hike.Stack_model.ssa_tag
            | None -> false));
     pin "SSA-24" "relane narrowing drops dead input phis and reads"

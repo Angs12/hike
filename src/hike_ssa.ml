@@ -10,10 +10,6 @@ module Abi = Hike_abi
 
 let ssa_tag = Model.ssa_tag
 
-let entry_tag : unit Value.Tag.t =
-  Value.Tag.register ~package:"hike" ~name:"hike-ssa-entry"
-    ~uuid:"1072b3e1-a039-4a5b-b340-d052dded07cd" (module Core.Unit)
-
 module High_water = struct
   open! Core
   type t = (var * int) list [@@deriving bin_io, compare, sexp]
@@ -305,30 +301,6 @@ let rename_versions ?(mode = fun _ -> Full) ?(floor = Var.Map.empty)
 let is_real tid =
   not (Tid.equal tid Graphs.Tid.start) && not (Tid.equal tid Graphs.Tid.exit)
 
-(* A backedge to the first block needs a separate initial incoming edge.
-   Keep its identity stable across fresh construction and updates; an
-   update reuses the old entry's attrs, so rebuilding it is not a change. *)
-let with_entry ?old sub =
-  match Term.first blk_t sub with
-  | None -> sub
-  | Some first ->
-    let g = Sub.to_graph sub in
-    if Graphs.Tid.Node.preds (Term.tid first) g |> Seq.exists ~f:is_real then
-      let tid = Tid.for_name ~package:"hike" ("ssa-entry-" ^ Tid.to_string (Term.tid sub)) in
-      let entry = Blk.create ~tid ~jmps:[Jmp.create (Goto (Direct (Term.tid first)))] ()
-        |> fun b -> Term.set_attr b entry_tag () in
-      let entry =
-        match old with
-        | Some old ->
-          (match Term.find blk_t old tid with
-           | Some previous when Term.has_attr previous entry_tag ->
-             Term.with_attrs entry (Term.attrs previous)
-           | _ -> entry)
-        | None -> entry
-      in
-      Term.prepend blk_t sub entry
-    else sub
-
 (* What phi placement and renaming share for one pre-SSA sub: its CFG,
    the call edges, and the blocks' phi needs. *)
 type ctx = {
@@ -373,11 +345,23 @@ let analyze ~(synth : Hike_synth.table)
        jmp: the completion writes the guards' fallthroughs).  The
        [start]/[exit] pseudo-nodes are dropped for the block relations. *)
     let g = Sub.to_graph sub in
+    let entry_tid =
+      Cbat_vsa.entry_block_of sub |> Base.Option.map ~f:Term.tid
+    in
     let succs_of tid =
       Graphs.Tid.Node.succs tid g |> Seq.to_list |> Base.List.filter ~f:is_real
     in
     let preds_of tid =
-      Graphs.Tid.Node.preds tid g |> Seq.to_list |> Base.List.filter ~f:is_real
+      let preds =
+        Graphs.Tid.Node.preds tid g |> Seq.to_list |> Base.List.filter ~f:is_real
+      in
+      (* The true entry's initial value has no physical predecessor.  When
+         the entry is also a loop header, give its phi a start-pseudo
+         operand; an entry without a backedge needs no phi. *)
+      match entry_tid with
+      | Some entry when Tid.equal entry tid && not (Base.List.is_empty preds) ->
+        Graphs.Tid.start :: preds
+      | _ -> preds
     in
     let machine_blk_tids =
       Term.enum blk_t sub
@@ -390,11 +374,22 @@ let analyze ~(synth : Hike_synth.table)
 #ifdef VSA_DEBUG
     debug_graph g;
 #endif
-    (* Block live-in over the terms' own reads and writes. *)
+    (* Block live-in over the terms' own reads and writes.  The return
+       lanes are reads at every exit: a bare ret block carries their value
+       implicitly, so it must join the liveness seed even though no term
+       in the block names it. *)
+    let exit_seed =
+      Term.enum arg_t sub
+      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc arg ->
+             match Arg.intent arg with
+             | Some (Out | Both) ->
+               Core.Set.union acc (Exp.free_vars (Arg.rhs arg))
+             | _ -> acc)
+    in
     let live_in =
       let live =
         Hike_bir_flow.liveness ~graph:g ~sub
-          ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
+          ~initial:(Tid.Map.singleton Graphs.Tid.exit exit_seed)
           ~def:(fun d -> (Model.writes (`Def d), Model.reads (`Def d)))
           ~phi:(fun p -> (Model.writes (`Phi p), Model.reads (`Phi p)))
           ~jmp:(fun j -> (Model.writes (`Jmp j), Model.reads (`Jmp j)))
@@ -425,7 +420,7 @@ let construct ~(synth : Hike_synth.table)
     ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) : sub term =
   if Seq.is_empty (Term.enum blk_t sub) then sub
   else
-    let c = analyze ~synth ~target (with_entry sub) in
+    let c = analyze ~synth ~target sub in
     let sub =
       place_phis ~preds_of:c.preds_of ~only:(Fun.const true) c.needs c.sub
     in
@@ -712,7 +707,6 @@ let update_sub_woken ~(synth : Hike_synth.table)
     (sub : sub term) : sub term * Tid.Set.t =
   if Seq.is_empty (Term.enum blk_t sub) then (sub, Tid.Set.empty)
   else
-    let sub = with_entry ~old sub in
     let c = analyze ~synth ~target (unssa_sub sub) in
     update_sub_woken_analyzed ~old ~c sub
 
@@ -1428,16 +1422,15 @@ let relane_sub ~synth ~target ~callee sub =
                       (Tid.name (Term.tid b)) (Tid.name (Term.tid j))))
           in
           not (Core.Set.equal (Model.writes (`Jmp before)) (Model.writes (`Jmp j))))) in
-  let sub' = with_entry ~old:sub refreshed in
-  let c = analyze ~synth ~target (unssa_sub sub') in
+  let c = analyze ~synth ~target (unssa_sub refreshed) in
   let needed b = Base.Option.value (Core.Map.find c.needs (Term.tid b))
       ~default:Var.Set.empty in
-  let missing = Term.enum blk_t sub' |> Seq.exists ~f:(fun b ->
+  let missing = Term.enum blk_t refreshed |> Seq.exists ~f:(fun b ->
       let existing = Term.enum phi_t b |> Seq.map ~f:(fun p -> Var.base (Phi.lhs p))
         |> Seq.to_list |> Var.Set.of_list in
       not (Core.Set.is_subset (needed b) ~of_:existing)) in
   if changed_writes || missing then
-    fst (update_sub_woken_analyzed ~old:sub ~c sub')
+    fst (update_sub_woken_analyzed ~old:sub ~c refreshed)
   else
     Term.map blk_t refreshed ~f:(fun b ->
         Term.filter phi_t b ~f:(fun p ->
