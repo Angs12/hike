@@ -21,6 +21,4 @@
    (:standard -inline 0 -rounds 1)))
  (vsa-debug
   (flags
-   :standard -g)
-  (ocamlopt_flags
-   (:standard -O3))))
+   :standard -g)))
