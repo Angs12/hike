@@ -9,7 +9,13 @@ open Bap.Std.Bil.Types
    pointer is carried as the convention's NAME for fixtures and
    diagnostics: its stack-ness, like any register's, is proven by the
    analysis, never assumed from this field. *)
+(* The calling convention a record describes.  Code that places arguments
+   or return values matches on it, so a second convention cannot be added
+   without every such place failing to compile. *)
+type convention = Sysv_x86_64_gnu
+
 type t = {
+  convention : convention;
   sp : var;                      (* stack pointer *)
   frame_pointer : var;           (* the conventional frame register (RBP);
                                     an ordinary callee-saved GPR *)
@@ -39,9 +45,6 @@ type t = {
   entry_symbol : string;         (* the process entry's linker symbol, the
                                     runtime boundary a dead continuation
                                     binds to (SysV: _start) *)
-  noreturn_symbols : string list; (* the runtime contract's never-returning
-                                    functions (the base fact for body-less
-                                    externs; DWARF extends it upstream) *)
 }
 
 let x86_64_sysv : t =
@@ -53,6 +56,7 @@ let x86_64_sysv : t =
   and zf = flag "ZF" and sf = flag "SF" and ovf = flag "OF"
   and df = flag "DF" in
   {
+    convention = Sysv_x86_64_gnu;
     sp = r64 "RSP";
     frame_pointer = r64 "RBP";
     thread_pointer = r64 "FS_BASE";
@@ -86,10 +90,6 @@ let x86_64_sysv : t =
     page_size = 4096L;
     red_zone = 128;
     entry_symbol = "_start";
-    noreturn_symbols =
-      [ "longjmp"; "siglongjmp"; "__stack_chk_fail"; "abort"; "exit";
-        "_exit"; "_Exit"; "quick_exit"; "__assert_fail"; "pthread_exit";
-        "__libc_start_main" ];
   }
 
 (* Var-based predicates; [Var.same] compares base vars (EAX ~ RAX),
@@ -213,6 +213,7 @@ let of_target (target : Theory.Target.t) : t =
       (Printf.sprintf "hike_abi: target %s is not x86_64-gnu-elf"
          (Theory.Target.to_string target));
   {
+    convention = Sysv_x86_64_gnu;
     sp = sp target;
     frame_pointer = frame_pointer target;
     thread_pointer = thread_pointer target;
@@ -234,7 +235,6 @@ let of_target (target : Theory.Target.t) : t =
     page_size = x86_64_sysv.page_size;
     red_zone = x86_64_sysv.red_zone;
     entry_symbol = x86_64_sysv.entry_symbol;
-    noreturn_symbols = x86_64_sysv.noreturn_symbols;
   }
 
 (* The target's word size in bits, from the byte size the record carries. *)

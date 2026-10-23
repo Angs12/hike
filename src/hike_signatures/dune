@@ -1,0 +1,8 @@
+(library
+ (name hike_signatures)
+ (public_name hike.hike_signatures)
+ (wrapped false)
+ (modules hike_signatures hike_sysv)
+ (libraries bap bap-core-theory core hike_abi sexplib)
+ (preprocess
+  (pps ppx_sexp_conv ppx_compare)))

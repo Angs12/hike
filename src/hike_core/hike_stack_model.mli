@@ -206,12 +206,39 @@ type call_arg_store = {
   sb_def : def term;
 }
 
-val site_bindings_of_sub_with_blocks :
+(* A stack-argument store that fills a call's slot from another block.
+   [rb_blk] holds the store [rb_def]; the call block is the map's key. *)
+type remote_arg_store = {
+  rb_slot : int;
+  rb_def : def term;
+  rb_blk : Tid.t;
+}
+
+(* The number of outgoing stack-argument slots a call's stores fill,
+   recorded on the call by the promotion when stores in other blocks
+   fill some. *)
+val call_stack_arity : int Value.Tag.t
+
+(* A call block's stack arguments, found by the position of the stores
+   (a singleton address that is a word-aligned slot above the call's SP):
+   [cs_own] the stores of the block itself, the last of a slot winning;
+   [cs_remote] the stores of other blocks that fill a slot the own stores
+   leave open; [cs_arity] the number of slots from 0 these fill without a
+   gap, so a local stored further up the frame is never an argument.  A
+   call whose SP is not a singleton has none.  Only call blocks are
+   keys. *)
+type call_site = {
+  cs_own : call_arg_store list;
+  cs_remote : remote_arg_store list;
+  cs_arity : int;
+}
+
+val call_sites :
   word:int ->
   sp:var ->
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_clp_set_composite.t, Type.error) Result.t) ->
-  sub term -> (call_arg_store list * blk term) Tid.Map.t
+  sub term -> call_site Tid.Map.t
 
 (* The layout: every alloca of the sub, riding the sub term. *)
 module Sub_layout : sig

@@ -766,43 +766,93 @@ let passed_version (blk : blk term) (v : var) : var option =
 let version_at_end (blk : blk term) (v : var) : var =
   Base.Option.value (passed_version blk v) ~default:v
 
-let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
+let call_stack_arity : int Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-call-stack-arity"
+    ~uuid:"7a1b9e0e-3c5e-4f06-9d0a-5a4f3a6d2c11" (module Core.Int)
+
+type remote_arg_store = {
+  rb_slot : int;
+  rb_def : def term;
+  rb_blk : Tid.t;
+}
+
+(* One call block's stack arguments, found by position. *)
+type call_site = {
+  cs_own : call_arg_store list;
+  cs_remote : remote_arg_store list;
+  cs_arity : int;
+}
+
+let call_sites ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Cbat_clp_set_composite.t, Type.error) Result.t)
-    (sub : sub term) : (call_arg_store list * blk term) Tid.Map.t =
+    (sub : sub term) : call_site Tid.Map.t =
   let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
       int64 option =
     match denote ~blk ?def e with
     | Error _ -> None
     | Ok ws -> singleton_stack_position ws
   in
+  (* Every store of the sub with a singleton stack address, once. *)
+  let stores =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun blk ->
+        Term.enum def_t blk
+        |> Seq.filter_map ~f:(fun d ->
+            match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
+            | Some (addr, _), Some _ ->
+              Base.Option.map (singleton_at ~def:d ~blk addr) ~f:(fun start ->
+                  (Term.tid blk, d, start))
+            | _ -> None))
+    |> Seq.to_list
+  in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun sites blk ->
       let btid = Term.tid blk in
-      let has_call =
-        Term.enum jmp_t blk |> Seq.exists ~f:machine_call
-      in
-      if not has_call then sites
+      if not (Term.enum jmp_t blk |> Seq.exists ~f:machine_call) then sites
       else
-        match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
-        | None -> Core.Map.set sites ~key:btid ~data:([], blk)
-        | Some call_sp ->
-          let bindings =
-            Term.enum def_t blk
-            |> Seq.fold ~init:Core.Int.Map.empty ~f:(fun acc d ->
-                match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
-                | Some (addr, _), Some _ ->
-                  (match singleton_at ~def:d ~blk addr with
-                   | Some start ->
-                     (match call_arg_slot ~word ~call_sp ~start with
-                      | Some slot ->
-                        Core.Map.set acc ~key:slot
-                          ~data:{ sb_slot = slot; sb_def = d }
-                      | None -> acc)
-                   | None -> acc)
-                | _ -> acc)
-          in
-          Core.Map.set sites ~key:btid ~data:(Core.Map.data bindings, blk))
+        let site =
+          match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
+          | None -> { cs_own = []; cs_remote = []; cs_arity = 0 }
+          | Some call_sp ->
+            let slot_of start = call_arg_slot ~word ~call_sp ~start in
+            (* The call block's own stores, the last of a slot winning. *)
+            let own =
+              Base.List.fold stores ~init:Core.Int.Map.empty
+                ~f:(fun acc (tid, d, start) ->
+                    match slot_of start with
+                    | Some slot when Tid.equal tid btid ->
+                      Core.Map.set acc ~key:slot
+                        ~data:{ sb_slot = slot; sb_def = d }
+                    | _ -> acc) in
+            (* Other blocks' stores of a slot the own stores leave open;
+               which of several is named is arbitrary: they write one
+               cell. *)
+            let remote =
+              Base.List.fold stores ~init:Core.Int.Map.empty
+                ~f:(fun acc (tid, d, start) ->
+                    match slot_of start with
+                    | Some slot
+                      when (not (Tid.equal tid btid))
+                        && (not (Core.Map.mem own slot))
+                        && not (Core.Map.mem acc slot) ->
+                      Core.Map.set acc ~key:slot
+                        ~data:{ rb_slot = slot; rb_def = d; rb_blk = tid }
+                    | _ -> acc) in
+            (* Only the run of slots from 0 that these fill without a gap
+               counts: a local stored further up the frame is no
+               argument. *)
+            let rec run k =
+              if Core.Map.mem own k || Core.Map.mem remote k then run (k + 1)
+              else k in
+            let limit = run 0 in
+            { cs_own = Core.Map.data own;
+              cs_remote =
+                Base.List.filter (Core.Map.data remote)
+                  ~f:(fun b -> b.rb_slot < limit);
+              cs_arity = limit }
+        in
+        Core.Map.set sites ~key:btid ~data:site)
 
 let reads = function
   | `Def d -> def_reads d
