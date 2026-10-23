@@ -274,8 +274,9 @@ let symbol t (label_name : string) : Tid.t =
       else
         { S.unknown with
           returns =
-            not (Base.List.mem t.abi.Hike_abi.noreturn_symbols name
-                   ~equal:String.equal) }
+            not (Base.Option.exists
+                   (Hike_signatures.find t.context.signatures name)
+                   ~f:(fun r -> r.Hike_signatures.noreturn)) }
     in
     Core.Hashtbl.set t.symbols ~key:tid ~data:(name, summary);
     t.symbol_names <- Core.Map.set t.symbol_names ~key:name ~data:tid
@@ -290,6 +291,13 @@ let indirect_target (j : jmp term) : exp option =
   | _ -> None
 
 let symbol_summary t tid = snd (Core.Hashtbl.find_exn t.symbols tid)
+
+(* A body-less import's callee: the user's record for its library and
+   symbol version, when there is one, bounds the call's reads and writes. *)
+let symbol_callee t name (s : S.t) : Vsa.Call_effects.callee =
+  match Hike_signatures.find t.context.signatures name with
+  | Some record -> Declared (s.written, record)
+  | None -> Summary s.written
 
 let final_summary t = function
   | Function f -> f.summary
@@ -1096,13 +1104,13 @@ and solve_to_fix ?state t frame e ~sub ~resolved ~synth ~seed ~wake :
   let lookup a = lookup_call_target t a in
   let known tid =
     match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
-    | Some (_, s), _ -> `Symbol s
+    | Some (name, s), _ -> `Symbol (name, s)
     | None, Some e -> `Entry e
     | None, None -> `Unknown
   in
   let callee tid : Vsa.Call_effects.callee =
     match known tid with
-    | `Symbol s -> Summary s.written
+    | `Symbol (name, s) -> symbol_callee t name s
     | `Unknown -> Summary None
     | `Entry e -> (
       match e.status with
@@ -1193,13 +1201,13 @@ and solve_body t frame (e : entry) (raw : sub term) : func =
   let lookup a = lookup_call_target t a in
   let known tid =
     match Core.Hashtbl.find t.symbols tid, Core.Hashtbl.find t.by_tid tid with
-    | Some (_, s), _ -> `Symbol s
+    | Some (name, s), _ -> `Symbol (name, s)
     | None, Some en -> `Entry en
     | None, None -> `Unknown
   in
   let callee tid : Vsa.Call_effects.callee =
     match known tid with
-    | `Symbol s -> Summary s.written
+    | `Symbol (name, s) -> symbol_callee t name s
     | `Unknown -> Summary None
     | `Entry en -> (
       match en.status with
@@ -1340,8 +1348,8 @@ and materialised_words t (f : func) : int64 list =
 
 (* ---- the program ---- *)
 
-let create proj ~file ~state ~subroutines : t =
-  let context = Hike_program_vsa.prepare proj in
+let create ~signatures proj ~file ~state ~subroutines : t =
+  let context = Hike_program_vsa.prepare ~signatures proj in
   {
     proj;
     file;
@@ -1493,7 +1501,8 @@ let facts t : Hike_kb.facts =
   Hike_kb.with_synth { built with
     Hike_kb.sub_addrs;
     images = t.context.images;
-    foreign_slots = t.context.linker_slots }
+    foreign_slots = t.context.linker_slots;
+    signatures = t.context.signatures }
     synth
 
 (* The worklist's program: main's closure (or, on refusal, that of
@@ -1501,8 +1510,8 @@ let facts t : Hike_kb.facts =
    bodies with one jump per block, plus a block-less declaration per
    external target (the emitter maps intrinsic targets itself); and the
    solves' analysis facts. *)
-let run (proj : Project.t) ~file ~state ~subroutines : result =
-  let t = create proj ~file ~state ~subroutines in
+let run ~signatures (proj : Project.t) ~file ~state ~subroutines : result =
+  let t = create ~signatures proj ~file ~state ~subroutines in
   let entry = Hike_image.entry_point proj in
   Base.Option.iter entry ~f:(fun a -> solve_roots t ~addresses:[ a ] [ a ]);
   let main =

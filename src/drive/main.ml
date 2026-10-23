@@ -6,16 +6,23 @@ open Bap.Std
 open Bap_core_theory
 
 let usage () =
-  Hike.Diag.warn "usage: hike <binary> [-o <out.ll>]";
+  Hike.Diag.warn "usage: hike <binary> --signatures <file> [--signatures <file>]... [-o <out.ll>]";
   exit 2
 
 let refuse fmt = Printf.ksprintf (fun s -> Hike.Diag.warn "%s" s; exit 1) fmt
 
 let arguments () =
-  match Array.to_list Sys.argv |> List.tl with
-  | [ binary ] -> (binary, Filename.basename binary ^ ".ll")
-  | [ binary; "-o"; out ] | [ "-o"; out; binary ] -> (binary, out)
-  | _ -> usage ()
+  let rec go binary out signatures = function
+    | [] -> (binary, out, List.rev signatures)
+    | "-o" :: file :: rest -> go binary (Some file) signatures rest
+    | "--signatures" :: file :: rest -> go binary out (file :: signatures) rest
+    | arg :: rest when binary = None && not (String.starts_with ~prefix:"-" arg) ->
+      go (Some arg) out signatures rest
+    | _ -> usage () in
+  match go None None [] (Array.to_list Sys.argv |> List.tl) with
+  | Some binary, out, signatures ->
+    (binary, Option.value out ~default:(Filename.basename binary ^ ".ll"), signatures)
+  | None, _, _ -> usage ()
 
 (* The GC parameters the bap front end sets: the lift's memory profile
    is the plugin path's. *)
@@ -40,7 +47,7 @@ let defines_code proj =
   |> Seq.exists ~f:(fun sub -> not (Seq.is_empty (Term.enum blk_t sub)))
 
 let () =
-  let binary, out = arguments () in
+  let binary, out, signature_files = arguments () in
   if not (Sys.file_exists binary) || Sys.is_directory binary then
     refuse "cannot read %s" binary;
   setup_gc ();
@@ -58,7 +65,15 @@ let () =
   if not (Hike.Abi.is_primary_target target) then
     refuse "%s: target %s is not x86_64-gnu-elf" binary
       (KB.Name.to_string (Theory.Target.name target));
-  match Hike.lift proj with
+  (* Without signatures the lift cannot tell which imports never return. *)
+  if signature_files = [] then
+    refuse "no signatures: pass --signatures FILE (data/glibc.sexp for glibc)";
+  let signatures =
+    match Hike.Signatures.load signature_files with
+    | Ok db -> db
+    | Error err -> refuse "signatures: %s" (message err)
+  in
+  match Hike.lift ~signatures proj with
   | exception exn -> refuse "lifting %s failed: %s" binary (Printexc.to_string exn)
   | lifted when not (defines_code lifted) -> refuse "%s: no function was discovered" binary
   | lifted -> (

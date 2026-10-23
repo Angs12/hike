@@ -413,6 +413,7 @@ let escaped_starts ~(spec : section_spec) ~(synth : Hike_synth.table)
 let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(target : Bap_core_theory.Theory.Target.t) ~(addr_bits : int)
     ~(symtab : Symtab.t option) ~(synth : Hike_synth.table)
+    ~(signatures : Hike_signatures.t)
     (spec : section_spec)
     (prog : program term) : unit =
   (* The sections construct from the spec before any function declares. *)
@@ -492,7 +493,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                 ~f:(fun acc (_, entry, _) ->
                   Core.Set.add acc (Word.to_int64_exn (Block.addr entry)))
          | None -> Core.Int64.Set.empty);
-      sub_starts }
+      sub_starts;
+      signatures }
   in
   (* An external function's PLT stub defines no function and emits no
      body — its declaration carries the name for every call site.  A

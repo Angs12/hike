@@ -371,3 +371,50 @@ let tls_spec (proj : Project.t) : Hike_spec.tls_spec option =
            tls_base = Int64.sub prefix rounded;
            tls_prefix = Int64.to_int prefix; tls_image = image }
   | _ -> failwith "hike-image: multiple PT_TLS headers"
+
+(* The versioned dynamic imports of the dynamic-linking tables: each
+   undefined [.dynsym] symbol with the library and symbol version its
+   [.gnu.version_r] requirement names.  A symbol whose version index no
+   requirement names (unversioned, or defined here) has none. *)
+let imports_of_sections ~(dynsym : Bytes.t) ~(dynstr : Bytes.t)
+    ~(versym : Bytes.t) ~(verneed : Bytes.t) :
+    (string * (string * string)) list =
+  let u16 b o = Stdlib.Bytes.get_uint16_le b o in
+  let u32 b o = Stdlib.Int32.to_int (Stdlib.Bytes.get_int32_le b o) land 0xffffffff in
+  let str off =
+    let stop = Bytes.index_from dynstr off '\000' in
+    Bytes.sub_string dynstr off (stop - off) in
+  let versions =
+    let rec need o acc =
+      let file = str (u32 verneed (o + 4)) in
+      let rec aux a acc =
+        let acc =
+          Core.Map.set acc ~key:(u16 verneed (a + 6) land 0x7fff)
+            ~data:(file, str (u32 verneed (a + 8))) in
+        let next = u32 verneed (a + 12) in
+        if next = 0 then acc else aux (a + next) acc in
+      let acc = aux (o + u32 verneed (o + 8)) acc in
+      let next = u32 verneed (o + 12) in
+      if next = 0 then acc else need (o + next) acc in
+    if Bytes.length verneed = 0 then Core.Int.Map.empty
+    else need 0 Core.Int.Map.empty in
+  Base.List.range 1 (Bytes.length dynsym / 24)
+  |> Base.List.filter_map ~f:(fun i ->
+      let o = 24 * i in
+      if u16 dynsym (o + 6) <> 0 then None
+      else
+        Base.Option.map
+          (Core.Map.find versions (u16 versym (2 * i) land 0x7fff))
+          ~f:(fun library_version -> (str (u32 dynsym o), library_version)))
+
+let versioned_imports (proj : Project.t) : (string * (string * string)) list =
+  let section name =
+    Base.Option.map (get_section_data (get_section_mem name proj))
+      ~f:(fun (bytes, _, _) -> bytes) in
+  match section ".dynsym", section ".dynstr", section ".gnu.version",
+        section ".gnu.version_r" with
+  | Some dynsym, Some dynstr, Some versym, Some verneed ->
+    (* A malformed table names no import. *)
+    (try imports_of_sections ~dynsym ~dynstr ~versym ~verneed
+     with Invalid_argument _ | Not_found -> [])
+  | _ -> []

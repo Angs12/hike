@@ -9,6 +9,7 @@ module Abi = Hike_abi
 
 (** The production diagnostic channel: [hike: ...] lines on stderr. *)
 module Diag = Hike_diag
+module Signatures = Hike_signatures
 
 module Vsa = Hike_vsa
 
@@ -103,7 +104,7 @@ module Bil2llvm = Bil2llvm
 
 (** The pass chain from discovery through types: the stages the plugin
     registers as passes, run in order. *)
-val lift : Project.t -> Project.t
+val lift : signatures:Hike_signatures.db -> Project.t -> Project.t
 
 (** Emits the lifted project's LLVM IR to the file [output]. *)
 val emit : string -> Project.t -> unit

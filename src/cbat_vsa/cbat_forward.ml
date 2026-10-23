@@ -169,7 +169,7 @@ let denote_jump
           ~entry ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
-    let call_site_transfer ~(summary : Int.Set.t option) =
+    let call_site_transfer ?signature ~(summary : Int.Set.t option) () =
       let facts = jp.jp_call_facts in
       (* The call reads the SP version the block ends with. *)
       let abi = { rctx.Cbat_runctx.rc_abi with sp = facts.cf_sp } in
@@ -186,7 +186,13 @@ let denote_jump
                   ~abi:rctx.Cbat_runctx.rc_abi ~preserved ws in
               jp.jp_preserved <- Some (ws, p);
               p) in
-      Cbat_call_effects.transfer ?kept ~abi ~preserved ~stack_args
+      let result =
+        Option.bind (List.hd rctx.Cbat_runctx.rc_abi.Hike_abi.return_regs)
+          ~f:(fun ret ->
+              List.find (Hike_stack_model.effects jmp).Hike_stack_model.Term_effects.writes
+                ~f:(Var.same ret)) in
+      Cbat_call_effects.transfer ?kept ?signature ?result ~abi ~preserved
+        ~stack_args
         ~site:{ Cbat_call_effects.summary; read_lanes = facts.cf_lanes }
         env
     in
@@ -212,8 +218,9 @@ let denote_jump
                 ~callee ~env texp
           in
           (match site_callee with
-           | Cbat_call_effects.Summary summary ->
-             call_site_transfer ~summary)
+           | Cbat_call_effects.Summary summary -> call_site_transfer ~summary ()
+           | Declared (summary, signature) ->
+             call_site_transfer ~signature ~summary ())
     in
     let leads () = if env_leads ~target rel then env else AI.bottom in
     let env_res =
@@ -221,7 +228,7 @@ let denote_jump
       | Int _ ->
         (* Traps ride the same frame-keep rule as ABI calls; a trap
            pushes no retaddr. *)
-        call_site_transfer ~summary:None
+        call_site_transfer ~summary:None ()
       | Call c ->
         if jp.jp_resolved then
           (* A resolved transfer is the intra-sub jump the concrete

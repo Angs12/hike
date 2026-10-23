@@ -68,3 +68,13 @@ val section_access :
 
 (** PT_TLS layout and file image; missing facts or unreadable bytes are errors. *)
 val tls_spec : Project.t -> Hike_spec.tls_spec option
+
+(** The versioned imports of the raw dynamic-linking tables ([.dynsym],
+    [.dynstr], [.gnu.version], [.gnu.version_r]). *)
+val imports_of_sections :
+  dynsym:Bytes.t -> dynstr:Bytes.t -> versym:Bytes.t -> verneed:Bytes.t ->
+  (string * (string * string)) list
+
+(** The versioned dynamic imports: each undefined symbol with the
+    library soname and symbol version its version requirement names. *)
+val versioned_imports : Project.t -> (string * (string * string)) list

@@ -148,6 +148,8 @@ type emit_ctx = {
      binding for binaries with no symbol table (a stripped binary's
      re-lifted subs are nameless but their starts are callable). *)
   sub_starts : Tid.t Core.Int64.Map.t;
+  (* The user's signatures: the record of each external it describes. *)
+  signatures : Hike_signatures.t;
 }
 
 type atomic_kind =

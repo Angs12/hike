@@ -18,4 +18,4 @@ val load : ?loader:string -> string -> Project.t Core.Or_error.t
     partition and symbol table, and the worklist over them.  A project
     loaded without BAP's disassembly gets a fresh scan and BAP's
     partition and symbol table of it; one loaded with it reuses BAP's. *)
-val run : Project.t -> result
+val run : signatures:Hike_signatures.db -> Project.t -> result

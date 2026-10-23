@@ -25,6 +25,38 @@ let is_main_role ctx (sub_tid : tid) : bool =
   | Some s -> Term.has_attr s Hike_stack_model.main_role
   | None -> false
 
+(* The caller-window base is the caller's SP at the call: its position
+   in the caller's residue (the shadow that covers the above-entry
+   window). *)
+let window_ptr ctx scope llvm_builder blk_tid () =
+  match !(scope.cur_frame) with
+  | None ->
+      failwith "hike-emit: call in a sub with no active frame"
+  | Some _ -> (
+      let sp_ver =
+        match lane_version scope blk_tid ctx.sp with
+        | Some v -> v
+        | None -> ctx.sp
+      in
+      match get_ptr_offset scope sp_ver with
+      | Some off ->
+          Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
+            Hike_stack_model.Ptr_residue off
+      | None -> as_ptr llvm_builder (lane_value ctx scope blk_tid ctx.sp))
+
+(* Slot parameter i binds the block's [call_arg i] def; both names
+   derive from the index, so the binding is order-independent.  A slot
+   the site never stored still has its window cell: the address is the
+   window at the slot's own offset (the stored-address defs are the
+   refinement of exactly that). *)
+let slot_ptr ctx scope llvm_builder blk_tid i =
+  match
+    get_local scope blk_tid
+      (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
+  with
+  | Some v -> as_ptr llvm_builder v
+  | None -> slot_gep ctx llvm_builder (window_ptr ctx scope llvm_builder blk_tid ()) i
+
 let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
   let extern = is_extern ctx call_tid in
@@ -32,38 +64,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
     Base.List.filter args ~f:(fun a ->
         Hike_stack_model.is_arg_slot ctx.synth (Arg.lhs a))
   in
-  (* The caller-window base is the caller's SP at the call: its position
-     in the caller's residue (the shadow that covers the above-entry
-     window). *)
-  let window_ptr () =
-    match !(scope.cur_frame) with
-    | None ->
-        failwith "hike-emit: call in a sub with no active frame"
-    | Some _ -> (
-        let sp_ver =
-          match lane_version scope blk_tid ctx.sp with
-          | Some v -> v
-          | None -> ctx.sp
-        in
-        match get_ptr_offset scope sp_ver with
-        | Some off ->
-            Bil2llvm_synth.materialize ctx scope llvm_builder blk_tid
-              Hike_stack_model.Ptr_residue off
-        | None -> as_ptr llvm_builder (lane_value ctx scope blk_tid ctx.sp))
-  in
-  (* Slot parameter i binds the block's [call_arg i] def; both names
-     derive from the index, so the binding is order-independent.  A slot
-     the site never stored still has its window cell: the address is the
-     window at the slot's own offset (the stored-address defs are the
-     refinement of exactly that). *)
-  let slot_ptr i =
-    match
-      get_local scope blk_tid
-        (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
-    with
-    | Some v -> as_ptr llvm_builder v
-    | None -> slot_gep ctx llvm_builder (window_ptr ()) i
-  in
+  let window_ptr () = window_ptr ctx scope llvm_builder blk_tid () in
+  let slot_ptr i = slot_ptr ctx scope llvm_builder blk_tid i in
   Base.List.map args ~f:(fun arg ->
       (* Resolve each lane from the block's versioned reads, including
          fp-lowered extern lanes. *)
@@ -144,13 +146,21 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
 
 let create_fun_declaration ?name ctx sub_tid =
   let name = Base.Option.value name ~default:(Tid.name sub_tid) in
-  let ret_typ = create_ret_type ctx sub_tid in
-  let args_typ = create_arg_types ctx sub_tid in
-  (* Extern declares are variadic. *)
   let fn_typ =
-    if is_extern ctx sub_tid then
-      Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
-    else Llvm.function_type ret_typ (Array.of_list args_typ)
+    match Bil2llvm_extern.lowering ctx sub_tid with
+    | Some (record, _) -> Bil2llvm_extern.fn_type ctx record
+    | None ->
+      if Base.Option.is_some (Bil2llvm_extern.record ctx sub_tid) then
+        Hike_diag.warn
+          "%s: the signature names a type the emitter cannot lower; \
+           declared generically"
+          (Bil2llvm_extern.name sub_tid);
+      let ret_typ = create_ret_type ctx sub_tid in
+      let args_typ = create_arg_types ctx sub_tid in
+      (* Extern declares are variadic. *)
+      if is_extern ctx sub_tid then
+        Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
+      else Llvm.function_type ret_typ (Array.of_list args_typ)
   in
   Hike_diag.debug ~tag:"hike-dbg-tail" (fun () ->
       Printf.sprintf "decl %s extern=%b blocks=%s"
@@ -200,18 +210,21 @@ let get_func ctx tid =
 
 (* Binds the call result into the ret lanes: a single ret zeroext,
    multiple rets extract from the aggregate. *)
-let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
+let bind_lane ctx scope blk_tid llvm_builder ret v =
   (* A vector return lane binds as the register's integer bits. *)
+  let v =
+    match lane_vector ctx ret with
+    | Some _ ->
+      Bil2llvm_value.Int
+        (Llvm.build_bitcast v (typ_lltype ctx (Var.typ (Arg.lhs ret))) ""
+           llvm_builder)
+    | None -> lane_value_of ctx ret v
+  in
+  bind_call_ret ctx scope blk_tid ret v
+
+let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   let bind_call_ret ctx scope blk_tid ret v =
-    let v =
-      match lane_vector ctx ret with
-      | Some _ ->
-        Bil2llvm_value.Int
-          (Llvm.build_bitcast v (typ_lltype ctx (Var.typ (Arg.lhs ret))) ""
-             llvm_builder)
-      | None -> lane_value_of ctx ret v
-    in
-    bind_call_ret ctx scope blk_tid ret v
+    bind_lane ctx scope blk_tid llvm_builder ret v
   in
   match rets with
   | [] ->
@@ -282,15 +295,23 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
 
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
-  let args = create_call_args ctx scope blk_tid llvm_builder target in
-  let args =
-    if is_extern ctx target then
-      args @ extern_stack_args ctx scope llvm_builder blk_tid blk
-    else args
-  in
-  let rets = get_rets ctx target in
-  let fn, fn_typ = get_func ctx target in
-  bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets;
+  (match Bil2llvm_extern.lowering ctx target with
+   | Some signature ->
+       Bil2llvm_extern.call ctx scope llvm_builder blk_tid blk target
+         ~callee:(get_func ctx target)
+         ~slot_ptr:(slot_ptr ctx scope llvm_builder blk_tid)
+         ~bind_lane:(bind_lane ctx scope blk_tid llvm_builder)
+         signature
+   | None ->
+       let args = create_call_args ctx scope blk_tid llvm_builder target in
+       let args =
+         if is_extern ctx target then
+           args @ extern_stack_args ctx scope llvm_builder blk_tid blk
+         else args
+       in
+       let rets = get_rets ctx target in
+       let fn, fn_typ = get_func ctx target in
+       bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets);
   (match fallthrough with
   | Some fallthrough -> finish_call scope llvm_builder (Some fallthrough)
   | None -> if emit_unreachable then finish_call scope llvm_builder None)

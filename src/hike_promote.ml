@@ -14,20 +14,13 @@ type site_binding = Hike_stack_model.call_arg_store = {
   sb_def : def term;
 }
 
-let site_bindings_of_sub_with_blocks ~(word : int) ~(sp : var)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Vsa.WordSet.t, Type.error) Result.t)
-    (sub : sub term) : (site_binding list * blk term) Tid.Map.t =
-  Model.site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
-
-(* Test-only view without the block terms; production uses
-   [site_bindings_of_sub_with_blocks]. *)
+(* The own stack-argument stores of each call block (the test view). *)
 let site_bindings_of_sub ~(word : int) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     (sub : sub term) : site_binding list Tid.Map.t =
-  site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
-  |> Core.Map.map ~f:fst
+  Model.call_sites ~word ~sp ~denote sub
+  |> Core.Map.map ~f:(fun site -> site.Model.cs_own)
 
 (* ---- The one address map: every address def's value is its storage's
    base plus the storage-relative displacement. ---- *)
@@ -145,7 +138,7 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     ~(ctx : Sections.ctx)
-    ~(sites : (site_binding list * blk term) Tid.Map.t)
+    ~(sites : Model.call_site Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
@@ -212,8 +205,16 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
       method! map_blk blk =
         let blk = super#map_blk blk in
         match Core.Map.find sites (Term.tid blk) with
-        | Some (bs, _) -> bind_site_args ~synth ~addr_bits bs blk
         | None -> blk
+        | Some site ->
+            let blk = bind_site_args ~synth ~addr_bits site.Model.cs_own blk in
+            (* Slots filled in other blocks: the call records how many. *)
+            if Base.List.is_empty site.Model.cs_remote then blk
+            else
+              Term.map jmp_t blk ~f:(fun j ->
+                  if Model.machine_call j then
+                    Term.set_attr j Model.call_stack_arity site.Model.cs_arity
+                  else j)
     end
   in
   let sub = rewrite#map_sub sub in
@@ -241,9 +242,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let sides =
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-           let sites =
-             site_bindings_of_sub_with_blocks ~word ~sp ~denote sub
-           in
+           let sites = Model.call_sites ~word ~sp ~denote sub in
            let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in

@@ -449,6 +449,10 @@ let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =
       MemEnv.add acc ~key ~data:(f ~key:(Cbat_var_id.var_of key) ~data)) in
   { env with memories }
 
+(* Whether [f] holds of some memory. *)
+let exists_memory (env : t) ~(f : Mem.t -> bool) : bool =
+  MemEnv.fold env.memories ~init:false ~f:(fun ~key:_ ~data acc -> acc || f data)
+
 (* The whole-memory-top fallback; the words stay. *)
 let top_memories (env : t) : t = { env with memories = MemEnv.top }
 

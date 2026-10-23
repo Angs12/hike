@@ -71,6 +71,9 @@ val top_words_except : preserved:Core.Int.Set.t -> t -> t
 (* Apply [f] to every memory cell; the words stay. *)
 val map_memories : t -> f:(key:var -> data:Cbat_ai_memmap.t -> Cbat_ai_memmap.t) -> t
 
+(* Whether [f] holds of some memory. *)
+val exists_memory : t -> f:(Cbat_ai_memmap.t -> bool) -> bool
+
 (* The whole-memory-top fallback; the words stay. *)
 val top_memories : t -> t
 

@@ -20,7 +20,11 @@ type site = {
 (* What a call site reads about its callee: its published kill summary
    ([None] = any caller-saved GPR).  The caller obtains it by solving the
    callee recursively; an already-final summary is read directly. *)
-type callee = Summary of Core.Int.Set.t option
+type callee =
+  | Summary of Core.Int.Set.t option
+  (* A declared external: its kill summary and the library record that
+     bounds what the call reads and writes. *)
+  | Declared of Core.Int.Set.t option * Hike_signatures.record
 
 val stack_arg_ranges :
   synth:Hike_synth.table ->
@@ -30,7 +34,8 @@ val stack_arg_ranges :
 (* An indirect target's callee: every code word in the target exp's
    pre-call denotation reads its lifted sub through [callee]; the call
    keeps the intersection of the solved targets' preserved sets.  Any
-   unresolved target makes the whole call [Summary None]. *)
+   unresolved target makes the whole call [Summary None].  A target's
+   record bounds nothing here: only a direct call applies it. *)
 val indirect_callee :
   synth:Hike_synth.table ->
   lookup:(int64 -> Tid.t option) ->
@@ -47,8 +52,17 @@ val preserved_with_summary :
    the rest topped; the frame kept at/above the highest possible
    call-time RSP outside outgoing stack arguments, unless the sub's
    sticky escape bit requires clearing the whole retained frame.  The
-   whole-memory top remains the fallback on an unbounded SP. *)
+   whole-memory top remains the fallback on an unbounded SP.
+
+   A [signature] narrows the call to what the library record declares:
+   only the declared parameter lanes are read, a stack pointer reaches
+   the callee only through a pointer parameter that may write, and the
+   cells outside the frame survive as the record's memory allows.
+   [result] is the call's version of the first return lane; a record's
+   [returned] parameter gives it that parameter's value. *)
 val transfer :
   ?kept:Core.Int.Set.t ->
   ?stack_args:(Cbat_word.t * Cbat_word.t) list ->
+  ?signature:Hike_signatures.record ->
+  ?result:Bap.Std.var ->
   abi:Hike_abi.t -> preserved:Core.Int.Set.t -> site:site -> AI.t -> AI.t

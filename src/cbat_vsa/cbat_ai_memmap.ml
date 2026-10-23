@@ -401,30 +401,49 @@ let meet_range_keep (m : t) ~key ~data : t =
       if Val.is_bottom m then d' else m)
     ~op_demoted:(fun _ d' -> d') m ~key ~data
 
+(* The outgoing stack-argument ranges as stack-line keys; [None] when a
+   bound is unkeyable. *)
+let stack_arg_keys (stack_args : (Cbat_word.t * Cbat_word.t) list) :
+    Key.t list option =
+  Option.all (List.map stack_args ~f:(fun (lo, hi) ->
+      Option.map2 (Key.of_word lo) (Key.of_word hi)
+        ~f:(fun lo hi ->
+          { Key.origin = Some Hike_origin.Stack; lo; hi; step = 1 })))
+
+(* What a call leaves of the cells that name no stack line. *)
+type foreign_cells = Drop_all | Keep_if of (Hike_origin.t option -> bool)
+
 (* Keep the caller's frame across a call: all inputs are OFFSET-space
    (the segment-relative line the Stack cells key by). A called
    function writes below its entry SP, may write the outgoing stack
-   arguments, and may reach the whole retained frame after a pointer
-   escapes. A plain (absolute) or rip cell names no stack line and the
-   callee may clobber any non-stack memory (it drops). *)
+   arguments, and may reach the frame from [clear_from] up (or all of it)
+   through a pointer it was handed. The cells that name no stack line
+   follow [foreign_cells]: [Drop_all] drops them, [Keep_if] keeps those whose key
+   origin it accepts. *)
 let call_keep (m : t) ~(keep_lo : Cbat_word.t)
-    ~(stack_args : (Cbat_word.t * Cbat_word.t) list) ~(clear_frame : bool) : t =
+    ~(stack_args : (Cbat_word.t * Cbat_word.t) list) ~(clear_frame : bool)
+    ~(clear_from : Cbat_word.t option) ~(foreign_cells : foreign_cells) : t =
   match m.itree with
   | None -> m
   | Some it ->
-    let stack_arg_pts = Option.all (List.map stack_args ~f:(fun (lo, hi) ->
-        Option.map2 (Key.of_word lo) (Key.of_word hi)
-          ~f:(fun lo hi ->
-            { Key.origin = Some Hike_origin.Stack; lo; hi; step = 1 }))) in
-    let keep_lo_pt = Key.of_word keep_lo in
-    match keep_lo_pt, stack_arg_pts with
-    | Some keep_lo_pt, Some stack_arg_pts ->
+    let clear_from_pt = Option.bind clear_from ~f:Key.of_word in
+    let keyable = Option.is_none clear_from || Option.is_some clear_from_pt in
+    match Key.of_word keep_lo, stack_arg_keys stack_args with
+    | Some keep_lo_pt, Some stack_arg_pts when keyable ->
       let is_stack_arg (k : Key.t) : bool =
         List.exists stack_arg_pts ~f:(Key.overlap k) in
+      let below_clear (k : Key.t) : bool =
+        Option.value_map clear_from_pt ~default:true
+          ~f:(fun f -> Key.lt (Key.upper k) f) in
       let keeps (k : Key.t) : bool =
         let o = Key.origin k in
-        (not clear_frame) && Option.exists o ~f:Hike_origin.names_stack_line
-        && (not (is_stack_arg k)) && not (Key.lt (Key.lower k) keep_lo_pt)
+        if Option.exists o ~f:Hike_origin.names_stack_line then
+          (not clear_frame) && (not (is_stack_arg k))
+          && (not (Key.lt (Key.lower k) keep_lo_pt)) && below_clear k
+        else
+          match foreign_cells with
+          | Drop_all -> false
+          | Keep_if f -> f o
       in
       let kept =
         IT.to_sequence it
@@ -434,6 +453,20 @@ let call_keep (m : t) ~(keep_lo : Cbat_word.t)
     | _ ->
       (* An unkeyable bound keeps the whole line (the sound identity). *)
       m
+
+(* The values stored in cells that overlap an outgoing stack-argument
+   range. *)
+let stack_arg_vals (m : t) ~(stack_args : (Cbat_word.t * Cbat_word.t) list) :
+    Val.t list =
+  match m.itree, stack_arg_keys stack_args with
+  | Some it, Some keys ->
+    IT.to_sequence it
+    |> Seq.filter_map ~f:(fun (k, v) ->
+        if Option.exists (Key.origin k) ~f:Hike_origin.names_stack_line
+           && List.exists keys ~f:(Key.overlap k)
+        then Some v else None)
+    |> Seq.to_list
+  | _ -> []
 
 (* Whether the map is the bottom map: no tree, no reads (the
    unreached state's memory). *)

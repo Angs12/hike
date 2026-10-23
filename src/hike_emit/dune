@@ -9,6 +9,7 @@
   bil2llvm_calls
   bil2llvm_env
   bil2llvm_exp
+  bil2llvm_extern
   bil2llvm_fp
   bil2llvm_int
   bil2llvm_memory
@@ -24,6 +25,7 @@
   llvm
   core
   hike.hike_abi
+  hike.hike_signatures
   hike.hike_def_slot
   hike.hike_stack_bounds
   hike.cbat_vsa

@@ -20,6 +20,7 @@
     monads
     ogre
     hike.hike_abi
+    hike.hike_signatures
     hike.hike_def_slot
     hike.hike_origin
     hike.hike_stack_bounds

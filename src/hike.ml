@@ -11,6 +11,7 @@ module Worklist = Hike_worklist
 module Decode = Hike_decode
 module Drive = Hike_drive
 module Diag = Hike_diag
+module Signatures = Hike_signatures
 module Cfg_complete = Hike_cfg_complete
 
 module Resolve = Hike_resolve
@@ -54,6 +55,7 @@ let emit output_program proj =
     ~target ~addr_bits
     ~symtab:(Some (Project.symbols proj))
     ~synth:facts.synth
+    ~signatures:facts.signatures
     spec prog;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
@@ -63,6 +65,27 @@ let output =
   Extension.Configuration.parameter ~aliases:[ "o"; "output" ]
     Extension.Type.("output file" %: string)
     "output-file" ~doc:"File to output LLVM IR"
+
+let signatures_files =
+  Extension.Configuration.parameter
+    Extension.Type.(list string) "signatures"
+    ~doc:"Signature files (S-expression) describing the external library \
+          functions; a later file overrides an earlier entry"
+
+(* The user's signature files, read when the pass first needs them: the
+   extension is registered whenever BAP starts, so a missing or bad file
+   must fail the lift, not BAP's initialization.  Without signatures the
+   lift cannot tell which imports never return, and would follow their
+   fallthroughs. *)
+let load_signatures files =
+  lazy
+    (if Base.List.is_empty files then
+       failwith "hike: no signatures: pass --signatures FILE (data/glibc.sexp)";
+     match Hike_signatures.load files with
+     | Ok db -> db
+     | Error err ->
+       failwith
+         (Printf.sprintf "hike: signatures: %s" (Core.Error.to_string_hum err)))
 
 (* The previous pass's ACTUAL registered name: BAP prefixes every pass
    with the bundle name, so the chain reads back the registered name
@@ -79,13 +102,13 @@ let chain' ~name ~deps run =
 
 (* Discovery: the drive's program and symbol table, and the analysis
    facts every later pass reads. *)
-let pass_discover proj =
+let pass_discover ~(signatures : Hike_signatures.db Lazy.t) proj =
   let target = Project.target proj in
   if not (Hike_abi.is_primary_target target) then
     failwith
       (Printf.sprintf "hike: target %s is not x86_64-gnu-elf"
          (KB.Name.to_string (Theory.Target.name target)));
-  let result = Hike_drive.run proj in
+  let result = Hike_drive.run ~signatures:(Lazy.force signatures) proj in
   Hike_kb.install result.facts;
   Project.with_program (Project.with_symbols proj result.symtab) result.program
 
@@ -122,8 +145,8 @@ let pass_split_blocks proj =
 
 (* The pass chain in order: the plugin registers each stage as a pass
    and [lift] runs them in sequence, so the two entries cannot drift. *)
-let stages = [
-  ("discover", pass_discover);
+let stages ~signatures () = [
+  ("discover", pass_discover ~signatures);
   ("variadic", pass_variadic);
   ("sections", pass_attrib);
   ("split-blocks", pass_split_blocks);
@@ -131,13 +154,16 @@ let stages = [
   ("types", Hike_types.run);
 ]
 
-let lift proj = Base.List.fold stages ~init:proj ~f:(fun proj (_, run) -> run proj)
+let lift ~signatures proj =
+  Base.List.fold (stages ~signatures:(Lazy.from_val signatures) ()) ~init:proj ~f:(fun proj (_, run) -> run proj)
 
 let () =
   Extension.declare ~provides:["pass"; "hike"] (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
+      let signatures =
+        load_signatures (Extension.Configuration.get ctx signatures_files) in
       let last =
-        Base.List.fold stages ~init:[] ~f:(fun deps (name, run) -> [ chain ~name ~deps run ])
+        Base.List.fold (stages ~signatures ()) ~init:[] ~f:(fun deps (name, run) -> [ chain ~name ~deps run ])
       in
       ignore (chain' ~name:"convlir" ~deps:last (emit output_file));
       Ok ())

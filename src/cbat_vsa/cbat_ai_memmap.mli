@@ -107,14 +107,27 @@ val meet_range_keep : t -> key:Key.t -> data:Val.t -> t
    tree's value at the same key; join otherwise. *)
 val widen_join_op : (Key.t -> Val.t -> Val.t -> Val.t) -> t -> t -> t
 
+(* What a call leaves of the cells that name no stack line: [Drop_all]
+   drops them all; [Keep_if f] keeps those whose key origin [f] accepts. *)
+type foreign_cells = Drop_all | Keep_if of (Hike_origin.t option -> bool)
+
 (* Keep stack cells at key >= [keep_lo] outside [stack_args], unless
-   [clear_frame] removes every retained frame cell. A cell is dropped
-   whenever its key range overlaps an outgoing stack-argument range. *)
+   [clear_frame] removes every retained frame cell; [clear_from] removes
+   those whose range reaches key >= it.  A cell is dropped whenever its
+   key range overlaps an outgoing stack-argument range.  Cells that name
+   no stack line follow [foreign_cells]. *)
 val call_keep :
   t ->
   keep_lo:Cbat_word.t ->
   stack_args:(Cbat_word.t * Cbat_word.t) list ->
-  clear_frame:bool -> t
+  clear_frame:bool ->
+  clear_from:Cbat_word.t option ->
+  foreign_cells:foreign_cells -> t
+
+(* The values of the stack cells overlapping an outgoing stack-argument
+   range (none when a bound is unkeyable). *)
+val stack_arg_vals :
+  t -> stack_args:(Cbat_word.t * Cbat_word.t) list -> Val.t list
 
 (* Whether the map is the bottom map (no tree, no reads). *)
 val is_bottom : t -> bool

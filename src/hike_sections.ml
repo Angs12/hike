@@ -519,16 +519,18 @@ let escape_members ~(sub : Tid.t) ~(env : env)
         m_identity = true } ]
   else []
 
-(* The exact outgoing argument stores of a call block, shared with the
-   promotion's slot binding rule, are the caller-window member. *)
-let call_window_members ~(sub : Tid.t) ~(env : env) ~(blk : blk term)
-    (bindings : Model.call_arg_store list) : member list =
+(* The exact outgoing argument stores of a call, shared with the
+   promotion's slot binding rule, are the caller-window member.  Each
+   store comes with the block that holds it: a store in a predecessor
+   block of the call fills a slot as well as one in the call's block. *)
+let call_window_members ~(sub : Tid.t) ~(env : env)
+    (stores : (blk term * def term) list) : member list =
   let extents =
-    Base.List.filter_map bindings ~f:(fun binding ->
-        match Model.addr_of_rhs (Def.rhs binding.Model.sb_def) with
+    Base.List.filter_map stores ~f:(fun (blk, def) ->
+        match Model.addr_of_rhs (Def.rhs def) with
         | None -> None
         | Some (addr, size) ->
-          (match env.denote ~blk ~def:binding.Model.sb_def addr with
+          (match env.denote ~blk ~def addr with
            | Error _ -> None
            | Ok ws ->
              Option.map (Model.singleton_stack_position ws) ~f:(fun lo ->
@@ -556,14 +558,13 @@ let access_of (d : def term) : (exp * int * bool) option =
       (addr, Size.in_bytes size, Option.is_some (Model.store_data_of_rhs (Def.rhs d))))
 
 let collect (env : env) (prog : program term) : collecting =
-  let site_bindings =
+  (* The stack arguments of each call block, by sub. *)
+  let call_sites =
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
         let sites =
-          Model.site_bindings_of_sub_with_blocks ~word:env.word ~sp:env.sp
-            ~denote:env.denote sub
-        in
-        Core.Map.set acc ~key:(Term.tid sub) ~data:sites)
+          Model.call_sites ~word:env.word ~sp:env.sp ~denote:env.denote sub in
+        Core.Map.set acc ~key:(Term.tid sub) ~data:(sub, sites))
   in
   let ownership_visitor =
     object
@@ -593,18 +594,24 @@ let collect (env : env) (prog : program term) : collecting =
                     ~init:acc
                     ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
         in
-        (* A call exposes only the stack-argument stores its caller
-           actually built in this block. *)
-        let bindings =
-          match Core.Map.find site_bindings acc.sub with
+        (* A call exposes the stack-argument stores its caller built:
+           those of this block and those of other blocks that fill a
+           slot this block's stores do not. *)
+        let stores =
+          match Core.Map.find call_sites acc.sub with
           | None -> []
-          | Some sites ->
+          | Some (sub, sites) ->
             (match Core.Map.find sites (Term.tid acc.blk) with
              | None -> []
-             | Some (bindings, _) -> bindings)
+             | Some site ->
+               Base.List.map site.Model.cs_own ~f:(fun b ->
+                   (acc.blk, b.Model.sb_def))
+               @ Base.List.filter_map site.Model.cs_remote ~f:(fun b ->
+                   Option.map (Term.find blk_t sub b.Model.rb_blk)
+                     ~f:(fun blk -> (blk, b.Model.rb_def))))
         in
         Base.List.fold
-          (call_window_members ~sub:acc.sub ~env ~blk:acc.blk bindings)
+          (call_window_members ~sub:acc.sub ~env stores)
           ~init:acc
           ~f:(fun acc m -> { acc with tree = insert acc.tree m })
 

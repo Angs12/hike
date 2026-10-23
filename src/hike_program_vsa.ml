@@ -9,9 +9,10 @@ type context = {
   linker_slots : Core.Int64.Set.t;
   text_range : (int64 * int64) option;
   data_spans : Hike_sections.data_span list;
+  signatures : Hike_signatures.t;
 }
 
-let prepare proj =
+let prepare ~signatures proj =
   let target = Project.target proj in
   let abi = Hike_abi.of_target target in
   let range_of_section name =
@@ -68,7 +69,12 @@ let prepare proj =
   Hike_origin.Regions.install
     (Base.List.map data_spans ~f:(fun span ->
          (span.Hike_sections.ds_sec, span.ds_lo, span.ds_hi)));
-  { target; images; linker_slots; text_range; data_spans }
+  let imports =
+    Core.String.Map.of_alist_reduce (Hike_image.versioned_imports proj)
+      ~f:(fun first _ -> first) in
+  let signatures =
+    Hike_signatures.create ~target signatures ~imports:(Core.Map.find imports) in
+  { target; images; linker_slots; text_range; data_spans; signatures }
 
 let normalize context ~synth program =
   let addr_bits = Hike_abi.word_bits (Hike_abi.of_target context.target) in

@@ -49,6 +49,10 @@ type facts = {
      one records it here, and a var absent from the table is not
      synthetic. *)
   synth : Hike_synth.table;
+  (* The user's signatures, as matched against this binary's imports:
+     the emitter declares and calls the externals they describe
+     exactly. *)
+  signatures : Hike_signatures.t;
 }
 
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
@@ -79,7 +83,10 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     lookup;
     denote = denote ~synth;
     spec = None;
-    synth }
+    synth;
+    signatures =
+      Hike_signatures.create ~target Hike_signatures.empty
+        ~imports:(fun _ -> None) }
 
 (* The run's record, installed once at the discover boundary. *)
 let run : facts option ref = ref None

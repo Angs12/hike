@@ -58,7 +58,7 @@ let source (proj : Project.t) ~(file : string) : Disasm.Driver.state * Symtab.t 
     (state, Hike_decode.symtab ~file state)
   else (state, Project.symbols proj)
 
-let run (proj : Project.t) : result =
+let run ~signatures (proj : Project.t) : result =
   let file = Hike_decode.file_of proj in
   let state, symtab = source proj ~file in
   let subroutines =
@@ -67,6 +67,6 @@ let run (proj : Project.t) : result =
     |> Seq.to_list
   in
   let { Hike_worklist.program; facts } =
-    Hike_worklist.run proj ~file ~state ~subroutines
+    Hike_worklist.run ~signatures proj ~file ~state ~subroutines
   in
   { program; facts; symtab }

@@ -45,6 +45,7 @@ val emit_program :
   addr_bits:int ->
   symtab:Symtab.t option ->
   synth:Hike_synth.table ->
+  signatures:Hike_signatures.t ->
   section_spec ->
   program term ->
   unit

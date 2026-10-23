@@ -12,5 +12,5 @@ type result = { program : program term; facts : Hike_kb.facts }
     [file], and [subroutines] its subroutine entries.  The entry carries
     [Sub.entry_point] and main [main_role] when main exists. *)
 val run :
-  Project.t -> file:string -> state:Disasm.Driver.state ->
+  signatures:Hike_signatures.db -> Project.t -> file:string -> state:Disasm.Driver.state ->
   subroutines:int64 list -> result
