@@ -71,7 +71,7 @@ type block_plan = Cbat_runctx.block_plan = {
 
 let plan_block
     ~(resolved : Tid.Set.t Tid.Map.t)
-    ~(edge_conds : exp Tid.Map.t Tid.Map.t)
+    ~(jmp_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     (source : tid) : block_plan =
@@ -79,7 +79,7 @@ let plan_block
   | None -> invalid_arg "hike: source tid does not represent block"
   | Some bf ->
     let b = bf.Cbat_runctx.bf_term in
-    let conds = Core.Map.find edge_conds source in
+    let conds = Core.Map.find jmp_conds source in
     let bp_jumps =
       Term.enum jmp_t b |> Seq.to_list
       |> List.map ~f:(fun jmp ->
@@ -96,13 +96,13 @@ let plan_block
     { bp_term = b; bp_has_conds = Option.is_some conds; bp_jumps }
 
 (* The plan of [source], memoized for the solve. *)
-let plans_of ~resolved ~edge_conds ~disabled ~rctx : tid -> block_plan =
+let plans_of ~resolved ~jmp_conds ~disabled ~rctx : tid -> block_plan =
   let memo : block_plan Tid.Table.t = Tid.Table.create () in
   fun source ->
     match Hashtbl.find memo source with
     | Some p -> p
     | None ->
-      let p = plan_block ~resolved ~edge_conds ~disabled ~rctx source in
+      let p = plan_block ~resolved ~jmp_conds ~disabled ~rctx source in
       Hashtbl.set memo ~key:source ~data:p;
       p
 

@@ -647,7 +647,7 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
          guards.  Its simple [target <> word] conjuncts are exactly the
          targets those arms cover; a true/absent condition covers none. *)
       let cond =
-        match Core.Map.find (Vsa.Runctx.edge_conds_of sub) source with
+        match Core.Map.find (Vsa.Runctx.jmp_conds_of sub) source with
         | Some by_jmp -> Core.Map.find by_jmp (Term.tid jmp)
         | None -> None
       in
@@ -887,6 +887,8 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
                       { Vsa.Dispatch.base; targets; sub = pre_sub; module_addr }
                       ~kind:dkind ~blk:source_blk ~jmp ~is_intra ~false_target
                   in
+                  (* The rewrite minted the case words' address synths. *)
+                  let synth = Hike_synth.union synth (Vsa.state_synth state) in
                   let working = Term.update blk_t pre_sub rewritten in
                   let working =
                     match trap with

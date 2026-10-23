@@ -305,12 +305,12 @@ let reset_memos () = Cbat_clp_set_scalar.reset_memos ()
    the pred's entry state, so the edge is dead without the backward
    refinement.  A dispatch extra-edge has no jmp and cannot be
    witnessed. *)
-let edge_forward_dead ~(rctx : Cbat_runctx.refine_ctx) ~edge_conds ~get
+let edge_forward_dead ~(rctx : Cbat_runctx.refine_ctx) ~jmp_conds ~get
     ~(p : Tid.t) ~(v : Tid.t) : bool =
   match Core.Map.find rctx.rc_blocks p with
   | None -> false
   | Some bf ->
-    let conds = Core.Map.find edge_conds p in
+    let conds = Core.Map.find jmp_conds p in
     Term.enum jmp_t bf.bf_term
     |> Seq.filter ~f:(fun j ->
         match Jmp.kind j with
@@ -331,23 +331,23 @@ let edge_forward_dead ~(rctx : Cbat_runctx.refine_ctx) ~edge_conds ~get
             | Error _ -> false))
 
 (* The dead-edge census of one denoted edge. *)
-let debug_edge_result ~rctx ~edge_conds ~get ~p ~v (res : AI.t) : unit =
+let debug_edge_result ~rctx ~jmp_conds ~get ~p ~v (res : AI.t) : unit =
   Cbat_attr_census.bump "bottomskip.edge.total";
   if AI.equal res AI.bottom then begin
     Cbat_attr_census.bump "bottomskip.edge.bottom";
-    if edge_forward_dead ~rctx ~edge_conds ~get ~p ~v then
+    if edge_forward_dead ~rctx ~jmp_conds ~get ~p ~v then
       Cbat_attr_census.bump "bottomskip.edge.forward_dead"
     else Cbat_attr_census.bump "bottomskip.edge.refine_only"
   end
 
 (* The dead-edge census of one block entry. *)
-let debug_entry ~rctx ~edge_conds ~get ~preds ~v (incoming : AI.t) : unit =
+let debug_entry ~rctx ~jmp_conds ~get ~preds ~v (incoming : AI.t) : unit =
   if not (List.is_empty preds) then begin
     Cbat_attr_census.bump "bottomskip.entry.total";
     if AI.equal incoming AI.bottom then begin
       Cbat_attr_census.bump "bottomskip.entry.bottom";
       if List.for_all preds ~f:(fun p ->
-          edge_forward_dead ~rctx ~edge_conds ~get ~p ~v)
+          edge_forward_dead ~rctx ~jmp_conds ~get ~p ~v)
       then Cbat_attr_census.bump "bottomskip.entry.forward_dead"
       else Cbat_attr_census.bump "bottomskip.entry.refine_only"
     end
@@ -464,9 +464,9 @@ let state_with_sub (st : run_state) (s : Sub.t) : run_state =
           Core.Map.set st.rc_blocks ~key:tid
             ~data:(Cbat_runctx.block_facts_of_block ~abi b));
   st.rc_preserved <- Cbat_runctx.preserved_of_sub ~abi s;
-  st.rc_edge_conds <- Cbat_runctx.edge_conds_of s;
+  st.rc_jmp_conds <- Cbat_runctx.jmp_conds_of s;
   st.rc_disabled_conds <-
-    Cbat_runctx.disabled_conds_of ~edge_conds:st.rc_edge_conds s;
+    Cbat_runctx.disabled_conds_of ~jmp_conds:st.rc_jmp_conds s;
   (* The graph, ordering and plans are functions of the old sub; the new
      sub invalidates them.  The solve rebuilds them once, not per resume. *)
   { st with rs_sub = s;
@@ -559,7 +559,7 @@ let static_graph_vsa
   let resolved_ref = ref resolved in
   let saved_sub = ref s in
   let preserved = ref st.rc_preserved in
-  let edge_conds = ref st.rc_edge_conds in
+  let jmp_conds = ref st.rc_jmp_conds in
   let disabled_conds = ref st.rc_disabled_conds in
   (* Reuse the persisted graph/order/plan caches only for a paused resume
      with the same static inputs.  A changed sub or resolution view
@@ -577,7 +577,7 @@ let static_graph_vsa
      against the current blocks/edge conditions/resolution.  A resumed
      solve reuses the persisted closure until it changes. *)
   let compute_plan (source : Tid.t) : Cbat_runctx.block_plan =
-    Cbat_forward.plan_block ~resolved:!resolved_ref ~edge_conds:!edge_conds
+    Cbat_forward.plan_block ~resolved:!resolved_ref ~jmp_conds:!jmp_conds
       ~disabled:!disabled_conds ~rctx source
   in
   let plan_table : Cbat_runctx.block_plan Tid.Table.t = Tid.Table.create () in
@@ -836,34 +836,58 @@ let static_graph_vsa
   let install_materialization ~(source : Tid.t) ~(blk : blk term)
       ~(jmp : jmp term) ~(entry : AI.t) ~(forward : AI.t)
       (m : Dispatch.materialized) : AI.t =
-    let jmp_tids b = Term.enum jmp_t b |> Seq.map ~f:Term.tid |> Seq.to_list in
+    (* A kept tid with a new kind (the trap fallback) is a rewrite too. *)
+    let jmps b =
+      Term.enum jmp_t b |> Seq.map ~f:(fun j -> (Term.tid j, Jmp.kind j))
+      |> Seq.to_list in
     let rewritten =
       match Term.find blk_t m.Dispatch.sub source with
-      | Some b -> not (Base.List.equal Tid.equal (jmp_tids b) (jmp_tids blk))
+      | Some b ->
+        not (Base.List.equal
+               (fun (t1, k1) (t2, k2) -> Tid.equal t1 t2 && Poly.equal k1 k2)
+               (jmps b) (jmps blk))
       | None -> false
     in
     if rewritten then begin
       let sub = m.Dispatch.sub in
       saved_sub := sub;
       preserved := Cbat_runctx.preserved_of_sub ~abi sub;
-      edge_conds := Cbat_runctx.edge_conds_of sub;
+      jmp_conds := Cbat_runctx.jmp_conds_of sub;
       disabled_conds :=
-        Cbat_runctx.disabled_conds_of ~edge_conds:!edge_conds sub;
+        Cbat_runctx.disabled_conds_of ~jmp_conds:!jmp_conds sub;
       rctx.Cbat_runctx.rc_preserved <- !preserved;
-      rctx.Cbat_runctx.rc_edge_conds <- !edge_conds;
+      rctx.Cbat_runctx.rc_jmp_conds <- !jmp_conds;
       rctx.Cbat_runctx.rc_disabled_conds <- !disabled_conds;
       (* The rewritten source, its new blocks and every old target whose
          phis changed all carry new terms; only an unchanged block keeps
          its previous facts. *)
+      let phi_vars blk =
+        Term.enum phi_t blk |> Seq.map ~f:Phi.lhs |> Seq.to_list
+        |> Var.Set.of_list in
       Term.enum blk_t sub
       |> Seq.iter ~f:(fun b ->
              let tid = Term.tid b in
              match Core.Map.find rctx.Cbat_runctx.rc_blocks tid with
              | Some bf when phys_equal bf.Cbat_runctx.bf_term b -> ()
-             | Some _ ->
+             | Some bf ->
                rctx.Cbat_runctx.rc_blocks <-
                  Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:tid
-                   ~data:(Cbat_runctx.block_facts_of_block ~abi b)
+                   ~data:(Cbat_runctx.block_facts_of_block ~abi b);
+               rebuild_plan tid;
+               (* A new phi is a new variable: it starts at bottom and the
+                  reseed delivers it.  Unbound it would read top, which no
+                  join can lower. *)
+               let fresh =
+                 Core.Set.diff (phi_vars b) (phi_vars bf.Cbat_runctx.bf_term) in
+               if not (Core.Set.is_empty fresh) then begin
+                 set tid
+                   (Core.Set.fold fresh ~init:(get tid) ~f:(fun st v ->
+                        match Var.typ v with
+                        | Type.Imm w ->
+                          AI.add_word st ~key:v ~data:(WordSet.bottom w)
+                        | Type.Mem _ | Type.Unk -> st));
+                 reseed_pending := Core.Set.add !reseed_pending tid
+               end
              | None ->
                sol_store :=
                  Core.Map.set !sol_store ~key:tid ~data:AI.bottom;
@@ -873,7 +897,7 @@ let static_graph_vsa
                  Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:tid
                    ~data:(Cbat_runctx.block_facts_of_block ~abi b));
       rebuild_plan source;
-      Cbat_forward.denote_block ~rctx (plan_of source) ~entry
+      Cbat_forward.denote_block ~rctx (plan_of source) ~entry:(get source)
     end else begin
     let target = Option.value_exn (materializable_target jmp) in
     let original =
@@ -994,11 +1018,11 @@ let static_graph_vsa
     in
     saved_sub := sub;
     preserved := Cbat_runctx.preserved_of_sub ~abi sub;
-    edge_conds := Cbat_runctx.edge_conds_of sub;
+    jmp_conds := Cbat_runctx.jmp_conds_of sub;
     disabled_conds :=
-      Cbat_runctx.disabled_conds_of ~edge_conds:!edge_conds sub;
+      Cbat_runctx.disabled_conds_of ~jmp_conds:!jmp_conds sub;
     rctx.Cbat_runctx.rc_preserved <- !preserved;
-    rctx.Cbat_runctx.rc_edge_conds <- !edge_conds;
+    rctx.Cbat_runctx.rc_jmp_conds <- !jmp_conds;
     rctx.Cbat_runctx.rc_disabled_conds <- !disabled_conds;
     rctx.Cbat_runctx.rc_blocks <-
       Core.Map.set rctx.Cbat_runctx.rc_blocks ~key:source
@@ -1028,7 +1052,7 @@ let static_graph_vsa
         ~f:(fun ~key:_ ~data:v acc -> Core.Set.add acc v) in
     { st with
       rc_preserved = !preserved;
-      rc_edge_conds = !edge_conds;
+      rc_jmp_conds = !jmp_conds;
       rc_disabled_conds = !disabled_conds;
       rs_sub = !saved_sub;
       rs_store = !sol_store;
@@ -1050,6 +1074,28 @@ let static_graph_vsa
       rs_need = Some !need_map_ref;
       rs_max_steps = Some !max_steps;
       rs_plan = Some plan_of }
+  in
+  (* Deliver one edge: [state] is the source's IN state and [forward] its
+     replayed post-state. *)
+  let deliver_edge ~(source : Tid.t) ~(state : AI.t) ~(forward : AI.t)
+      (target : Tid.t) : unit =
+    let old_delivered = delivered_at ~source ~target in
+    let res =
+      if AI.equal forward AI.bottom then AI.bottom
+      else
+        Cbat_landmarks.with_widening_head
+          rctx.Cbat_runctx.rc_landmarks
+          (Hashtbl.find !block_to_head_ref source) (fun () ->
+            Stages.time `Denote (fun () ->
+                Cbat_forward.denote_jump ~preserved:!preserved
+                  ~callee ~rctx (plan_of source) ~source ~entry:state ~forward
+                  ~target))
+    in
+#ifdef VSA_DEBUG
+    debug_edge_result ~rctx ~jmp_conds:!jmp_conds ~get
+      ~p:source ~v:target res;
+#endif
+    note_edge ~source ~target ~old_delivered res
   in
   (* One source IN state: replay its definitions once, install any site
      materializations, then deliver every outgoing edge with its own
@@ -1097,25 +1143,8 @@ let static_graph_vsa
         rebuild_graph ();
         rebuild_wto ()
       end;
-      let plan = plan_of source in
-      List.iter (dedup_targets ()) ~f:(fun target ->
-          let old_delivered = delivered_at ~source ~target in
-          let res =
-            if AI.equal forward AI.bottom then AI.bottom
-            else
-              Cbat_landmarks.with_widening_head
-                rctx.Cbat_runctx.rc_landmarks
-                (Hashtbl.find !block_to_head_ref source) (fun () ->
-                  Stages.time `Denote (fun () ->
-                      Cbat_forward.denote_jump ~preserved:!preserved
-                        ~callee ~rctx plan ~source ~entry:state ~forward
-                        ~target))
-          in
-#ifdef VSA_DEBUG
-          debug_edge_result ~rctx ~edge_conds:!edge_conds ~get
-            ~p:source ~v:target res;
-#endif
-          note_edge ~source ~target ~old_delivered res)
+      let state = if !installed then get source else state in
+      List.iter (dedup_targets ()) ~f:(deliver_edge ~source ~state ~forward)
     end;
     current := None
   in
@@ -1152,7 +1181,10 @@ let static_graph_vsa
   let refan_into (target : Tid.t) : unit =
     List.iter (preds target) ~f:(fun source ->
         let state = get source in
-        if not (AI.equal state AI.bottom) then fan_out source state);
+        if not (AI.equal state AI.bottom) then
+          let forward = Stages.time `Denote (fun () ->
+              Cbat_forward.denote_block ~rctx (plan_of source) ~entry:state) in
+          deliver_edge ~source ~state ~forward target);
     enqueue target
   in
   (* A warm head whose join grew widens by the landmark module's arm:
@@ -1205,7 +1237,7 @@ let static_graph_vsa
         Option.value (Core.Map.find !incoming_store v) ~default:AI.bottom
     in
 #ifdef VSA_DEBUG
-    debug_entry ~rctx ~edge_conds:!edge_conds ~get ~preds ~v incoming;
+    debug_entry ~rctx ~jmp_conds:!jmp_conds ~get ~preds ~v incoming;
     head_arm := "";
 #endif
     let has_widened = Core.Set.mem !heads_ref v && head_warmed v in
@@ -1334,6 +1366,7 @@ let static_graph_vsa
     | None -> ()
     | Some v ->
       ignore (process_vertex v : bool);
+      reseed_deferred ();
       stabilize_worklist () in
   let run () = stabilize_worklist () in
   seed ();

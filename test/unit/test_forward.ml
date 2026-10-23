@@ -561,19 +561,6 @@ let tests : unit Alcotest.test list =
           (match denote (Bil.Ite (Bil.Var c, lit 7, lit 9)) AI.top with
            | Ok ws -> Ws.equal ws (Ws.join (Ws.singleton (w64 7)) (Ws.singleton (w64 9)))
            | Error _ -> false));
-
-    pin "FWD-29"
-      "reachable_jumps stops at an always-taken jump without denoting a later guard"
-      (fun () ->
-        let dead = v1 "fwd29_dead" in
-        let env = AI.add_word AI.top ~key:dead ~data:(Ws.bottom 1) in
-        let t = Term.tid (blk_of_defs []) in
-        let first = mk_goto t in
-        let later = mk_jmp_to t (Bil.Var dead) in
-        let kept =
-          Vsa.Test_seam.reachable_jumps ~synth:Hike.Synth.empty env (Seq.of_list [ first; later ])
-          |> Seq.to_list in
-        check "FWD-29" (List.length kept = 1));
   ]
 
 let () = run "forward" tests

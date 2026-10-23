@@ -74,7 +74,7 @@ type refine_ctx = {
      They are part of the persisted context so a resume does not derive
      them again. *)
   mutable rc_preserved : Int.Set.t;
-  mutable rc_edge_conds : exp Tid.Map.t Tid.Map.t;
+  mutable rc_jmp_conds : exp Tid.Map.t Tid.Map.t;
   mutable rc_disabled_conds : exp Tid.Map.t;
   (* The final state each edge delivered, per (source,target): the
      values the destination receives and the memory the edge carries.
@@ -172,28 +172,35 @@ let preserved_of_sub ~(abi : Hike_abi.t) (_s : sub term) : Int.Set.t =
     |> Var.Set.of_list in
   Cbat_var_id.intern_set regs
 
-(* Per-sub static edge table: per (block, jmp) accumulated cond, in
-   the completed (negation-free) form. *)
-let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
-  let ircfg = Sub.to_cfg sub in
-  Graphs.Ir.edges ircfg
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc e ->
-      let src = Term.tid (Graphs.Ir.Node.label (Graphs.Ir.Edge.src e)) in
-      let jmp = Term.tid (Graphs.Ir.Edge.jmp e) in
-      let cond = Utils.complete_cond (Graphs.Ir.Edge.cond e ircfg) in
-      Core.Map.update acc src ~f:(fun by_jmp ->
-          Core.Map.set (Option.value by_jmp ~default:Tid.Map.empty)
-            ~key:jmp ~data:cond))
+(* Per-sub static jmp table: per (block, jmp) accumulated cond, BAP's
+   edge cond for every jmp — its own cond under the negation of each
+   earlier jmp's — in the completed (negation-free) form.  An indirect
+   transfer has no Ir edge but still gets its cond here. *)
+let jmp_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc b ->
+      let _, by_jmp =
+        Term.enum jmp_t b
+        |> Seq.fold ~init:([], Tid.Map.empty) ~f:(fun (before, m) j ->
+            let cond =
+              List.fold (List.rev before) ~init:(Jmp.cond j)
+                ~f:(fun c p -> Bil.BinOp (Bil.AND, c, Bil.UnOp (Bil.NOT, Jmp.cond p)))
+              |> Exp.fold_consts in
+            (j :: before,
+             Core.Map.set m ~key:(Term.tid j) ~data:(Utils.complete_cond cond)))
+      in
+      if Core.Map.is_empty by_jmp then acc
+      else Core.Map.set acc ~key:(Term.tid b) ~data:by_jmp)
 
 (* Per-sub disabled-continuation table: each jmp observes the NEXT
    jmp's cond. *)
-let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
+let disabled_conds_of ~(jmp_conds : exp Tid.Map.t Tid.Map.t)
     (sub : sub term) : exp Tid.Map.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc b ->
       let js = Term.enum jmp_t b |> Seq.to_list in
       let cond j =
-        Option.bind (Core.Map.find edge_conds (Term.tid b)) ~f:(fun by_jmp ->
+        Option.bind (Core.Map.find jmp_conds (Term.tid b)) ~f:(fun by_jmp ->
             Core.Map.find by_jmp (Term.tid j)) in
       let rec pair js dcs acc =
         match js, dcs with
@@ -215,7 +222,7 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b)
           ~data:(block_facts_of_block ~abi b)) in
-  let edge_conds = edge_conds_of s in
+  let jmp_conds = jmp_conds_of s in
   {
     rc_edges = ref Tid.Map.empty;
     rc_nonneg = (fun ~env:_ _ -> false);
@@ -225,8 +232,8 @@ let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_writes:_
     rc_sub_lookup = sub_lookup;
     rc_blocks = blocks;
     rc_preserved = preserved_of_sub ~abi s;
-    rc_edge_conds = edge_conds;
-    rc_disabled_conds = disabled_conds_of ~edge_conds s;
+    rc_jmp_conds = jmp_conds;
+    rc_disabled_conds = disabled_conds_of ~jmp_conds s;
     rs_sub = s;
     rs_store = Tid.Map.empty;
     rs_default = AI.bottom;
