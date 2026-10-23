@@ -16,3 +16,21 @@ _build-default-check/
 _build-fast/
 _build-release/
 __pycache__/
+
+# Generated build trees and compiled outputs
+_build*/
+*.ll
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.bc
+
+# Local/generated artifacts
+*.pdf
+review.html
+compile_commands.json
