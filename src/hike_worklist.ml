@@ -411,9 +411,8 @@ and stub_symbol (blk : Block.t) : string option =
 
 (* The body's local closure: lift, solve, and the growth loop. *)
 and body t frame e cfg blk : final =
-  let keep_fall = walk t frame cfg blk in
   let raw =
-    D.trim cfg ~entry:blk ~keep_fall
+    D.trim cfg ~entry:blk ~keep_fall:(returns t frame)
     |> D.lift ~file:t.file ~tid:e.tid ~name:e.name blk
     |> link t frame |> claim t e
   in
@@ -423,30 +422,14 @@ and body t frame e cfg blk : final =
     frontier_add_found t.frontier (materialised_words t f);
   Function f
 
-(* The callee-first walk: each reached call's destinations are solved
-   before its fallthrough is followed, and the fallthrough is kept only
-   when one of them may return. *)
-and walk t frame cfg (entry : Block.t) : Block.t -> bool =
-  let returns blk =
-    match D.dests blk with
-    | [] -> true
-    | labels ->
-      Base.List.map labels ~f:(target_summary t frame)
-      |> Base.List.exists ~f:(fun (s : S.t) -> s.returns)
-  in
-  let rec go (seen, kept) b =
-    if Core.Set.mem seen b then (seen, kept)
-    else
-      let fall = (not (D.is_call b)) || returns b in
-      let kept = if fall then Core.Set.add kept b else kept in
-      Graphs.Cfg.Node.outputs b cfg
-      |> Seq.fold ~init:(Core.Set.add seen b, kept) ~f:(fun acc edge ->
-          match Graphs.Cfg.Edge.label edge with
-          | `Fall when not fall -> acc
-          | _ -> go acc (Graphs.Cfg.Edge.dst edge))
-  in
-  let _, kept = go (Block.Set.empty, Block.Set.empty) entry in
-  Core.Set.mem kept
+(* A reached call keeps its fallthrough when one of its destinations may
+   return; an unknown destination may.  [D.trim] asks in execution
+   order, so each callee is solved before its fallthrough is followed. *)
+and returns t frame (blk : Block.t) : bool =
+  match D.dests blk with
+  | [] -> true
+  | labels ->
+    Base.List.exists labels ~f:(fun l -> (target_summary t frame l).S.returns)
 
 and target_summary t frame (label : Tid.t) : S.t =
   match D.dest label with
@@ -582,8 +565,8 @@ and preview_decoded t (addrs : int64 list) : Disasm.Driver.state option =
 
 (* The resolved target's own decoded body, rooted at the target.  The
    worklist-only decode state stays here; the runner sees a closure. *)
-and lift_target_in t (state : Disasm.Driver.state) (e : entry) (addr : int64) :
-    sub term option =
+and lift_target_in t frame (state : Disasm.Driver.state) (e : entry)
+    (addr : int64) : sub term option =
   let entry = Addr.of_int64 addr in
   let cfg =
     D.function_cfg ~file:t.file state ~entry ~is_entry:(fun a ->
@@ -592,7 +575,7 @@ and lift_target_in t (state : Disasm.Driver.state) (e : entry) (addr : int64) :
   match D.block_at cfg entry with
   | None -> None
   | Some blk ->
-    let cfg = D.trim cfg ~entry:blk ~keep_fall:(fun _ -> true) in
+    let cfg = D.trim cfg ~entry:blk ~keep_fall:(returns t frame) in
     (try Some (D.lift ~file:t.file ~tid:e.tid ~name:e.name blk cfg)
      with _ -> None)
 
@@ -884,7 +867,7 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
               let is_entry_at a = is_entry_in t decoded a in
               let lifted =
                 Base.List.map addrs ~f:(fun a ->
-                    (a, lift_target_in t decoded e a))
+                    (a, lift_target_in t frame decoded e a))
               in
               if Base.List.exists lifted ~f:(fun (_, f) -> Option.is_none f)
               then None
