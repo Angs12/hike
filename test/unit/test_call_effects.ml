@@ -76,6 +76,36 @@ let ce_xy_env () =
   in
   (x, y, env)
 
+
+module Sg = Hike_signatures
+
+let sg_ptr ?(captured = false) access =
+  { Sg.ty = Hike_sysv.Scalar Hike_sysv.Pointer; access; captured }
+
+let sg_record ?(memory = Sg.Any) ?returned ?(variadic = false) params =
+  { Sg.library = "libc.so.6"; version = "GLIBC_2.2.5"; symbol = "f"; return = Some (Hike_sysv.Scalar Hike_sysv.Long); returned; params; variadic;
+    memory; noreturn = false }
+
+let sg_call ?signature ?result env read_lanes =
+  Ce.transfer ?signature ?result ~abi:ce_abi ~preserved:Core.Int.Set.empty
+    ~site:{ Ce.summary = None; read_lanes } env
+
+let sg_global_key = List.hd (Mem.Key.of_wordset (Ws.singleton (w64 0x7000)))
+
+(* The frame of [ce_raw_env] with a global cell, and the first argument
+   lane pointing at [lane]. *)
+let sg_env lane =
+  let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+  let e, m = ce_raw_env () in
+  let mem =
+    Mem.add (AI.find_memory ce_idx e m) ~key:sg_global_key
+      ~data:(Mem.Val.create (Ws.singleton (w64 9)) LittleEndian) in
+  let e = AI.add_memory e ~key:m ~data:mem in
+  (AI.add_word e ~key:rdi ~data:(Ws.stack_word_i64 lane), m, rdi)
+
+let sg_global m post =
+  Mem.Val.data (Mem.find (64, LittleEndian) (AI.find_memory ce_idx post m) sg_global_key)
+
 let tests : unit Alcotest.test list =
   [
     (* The kill summary keeps non-written caller-saved GPRs and the base. *)
@@ -173,9 +203,10 @@ let tests : unit Alcotest.test list =
              let callee t = Ce.Summary
                  (if Tid.equal t callee_tid then Some writes else None) in
              let env = AI.add_word AI.top ~key:target ~data:value in
-             let (Ce.Summary actual) =
+             let actual =
                Ce.indirect_callee ~synth:Hike.Synth.empty ~lookup ~callee ~env
                  (Bil.Var target)
+               |> function Ce.Summary w | Ce.Declared (w, _) -> w
              in
              check "callee's written registers"
                (Base.Option.equal Core.Int.Set.equal
@@ -297,6 +328,7 @@ let tests : unit Alcotest.test list =
         let cleared =
           Mem.call_keep memory ~keep_lo:(w64 0x1000)
             ~stack_args:[ (w64 0x2000, w64 0x2007) ] ~clear_frame:false
+            ~clear_from:None ~foreign_cells:Mem.Drop_all
         in
         check "CE-23" (List.is_empty (Mem.cells cleared)));
 
@@ -503,6 +535,72 @@ let tests : unit Alcotest.test list =
            && (match result_phi with
                | [ p ] -> Var.index p > 0
                | _ -> false)));
+
+    pin "CE-31" "a read-only, uncaptured stack pointer leaves the frame intact"
+      (fun () ->
+        let e, m, rdi = sg_env 0x2000L in
+        let signature =
+          sg_record ~memory:(Sg.Argmem Sg.Read_only)
+            [ sg_ptr Sg.Read_only ] in
+        let post = sg_call ~signature e [ rdi ] in
+        check "CE-31"
+          (Ws.equal (ce_reads m 0x2000L post) (Ws.singleton (w64 42))
+          && Ws.equal (ce_reads m 0x3000L post) (Ws.singleton (w64 7))
+          && not (AI.frame_escaped post)));
+
+    pin "CE-32" "a may-write, uncaptured stack pointer drops the frame from the pointer up"
+      (fun () ->
+        let e, m, rdi = sg_env 0x3000L in
+        let signature = sg_record [ sg_ptr Sg.May_write ] in
+        let post = sg_call ~signature e [ rdi ] in
+        check "CE-32"
+          (Ws.equal (ce_reads m 0x2000L post) (Ws.singleton (w64 42))
+          && Ws.is_top (ce_reads m 0x3000L post)
+          && not (AI.frame_escaped post)));
+
+    pin "CE-33" "a captured stack pointer keeps the sticky whole-frame escape"
+      (fun () ->
+        let e, m, rdi = sg_env 0x3000L in
+        let signature = sg_record [ sg_ptr ~captured:true Sg.Read_only ] in
+        let post = sg_call ~signature e [ rdi ] in
+        check "CE-33"
+          (Ws.is_top (ce_reads m 0x2000L post) && AI.frame_escaped post));
+
+    pin "CE-34" "an Argmem call keeps the global cells its pointers do not name"
+      (fun () ->
+        let e, m, rdi = sg_env 0x3000L in
+        let argmem =
+          sg_record ~memory:(Sg.Argmem Sg.May_write) [ sg_ptr Sg.May_write ] in
+        let any = sg_record [ sg_ptr Sg.May_write ] in
+        check "CE-34"
+          (Ws.equal (sg_global m (sg_call ~signature:argmem e [ rdi ]))
+             (Ws.singleton (w64 9))
+          && Ws.is_top (sg_global m (sg_call ~signature:any e [ rdi ]))));
+
+    pin "CE-35" "a returned parameter's provenance reaches the result lane"
+      (fun () ->
+        let e, _, rdi = sg_env 0x3000L in
+        let result = v64 "sg_result" in
+        let signature = sg_record ~returned:0 [ sg_ptr Sg.May_write ] in
+        let post = sg_call ~signature ~result e [ rdi ] in
+        check "CE-35"
+          (Ws.equal (AI.find_word 64 post result) (Ws.stack_word_i64 0x3000L)));
+
+    pin "CE-36" "only declared lanes are read; a variadic tail reads the rest"
+      (fun () ->
+        let e, m, rdi = sg_env 0x3000L in
+        let rsi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 1 in
+        let e = AI.add_word e ~key:rsi ~data:(Ws.stack_word_i64 0x2000L) in
+        let fixed = sg_record [ sg_ptr Sg.Read_only ] in
+        let variadic = sg_record ~variadic:true [ sg_ptr Sg.Read_only ] in
+        let undeclared = sg_record [] in
+        check "CE-36"
+          (not (AI.frame_escaped (sg_call ~signature:fixed e [ rdi; rsi ]))
+          && not (AI.frame_escaped (sg_call ~signature:undeclared e [ rdi; rsi ]))
+          && AI.frame_escaped (sg_call ~signature:variadic e [ rdi; rsi ])
+          && Ws.is_top
+               (ce_reads m 0x2000L (sg_call ~signature:variadic e [ rdi; rsi ]))));
+
   ]
 
 let () = run "call_effects" tests

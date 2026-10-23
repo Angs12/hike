@@ -17,7 +17,7 @@ let calls (sub : sub term) : Call.t list =
       else match Jmp.kind j with Call c -> Some c | _ -> None)
   |> Seq.to_list
 
-let lift code = with_binary code (fun p -> (Hike.Drive.run p).program)
+let lift code = with_binary code (fun p -> (Hike.Drive.run ~signatures:Hike.Signatures.empty p).program)
 
 let starts_at a t =
   Base.Option.equal Addr.equal (Term.get_attr t address) (Some (Addr.of_int64 a))
@@ -118,7 +118,7 @@ let tests = [
       (* lea rax,[rip+3]; call rax; ret; mov eax,42; ret *)
       with_binary "\x48\x8d\x05\x03\x00\x00\x00\xff\xd0\xc3\xb8\x2a\x00\x00\x00\xc3"
         (fun project ->
-          let result = Hike.Drive.run project in
+          let result = Hike.Drive.run ~signatures:Hike.Signatures.empty project in
           let caller = at result.program 0x400078L |> Base.Option.value_exn in
           check "destination is a discovered function" (at result.program 0x400082L <> None);
           let direct =
@@ -150,7 +150,7 @@ let tests = [
         "\xb8\x07\x00\x00\x00\x48\x8d\x0d\x02\x00\x00\x00\xff\xe1\x83\xc0\x01\
          \x48\x8d\x0d\x02\x00\x00\x00\xff\xe1\x83\xc0\x01\xc3"
         (fun project ->
-          let result = Hike.Drive.run project in
+          let result = Hike.Drive.run ~signatures:Hike.Signatures.empty project in
           let sub = at result.program 0x400078L |> Base.Option.value_exn in
           let block = Term.enum blk_t sub
             |> Seq.find_exn ~f:(starts_at 0x400092L) in

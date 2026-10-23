@@ -1,0 +1,5 @@
+; The System V placement as tokens, for the compiler oracle
+; (test/gate/sysv_oracle.py).
+(executable
+ (name sysv_classify)
+ (libraries hike.hike_signatures core))

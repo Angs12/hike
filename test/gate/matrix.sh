@@ -56,7 +56,7 @@ cell () {
       continue
     fi
     [ "$strip" = "strip" ] && objcopy --strip-all "$bin"
-    if ! timeout 600 "$(hike_exe)" "$bin" -o "$ll" >>"$log" 2>&1; then
+    if ! timeout 600 "$(hike_exe)" "$bin" -o "$ll" ${HIKE_SIGNATURES:+--signatures "$HIKE_SIGNATURES"} >>"$log" 2>&1; then
       echo "  $name: LIFT-FAIL" >> "$log"; reds="$reds $name(lift)"
       continue
     fi

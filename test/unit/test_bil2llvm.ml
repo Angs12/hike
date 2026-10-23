@@ -74,6 +74,41 @@ let mk_marker target : tid -> jmp term = fun cont ->
 let atomic_w (x : int) = Cbat_word.to_word (w64 x)
 
 (* One label per incoming: the token between ', %"' and the next '"'. *)
+
+(* ---- exact external calls: a caller of a block-less external ---- *)
+
+let ext_record ?(variadic = false) ?return name params =
+  { Hike_signatures.library = "libc.so.6"; version = "GLIBC_2.2.5";
+    symbol = name; return; returned = None; variadic;
+    memory = Hike_signatures.Any; noreturn = false;
+    params = List.map (fun ty ->
+        { Hike_signatures.ty; access = Hike_signatures.May_write;
+          captured = true }) params }
+
+(* A caller that sets the integer lanes [lanes] and calls the external
+   [name], emitted under [record] (applied only if it names [name]). *)
+let ext_call_ir ~record ~lanes name =
+  let ext_tid = Tid.for_name name in
+  let ext = Sub.create ~tid:ext_tid ~name () in
+  let sets =
+    List.map (fun i ->
+        Def.create (int_param i) (Bil.Int (Cbat_word.to_word (w64 (i + 1)))))
+      lanes in
+  let caller, _ =
+    sub_of "ext_caller"
+      [ sets,
+        [ (1, fun t ->
+              Jmp.create
+                (Call
+                   (Call.create ~return:(Direct t) ~target:(Direct ext_tid) ()))) ];
+        [], [ (0, mk_ret) ] ] in
+  let signatures =
+    Hike_signatures.create ~target:(x86_target ())
+      (Hike_signatures.of_records [ record ])
+      ~imports:(fun _ -> Some (record.Hike_signatures.library,
+                               record.Hike_signatures.version)) in
+  emit_ir ~synth:Hike.Synth.empty ~signatures [ caller; ext ]
+
 let tests : unit Alcotest.test list =
   [
     (* SCOPE: undef-read diagnostics stay with the sub that reads the lane. *)
@@ -996,6 +1031,73 @@ let tests : unit Alcotest.test list =
         check "EMIT-65d"
           (Option.is_some
              (Bil2llvm_env.mint_version scope (Term.tid blk) base)));
+
+    (* ---- exact external calls ---- *)
+    pin "EMIT-70"
+      "an external with a record is declared and called with its declared types"
+      (fun () ->
+        let record = ext_record "ext_fix"
+            ~return:(Hike_sysv.Scalar Hike_sysv.Int)
+            [ Hike_sysv.Scalar Hike_sysv.Pointer; Hike_sysv.Scalar Hike_sysv.Long ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0; 1 ] "ext_fix" in
+        check_ir "EMIT-70.declare" "declare i32 @ext_fix(ptr, i64)" ir;
+        check_ir "EMIT-70.call" "call i32 @ext_fix(" ir;
+        check "EMIT-70.not generic"
+          (not (contains_substring ir "{ i64, i64, <4 x i64>, <4 x i64> } @ext_fix")));
+
+    pin "EMIT-71" "a floating parameter travels in a vector register, the return in the first vector lane"
+      (fun () ->
+        let record = ext_record "ext_dbl"
+            ~return:(Hike_sysv.Scalar (Hike_sysv.Real Hike_sysv.Double))
+            [ Hike_sysv.Scalar (Hike_sysv.Real Hike_sysv.Double);
+              Hike_sysv.Scalar Hike_sysv.Long ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0 ] "ext_dbl" in
+        check_ir "EMIT-71.declare" "declare double @ext_dbl(double, i64)" ir);
+
+    pin "EMIT-72" "narrow integers are declared at their width"
+      (fun () ->
+        let record = ext_record "ext_narrow"
+            ~return:(Hike_sysv.Scalar Hike_sysv.Short)
+            [ Hike_sysv.Scalar Hike_sysv.Char; Hike_sysv.Scalar Hike_sysv.Short;
+              Hike_sysv.Scalar Hike_sysv.Bool ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0; 1; 2 ] "ext_narrow" in
+        check_ir "EMIT-72.declare" "declare i16 @ext_narrow(i8, i16, i8)" ir);
+
+    pin "EMIT-73" "a variadic record declares its fixed part and the ellipsis"
+      (fun () ->
+        let record = ext_record "ext_va" ~variadic:true
+            ~return:(Hike_sysv.Scalar Hike_sysv.Int)
+            [ Hike_sysv.Scalar Hike_sysv.Pointer ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0 ] "ext_va" in
+        check_ir "EMIT-73.declare" "declare i32 @ext_va(ptr, ...)" ir);
+
+    pin "EMIT-74" "a parameter past the sixth integer register is read from its stack slot"
+      (fun () ->
+        let longs = List.init 8 (fun _ -> Hike_sysv.Scalar Hike_sysv.Long) in
+        let record = ext_record "ext_stack" longs in
+        let ir = ext_call_ir ~record ~lanes:[ 0; 1; 2; 3; 4; 5 ] "ext_stack" in
+        check_ir "EMIT-74.declare"
+          "declare void @ext_stack(i64, i64, i64, i64, i64, i64, i64, i64)" ir;
+        check "EMIT-74.the two stack words are loaded"
+          (contains_substring ir "load i64"));
+
+    pin "EMIT-75" "a type the emitter cannot lower keeps the generic declaration"
+      (fun () ->
+        let by_value =
+          Hike_sysv.Aggregate
+            { size = 16; align = 8; trivial = true;
+              fields = [ { offset = 0; ty = Hike_sysv.Scalar Hike_sysv.Long };
+                         { offset = 8; ty = Hike_sysv.Scalar Hike_sysv.Long } ] } in
+        let record = ext_record "ext_agg" [ by_value ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0 ] "ext_agg" in
+        check_ir "EMIT-75" "{ i64, i64, <4 x i64>, <4 x i64> } @ext_agg(" ir);
+
+    pin "EMIT-76" "a record applies only to the external it names" (fun () ->
+        let record = ext_record "other_name"
+            ~return:(Hike_sysv.Scalar Hike_sysv.Int)
+            [ Hike_sysv.Scalar Hike_sysv.Long ] in
+        let ir = ext_call_ir ~record ~lanes:[ 0 ] "ext_plain" in
+        check_ir "EMIT-76" "{ i64, i64, <4 x i64>, <4 x i64> } @ext_plain(" ir);
   ]
 
 let () = run "bil2llvm" tests

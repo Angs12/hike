@@ -25,8 +25,17 @@ def installed_hike():
     return Path(bindir) / "hike"
 
 
-def lift_command(hike, binary, stem):
-    return [str(hike), str(binary), "-o", f"{stem}.ll"]
+def signatures_file():
+    """The signatures the current hike lifts under (it refuses to run without)."""
+    return os.environ.get("HIKE_SIGNATURES") or str(
+        Path(__file__).resolve().parents[2] / "data" / "glibc.sexp")
+
+
+def lift_command(hike, binary, stem, signatures=None):
+    command = [str(hike), str(binary), "-o", f"{stem}.ll"]
+    if signatures:
+        command += ["--signatures", signatures]
+    return command
 
 
 def summarize(binary_hash, samples):
@@ -71,7 +80,7 @@ def profile(binary, stem, args):
                "-o", f"{stem}.stat", "--", "perf", "record", "-F", "99",
                "-e", "cpu-clock", "--call-graph", "dwarf,8192",
                "-o", f"{stem}.perf.data", "--",
-               *lift_command(args.hike, binary, stem)]
+               *lift_command(args.hike, binary, stem, signatures_file())]
     result = measure(command, Path(f"{stem}.log"), args.timeout, os.environ.copy())
     if Path(f"{stem}.perf.data").exists():
         with Path(f"{stem}.report.txt").open("wb") as report:
@@ -146,7 +155,9 @@ def main():
             for label in labels:
                 stem = args.output / f"{index}-{binary.name}-{run}-{label}"
                 hike = reference_hike if label == "reference" else args.hike
-                sample = measure(lift_command(hike, binary, stem),
+                sample = measure(lift_command(
+                    hike, binary, stem,
+                    None if label == "reference" else signatures_file()),
                                  Path(f"{stem}.log"), args.timeout, os.environ.copy())
                 target = reference if label == "reference" else samples
                 target.append(sample)

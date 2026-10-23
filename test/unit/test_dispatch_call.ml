@@ -107,7 +107,7 @@ let env_live (result : Hike.Drive.result) (b : blk term) : bool =
   | Some (pre, _) -> not (Cbat_vsa.AI.equal pre Cbat_vsa.AI.bottom)
   | None -> false
 
-let drive ?data code = with_binary ?data code (fun p -> Hike.Drive.run p)
+let drive ?data code = with_binary ?data code (fun p -> Hike.Drive.run ~signatures:Hike.Signatures.empty p)
 
 (* The synthetic VSA seam for CALL-6. *)
 let solve_sub ?materialize_transfer (sub : sub term) =

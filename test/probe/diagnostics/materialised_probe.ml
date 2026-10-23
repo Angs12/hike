@@ -18,7 +18,7 @@ let () =
       | Error e -> failwith (Core.Error.to_string_hum e)
     in
     let target = Project.target proj in
-    let { Hike.Drive.program; facts; _ } = Hike.Drive.run proj in
+    let { Hike.Drive.program; facts; _ } = Hike.Drive.run ~signatures:(Probe_common.signatures ()) proj in
     let word_bits = Hike_abi.word_bits (Hike.Abi.of_target target) in
     let scanned = ref 0 and words = ref [] in
     let word_defs = ref [] in

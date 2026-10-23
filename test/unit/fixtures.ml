@@ -1067,6 +1067,9 @@ let empty_spec : B2l.section_spec =
     spec_relative = []; spec_externals = [] }
 
 let with_emitted_module ~synth ?(types = fun prog -> prog)
+    ?(signatures =
+        Hike_signatures.create ~target:(x86_target ()) Hike_signatures.empty
+          ~imports:(fun _ -> None))
     (spec : B2l.section_spec) (subs : sub term list) f =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
@@ -1116,14 +1119,14 @@ let with_emitted_module ~synth ?(types = fun prog -> prog)
       (* The types pass runs on the SSA program; a fixture stamps its own. *)
       let prog = types prog in
       B2l.emit_program llvm_ctx llvm_module ~target:(x86_target ())
-        ~addr_bits:64 ~symtab:None ~synth spec prog;
+        ~addr_bits:64 ~symtab:None ~synth ~signatures spec prog;
       Base.Option.iter
         (Llvm_analysis.verify_module llvm_module)
         ~f:Alcotest.fail;
       f llvm_module)
 
-let emit_ir_spec ~synth ?types spec subs =
-  with_emitted_module ~synth ?types spec subs Llvm.string_of_llmodule
+let emit_ir_spec ~synth ?types ?signatures spec subs =
+  with_emitted_module ~synth ?types ?signatures spec subs Llvm.string_of_llmodule
 
 let llvm_instructions llvm_module =
   Llvm.fold_left_functions (fun instructions fn ->
@@ -1131,8 +1134,8 @@ let llvm_instructions llvm_module =
           Llvm.fold_left_instrs (fun instructions insn -> insn :: instructions)
             instructions block) instructions fn) [] llvm_module
 
-let emit_ir ~synth ?types (subs : sub term list) : string =
-  emit_ir_spec ~synth ?types empty_spec subs
+let emit_ir ~synth ?types ?signatures (subs : sub term list) : string =
+  emit_ir_spec ~synth ?types ?signatures empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

@@ -7,7 +7,8 @@ name="$1"
 BINS="$2"; IR="$3"; OUT="$4"; TIMES="$5"; LLOG="$6"
 b="$BINS/$name"; ll="$IR/out_$name.ll"
 t0=$(date +%s.%N)
-if timeout 600 "$(hike_exe)" "$b" -o "$ll" > "$OUT/$name.lift.log" 2>&1 \
+if timeout 600 "$(hike_exe)" "$b" -o "$ll" ${HIKE_SIGNATURES:+--signatures "$HIKE_SIGNATURES"} \
+   > "$OUT/$name.lift.log" 2>&1 \
    && [ -s "$ll" ]; then
     echo "OK   $name" >> "$LLOG"
     t1=$(date +%s.%N)

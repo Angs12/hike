@@ -2,7 +2,7 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: corpus lift allocas semantics unit referee
+#     stages: corpus lift allocas semantics unit referee sysv
 #             performance all
 #
 # Every lift runs the installed hike executable (Hike.Drive, ADR 0032).
@@ -22,7 +22,7 @@ EMIT="${HIKE_EMIT:-/tmp/hike-emit}"
 SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
 
 usage() {
-  echo "usage: gate.sh <corpus|lift|allocas|semantics|unit|referee|performance|all> [performance options and binaries]" >&2
+  echo "usage: gate.sh <corpus|lift|allocas|semantics|unit|referee|sysv|performance|all> [performance options and binaries]" >&2
   exit 2
 }
 
@@ -45,6 +45,10 @@ stage() {
     semantics)  need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
     referee)    ( cd "$TREE" && dune exec test/unit/test_clp_equiv.exe ) ;;
+    sysv)       ( cd "$TREE" && dune build --root . test/probe/sysv/sysv_classify.exe &&
+                  for seed in 1 2 3 4 5; do
+                    python3 "$HERE/sysv_oracle.py" --cases 1000 --seed "$seed" || exit 1
+                  done ) ;;
     performance)
       local perfout="${HIKE_PERFOUT:-${TMPDIR:-/tmp}/hike-performance-$(date -u +%Y%m%dT%H%M%S)}"
       python3 "$HERE/performance.py" --output "$perfout" "$@"
@@ -57,7 +61,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in corpus lift allocas semantics unit referee; do
+  for s in corpus lift allocas semantics unit referee sysv; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2

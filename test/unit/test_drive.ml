@@ -31,7 +31,7 @@ let tests = [
     (fun () ->
       with_binary ~load:sole calls_and_dispatch (fun proj ->
           check "DRIVE-01.no-backend" (Term.length sub_t (Project.program proj) = 0);
-          let result = Hike.Drive.run proj in
+          let result = Hike.Drive.run ~signatures:Hike.Signatures.empty proj in
           let addresses = Term.enum sub_t result.program
             |> Seq.filter_map ~f:(fun s -> Term.get_attr s address)
             |> Seq.map ~f:Word.to_int64_exn |> Seq.to_list |> List.sort compare in
@@ -56,7 +56,7 @@ let tests = [
   pin "DRIVE-02" "discovery is the same with and without BAP's disassembly" (fun () ->
       let discover load =
         with_binary ~load calls_and_dispatch (fun proj ->
-            let result = Hike.Drive.run proj in
+            let result = Hike.Drive.run ~signatures:Hike.Signatures.empty proj in
             (shape result.program, symbols result.symtab))
       in
       let program, symtab = discover sole in

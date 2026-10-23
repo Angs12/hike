@@ -18,8 +18,17 @@ hike_llc() {
 
 # The lift entry every gate runs: the installed hike executable
 # (Hike.Drive, ADR 0032).
+# The signatures every lift runs under: without them the lift cannot tell
+# which imports never return.  Override with HIKE_SIGNATURES.
+HIKE_SIGNATURES="${HIKE_SIGNATURES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/data/glibc.sexp}"
+export HIKE_SIGNATURES
+
 hike_exe() {
-  printf '%s/hike' "$(opam var bin 2>/dev/null)"
+  if [ -n "${HIKE_EXE:-}" ]; then
+    printf '%s' "$HIKE_EXE"
+  else
+    printf '%s/hike' "$(opam var bin 2>/dev/null)"
+  fi
 }
 
 # The run timeout every gate shares (a corpus binary must finish in

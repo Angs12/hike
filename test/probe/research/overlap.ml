@@ -8,7 +8,7 @@ open Bap.Std
 let census (path : string) : unit =
   let proj = Probe_common.load_project path in
   let file = Hike.Decode.file_of proj in
-  let program = (Hike.Drive.run proj).program in
+  let program = (Hike.Drive.run ~signatures:(Probe_common.signatures ()) proj).program in
   let state = Hike.Decode.scan proj ~file ~roots:[] in
   let starts sub =
     Term.enum blk_t sub

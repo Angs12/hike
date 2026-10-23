@@ -145,7 +145,7 @@ let lift path out =
     | Error e -> failwith (Core.Error.to_string_hum e)
   in
   let t0 = Unix.gettimeofday () in
-  let lifted = Hike.lift proj in
+  let lifted = Hike.lift ~signatures:(Probe_common.signatures ()) proj in
   let t1 = Unix.gettimeofday () in
   Hike.emit out lifted;
   let t2 = Unix.gettimeofday () in

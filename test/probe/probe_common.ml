@@ -205,6 +205,13 @@ let ws_run_binary (path : string) (run_sub : Hike_abi.t -> Hike.Synth.table -> V
       Ok (List.map (run_sub abi synth (section_images proj)) subs)
   with e -> Error (Run_error e)
 
+(* The signatures a probe lifts under: the file HIKE_SIGNATURES names,
+   else none (a probe binary has no libc imports to describe). *)
+let signatures () =
+  match Sys.getenv_opt "HIKE_SIGNATURES" with
+  | Some file -> Core.Or_error.ok_exn (Hike.Signatures.load [ file ])
+  | None -> Hike.Signatures.empty
+
 (* Load a binary through the production driver and apply [run_sub] to each
    sub of the discovered program, with the run's solved facts. *)
 let ws_run_discovered (path : string)
@@ -214,7 +221,8 @@ let ws_run_discovered (path : string)
     match Hike.Drive.load path with
     | Error e -> Error (Load_error e)
     | Ok proj ->
-      let { Hike.Drive.program; facts; _ } = Hike.Drive.run proj in
+      let { Hike.Drive.program; facts; _ } =
+        Hike.Drive.run ~signatures:(signatures ()) proj in
       Ok (List.map (run_sub facts) (Term.enum sub_t program |> Seq.to_list))
   with e -> Error (Run_error e)
 

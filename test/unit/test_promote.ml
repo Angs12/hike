@@ -458,6 +458,34 @@ let ssa_valid ~synth (sub : sub term) : bool * bool =
   in
   (single, dominated)
 
+
+(* A frame whose stack-argument stores [stores] (slot offset above the
+   call's SP, value) sit in the entry block and whose call block holds
+   [own]; returns the remote sites of the call block. *)
+let pr_remote_sites ~stores ~own =
+  let m = memv "pr_rb_m" in
+  let store (off, v) =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m, plus_addr sp off, Bil.Int (Cbat_word.to_word (w64 v)),
+           LittleEndian, `r64 )) in
+  let remote = List.map store stores and local = List.map store own in
+  let sub, tids =
+    sub_of "pr_remote_caller"
+      [ remote, [ (1, mk_goto) ];
+        local,
+        [ (2,
+           fun t ->
+             Jmp.create
+               (Call
+                  (Call.create ~return:(Direct t)
+                     ~target:(Indirect (Bil.Var (v64 "pr_rb_tptr"))) ()))) ];
+        [], [ (0, mk_ret) ] ] in
+  let facts, sub = fixture_facts_sub ~synth:Hike.Synth.empty sub in
+  let sites =
+    Hike.Stack_model.call_sites ~word:8 ~sp ~denote:facts.denote sub in
+  (Core.Map.find sites tids.(1), tids, remote)
+
 let tests : unit Alcotest.test list =
   [
     ("indirect convention", [ case "indirect calls and wrappers agree on slot pointers" (fun () ->
@@ -1023,7 +1051,43 @@ let tests : unit Alcotest.test list =
         let sub' = Term.first sub_t result.program |> Base.Option.value_exn in
         let single, defined = ssa_valid ~synth:result.facts.Hike.Kb.synth sub' in
         check "PR-43 single definitions" single;
-        check "PR-43 reads defined" defined)
+        check "PR-43 reads defined" defined);
+
+    pin "PR-44" "a store in a predecessor block fills a call's stack slot"
+      (fun () ->
+        match pr_remote_sites ~stores:[ (16L, 7) ] ~own:[ (8L, 6) ] with
+        | Some { Hike.Stack_model.cs_remote = [ b ]; cs_arity; _ }, tids, [ st ] ->
+            check "PR-44.slot" (b.Hike.Stack_model.rb_slot = 1);
+            check "PR-44.block" (Tid.equal b.Hike.Stack_model.rb_blk tids.(0));
+            check "PR-44.store"
+              (Tid.equal (Term.tid b.Hike.Stack_model.rb_def) (Term.tid st));
+            check "PR-44.arity counts the call block's own slot too" (cs_arity = 2)
+        | _ -> check "PR-44 one remote slot" false);
+
+    pin "PR-45" "slots past a gap are not arguments (a local above the frame)"
+      (fun () ->
+        match pr_remote_sites ~stores:[ (32L, 7) ] ~own:[ (8L, 6) ] with
+        | Some { Hike.Stack_model.cs_remote = []; cs_arity = 1; _ }, _, _ -> ()
+        | _ -> check "PR-45 the gap slot is dropped" false);
+
+    pin "PR-46" "a slot the call block's own store fills is not remote"
+      (fun () ->
+        match pr_remote_sites ~stores:[ (8L, 7) ] ~own:[ (8L, 6) ] with
+        | Some { Hike.Stack_model.cs_remote = []; cs_arity = 1; _ }, _, _ -> ()
+        | _ -> check "PR-46 shadowed by the own store" false);
+
+    pin "PR-47" "remote slots form a run from slot 0 with the call block's own"
+      (fun () ->
+        match
+          pr_remote_sites ~stores:[ (8L, 1); (16L, 2); (24L, 3); (48L, 9) ] ~own:[]
+        with
+        | Some { Hike.Stack_model.cs_remote = rs_stores; cs_arity = rs_arity; _ }, _, _ ->
+            check "PR-47.slots"
+              (List.sort compare
+                 (List.map (fun b -> b.Hike.Stack_model.rb_slot) rs_stores)
+               = [ 0; 1; 2 ]);
+            check "PR-47.arity" (rs_arity = 3)
+        | None, _, _ -> check "PR-47 a run" false);
   ]
 
 let () = run "promote" tests

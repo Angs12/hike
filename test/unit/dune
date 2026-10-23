@@ -31,6 +31,8 @@
   test_ws
   test_pieces
   test_call_effects
+  test_signatures
+  test_sysv
   test_backward
   test_preimage
   test_forward
@@ -68,6 +70,7 @@
   test_domain_properties
   test_landmarks
   test_dce)
+ (deps ../../data/glibc.sexp)
  (modules :standard \ harness common fixtures verify_ssa test_ssa_verify test_clp_equiv)
  (libraries
   hike_test
@@ -87,6 +90,7 @@
   precision_probe_rows
   llvm
   hike.hike_origin
+  hike.hike_signatures
   hike.hike_stack_bounds
   unix)
  (flags

@@ -44,6 +44,7 @@ if [ ! -x "$HIKE_BIN" ]; then
   exit 2
 fi
 TOOLCHAIN_SHA="$({ sha256sum "$HIKE_BIN" 2>/dev/null
+                   [ -n "${HIKE_SIGNATURES:-}" ] && sha256sum "$HIKE_SIGNATURES"
                    find "$LIBDIR" -maxdepth 3 -path '*bap*' \
                      \( -name '*.cmxs' -o -name '*.cmxa' -o -name '*.cma' \) -print 2>/dev/null \
                      | sort | xargs sha256sum 2>/dev/null
@@ -84,6 +85,7 @@ for f in $BINS; do
   else
     rm -f "$OUT/out_$f.ll"
     timeout 300 "$HIKE_BIN" "$CORPUS/$f" -o "$OUT/out_$f.ll" \
+      ${HIKE_SIGNATURES:+--signatures "$HIKE_SIGNATURES"} \
       >"$OUT/stdout_$f.txt" 2>"$OUT/err_$f.txt"
     rc=$?
     echo "$rc" >"$OUT/rc_$f.txt"
