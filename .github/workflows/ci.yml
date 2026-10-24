@@ -1,0 +1,73 @@
+name: gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      - name: Build BAP, Hike and the corpus
+        run: |
+          nix build --print-out-paths .#bap > "$RUNNER_TEMP/bap.path"
+          nix build --print-out-paths .#hike > "$RUNNER_TEMP/hike.path"
+          nix build --print-out-paths .#corpus > "$RUNNER_TEMP/corpus.path"
+
+      - name: Lift gate
+        run: |
+          BAP=$(cat "$RUNNER_TEMP/bap.path")
+          HIKE=$(cat "$RUNNER_TEMP/hike.path")
+          CORPUS=$(cat "$RUNNER_TEMP/corpus.path")
+          mkdir -p "$RUNNER_TEMP/emit"
+          HIKE_EXE="$HIKE/bin/hike" \
+          HIKE_LIBDIR="$BAP/lib" \
+          HIKE_CORPUS="$CORPUS" \
+          HIKE_EMIT="$RUNNER_TEMP/emit" \
+            bash test/gate/gate.sh lift
+
+      - name: Semantics gate
+        run: |
+          LLVM=$(nix build --print-out-paths .#llvm19)
+          mkdir -p "$RUNNER_TEMP/llvm-bin"
+          ln -sf "$LLVM/bin/opt" "$RUNNER_TEMP/llvm-bin/opt-19"
+          ln -sf "$LLVM/bin/llc" "$RUNNER_TEMP/llvm-bin/llc-19"
+          export PATH="$RUNNER_TEMP/llvm-bin:$PATH"
+          export HIKE_LLC="$RUNNER_TEMP/llvm-bin/llc-19"
+
+          CORPUS=$(cat "$RUNNER_TEMP/corpus.path")
+          HIKE_CORPUS="$CORPUS" \
+          HIKE_EMIT="$RUNNER_TEMP/emit" \
+          HIKE_SEMOUT="$RUNNER_TEMP/sem" \
+            bash test/gate/gate.sh semantics
+
+      - name: Unit tests
+        run: nix build --print-out-paths .#checks.x86_64-linux.unit

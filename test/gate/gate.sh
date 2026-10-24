@@ -28,7 +28,7 @@ usage() {
 
 need_renderer() {
   command -v "$LLC" >/dev/null 2>&1 || {
-    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to pin one)" >&2
+    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to another llc)" >&2
     exit 2
   }
   echo "  tools: $("$LLC" --version 2>/dev/null | head -1)"

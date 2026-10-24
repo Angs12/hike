@@ -2,15 +2,15 @@
 # The gate tier's shared pipeline: ONE copy of the render / link / run /
 # compare recipe.  Sourced, never executed.
 
-# The renderer: the llc on PATH, overridable for a pinned toolchain.
-LLC="${HIKE_LLC:-llc}"
+# The renderer: pinned to the LLVM release the project targets.
+LLC="${HIKE_LLC:-llc-19}"
 
 # llc a module to an object; no flags means -O0.
 hike_llc() {
   local ll="$1" obj="$2"; shift 2
   if [ "$#" -eq 0 ]; then set -- -O0; fi
   command -v "$LLC" >/dev/null 2>&1 || {
-    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to pin one)" >&2
+    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to another llc)" >&2
     return 127
   }
   "$LLC" "$@" -filetype=obj "$ll" -o "$obj"
@@ -24,11 +24,11 @@ HIKE_SIGNATURES="${HIKE_SIGNATURES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 
 export HIKE_SIGNATURES
 
 hike_exe() {
-  if [ -n "${HIKE_EXE:-}" ]; then
-    printf '%s' "$HIKE_EXE"
-  else
-    printf '%s/hike' "$(opam var bin 2>/dev/null)"
+  if [ -z "${HIKE_EXE:-}" ]; then
+    echo "FATAL: set HIKE_EXE to the installed hike executable" >&2
+    return 1
   fi
+  printf '%s' "$HIKE_EXE"
 }
 
 # The run timeout every gate shares (a corpus binary must finish in

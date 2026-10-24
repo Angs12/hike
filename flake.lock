@@ -1,0 +1,48 @@
+{
+  "nodes": {
+    "bap": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792834958,
+        "narHash": "sha256-2ODHaY6AayM+RuBnw4IRdY1hdMWwfE/7SjVZrryAFuY=",
+        "owner": "Angs12",
+        "repo": "bap",
+        "rev": "f3382e531775a7735ff1a60924b32ed6c411753e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Angs12",
+        "repo": "bap",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792502884,
+        "narHash": "sha256-IoNisKcGbUjdd45qCqywGMCYmZ5EnkxezvLII0FWwNA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "bap": "bap",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

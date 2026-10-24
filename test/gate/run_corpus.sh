@@ -32,7 +32,13 @@ fi
 
 # Bind every emission in $OUT to the build that produced it: the toolchain
 # stamp names the hike executable and the bap plugin objects it loads.
-LIBDIR="$(opam var lib 2>/dev/null || true)"
+# The BAP library root is explicit: the stamp must cover the plugin
+# objects the executable loads, not just the executable.
+LIBDIR="${HIKE_LIBDIR:-}"
+if [ -z "$LIBDIR" ]; then
+  echo "FATAL: set HIKE_LIBDIR to the BAP library root" >&2
+  exit 2
+fi
 
 # The whole toolchain the lift reads: the hike executable and the bap plugin
 # objects it loads.  A stamp naming only the hike build would serve a stale

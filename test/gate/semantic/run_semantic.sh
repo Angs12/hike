@@ -5,7 +5,7 @@
 # binary at the consumer optimizer's HIKE_OPT_LEVEL (default 2; 0 = no
 # optimization passes).  Strict: no allowlist; failures auto-bisect
 # every pass in BISECT_PASSES and list each breaking pass (CRASH = opt
-# crashed).  Keeps *_opt.ll as the repro artifact.  Pins opt-21 (fails
+# crashed).  Keeps *_opt.ll as the repro artifact.  Pins opt-19 (fails
 # loudly when missing); exit 0 iff all pass.
 # Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir]
 
@@ -23,7 +23,7 @@ if ! compgen -G "$IR/out_*.ll" >/dev/null; then
 fi
 
 # Pinned optimizer; a default switch must not silently change the gate.
-OPT=opt-21
+OPT=opt-19
 OPT_LEVEL="${HIKE_OPT_LEVEL:-2}"
 command -v "$OPT" >/dev/null 2>&1 || {
 	echo "FATAL: $OPT not found (the gate pins the opt version; NO FALLBACKS)"

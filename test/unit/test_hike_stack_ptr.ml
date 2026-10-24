@@ -144,7 +144,7 @@ let tests : unit Alcotest.test list =
       "the optimizer sees a runtime frame as a fresh object: a frame store \
        survives an unknown call and a store through an argument"
       (fun () ->
-        match Unix.system "command -v opt-21 >/dev/null 2>&1" with
+        match Unix.system "command -v opt >/dev/null 2>&1" with
         | Unix.WEXITED 0 ->
             with_builder (fun llvm_ctx llvm_module sp_b ->
             ignore (Llvm.build_ret_void sp_b);
@@ -190,7 +190,7 @@ let tests : unit Alcotest.test list =
             let out = src ^ ".opt.ll" in
             let rc =
               Sys.command
-                (Printf.sprintf "opt-21 -O2 -S %s -o %s"
+                (Printf.sprintf "opt -O2 -S %s -o %s"
                    (Filename.quote src) (Filename.quote out))
             in
             Alcotest.(check int) "optimizer succeeds" 0 rc;
@@ -200,7 +200,7 @@ let tests : unit Alcotest.test list =
             check "SPTR-06"
               (contains_substring text "ret i64 42"
                && not (contains_substring text "load i64")))
-        | _ -> Alcotest.fail "SPTR-06 requires opt-21 on PATH");
+        | _ -> Alcotest.fail "SPTR-06 requires opt on PATH");
 
   ]
 

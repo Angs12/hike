@@ -11,7 +11,7 @@ TREE="$(cd "$HERE/../.." && pwd)"
 
 WORK="${HIKE_MATRIX:-/tmp/hike-matrix}"
 SRC="$TREE/src/synth"
-LLC="${HIKE_LLC:-llc-21}"
+LLC="${HIKE_LLC:-llc-19}"
 
 if [ "$#" -ne 0 ]; then
   echo "matrix.sh takes no arguments; it always runs the complete matrix" >&2
@@ -69,7 +69,7 @@ cell () {
     case "$name" in tls_pthreads|tls_initialized|tls_models) repeats=20 ;; esac
     for lvl in 0 3 z; do
       local optll="$dir/$name.O$lvl.ll" lout="$dir/$name.O$lvl.l.out"
-      if ! opt-21 -O"$lvl" -S "$ll" -o "$optll" 2>>"$log"; then
+      if ! opt-19 -O"$lvl" -S "$ll" -o "$optll" 2>>"$log"; then
         echo "  $name: OPT-FAIL O$lvl" >> "$log"
         reds="$reds $name(O$lvl-opt)"; passed=0; continue
       fi

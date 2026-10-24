@@ -39,7 +39,7 @@ for cc in gcc clang; do
       res="lift rc=$rc"
       if [ "$rc" -ne 0 ]; then
         res="$res $(grep -m1 'hike:' "$OUT/lift/$n.err" | cut -c1-150)"; fail=1
-      elif opt-21 -O2 -S "$OUT/lift/$n.ll" -o "$OUT/lift/$n.opt.ll" 2>"$OUT/lift/$n.build.err" \
+      elif opt-19 -O2 -S "$OUT/lift/$n.ll" -o "$OUT/lift/$n.opt.ll" 2>"$OUT/lift/$n.build.err" \
         && llc -relocation-model=pic -filetype=obj "$OUT/lift/$n.opt.ll" -o "$OUT/lift/$n.o" 2>>"$OUT/lift/$n.build.err" \
         && gcc -O0 -pie -o "$OUT/lift/$n.bin" "$OUT/lift/$n.o" -lpthread 2>>"$OUT/lift/$n.build.err"; then
         for a in "" "x" "x y z"; do
