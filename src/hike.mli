@@ -82,6 +82,11 @@ module Image = Hike_image
 
 module Sections = Hike_sections
 
+(** Ownership closure and the storage-relative rewrite plan: logical
+    stack ranges from VSA, merged only where a consuming operation needs
+    one native origin, finalized once. *)
+module Ownership = Hike_ownership
+
 (** The Stack-Arg PROMOTION: the layout's slots become the sub's
     promoted parameters and call sites bind the stored values. *)
 module Promote = Hike_promote

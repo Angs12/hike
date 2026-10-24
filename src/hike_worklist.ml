@@ -1491,8 +1491,13 @@ let facts t : Hike_kb.facts =
     |> Base.List.map ~f:(fun e -> (Addr.of_int64 e.addr, tid_of e))
     |> Core.Map.of_alist_reduce (module Addr) ~f:(fun a _ -> a)
   in
+  let defs =
+    Base.List.fold funcs ~init:Var.Map.empty ~f:(fun acc (_, f) ->
+        Core.Map.fold (Hike_kb.defs_of_sub f.solved) ~init:acc
+          ~f:(fun ~key ~data acc -> Core.Map.set acc ~key ~data))
+  in
   let built =
-    Hike_kb.build ~target:t.context.target ~lookup
+    Hike_kb.build ~target:t.context.target ~lookup ~defs
       ~block_envs:(Base.List.fold funcs ~init:Tid.Map.empty ~f:(fun acc (_, f) ->
           Core.Map.merge_skewed acc f.envs ~combine:(fun ~key:_ a _ -> a)))
       ~block_addrs:(union (Base.List.map funcs ~f:(fun (_, f) -> f.block_addrs)))

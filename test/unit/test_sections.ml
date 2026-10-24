@@ -726,9 +726,14 @@ let tests : unit Alcotest.test list =
           (match narrow' with
            | Some d -> (
                match Def.rhs d with
-               | Bil.Store (Bil.Var mem, Bil.Var b, _, _, `r16) ->
+               | Bil.Store (Bil.Var mem,
+                   Bil.BinOp (Bil.MINUS,
+                     Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int anchor), Bil.Int off),
+                   _, _, `r16) ->
                    Var.same mem (Sm.region_mem ~addr_bits:64 1)
                    && Sm.region_ptr_id_of synth b = Some 1
+                   && Word.equal anchor (Word.of_int ~width:64 16)
+                   && Word.equal off (Word.of_int ~width:64 16)
                    && Var.equal (Def.lhs d) mem
                | _ -> false)
            | None -> false));

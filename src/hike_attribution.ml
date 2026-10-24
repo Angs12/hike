@@ -27,9 +27,17 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     let sections =
       Hike_sections.attribute ~facts ~word ~entry ~spans program
     in
+    let synth, ownership =
+      Hike_ownership.complete ~facts ~word ~entry ~ctx:sections program in
+    let sections =
+      { sections with
+        Hike_sections.sub_trees = ownership.Hike_ownership.sub_trees;
+        conversions = ownership.conversions } in
+    let facts = Hike_kb.with_synth facts synth in
     let synth, program =
       Term.map sub_t program ~f:(Hike_sections.stamp_tags sections)
-      |> Hike_promote.rewrite_program ~word ~entry ~facts ~spans ~ctx:sections
+      |> Hike_promote.rewrite_program ~word ~entry ~facts
+           ~trees:sections.sub_trees ~rewrites:ownership.rewrites
     in
     let facts = Hike_kb.with_synth facts synth in
     let spec =

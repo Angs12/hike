@@ -51,8 +51,8 @@ val rewrite_program :
   word:int ->
   entry:int64 ->
   facts:Hike_kb.facts ->
-  spans:Hike_sections.data_span list ->
-  ctx:Hike_sections.ctx ->
+  trees:Hike_sections.sub_tree Tid.Map.t ->
+  rewrites:Hike_ownership.rewrites ->
   program term ->
   Hike_synth.table * program term
 

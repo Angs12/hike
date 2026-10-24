@@ -45,6 +45,9 @@ type facts = {
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
   spec : Hike_spec.section_spec option;
+  (* The SSA definition index: every version VSA solved, with the def or
+     phi that defines it. *)
+  defs : [ `Def of def term | `Phi of phi term ] Var.Map.t;
   (* The run's synthetic vars with their kinds: each pass that creates
      one records it here, and a var absent from the table is not
      synthetic. *)
@@ -55,10 +58,31 @@ type facts = {
   signatures : Hike_signatures.t;
 }
 
+(* The definition index of one solved sub / program.  A version has one
+   definition; a duplicate later definition replaces the earlier one, as
+   the SSA passes keep only the live version. *)
+let defs_of_sub (sub : sub term) : [ `Def of def term | `Phi of phi term ] Var.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Var.Map.empty ~f:(fun acc blk ->
+      let acc =
+        Term.enum phi_t blk
+        |> Seq.fold ~init:acc ~f:(fun acc p ->
+            Core.Map.set acc ~key:(Phi.lhs p) ~data:(`Phi p)) in
+      Term.enum def_t blk
+      |> Seq.fold ~init:acc ~f:(fun acc d ->
+          Core.Map.set acc ~key:(Def.lhs d) ~data:(`Def d)))
+
+let defs_of_program (prog : program term) : [ `Def of def term | `Phi of phi term ] Var.Map.t =
+  Term.enum sub_t prog
+  |> Seq.fold ~init:Var.Map.empty ~f:(fun acc sub ->
+      Core.Map.fold (defs_of_sub sub) ~init:acc ~f:(fun ~key ~data acc ->
+          Core.Map.set acc ~key ~data))
+
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     ~(lookup : int64 -> Tid.t option)
     ~(block_addrs : Tid.t Addr.Map.t)
-    ~(target : Bap_core_theory.Theory.Target.t) : facts =
+    ~(target : Bap_core_theory.Theory.Target.t)
+    ~(defs : [ `Def of def term | `Phi of phi term ] Var.Map.t) : facts =
   let abi = Hike_abi.of_target target in
   let synth =
     Base.List.fold abi.Hike_abi.env_regs ~init:Hike_synth.empty
@@ -83,6 +107,7 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     lookup;
     denote = denote ~synth;
     spec = None;
+    defs;
     synth;
     signatures =
       Hike_signatures.create ~target Hike_signatures.empty

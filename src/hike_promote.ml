@@ -134,15 +134,14 @@ let promote_sub ~(synth : Hike_synth.table ref) ~(addr_bits : int)
    products. *)
 let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
     ~(entry : int64) ~(addr_bits : int) ~(abi : Hike_abi.t)
-    ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
-    ~(ctx : Sections.ctx)
+    ~(tree : Sections.sub_tree)
+    ~(rewrites : Hike_ownership.rewrites)
     ~(sites : Model.call_site Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
-  let tree = Core.Map.find_exn ctx.sub_trees (Term.tid sub) in
   let arity = Sections.slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
@@ -168,19 +167,11 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
   (* The layout precedes the rewrite: each storage's base offset [rel]
      reads off it, and the rewrite's value forms must not perturb the
      region geometry the layout measures. *)
-  let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
-  let storages = Sections.spans_of_layout ~synth ~word layout in
   (* The window forms need an Args-space access, including the overflow
      area consumed by a recognized va_list construction. A dead
      SP-derived value does not need the incoming lane. *)
-  let window_ok =
-    layout.Hike_stack_model.window_param && not callee_exempt
-  in
-  let facts =
-    Sections.def_facts ~synth ~word ~entry ~abi ~tree ~data:ctx.data_tree
-      ~projections:ctx.projections ~conversions:ctx.conversions ~storages
-      ~window_param:window_ok ~spans ~denote sub
-  in
+  let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
+  let facts = Core.Map.find_exn rewrites (Term.tid sub) in
   (* The second pass: one general [Term.mapper] over the sub.  Every def
      (and phi) the attribution proved is rewritten to its owning
      storage — no ad-hoc def filtering. *)
@@ -193,14 +184,17 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
         match Core.Map.find facts (Term.tid d) with
         | None -> d
         | Some f -> (
-            match f.Sections.fr_rhs with
-            | Some rhs -> Def.with_rhs d rhs
-            | None ->
-                (* The conversion names the address's own alloca; carry
-                   it on the def so the emitter materializes into that
-                   region, never the operand's. *)
-                Hike_synth_addr.rewrite_storage ~synth ~addr_bits ~conv:f.Sections.fr_conv ~bits:f.Sections.fr_bits
-                  ?addr:f.Sections.fr_addr d)
+            let d = Base.Option.value_map f.Hike_ownership.fr_rhs ~default:d
+                ~f:(Def.with_rhs d) in
+            Hike_synth_addr.rewrite_storage ~synth ~addr_bits
+              ~conv:f.Hike_ownership.fr_conv ~bits:f.Hike_ownership.fr_bits
+              ?addr:f.Hike_ownership.fr_addr d)
+
+      method! map_jmp j =
+        let j = super#map_jmp j in
+        match Core.Map.find facts (Term.tid j) with
+        | Some { Hike_ownership.fr_rhs = Some cond; _ } -> Jmp.with_cond j cond
+        | _ -> j
 
       method! map_blk blk =
         let blk = super#map_blk blk in
@@ -222,8 +216,8 @@ let rewrite_sub ~(synth : Hike_synth.table ref) ~(word : int)
 
 (* The program driver: per-sub sites and resolution, the rewrite. *)
 let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
-    ~(spans : Sections.data_span list)
-    ~(ctx : Sections.ctx)
+    ~(trees : Sections.sub_tree Tid.Map.t)
+    ~(rewrites : Hike_ownership.rewrites)
     (prog : program term) : Hike_synth.table * program term =
   let synth = ref facts.synth in
   let abi = facts.abi in
@@ -249,8 +243,9 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
         let sites, resolved = Core.Map.find_exn sides (Term.tid sub) in
-        rewrite_sub ~synth ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx
-          ~sites ~resolved
+        rewrite_sub ~synth ~word ~entry ~addr_bits ~abi ~denote
+          ~tree:(Core.Map.find_exn trees (Term.tid sub))
+          ~rewrites ~sites ~resolved
           ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
           sub)
   in

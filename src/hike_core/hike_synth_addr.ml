@@ -98,12 +98,12 @@ let address_leaves ~(synth : Hike_synth.table)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                      (Cbat_clp_set_composite.t, Type.error) Result.t)
     ~(storages : Hike_synth.storage_span list)
-    ~(blk : blk term) ~(def : def term) (e : exp) : leaf Var.Map.t =
+    ~(blk : blk term) ?def (e : exp) : leaf Var.Map.t =
   (object
      inherit [ leaf Var.Map.t ] Exp.visitor
      method! visit_var v acc =
        let by_denotation () =
-         match denote ~blk ~def (Bil.Var v) with
+         match denote ~blk ?def (Bil.Var v) with
          | Ok ws
            when (not
                    (Cbat_clp_set_composite.is_top ws

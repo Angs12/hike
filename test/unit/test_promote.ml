@@ -354,10 +354,14 @@ let rw_sec () : Hike.Synth.table * sub term =
     Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
       ~spans prog
   in
+  let facts, ctx, rewrites =
+    fixture_ownership ~word:8 ~entry:Hike.Stack_model.segment_base ~facts
+      ~ctx ~spans prog
+  in
   let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
   let synth, prog =
     Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base
-      ~facts ~spans ~ctx prog
+      ~facts ~trees:ctx.sub_trees ~rewrites prog
   in
   (synth, Term.first sub_t prog |> Base.Option.value_exn)
 
@@ -677,9 +681,8 @@ let tests : unit Alcotest.test list =
            | Some d -> Ds.def_is_window_value d
            | None -> false));
 
-    (* PR-23: a region address def's value is its storage's base plus the
-       folded displacement (zero here — the base itself). *)
-    pin "PR-23" "a region address def's value is its storage base + displacement"
+    (* A base substitution keeps the access's original subtraction. *)
+    pin "PR-23" "address bases change without collapsing access subtraction"
       (fun () ->
         let synth, sub' = rw_frame () in
         let find v =
@@ -702,15 +705,17 @@ let tests : unit Alcotest.test list =
                Base.Option.bind st42 ~f:(fun d ->
                    Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst) )
            with
-           | Some (Bil.Var pv), Some (Bil.Var av) ->
+           | Some (Bil.Var pv),
+             Some (Bil.BinOp (Bil.MINUS,
+               Bil.BinOp (Bil.PLUS, Bil.Var av, Bil.Int anchor), Bil.Int off)) ->
                Cu.region_ptr_id_of synth pv = Some 2
                && Cu.region_ptr_id_of synth av = Some 1
+               && Word.equal anchor (Word.of_int ~width:64 16)
+               && Word.equal off (Word.of_int ~width:64 16)
            | _ -> false));
 
-    (* PR-39: a runtime index in an ABI lane (a bounded non-stack value)
-       is a foldable piece: the indexed store's address is its region's
-       base plus the piece, never the raw frame arithmetic. *)
-    pin "PR-39" "an ABI-lane runtime index folds into the access's region"
+    (* A runtime index keeps its scale and surrounding displacement. *)
+    pin "PR-39" "an ABI-lane runtime index preserves access arithmetic"
       (fun () ->
         let synth, sub' = rw_abi_index () in
         let indexed =
@@ -727,10 +732,104 @@ let tests : unit Alcotest.test list =
              Base.Option.bind indexed ~f:(fun d ->
                  Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst)
            with
-           | Some (Bil.Var b) -> Cu.region_ptr_id_of synth b = Some 1
-           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) ->
+           | Some (Bil.BinOp (Bil.PLUS,
+               Bil.BinOp (Bil.MINUS,
+                 Bil.BinOp (Bil.PLUS, Bil.Var b, _), Bil.Int off),
+               Bil.BinOp (Bil.TIMES, Bil.Var index, Bil.Int scale))) ->
                Cu.region_ptr_id_of synth b = Some 1
+               && Var.same index (int_ret 0)
+               && Word.equal off (Word.of_int ~width:64 16)
+               && Word.equal scale (Word.of_int ~width:64 8)
            | _ -> false));
+
+    pin "PR-48" "a variable pointer crosses allocation ranges without merging them"
+      (fun () ->
+        let m = memv "cross_m" in
+        let p, q, i = v64 "cross_p", v64 "cross_q", v64 "cross_i" in
+        let k n = Bil.Int (Word.of_int ~width:64 n) in
+        let store p n = Def.create m
+            (Bil.Store (Bil.Var m, Bil.Var p, k n, LittleEndian, `r64)) in
+        let q_def = Def.create q (Bil.BinOp (Bil.PLUS, Bil.Var p, k 64)) in
+        let diff = Def.create (v64 "cross_diff")
+            (Bil.BinOp (Bil.MINUS, Bil.Var q, Bil.Var p)) in
+        let sub = straight_sub "cross_allocations"
+            [ Def.create i (Bil.Ite (Bil.Var (v1 "cross_c"), k 0, k 8));
+              Def.create p (Bil.BinOp (Bil.PLUS,
+                  Bil.BinOp (Bil.MINUS, Bil.Var sp, k 80), Bil.Var i));
+              store p 11; q_def; store q 22; diff ] in
+        let synth, rewritten = rewrite_one_synth ~synth:Hike.Synth.empty sub in
+        let roots e = Exp.free_vars e |> Core.Set.to_list
+          |> Base.List.filter_map ~f:(Cu.region_ptr_id_of synth)
+          |> Base.List.dedup_and_sort ~compare:Int.compare in
+        let q_rhs = Def.rhs (Base.Option.value_exn
+            (t10_find_def rewritten (Term.tid q_def))) in
+        let diff_rhs = Def.rhs (Base.Option.value_exn
+            (t10_find_def rewritten (Term.tid diff))) in
+        check "retargeting preserves the original addition"
+          (match q_rhs with
+           | Bil.BinOp (Bil.PLUS, base, Bil.Int off) ->
+               Word.equal off (Word.of_int ~width:64 64)
+               && Base.List.length (roots base) = 2
+           | _ -> false);
+        check "difference uses both logical coordinates"
+          (match diff_rhs with
+           | Bil.BinOp (Bil.MINUS, a, b) ->
+               Base.List.length (roots a) = 1
+               && Base.List.length (roots b) = 1
+               && roots a <> roots b
+           | _ -> false);
+        let layout = Base.Option.value_exn (Term.get_attr rewritten Cu.layout_tag) in
+        check "the allocations remain separate"
+          (Base.List.length layout.Cu.regions = 2));
+
+    pin "PR-49" "a phi merges its owners only when logical coordinates need them"
+      (fun () ->
+        let run logical_comparison =
+          let m = memv "join_m" in
+          let a, b, c, p = v64 "join_a", v64 "join_b", v64 "join_c", v64 "join_p" in
+          let k n = Bil.Int (Word.of_int ~width:64 n) in
+          let address v n = Def.create v (Bil.BinOp (Bil.MINUS, Bil.Var sp, k n)) in
+          let store v = Def.create m
+              (Bil.Store (Bil.Var m, Bil.Var v, k 1, LittleEndian, `r64)) in
+          let condition t = Jmp.create ~cond:(Bil.Var (v1 "join_condition"))
+              (Goto (Direct t)) in
+          let other = if logical_comparison then Bil.Var a else k 0 in
+          let sub, _ = sub_of "join_owners"
+              [ [address a 80; address b 56; address c 16; store a; store b; store c],
+                [1, condition; 2, mk_goto];
+                [Def.create p (Bil.Var a)], [3, mk_goto];
+                [Def.create p (Bil.Var b)], [3, mk_goto];
+                [Def.create (v1 "join_comparison")
+                   (Bil.BinOp (Bil.EQ, Bil.Var p, other))], [4, mk_goto];
+                [], [0, mk_ret] ] in
+          let _, rewritten = rewrite_one_synth ~synth:Hike.Synth.empty sub in
+          Base.Option.value_exn (Term.get_attr rewritten Cu.layout_tag) in
+        check "native use keeps independent phi alternatives"
+          (Base.List.length (run false).Cu.regions = 3);
+        let shared = (run true).Cu.regions in
+        check "logical use shares only the ambiguous owners"
+          (Base.List.length shared = 2
+           && Base.List.exists shared ~f:(fun r ->
+             Int64.equal r.Cu.Sub_layout.r_lo (Int64.sub Cu.segment_base 16L))));
+
+    pin "PR-50" "unsigned stack ordering across entry preserves the common origin"
+      (fun () ->
+        let p, q = v64 "order_p", v64 "order_q" in
+        let m = memv "order_m" in
+        let k n = Bil.Int (Word.of_int ~width:64 n) in
+        let cmp = Def.create (v1 "order_result")
+            (Bil.BinOp (Bil.LT, Bil.Var p, Bil.Var q)) in
+        let sub = straight_sub "stack_order"
+            [ Def.create p (Bil.BinOp (Bil.MINUS, Bil.Var sp, k 8));
+              Def.create m (Bil.Store (Bil.Var m, Bil.Var p, k 1, LittleEndian, `r64));
+              Def.create q (Bil.BinOp (Bil.PLUS, Bil.Var sp, k 8)); cmp ] in
+        let synth, rewritten = rewrite_one_synth ~synth:Hike.Synth.empty sub in
+        let rhs = Def.rhs (Base.Option.value_exn
+            (t10_find_def rewritten (Term.tid cmp))) in
+        check "entry - 8 is below entry + 8"
+          (match Cbat_vsa.denote_imm_exp ~synth rhs AI.top with
+           | Ok value -> Cu.singleton_i64 value = Some 1L
+           | Error _ -> false));
 
     (* PR-26: the residue's accesses and values take the same base +
        displacement form as a region's — the escaped cell write-closes
@@ -751,19 +850,18 @@ let tests : unit Alcotest.test list =
           |> Seq.find ~f:(fun d ->
                  String.equal (Var.name (Var.base (Def.lhs d))) "rw_q")
           |> Base.Option.map ~f:Def.rhs
-          |> Base.Option.map ~f:(function
-               | Bil.Var b -> Some b
-               | Bil.BinOp (Bil.PLUS, Bil.Var b, _) -> Some b
-               | _ -> None)
-          |> Base.Option.join
         in
         check "PR-26"
           (Base.List.for_all through ~f:(fun d ->
                match Cu.addr_of_rhs (Def.rhs d) with
                | Some (a, _) -> addr_ok a
                | None -> false)
-          && Base.Option.value_map q ~default:false
-               ~f:(fun b -> Cu.region_ptr_id_of synth b = Some 0)));
+          && Base.Option.value_map q ~default:false ~f:(function
+               | Bil.BinOp (Bil.MINUS,
+                   Bil.BinOp (Bil.PLUS, Bil.Var b, _), Bil.Int off) ->
+                   Cu.region_ptr_id_of synth b = Some 0
+                   && Word.equal off (Word.of_int ~width:64 40)
+               | _ -> false)));
 
     (* PR-25: a reloaded-base access routes to its proven storage — the
        through-pointer store's address is the storage base plus the
@@ -796,8 +894,10 @@ let tests : unit Alcotest.test list =
                  Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst)
           |> Seq.exists ~f:(fun a ->
                  match a with
-                 | Bil.BinOp (Bil.PLUS, Bil.Var b, _) ->
+                 | Bil.BinOp (Bil.PLUS,
+                     Bil.BinOp (Bil.PLUS, Bil.Var b, _), Bil.Int off) ->
                      Cu.is_window_var synth b
+                     && Word.equal off (Word.of_int ~width:64 20)
                  | Bil.Var b -> Cu.is_window_var synth b
                  | _ -> false)
         in
@@ -815,7 +915,10 @@ let tests : unit Alcotest.test list =
         in
         check "PR-28"
           (match w with
-           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) -> Cu.is_window_var synth b
+           | Some (Bil.BinOp (Bil.PLUS,
+               Bil.BinOp (Bil.PLUS, Bil.Var b, _), Bil.Int off)) ->
+               Cu.is_window_var synth b
+               && Word.equal off (Word.of_int ~width:64 20)
            | Some (Bil.Var b) -> Cu.is_window_var synth b
            | _ -> false));
 

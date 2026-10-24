@@ -266,7 +266,7 @@ module Hv = Hike.Vsa
 let top_facts () : Hike.Kb.facts =
   Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
     ~block_addrs:(Core.Map.empty (module Addr))
-    ~target:(x86_target ())
+    ~target:(x86_target ()) ~defs:Var.Map.empty
 
 (* The fixtures' callees: a sub of [prog] writes the registers its
    own defs write; any other target writes anything. *)
@@ -354,6 +354,7 @@ let run_chain_attrib_result ~synth ?(spans = []) (subs : sub term list) :
   let facts =
     Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
       ~block_addrs:(Core.Map.empty (module Addr)) ~target
+      ~defs:(Hike.Kb.defs_of_program prog)
   in
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
@@ -391,7 +392,9 @@ let fixture_facts ~synth (subs : sub term list) :
          ok && not (Core.Map.is_empty envs), synth))
   in
   let facts = Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
-      ~block_addrs:(Core.Map.empty (module Addr)) ~target:(x86_target ()) in
+      ~block_addrs:(Core.Map.empty (module Addr)) ~target:(x86_target ())
+      ~defs:(Hike.Kb.defs_of_program
+               (Program.create ~subs:(Base.List.rev stamped) ())) in
   (Hike.Kb.with_synth facts (Hike.Synth.union facts.synth synth),
    Base.List.rev stamped,
    ok && not (Core.Map.is_empty all_envs))
@@ -412,6 +415,17 @@ let fixture_ctx ~synth ?(spans = []) (subs : sub term list) : Hike.Sections.ctx 
   let facts, subs, _ = fixture_facts ~synth subs in
   Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
     ~spans (Program.create ~subs ())
+
+(* Ownership closure over a fixture: the facts carry the minted bases,
+   the ctx the end trees, and the rewrite table the per-def forms. *)
+let fixture_ownership ~word ~entry ~facts ~ctx ~spans prog =
+  let synth, ownership =
+    Hike.Ownership.complete ~facts ~word ~entry ~ctx prog in
+  let ctx =
+    { ctx with
+      Hike.Sections.sub_trees = ownership.Hike.Ownership.sub_trees;
+      conversions = ownership.Hike.Ownership.conversions } in
+  (Hike.Kb.with_synth facts synth, ctx, ownership.Hike.Ownership.rewrites)
 
 (* The single-sub rewrite: the chain replica's rewritten sub. *)
 let rewrite_one ~synth (sub : sub term) : sub term =

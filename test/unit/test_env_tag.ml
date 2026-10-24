@@ -23,9 +23,13 @@ let promote_rewrite_synth (facts : Hike.Kb.facts) (sub : sub term) :
     Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
       ~spans:[] prog
   in
+  let facts, ctx, rewrites =
+    fixture_ownership ~word:8 ~entry:Hike.Stack_model.segment_base ~facts
+      ~ctx ~spans:[] prog
+  in
   let synth, prog =
     Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base
-      ~facts ~spans:[] ~ctx prog
+      ~facts ~trees:ctx.sub_trees ~rewrites prog
   in
   (synth, Term.first sub_t prog |> Base.Option.value_exn)
 
@@ -64,7 +68,7 @@ let tests =
             ~lookup:(fun _ -> None)
             ~block_envs:Tid.Map.empty
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:(x86_target ())
+            ~target:(x86_target ()) ~defs:Var.Map.empty
         in
         let m = memv "ets_m" in
         let y = v64 "ets_y" in
@@ -115,7 +119,7 @@ let tests =
             ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk5) (pre5, pre5))
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:(x86_target ())
+            ~target:(x86_target ()) ~defs:Var.Map.empty
         in
         check "ENV-10"
           (match facts5.denote ~blk:blk5 ~def:d5 (Bil.Var x) with
@@ -132,7 +136,7 @@ let tests =
             ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk6) (pre6, post6))
             ~block_addrs:(Core.Map.empty (module Addr))
-            ~target:(x86_target ())
+            ~target:(x86_target ()) ~defs:Var.Map.empty
         in
         check "ENV-11"
           (match facts6.denote ~blk:blk6 (Bil.Var x) with

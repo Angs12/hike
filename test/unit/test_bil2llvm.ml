@@ -380,7 +380,7 @@ let tests : unit Alcotest.test list =
         let sol = static_graph_vsa ~synth:Hike.Synth.empty ~abi sub (Vsa.init_sol ~abi sub) in
         let envs, sub = Vsa.stamp_envs_of_sol ~synth:Hike.Synth.empty ~sol sub in
         let facts = Hike.Kb.build ~block_envs:envs ~lookup:(fun _ -> None)
-            ~block_addrs:Addr.Map.empty ~target:(x86_target ()) in
+            ~block_addrs:Addr.Map.empty ~target:(x86_target ()) ~defs:Var.Map.empty in
         let tls = Some { Hike_spec.tls_lo = 0x5000L; tls_memsz = 8L;
                          tls_align = 8; tls_base = -8L; tls_prefix = 0;
                          tls_image = Bytes.make 8 '\000' } in

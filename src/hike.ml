@@ -27,6 +27,7 @@ module Stack_model = Hike_stack_model
 module Variadic = Hike_variadic
 module Def_slots = Hike_def_slots
 module Sections = Hike_sections
+module Ownership = Hike_ownership
 module Image = Hike_image
 module Promote = Hike_promote
 module Attribution = Hike_attribution

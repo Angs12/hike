@@ -28,6 +28,8 @@ type range = { lo : point; hi : point } [@@deriving sexp]
     order (signed for Stack/Args, unsigned for data sections). *)
 val compare : range -> range -> int
 val equal : range -> range -> bool
+val compare_point : point -> point -> int
+val equal_point : point -> point -> bool
 
 val point : sec -> int64 -> point
 val range : sec -> int64 -> int64 -> range
@@ -111,25 +113,17 @@ type conv = Hike_synth_addr.conv =
   | Conv_global of int                    (* the component id *)
   | Keep
 
-(** The completed attribution: the finalized trees, the def tags, each
-    access def's projection, and the data spans served whole. *)
+(** The attribution snapshot: the collection's finalized trees, the raw
+    member trees ownership closes, the def tags, each access def's
+    projection, and the data spans served whole. *)
 type ctx = {
   sub_trees : sub_tree Tid.Map.t;
+  sub_members : member list Tree.t Tid.Map.t;
   data_tree : data_tree;
   tags : sec_tag Tid.Map.t;
   projections : projection option Tid.Map.t;
   conversions : conv Tid.Map.t;
   whole : data_span list;
-}
-
-(** One def's rewrite facts: the access's conversion (the mem
-    re-point) plus the storage-relative address forms — a value def's
-    whole rhs, an access def's mem-node address. *)
-type def_fact = {
-  fr_conv : conv;
-  fr_bits : int;
-  fr_addr : exp option;
-  fr_rhs : exp option;
 }
 
 (** The sub's storage spans: the layout's regions in the synth fact
@@ -138,18 +132,41 @@ val spans_of_layout :
   synth:Hike_synth.table ref -> word:int -> Hike_stack_model.sub_layout ->
   Hike_synth.storage_span list
 
-(** Every def's rewrite facts, selected from the finalized trees, the
-    access conversions, the storage spans and the value's leaves. *)
-val def_facts :
-  synth:Hike_synth.table ref -> word:int -> entry:int64 -> abi:Hike_abi.t ->
-  tree:sub_tree -> data:data_tree ->
-  projections:projection option Tid.Map.t ->
-  conversions:conv Tid.Map.t ->
-  storages:Hike_synth.storage_span list ->
-  window_param:bool -> spans:data_span list ->
-  denote:(blk:blk term -> ?def:def term -> exp ->
-          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
-  sub term -> def_fact Tid.Map.t
+(** The end tree's storage decision: called once after ownership closes. *)
+val finalize_tree :
+  word:int -> entry:int64 -> whole:data_span list ->
+  member list Tree.t -> sub_tree
+
+(** The stack binding wholly owning [lo, hi]. *)
+val binding_of_range : 'a Tree.t -> int64 -> int64 -> (range * 'a) option
+
+(** Merge the hull of [ranges] into the tree; every intersecting binding
+    is absorbed and keeps its members and extent. *)
+val merge_ranges : member list Tree.t -> range list -> member list Tree.t
+
+(** The def's memory access: (address, width in bytes, stores). *)
+val access_of : def term -> (exp * int * bool) option
+
+(** The def's storage conversion, read from its attribution projection
+    and the finalized tree. *)
+val conversion_of :
+  word:int ->
+  entry:int64 ->
+  synth:Hike_synth.table ->
+  tree:sub_tree ->
+  data:data_tree ->
+  projected:projection option ->
+  access:(exp * int * bool) option ->
+  conv * Tag.t option
+
+(** The data binding wholly owning [c]: (component id, native low bound). *)
+val owning_data_binding : data_tree -> int64 -> (int * int64) option
+
+(** The word cell of a promotable Args member, when it names one. *)
+val args_member_cell : word:int -> entry:int64 -> member -> int option
+
+(** The storage's region id (the residue's id for non-carved storage). *)
+val region_id_of_storage : storage -> int
 
 
 (** Projects one address denotation of [width] bytes into its
