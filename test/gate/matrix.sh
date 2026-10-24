@@ -77,7 +77,7 @@ cell () {
         echo "  $name: LLC-FAIL O$lvl" >> "$log"
         reds="$reds $name(O$lvl-llc)"; passed=0; continue
       fi
-      if ! gcc -pie "$o" -o "$exe" -lpthread 2>>"$log"; then
+      if ! gcc -pie "$o" -o "$exe" -lpthread -latomic 2>>"$log"; then
         echo "  $name: LINK-FAIL O$lvl" >> "$log"
         reds="$reds $name(O$lvl-link)"; passed=0; continue
       fi

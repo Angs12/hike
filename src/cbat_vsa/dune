@@ -14,8 +14,6 @@
  (name cbat_vsa_domain)
  (public_name hike.cbat_vsa_domain)
  (wrapped false)
- (ocamlopt_flags
-  (:standard -O3))
  (modules
   cbat_preimage
   cbat_clp
@@ -40,8 +38,6 @@
 (library
  (name cbat_vsa)
  (public_name hike.cbat_vsa)
- (ocamlopt_flags
-  (:standard -O3))
  (modules
   cbat_vsa
   cbat_transfer

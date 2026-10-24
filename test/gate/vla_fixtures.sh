@@ -41,7 +41,7 @@ for cc in gcc clang; do
         res="$res $(grep -m1 'hike:' "$OUT/lift/$n.err" | cut -c1-150)"; fail=1
       elif opt-19 -O2 -S "$OUT/lift/$n.ll" -o "$OUT/lift/$n.opt.ll" 2>"$OUT/lift/$n.build.err" \
         && llc -relocation-model=pic -filetype=obj "$OUT/lift/$n.opt.ll" -o "$OUT/lift/$n.o" 2>>"$OUT/lift/$n.build.err" \
-        && gcc -O0 -pie -o "$OUT/lift/$n.bin" "$OUT/lift/$n.o" -lpthread 2>>"$OUT/lift/$n.build.err"; then
+        && gcc -O0 -pie -o "$OUT/lift/$n.bin" "$OUT/lift/$n.o" -lpthread -latomic 2>>"$OUT/lift/$n.build.err"; then
         for a in "" "x" "x y z"; do
           l=$(timeout 15 "$OUT/lift/$n.bin" $a 2>&1; echo "rc=$?")
           nv=$(timeout 15 "$b" $a 2>&1; echo "rc=$?")

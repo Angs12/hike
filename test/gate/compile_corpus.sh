@@ -17,16 +17,16 @@ build_lane () {
   for f in *.c; do
     [ "$f" = "list.c" ] && continue
     name="${f%.c}"
-    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread || { echo "FAIL $name (compile)"; fail=1; }
+    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread -latomic || { echo "FAIL $name (compile)"; fail=1; }
   done
 
   # Exercise the library through a functional driver.
-  gcc $flags -fno-stack-protector -I. -o "$dest/list" list.c "$HERE/fixtures/list_main.c" \
+  gcc $flags -fno-stack-protector -I. -o "$dest/list" list.c "$HERE/fixtures/list_main.c" -latomic \
     || { echo "FAIL list (compile)"; fail=1; }
 
   for model in "${TLS_MODELS[@]}"; do
     gcc $flags -fno-stack-protector -ftls-model="$model" \
-      -o "$dest/tls_models_$model" tls_models.c -lpthread \
+      -o "$dest/tls_models_$model" tls_models.c -lpthread -latomic \
       || { echo "FAIL tls_models_$model (compile)"; fail=1; }
   done
 

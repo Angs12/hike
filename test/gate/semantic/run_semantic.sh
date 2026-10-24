@@ -102,7 +102,7 @@ for ll in "$IR"/out_*.ll; do
 			FAILED+=("$base")
 			continue
 		}
-	if ! gcc -O0 -pie -o "$OUT/${base}_opt.bin" "$OUT/${base}_opt.o" 2>>"$OUT/.gcc.log"; then
+	if ! gcc -O0 -pie -o "$OUT/${base}_opt.bin" "$OUT/${base}_opt.o" -latomic 2>>"$OUT/.gcc.log"; then
 		echo "FAIL $base (link after opt; see $OUT/.gcc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
@@ -141,7 +141,7 @@ for ll in "$IR"/out_*.ll; do
 					continue
 				}
 			gcc -O0 -pie -o "$OUT/${base}_bisect_$p.bin" \
-				"$OUT/${base}_bisect_$p.o" 2>/dev/null ||
+				"$OUT/${base}_bisect_$p.o" -latomic 2>/dev/null ||
 				{
 					bisect_line="$bisect_line $p(link)"
 					any_bisect=1
