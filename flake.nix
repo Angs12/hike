@@ -57,11 +57,43 @@
           corpusPkg = pkgs.callPackage ./nix/corpus.nix {
             src = ./.;
           };
+
+          # The gate app wires this flake's executable, BAP root, corpus and
+          # pinned LLVM into the gate scripts.
+          llvm19Gate = pkgs.runCommand "llvm19-gate" { } ''
+            mkdir -p $out/bin
+            ln -s ${llvmPackages.llvm}/bin/opt $out/bin/opt-19
+            ln -s ${llvmPackages.llvm}/bin/llc $out/bin/llc-19
+          '';
+
+          gatePkg = pkgs.writeShellApplication {
+            name = "hike-gate";
+            runtimeInputs = with pkgs; [
+              coreutils
+              gnugrep
+              gnused
+              gawk
+              diffutils
+              findutils
+              gcc
+              python3
+            ];
+            text = ''
+              export HIKE_EXE="${hikePkg}/bin/hike"
+              export HIKE_LIBDIR="${bapPkg}/lib"
+              export HIKE_CORPUS="''${HIKE_CORPUS:-${corpusPkg}}"
+              export HIKE_LLC="''${HIKE_LLC:-${llvm19Gate}/bin/llc-19}"
+              export PATH="${llvm19Gate}/bin:$PATH"
+
+              exec bash "${./.}/test/gate/gate.sh" "$@"
+            '';
+          };
         in
         {
           bap = bapPkg;
           hike = hikePkg;
           corpus = corpusPkg;
+          gate = gatePkg;
           # The gate scripts pin opt-19/llc-19; expose the matching tools.
           llvm19 = pkgs.llvmPackages_19.llvm;
           default = hikePkg;
@@ -77,6 +109,12 @@
             type = "app";
             program = "${self.packages.${system}.hike}/bin/hike";
             meta.description = "Lift an x86-64 ELF binary to LLVM IR";
+          };
+          gate = {
+            type = "app";
+            program = "${self.packages.${system}.gate}/bin/hike-gate";
+            meta.description =
+              "Run the Hike gates against this flake's build (lift, allocas, semantics, performance)";
           };
         });
     };

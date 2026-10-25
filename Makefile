@@ -20,7 +20,7 @@ PERFOUT ?= /tmp/hike-performance
 
 .PHONY: help build install uninstall reinstall clean clean-installed clean-cache \
         test unit referee corpus lift allocas semantics gates matrix fresh-lift \
-        performance distclean
+        performance require-opam distclean
 
 help:
 	@echo "make build             dune build @install"
@@ -43,9 +43,16 @@ help:
 
 build:
 	$(DUNE) build @install
+	@echo "built:       _build/default/src/drive/main.exe"
+	@if [ -n "$(OPAM_BIN)" ]; then echo "installs to: $(HIKE_BIN)"; fi
 
-install: build
+require-opam:
+	@test -n "$(OPAM_BIN)" -a -n "$(OPAM_LIB)" || \
+		{ echo "make: no opam switch (run 'eval $$(opam env)' or set OPAM)" >&2; exit 2; }
+
+install: build require-opam
 	$(DUNE) install
+	@echo "hike installed: $(HIKE_BIN)"
 
 uninstall:
 	$(DUNE) uninstall
@@ -53,6 +60,7 @@ uninstall:
 reinstall: clean-installed
 	$(DUNE) build @install
 	$(DUNE) install
+	@echo "hike installed: $(HIKE_BIN)"
 
 test: unit
 
@@ -66,35 +74,39 @@ corpus:
 	bash test/gate/compile_corpus.sh "$(CORPUS)"
 
 lift: install
+	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" bash test/gate/gate.sh lift
 
 fresh-lift: install
-	FRESH=1 HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" bash test/gate/gate.sh lift
+	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	FRESH=1 HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" \
+		bash test/gate/gate.sh lift
 
 allocas: install
+	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" bash test/gate/gate.sh allocas
 
 semantics: install
+	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" HIKE_SEMOUT="$(SEMOUT)" \
 		bash test/gate/gate.sh semantics
 
 gates: install corpus
+	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" HIKE_SEMOUT="$(SEMOUT)" \
 		bash test/gate/gate.sh all
 
 matrix: install
-	HIKE_MATRIX="$(MATRIX)" bash test/gate/matrix.sh
+	HIKE_EXE="$(HIKE_BIN)" HIKE_MATRIX="$(MATRIX)" bash test/gate/matrix.sh
 
 performance: install
-	HIKE_PERFOUT="$(PERFOUT)" HIKE_CORPUS="$(CORPUS)" \
+	HIKE_EXE="$(HIKE_BIN)" HIKE_PERFOUT="$(PERFOUT)" HIKE_CORPUS="$(CORPUS)" \
 		bash test/gate/gate.sh performance
 
 clean:
 	$(DUNE) clean
 
-clean-installed:
-	@test -n "$(OPAM_BIN)" -a -n "$(OPAM_LIB)" || \
-		{ echo "clean-installed: opam switch not found" >&2; exit 2; }
+clean-installed: require-opam
 	rm -rf "$(HIKE_BIN)" "$(HIKE_LIB)" "$(HIKE_PLUGIN)"
 
 clean-cache:

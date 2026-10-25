@@ -46,11 +46,28 @@ Build everything:
 nix build .#bap .#hike .#corpus
 ```
 
-The convenience links are `result-bap`, `result-hike`, and `result-corpus`.
+`nix build` links the last build as `./result` and prints no path. Name the
+link you want, or ask for the store path:
+
+```sh
+nix build --out-link result-hike .#hike
+nix build --print-out-paths .#hike   # /nix/store/...-hike-0.1.0
+```
 
 ## Run
 
+`nix run` needs no path:
+
 ```sh
+nix run .#hike -- binary \
+  --signatures "$(nix build --print-out-paths .#hike)/share/hike/glibc.sexp" \
+  -o binary.ll
+```
+
+Or use a named link:
+
+```sh
+nix build --out-link result-hike .#hike
 result-hike/bin/hike binary \
   --signatures result-hike/share/hike/glibc.sexp \
   -o binary.ll
@@ -66,31 +83,27 @@ plugin's findlib `requires` at startup.
 
 ## Gates
 
-The lift gate takes the executable, the BAP library root, and the corpus
-explicitly; it does not read an opam switch.  `HIKE_EXE` and
-`HIKE_LIBDIR` are required, and the stamp covers both the executable and
-the plugin objects it loads.
+The `gate` app wires the installed executable, the BAP library root, the
+corpus and the pinned LLVM 19 tools, so no environment variables are needed:
 
 ```sh
-BAP=$(nix build --print-out-paths .#bap)
-HIKE=$(nix build --print-out-paths .#hike)
-CORPUS=$(nix build --print-out-paths .#corpus)
-
-HIKE_EXE="$HIKE/bin/hike" \
-HIKE_LIBDIR="$BAP/lib" \
-HIKE_CORPUS="$CORPUS" \
-  bash test/gate/gate.sh lift
+nix run .#gate -- lift
+nix run .#gate -- allocas       # Python 3 is in the app
+nix run .#gate -- semantics     # opt-19/llc-19 are in the app
+nix run .#gate -- performance
 ```
 
-`allocas` additionally needs Python 3:
+`corpus`, `unit`, `referee`, `sysv` and `all` build or write into the
+source tree, so run those from the checkout with `bash test/gate/gate.sh`
+and the switch's `dune`.
 
-```sh
-nix shell nixpkgs#python3 --command env \
-  HIKE_CORPUS="$CORPUS" HIKE_EMIT=/tmp/hike-emit \
-  bash test/gate/gate.sh allocas
-```
-
-`semantics` pins `opt-19` and `llc-19` (fails loudly when missing).
+Outside Nix the scripts find `hike` on `PATH` (a bare `HIKE_EXE` name is
+resolved there too) and derive the BAP library root from `BAP_PLUGIN_PATH`
+or `ocamlfind query bap`; `HIKE_EXE`, `HIKE_LIBDIR`, `HIKE_CORPUS`,
+`HIKE_EMIT`, `HIKE_SEMOUT` and `HIKE_LLC` still override.  `make lift` and
+`make semantics` pass the opam switch's paths for you.  The app pins this
+flake's executable and BAP root; the corpus, emit directories and renderer
+remain overridable.
 
 ## Checks
 

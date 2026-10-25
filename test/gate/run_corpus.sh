@@ -34,9 +34,12 @@ fi
 # stamp names the hike executable and the bap plugin objects it loads.
 # The BAP library root is explicit: the stamp must cover the plugin
 # objects the executable loads, not just the executable.
-LIBDIR="${HIKE_LIBDIR:-}"
-if [ -z "$LIBDIR" ]; then
-  echo "FATAL: set HIKE_LIBDIR to the BAP library root" >&2
+LIBDIR="$(bap_libdir)" || {
+  echo "FATAL: cannot locate the BAP library root: set HIKE_LIBDIR" >&2
+  exit 2
+}
+if [ ! -d "$LIBDIR" ]; then
+  echo "FATAL: BAP library root $LIBDIR is not a directory (set HIKE_LIBDIR)" >&2
   exit 2
 fi
 
@@ -44,9 +47,9 @@ fi
 # objects it loads.  A stamp naming only the hike build would serve a stale
 # emission after a bap upgrade or a lifter rebuild — the stale-IR-green class
 # the gate exists to stop.
-HIKE_BIN="$(hike_exe)"
+HIKE_BIN="$(hike_exe)" || exit 2
 if [ ! -x "$HIKE_BIN" ]; then
-  echo "FATAL: no installed hike executable at $HIKE_BIN (dune install)" >&2
+  echo "FATAL: hike executable $HIKE_BIN is not executable" >&2
   exit 2
 fi
 TOOLCHAIN_SHA="$({ sha256sum "$HIKE_BIN" 2>/dev/null

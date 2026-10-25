@@ -23,12 +23,43 @@ hike_llc() {
 HIKE_SIGNATURES="${HIKE_SIGNATURES:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/data/glibc.sexp}"
 export HIKE_SIGNATURES
 
+# The installed executable: an explicit HIKE_EXE wins (a bare name is
+# resolved on PATH), else `hike` on PATH.
 hike_exe() {
-  if [ -z "${HIKE_EXE:-}" ]; then
-    echo "FATAL: set HIKE_EXE to the installed hike executable" >&2
+  local exe="${HIKE_EXE:-}"
+  [ -n "$exe" ] || exe="$(type -P -- hike 2>/dev/null || true)"
+  case "$exe" in
+    */*) ;;
+    *) exe="$(type -P -- "$exe" 2>/dev/null || true)" ;;
+  esac
+  if [ -z "$exe" ]; then
+    echo "FATAL: no hike executable: install it, put it on PATH, or set HIKE_EXE" >&2
     return 1
   fi
-  printf '%s' "$HIKE_EXE"
+  printf '%s' "$exe"
+}
+
+# The BAP library root the toolchain stamp covers: an explicit HIKE_LIBDIR
+# wins; else the root the hike wrapper exports (BAP_PLUGIN_PATH is
+# <root>/bap-common/plugins); else the parent of findlib's bap package.
+bap_libdir() {
+  local first
+  if [ -n "${HIKE_LIBDIR:-}" ]; then
+    printf '%s' "$HIKE_LIBDIR"
+    return 0
+  fi
+  first="${BAP_PLUGIN_PATH%%:*}"
+  case "$first" in
+    */bap-common/plugins)
+      printf '%s' "${first%/bap-common/plugins}"
+      return 0 ;;
+  esac
+  first="$(ocamlfind query bap 2>/dev/null || true)"
+  if [ -n "$first" ] && [ -d "$first" ]; then
+    printf '%s' "$(dirname "$first")"
+    return 0
+  fi
+  return 1
 }
 
 # The run timeout every gate shares (a corpus binary must finish in
