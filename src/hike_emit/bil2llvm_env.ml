@@ -235,15 +235,17 @@ let var_lltype ctx var =
 
 (* An environment register's process-global cell: one internal module
    global per register, zero-initialized.  Reads load it, defs and phi
-   incomings store it — the register never rides a call signature. *)
+   incomings store it — the register never rides a call signature.  Every
+   version of the register shares the cell. *)
 let env_global ctx (v : var) =
-  let name = "hike_env_" ^ Hike_stack_model.sanitize_tid_name (Var.name v) in
+  let reg = Base.Option.value_exn (Hike_synth.env_of ctx.synth v) in
+  let name = "hike_env_" ^ Hike_stack_model.sanitize_tid_name (Var.name reg) in
   match Llvm.lookup_global name ctx.llvm_module with
   | Some g -> g
   | None ->
     let g =
       Llvm.define_global name
-        (Llvm.const_int (var_lltype ctx v) 0)
+        (Llvm.const_int (var_lltype ctx reg) 0)
         ctx.llvm_module
     in
     Llvm.set_linkage Llvm.Linkage.Internal g;
