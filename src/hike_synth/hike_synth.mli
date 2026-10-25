@@ -21,6 +21,7 @@ type kind =
   | K_environment of var
   | K_fp_input of int
   | K_fp_output of int
+  | K_x87_state
   | K_accumulator
   | K_let of int * typ
   | K_temporary of temporary * int
@@ -42,7 +43,8 @@ type lane = Input | Output
 
 (** The general classification of a synthetic variable: a module
     address, a storage base or its bytes, an environment register, an FP
-    lane, or a transient value.  One function answers every consumer. *)
+    lane, the x87 state, or a transient value.  One function answers every
+    consumer. *)
 type classification =
   | Module_addr of int64
   | Thread_addr of int64
@@ -50,6 +52,7 @@ type classification =
   | Bytes of storage
   | Env_register of var
   | Fp_lane of lane * int
+  | X87_state
   | Transient
 
 val classify : table -> var -> classification option
@@ -60,7 +63,7 @@ val mem : table -> var -> bool
 val union : table -> table -> table
 
 (** The table narrowed to the vars the program names (target registers
-    stay). *)
+    and the x87 state stay). *)
 val restrict_to_program : table -> program term -> table
 
 (** Records [v] under its base var. *)
@@ -75,6 +78,9 @@ val bytes : addr_bits:int -> storage -> var
 val module_addr : addr_bits:int -> int64 -> var
 val thread_addr : addr_bits:int -> int64 -> var
 val fp_lane : addr_bits:int -> lane -> int -> var
+
+(** The x87 register state the x87 intrinsics operate on. *)
+val x87_state : addr_bits:int -> var
 
 (* — Creation with registration: the pass that mints a var records it. — *)
 val mint : addr_bits:int -> kind -> table -> table * var
@@ -93,6 +99,9 @@ val record : table ref -> (table -> table * 'a) -> 'a
 
 (** Records the target's caller-window base. *)
 val add_window : table -> addr_bits:int -> table
+
+(** Records the target's x87 register state. *)
+val add_x87_state : table -> addr_bits:int -> table
 
 (** Records a target register under the environment kind. *)
 val add_environment : table -> var -> table

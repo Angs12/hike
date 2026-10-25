@@ -2,8 +2,9 @@
    declaration and call.  An external whose record has only lowerable
    types is declared with its declared parameter types and called with
    them in their System V registers and stack slots; its declared return
-   fills the first return lane of its class.  Any other external keeps
-   the generic convention. *)
+   fills the first return lane of its class, and a long double return is
+   pushed on the x87 stack.  Any other external keeps the generic
+   convention. *)
 
 open Bap.Std
 module Abi = Hike_abi
@@ -11,11 +12,11 @@ open Bil2llvm_env
 open Bil2llvm_exp
 
 (* The types the emitter can pass and return: the integers, pointers,
-   float and double. *)
+   float, double and long double. *)
 let lowers : Hike_sysv.ctype -> bool = function
   | Scalar
       (Bool | Char | Short | Int | Long | Long_long | Pointer
-      | Real (Float | Double)) -> true
+      | Real (Float | Double | Long_double)) -> true
   | Scalar _ | Complex _ | Aggregate _ -> false
 
 let lltype ctx : Hike_sysv.ctype -> Llvm.lltype = function
@@ -26,6 +27,7 @@ let lltype ctx : Hike_sysv.ctype -> Llvm.lltype = function
   | Scalar Pointer -> ctx.ptr_ty
   | Scalar (Real Float) -> Llvm.float_type ctx.llvm_ctx
   | Scalar (Real Double) -> Llvm.double_type ctx.llvm_ctx
+  | Scalar (Real Long_double) -> Llvm.x86fp80_type ctx.llvm_ctx
   | ty ->
       failwith
         ("hike-emit: no LLVM type for "
@@ -179,7 +181,8 @@ let call ctx scope llvm_builder blk_tid blk target ~callee:(fn, fn_typ)
           | Registers [ Vector_register { index; _ } ] ->
               declared ty (vector index)
           | Stack { offset; _ } ->
-              declared ty (stack_word (offset / ctx.abi.Abi.word))
+              Bil2llvm_memory.load_ptr llvm_builder (lltype ctx ty)
+                (slot_ptr (offset / ctx.abi.Abi.word))
           | Registers _ | Nowhere ->
               failwith "hike-emit: a scalar parameter has no single location") in
   let tail =
@@ -206,5 +209,10 @@ let call ctx scope llvm_builder blk_tid blk target ~callee:(fn, fn_typ)
       ints @ vectors @ slots in
   let result =
     Llvm.build_call fn_typ fn (Array.of_list (fixed @ tail)) "" llvm_builder in
+  (match call.return with
+   | Returned_in [ X87_return ] ->
+       Bil2llvm_fp.X87.push ctx llvm_builder
+         (Bil2llvm_fp.X87.lane ctx llvm_builder result)
+   | _ -> ());
   Base.List.iter (get_rets ctx target) ~f:(fun ret ->
       bind_lane ret (result_lane ctx llvm_builder record result ret))

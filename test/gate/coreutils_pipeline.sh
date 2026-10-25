@@ -187,7 +187,7 @@ do_link() {
         hike_llc "$ll" "$OUT/${name}_lifted.o" "${LLC_OPT:--O0}" -relocation-model=pic 2>>"$OUT/$name.llc.log" \
           || { echo "FAIL $name (llc)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
         if ! gcc -O0 -pie -o "$OUT/${name}_lifted" "$OUT/${name}_lifted.o" \
-                 $GMP $CRYPTO -latomic 2>>"$OUT/$name.gcc.log"; then
+                 $GMP $CRYPTO -latomic -lm 2>>"$OUT/$name.gcc.log"; then
             echo "FAIL $name (link)" >> "$TEST_LOG"; fail=$((fail+1)); continue
         fi
         rm -f "$OUT/${name}_lifted.o"

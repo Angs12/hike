@@ -89,6 +89,7 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
       ~f:Hike_synth.add_environment
     |> fun synth ->
     Hike_synth.add_window synth ~addr_bits:(Hike_abi.word_bits abi)
+    |> Hike_synth.add_x87_state ~addr_bits:(Hike_abi.word_bits abi)
   in
   let denote ~synth ~blk ?def e =
     let pre, post =

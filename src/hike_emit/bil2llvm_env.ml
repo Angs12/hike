@@ -254,6 +254,15 @@ let env_global ctx (v : var) =
 let load_env_reg ctx llvm_builder (v : var) =
   Llvm.build_load (var_lltype ctx v) (env_global ctx v) "" llvm_builder
 
+(* The x87 register state of a thread: the eight 80-bit registers by
+   physical index, the top-of-stack index, and one bit per physical
+   register that holds a value. *)
+let x87_state_type ctx =
+  Llvm.struct_type ctx.llvm_ctx
+    [| Llvm.array_type (Llvm.integer_type ctx.llvm_ctx 80) 8;
+       Llvm.i8_type ctx.llvm_ctx;
+       Llvm.i8_type ctx.llvm_ctx |]
+
 (* A var whose value is a stack address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
 let is_ptr_var ctx (v : Var.t) : bool =

@@ -30,6 +30,7 @@ let emits op instruction =
            (Llvm.value_name
               (Llvm.operand instruction (Llvm.num_operands instruction - 1)))
            ~prefix:"llvm.sqrt."
+  | Bil2llvm_fp.X87 _ -> invalid_arg "emits: an x87 op has no single native op"
 
 (* Each row uses real ABI inputs and reads the correctly sized result. *)
 let fp_assert name op width =

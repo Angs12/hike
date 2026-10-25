@@ -34,12 +34,22 @@ let build_components ~addr_bits (sections : section list) : bindings =
             { values = acc.values |> add mem o.base |> add ptr o.base;
               origins = acc.origins |> add mem o.own_lo |> add ptr o.own_lo }))
 
-(* The module-address vars: one value per distinct address. *)
+(* The module-lifetime vars: one value per distinct module address, and
+   the x87 state's thread-local cell, empty at thread start. *)
 let build_addrs ctx (acc : bindings) : bindings =
   let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
   Base.List.fold (Hike_synth.bindings ctx.synth) ~init:acc
     ~f:(fun acc (v, c) ->
       match c with
+      | Hike_synth.X87_state ->
+        let state_ty = x87_state_type ctx in
+        let g =
+          Llvm.define_global (Var.name v) (Llvm.const_null state_ty)
+            ctx.llvm_module
+        in
+        Llvm.set_thread_local true g;
+        Llvm.set_linkage Llvm.Linkage.Internal g;
+        { acc with values = add v g acc.values }
       | Hike_synth.Module_addr a ->
         let value =
           match

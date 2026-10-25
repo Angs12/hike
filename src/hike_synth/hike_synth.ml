@@ -21,6 +21,7 @@ type kind =
   | K_environment of var
   | K_fp_input of int
   | K_fp_output of int
+  | K_x87_state
   | K_accumulator
   | K_let of int * typ
   | K_temporary of temporary * int
@@ -54,6 +55,7 @@ let var ~addr_bits kind =
     | K_environment v -> Var.name v, Var.typ v
     | K_fp_input i -> Printf.sprintf "intrinsic:x%d:%d" i addr_bits, Type.Imm addr_bits
     | K_fp_output i -> Printf.sprintf "intrinsic:y%d:%d" i addr_bits, Type.Imm addr_bits
+    | K_x87_state -> "hike_x87", Type.Imm addr_bits
     | K_accumulator -> "hike_acc", Type.Imm addr_bits
     | K_let (i, typ) -> Printf.sprintf "hike_let%d" i, typ
     | K_temporary (temporary, i) ->
@@ -127,6 +129,8 @@ let mint_thread_addr ~addr_bits a = mint ~addr_bits (K_thread_addr a)
 let mint_fp_lane ~addr_bits lane i =
   mint ~addr_bits (match lane with Input -> K_fp_input i | Output -> K_fp_output i)
 
+let x87_state ~addr_bits = var ~addr_bits K_x87_state
+
 let mint_fresh ~bits temporary tbl =
   incr next_temporary;
   mint ~addr_bits:bits (K_temporary (temporary, !next_temporary)) tbl
@@ -143,6 +147,9 @@ let record (cell : table ref) f =
 
 (* The caller-window base is one var per target, known with the facts. *)
 let add_window tbl ~addr_bits = fst (mint ~addr_bits K_window tbl)
+
+(* The x87 register state is one var per target, known with the facts. *)
+let add_x87_state tbl ~addr_bits = fst (mint ~addr_bits K_x87_state tbl)
 
 (* An environment register is the target's own var: recorded as given. *)
 let add_environment tbl v = add tbl v (K_environment v)
@@ -168,7 +175,9 @@ let restrict_to_program (tbl : table) (prog : program term) : table =
        | Some k -> Core.Map.set acc ~key ~data:k
        | None -> acc
    end)#run prog
-    (Core.Map.filter tbl ~f:(function K_environment _ | K_window -> true | _ -> false))
+    (Core.Map.filter tbl ~f:(function
+         | K_environment _ | K_window | K_x87_state -> true
+         | _ -> false))
 
 (* Virtual vars are the lifter's temporaries even when the table does
    not record them; a recorded kind still wins for a real var. *)
@@ -211,6 +220,7 @@ type classification =
   | Bytes of storage
   | Env_register of var
   | Fp_lane of lane * int
+  | X87_state
   | Transient
 
 let classify tbl v =
@@ -226,6 +236,7 @@ let classify tbl v =
     | K_environment v -> Some (Env_register v)
     | K_fp_input i -> Some (Fp_lane (Input, i))
     | K_fp_output i -> Some (Fp_lane (Output, i))
+    | K_x87_state -> Some X87_state
     | K_accumulator | K_let _ | K_temporary _ -> Some Transient)
   | None -> None
 
