@@ -38,8 +38,6 @@ let join a b =
 let equal a b =
   Bool.equal a.unknown b.unknown && Base.List.equal same a.roots b.roots
 
-let merge a b = Core.Map.merge_skewed a b ~combine:(fun ~key:_ -> join)
-
 (* The SSA definition index is VSA's own: [defs] names every version once,
    with its defining term.  Jump effects add the lanes a call defines. *)
 let solve ~sub ~abi ~entry ~targets ~nonstack ~leaves ~phi_leaves ~defs =
@@ -123,15 +121,21 @@ let solve ~sub ~abi ~entry ~targets ~nonstack ~leaves ~phi_leaves ~defs =
           else unknown in
         Core.Map.set state ~key:v ~data:value)
   in
-  let solution =
-    Hike_bir_flow.run ~graph:(Sub.to_graph sub) ~sub ~rev:false
-      ~initial:(Tid.Map.singleton Graphs.Tid.start initial)
-      ~default:Var.Map.empty ~equal:(Core.Map.equal equal) ~merge ~def ~phi ~jmp
-  in
-  let all =
-    Core.Map.fold solution.after ~init:initial
-      ~f:(fun ~key:_ ~data state -> merge state data) in
-  get all
+  (* Each SSA version has one definition, so one state for the whole sub
+     holds every version's owners; the terms re-apply until it is stable. *)
+  let elts =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:Blk.elts
+    |> Seq.to_list in
+  let step state =
+    Base.List.fold elts ~init:state ~f:(fun state -> function
+        | `Def d -> def state d
+        | `Phi p -> phi state p
+        | `Jmp j -> jmp state j) in
+  let rec close state =
+    let next = step state in
+    if Core.Map.equal equal state next then state else close next in
+  get (close initial)
 
 let word ~bits k = Bil.Int (Word.of_int64 ~width:bits k)
 let integer ~bits e = Bil.Cast (Bil.UNSIGNED, bits, e)
