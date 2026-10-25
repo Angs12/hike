@@ -147,6 +147,9 @@ val slot_index_of_offset : word:int -> int64 -> int
 val call_arg_slot : word:int -> call_sp:int64 -> start:int64 -> int option
 val args_cell_of_span : word:int -> entry:int64 -> int64 -> int64 -> int option
 
+(** The slots a stack argument of the given byte size occupies. *)
+val arg_cells : word:int -> int -> int
+
 val region_mem : addr_bits:int -> int -> var
 
 val region_ptr : addr_bits:int -> int -> var
@@ -224,13 +227,15 @@ val call_stack_arity : int Value.Tag.t
    [cs_own] the stores of the block itself, the last of a slot winning;
    [cs_remote] the stores of other blocks that fill a slot the own stores
    leave open; [cs_arity] the number of slots from 0 these fill without a
-   gap, so a local stored further up the frame is never an argument.  A
-   call whose SP is not a singleton has none.  Only call blocks are
-   keys. *)
+   gap, a store filling every slot it covers, so a local stored further
+   up the frame is never an argument; [cs_window] the positions of the
+   whole slots these stores reach, as one hull.  A call whose SP is not a
+   singleton has none.  Only call blocks are keys. *)
 type call_site = {
   cs_own : call_arg_store list;
   cs_remote : remote_arg_store list;
   cs_arity : int;
+  cs_window : (int64 * int64) option;
 }
 
 val call_sites :

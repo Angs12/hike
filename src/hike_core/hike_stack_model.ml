@@ -375,6 +375,9 @@ let call_arg_slot ~(word : int) ~(call_sp : int64) ~(start : int64) : int option
   then Some (slot_index_of_offset ~word rel)
   else None
 
+(* The slots a stack argument of [bytes] occupies: whole word cells. *)
+let arg_cells ~(word : int) (bytes : int) : int = (bytes + word - 1) / word
+
 (* The word cell of an Args span wholly inside one cell at/above the
    args base: its slot index, else [None]. *)
 let args_cell_of_span ~(word : int) ~(entry : int64) (lo : int64)
@@ -781,6 +784,7 @@ type call_site = {
   cs_own : call_arg_store list;
   cs_remote : remote_arg_store list;
   cs_arity : int;
+  cs_window : (int64 * int64) option;
 }
 
 let call_sites ~(word : int) ~(sp : var)
@@ -800,9 +804,9 @@ let call_sites ~(word : int) ~(sp : var)
         Term.enum def_t blk
         |> Seq.filter_map ~f:(fun d ->
             match addr_of_rhs (Def.rhs d), store_data_of_rhs (Def.rhs d) with
-            | Some (addr, _), Some _ ->
+            | Some (addr, size), Some _ ->
               Base.Option.map (singleton_at ~def:d ~blk addr) ~f:(fun start ->
-                  (Term.tid blk, d, start))
+                  (Term.tid blk, d, start, Size.in_bytes size))
             | _ -> None))
     |> Seq.to_list
   in
@@ -813,13 +817,17 @@ let call_sites ~(word : int) ~(sp : var)
       else
         let site =
           match singleton_at ~blk (Bil.Var (version_at_end blk sp)) with
-          | None -> { cs_own = []; cs_remote = []; cs_arity = 0 }
+          | None -> { cs_own = []; cs_remote = []; cs_arity = 0; cs_window = None }
           | Some call_sp ->
             let slot_of start = call_arg_slot ~word ~call_sp ~start in
+            (* The first and last slot a store covers. *)
+            let cells start bytes =
+              Base.Option.map (slot_of start) ~f:(fun slot ->
+                  (slot, slot + arg_cells ~word bytes - 1)) in
             (* The call block's own stores, the last of a slot winning. *)
             let own =
               Base.List.fold stores ~init:Core.Int.Map.empty
-                ~f:(fun acc (tid, d, start) ->
+                ~f:(fun acc (tid, d, start, _) ->
                     match slot_of start with
                     | Some slot when Tid.equal tid btid ->
                       Core.Map.set acc ~key:slot
@@ -830,7 +838,7 @@ let call_sites ~(word : int) ~(sp : var)
                cell. *)
             let remote =
               Base.List.fold stores ~init:Core.Int.Map.empty
-                ~f:(fun acc (tid, d, start) ->
+                ~f:(fun acc (tid, d, start, _) ->
                     match slot_of start with
                     | Some slot
                       when (not (Tid.equal tid btid))
@@ -841,16 +849,39 @@ let call_sites ~(word : int) ~(sp : var)
                     | _ -> acc) in
             (* Only the run of slots from 0 that these fill without a gap
                counts: a local stored further up the frame is no
-               argument. *)
-            let rec run k =
-              if Core.Map.mem own k || Core.Map.mem remote k then run (k + 1)
-              else k in
+               argument.  A store fills every slot it covers. *)
+            let filled =
+              Base.List.fold stores ~init:Core.Int.Set.empty
+                ~f:(fun acc (_, _, start, bytes) ->
+                    match cells start bytes with
+                    | Some (first, last) ->
+                      Base.List.fold (Base.List.range first (last + 1))
+                        ~init:acc ~f:Core.Set.add
+                    | None -> acc) in
+            let rec run k = if Core.Set.mem filled k then run (k + 1) else k in
             let limit = run 0 in
-            { cs_own = Core.Map.data own;
-              cs_remote =
-                Base.List.filter (Core.Map.data remote)
-                  ~f:(fun b -> b.rb_slot < limit);
-              cs_arity = limit }
+            let cs_own = Core.Map.data own in
+            let cs_remote =
+              Base.List.filter (Core.Map.data remote) ~f:(fun b -> b.rb_slot < limit) in
+            (* The argument range is the hull of the whole slots the
+               argument stores reach. *)
+            let arguments =
+              Tid.Set.of_list
+                (Base.List.map cs_own ~f:(fun b -> Term.tid b.sb_def)
+                 @ Base.List.map cs_remote ~f:(fun b -> Term.tid b.rb_def)) in
+            let cs_window =
+              Base.List.fold stores ~init:None ~f:(fun acc (_, d, start, bytes) ->
+                  match cells start bytes with
+                  | Some (first, last) when Core.Set.mem arguments (Term.tid d) ->
+                    Some (match acc with
+                        | None -> (first, last)
+                        | Some (lo, hi) -> (Stdlib.min lo first, Stdlib.max hi last))
+                  | _ -> acc)
+              |> Base.Option.map ~f:(fun (first, last) ->
+                  (Stdlib.Int64.add call_sp (slot_offset ~word first),
+                   Stdlib.Int64.pred
+                     (Stdlib.Int64.add call_sp (slot_offset ~word (last + 1))))) in
+            { cs_own; cs_remote; cs_arity = limit; cs_window }
         in
         Core.Map.set sites ~key:btid ~data:site)
 
