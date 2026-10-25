@@ -820,43 +820,7 @@ and materialize_dispatch t frame (e : entry) : Hike_vsa.materialize_transfer =
                String.concat ","
                  (Base.List.map ws ~f:Cbat_word.to_string)));
       match words with
-      | None -> None
-      | Some [] ->
-        (* Every target this fallback could name is already covered by
-           the arms.  Keep the block compilable and emit the no-match as
-           a trap instead of an indirect transfer. *)
-        let source_blk = Term.find_exn blk_t sub source in
-        let trap_tid = Tid.create () in
-        let trap =
-          Blk.create ~tid:trap_tid
-            ~jmps:[ Jmp.create_int 0 trap_tid ] ()
-        in
-        let fallback = Jmp.with_kind jmp (Goto (Direct trap_tid)) in
-        let rewritten =
-          Term.concat_map jmp_t source_blk ~f:(fun j ->
-              if Tid.equal (Term.tid j) (Term.tid jmp) then [ fallback ]
-              else [ j ])
-        in
-        let working =
-          Term.append blk_t (Term.update blk_t sub rewritten) trap
-        in
-        let synth =
-          Hike_synth.union (Vsa.state_synth state) t.synth
-        in
-        let delta =
-          Hike_cfg_complete.materialize_site
-            ~target:t.context.target ~abi:t.abi
-            ~callee_tid:(fun tid -> callee_tid t frame tid)
-            ~rip_address ~claim:(claim t e) ~synth ~block_addrs
-            ~old:sub ~working ~cases:[]
-            ~edges:(direct_block_edges rewritten)
-        in
-        let built_synth = delta.Hike_cfg_complete.delta_synth in
-        if not (Base.phys_equal built_synth (Vsa.state_synth state)) then
-          (Vsa.state_ctx state).Cbat_vsa.Runctx.rc_synth := built_synth;
-        Some
-          { Vsa.Dispatch.base = None; targets = [];
-            sub = delta.Hike_cfg_complete.delta_sub; module_addr }
+      | None | Some [] -> None
       | Some words -> (
         match
           Base.Option.all
