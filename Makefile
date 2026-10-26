@@ -74,25 +74,25 @@ corpus:
 	bash test/gate/compile_corpus.sh "$(CORPUS)"
 
 lift: install
-	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	HIKE_EXE="$(HIKE_BIN)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" bash test/gate/gate.sh lift
 
 fresh-lift: install
-	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	HIKE_EXE="$(HIKE_BIN)" \
 	FRESH=1 HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" \
 		bash test/gate/gate.sh lift
 
 allocas: install
-	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	HIKE_EXE="$(HIKE_BIN)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" bash test/gate/gate.sh allocas
 
 semantics: install
-	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	HIKE_EXE="$(HIKE_BIN)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" HIKE_SEMOUT="$(SEMOUT)" \
 		bash test/gate/gate.sh semantics
 
 gates: install corpus
-	HIKE_EXE="$(HIKE_BIN)" HIKE_LIBDIR="$(OPAM_LIB)" \
+	HIKE_EXE="$(HIKE_BIN)" \
 	HIKE_CORPUS="$(CORPUS)" HIKE_EMIT="$(EMIT)" HIKE_SEMOUT="$(SEMOUT)" \
 		bash test/gate/gate.sh all
 

@@ -83,8 +83,8 @@ plugin's findlib `requires` at startup.
 
 ## Gates
 
-The `gate` app wires the installed executable, the BAP library root, the
-corpus and the pinned LLVM 19 tools, so no environment variables are needed:
+The `gate` app wires the installed executable, the corpus and the pinned
+LLVM 19 tools, so no environment variables are needed:
 
 ```sh
 nix run .#gate -- lift
@@ -98,12 +98,10 @@ source tree, so run those from the checkout with `bash test/gate/gate.sh`
 and the switch's `dune`.
 
 Outside Nix the scripts find `hike` on `PATH` (a bare `HIKE_EXE` name is
-resolved there too) and derive the BAP library root from `BAP_PLUGIN_PATH`
-or `ocamlfind query bap`; `HIKE_EXE`, `HIKE_LIBDIR`, `HIKE_CORPUS`,
-`HIKE_EMIT`, `HIKE_SEMOUT` and `HIKE_LLC` still override.  `make lift` and
-`make semantics` pass the opam switch's paths for you.  The app pins this
-flake's executable and BAP root; the corpus, emit directories and renderer
-remain overridable.
+resolved there too); `HIKE_EXE`, `HIKE_CORPUS`, `HIKE_EMIT`, `HIKE_SEMOUT`
+and `HIKE_LLC` still override.  `make lift` and `make semantics` pass the
+opam switch's executable for you.  The app pins this flake's executable;
+the corpus, emit directories and renderer remain overridable.
 
 ## Checks
 

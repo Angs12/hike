@@ -20,9 +20,11 @@ def sha256(path):
 
 
 def installed_hike():
-    """The installed lift entry (Hike.Drive, ADR 0032)."""
-    bindir = subprocess.check_output(["opam", "var", "bin"], text=True).strip()
-    return Path(bindir) / "hike"
+    """The lift entry (Hike.Drive, ADR 0032): HIKE_EXE, else hike on PATH."""
+    exe = os.environ.get("HIKE_EXE") or shutil.which("hike")
+    if not exe:
+        raise SystemExit("FATAL: no hike executable: put it on PATH or set HIKE_EXE")
+    return Path(shutil.which(exe) or exe).resolve()
 
 
 def signatures_file():

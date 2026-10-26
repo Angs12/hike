@@ -39,29 +39,6 @@ hike_exe() {
   printf '%s' "$exe"
 }
 
-# The BAP library root the toolchain stamp covers: an explicit HIKE_LIBDIR
-# wins; else the root the hike wrapper exports (BAP_PLUGIN_PATH is
-# <root>/bap-common/plugins); else the parent of findlib's bap package.
-bap_libdir() {
-  local first
-  if [ -n "${HIKE_LIBDIR:-}" ]; then
-    printf '%s' "$HIKE_LIBDIR"
-    return 0
-  fi
-  first="${BAP_PLUGIN_PATH%%:*}"
-  case "$first" in
-    */bap-common/plugins)
-      printf '%s' "${first%/bap-common/plugins}"
-      return 0 ;;
-  esac
-  first="$(ocamlfind query bap 2>/dev/null || true)"
-  if [ -n "$first" ] && [ -d "$first" ]; then
-    printf '%s' "$(dirname "$first")"
-    return 0
-  fi
-  return 1
-}
-
 # The run timeout every gate shares (a corpus binary must finish in
 # seconds; 15 s is the generous ceiling).
 HIKE_RUN_TIMEOUT="${HIKE_RUN_TIMEOUT:-15}"

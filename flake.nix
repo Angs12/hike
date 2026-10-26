@@ -80,7 +80,6 @@
             ];
             text = ''
               export HIKE_EXE="${hikePkg}/bin/hike"
-              export HIKE_LIBDIR="${bapPkg}/lib"
               export HIKE_CORPUS="''${HIKE_CORPUS:-${corpusPkg}}"
               export HIKE_LLC="''${HIKE_LLC:-${llvm19Gate}/bin/llc-19}"
               export PATH="${llvm19Gate}/bin:$PATH"

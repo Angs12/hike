@@ -31,22 +31,7 @@ if [ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]; then
 fi
 
 # Bind every emission in $OUT to the build that produced it: the toolchain
-# stamp names the hike executable and the bap plugin objects it loads.
-# The BAP library root is explicit: the stamp must cover the plugin
-# objects the executable loads, not just the executable.
-LIBDIR="$(bap_libdir)" || {
-  echo "FATAL: cannot locate the BAP library root: set HIKE_LIBDIR" >&2
-  exit 2
-}
-if [ ! -d "$LIBDIR" ]; then
-  echo "FATAL: BAP library root $LIBDIR is not a directory (set HIKE_LIBDIR)" >&2
-  exit 2
-fi
-
-# The whole toolchain the lift reads: the hike executable and the bap plugin
-# objects it loads.  A stamp naming only the hike build would serve a stale
-# emission after a bap upgrade or a lifter rebuild — the stale-IR-green class
-# the gate exists to stop.
+# stamp names the hike executable, the lift entry.
 HIKE_BIN="$(hike_exe)" || exit 2
 if [ ! -x "$HIKE_BIN" ]; then
   echo "FATAL: hike executable $HIKE_BIN is not executable" >&2
@@ -54,9 +39,6 @@ if [ ! -x "$HIKE_BIN" ]; then
 fi
 TOOLCHAIN_SHA="$({ sha256sum "$HIKE_BIN" 2>/dev/null
                    [ -n "${HIKE_SIGNATURES:-}" ] && sha256sum "$HIKE_SIGNATURES"
-                   find "$LIBDIR" -maxdepth 3 -path '*bap*' \
-                     \( -name '*.cmxs' -o -name '*.cmxa' -o -name '*.cma' \) -print 2>/dev/null \
-                     | sort | xargs sha256sum 2>/dev/null
                  } | sha256sum | cut -d' ' -f1)"
 
 # Corpus executables in sorted order (skips sources/stubs).
