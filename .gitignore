@@ -34,3 +34,7 @@ _build*/
 *.pdf
 review.html
 compile_commands.json
+
+# Nix build links and per-task scratch work
+result
+.scratch/
